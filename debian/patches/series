@@ -1,0 +1,6 @@
+07_gallium-fix-build-failure-on-powerpcspe.diff
+path_max.diff
+src_glx_dri_common.h.diff
+
+# zhaoxin for deepin
+0001-add-zx-s-driver-to-mesa-s-driver-map-list-and-export.patch
