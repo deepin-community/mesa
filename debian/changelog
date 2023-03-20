@@ -1,3 +1,9 @@
+mesa (21.3.8-1deepin) unstable; urgency=medium
+
+  * Regulate version name
+
+ -- Yutao Meng <mengyutao@uniontech.com>  Mon, 20 Mar 2023 14:25:55 +0800
+
 mesa (21.3.8-deepin) stable; urgency=medium
 
   * ['Rebuild  against by  current gcc 11.2']
