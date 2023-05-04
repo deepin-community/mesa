@@ -1,3 +1,13 @@
+mesa (21.3.8-2deepin8) unstable; urgency=medium
+
+  * add patch
+  * fix DPMS off seems to blank compositor's back or front buffer
+  * loader/dri3: Overhaul draw->cur_num_back handling
+  * https://gitlab.freedesktop.org/xorg/xserver/-/issues/1296
+  * https://github.com/linuxdeepin/developer-center/issues/4252 
+
+ -- LiChengGang <lichenggang@uniontech.com>  Thu, 04 May 2023 16:56:12 +0800
+
 mesa (21.3.8-2deepin) unstable; urgency=medium
 
   * update changelog.
