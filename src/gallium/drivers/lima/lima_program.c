@@ -61,7 +61,10 @@ static const nir_shader_compiler_options vs_nir_options = {
    .lower_fceil = true,
    .lower_insert_byte = true,
    .lower_insert_word = true,
-   .force_indirect_unrolling = (nir_var_shader_in | nir_var_shader_out | nir_var_function_temp),
+   .force_indirect_unrolling = nir_var_all,
+   .force_indirect_unrolling_sampler = true,
+   .lower_varying_from_uniform = true,
+   .max_unroll_iterations = 32,
 };
 
 static const nir_shader_compiler_options fs_nir_options = {
@@ -81,7 +84,10 @@ static const nir_shader_compiler_options fs_nir_options = {
    .lower_insert_word = true,
    .lower_bitops = true,
    .lower_vector_cmp = true,
-   .force_indirect_unrolling = (nir_var_shader_in | nir_var_shader_out | nir_var_function_temp),
+   .force_indirect_unrolling = (nir_var_shader_out | nir_var_function_temp),
+   .force_indirect_unrolling_sampler = true,
+   .lower_varying_from_uniform = true,
+   .max_unroll_iterations = 32,
 };
 
 const void *
@@ -133,19 +139,22 @@ lima_program_optimize_vs_nir(struct nir_shader *s)
       NIR_PASS(progress, s, lima_nir_lower_ftrunc);
       NIR_PASS(progress, s, nir_opt_constant_folding);
       NIR_PASS(progress, s, nir_opt_undef);
+      NIR_PASS(progress, s, nir_lower_undef_to_zero);
       NIR_PASS(progress, s, nir_opt_loop_unroll);
+      NIR_PASS(progress, s, nir_lower_undef_to_zero);
    } while (progress);
 
    NIR_PASS_V(s, nir_lower_int_to_float);
    /* int_to_float pass generates ftrunc, so lower it */
    NIR_PASS(progress, s, lima_nir_lower_ftrunc);
-   NIR_PASS_V(s, nir_lower_bool_to_float);
+   NIR_PASS_V(s, nir_lower_bool_to_float, true);
 
    NIR_PASS_V(s, nir_copy_prop);
    NIR_PASS_V(s, nir_opt_dce);
    NIR_PASS_V(s, lima_nir_split_loads);
    NIR_PASS_V(s, nir_lower_locals_to_regs);
    NIR_PASS_V(s, nir_convert_from_ssa, true);
+   NIR_PASS_V(s, nir_opt_dce);
    NIR_PASS_V(s, nir_remove_dead_variables, nir_var_function_temp, NULL);
    nir_sweep(s);
 }
@@ -159,6 +168,10 @@ lima_alu_to_scalar_filter_cb(const nir_instr *instr, const void *data)
    nir_alu_instr *alu = nir_instr_as_alu(instr);
    switch (alu->op) {
    case nir_op_frcp:
+   /* nir_op_idiv is lowered to frcp by lower_int_to_floats which
+    * will be run later, so lower idiv here
+    */
+   case nir_op_idiv:
    case nir_op_frsq:
    case nir_op_flog2:
    case nir_op_fexp2:
@@ -216,6 +229,7 @@ lima_program_optimize_fs_nir(struct nir_shader *s,
 	      nir_var_shader_in | nir_var_shader_out, type_size, 0);
    NIR_PASS_V(s, nir_lower_regs_to_ssa);
    NIR_PASS_V(s, nir_lower_tex, tex_options);
+   NIR_PASS_V(s, lima_nir_lower_txp);
 
    do {
       progress = false;
@@ -241,7 +255,7 @@ lima_program_optimize_fs_nir(struct nir_shader *s,
    } while (progress);
 
    NIR_PASS_V(s, nir_lower_int_to_float);
-   NIR_PASS_V(s, nir_lower_bool_to_float);
+   NIR_PASS_V(s, nir_lower_bool_to_float, true);
 
    /* Some ops must be lowered after being converted from int ops,
     * so re-run nir_opt_algebraic after int lowering. */
@@ -283,8 +297,8 @@ lima_fs_compile_shader(struct lima_context *ctx,
    nir_shader *nir = nir_shader_clone(fs, ufs->base.ir.nir);
 
    struct nir_lower_tex_options tex_options = {
-      .lower_txp = ~0u,
       .swizzle_result = ~0u,
+      .lower_invalid_implicit_lod = true,
    };
 
    for (int i = 0; i < ARRAY_SIZE(key->tex); i++) {
@@ -297,7 +311,7 @@ lima_fs_compile_shader(struct lima_context *ctx,
    if (lima_debug & LIMA_DEBUG_PP)
       nir_print_shader(nir, stdout);
 
-   if (!ppir_compile_nir(fs, nir, screen->pp_ra, &ctx->debug)) {
+   if (!ppir_compile_nir(fs, nir, screen->pp_ra, &ctx->base.debug)) {
       ralloc_free(nir);
       return false;
    }
@@ -473,7 +487,7 @@ lima_vs_compile_shader(struct lima_context *ctx,
    if (lima_debug & LIMA_DEBUG_GP)
       nir_print_shader(nir, stdout);
 
-   if (!gpir_compile_nir(vs, nir, &ctx->debug)) {
+   if (!gpir_compile_nir(vs, nir, &ctx->base.debug)) {
       ralloc_free(nir);
       return false;
    }
@@ -591,15 +605,19 @@ lima_update_fs_state(struct lima_context *ctx)
    memcpy(key->nir_sha1, ctx->uncomp_fs->nir_sha1,
           sizeof(ctx->uncomp_fs->nir_sha1));
 
+   uint8_t identity[4] = { PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y,
+                           PIPE_SWIZZLE_Z, PIPE_SWIZZLE_W };
    for (int i = 0; i < lima_tex->num_textures; i++) {
       struct lima_sampler_view *sampler = lima_sampler_view(lima_tex->textures[i]);
+      if (!sampler) {
+         memcpy(key->tex[i].swizzle, identity, 4);
+         continue;
+      }
       for (int j = 0; j < 4; j++)
          key->tex[i].swizzle[j] = sampler->swizzle[j];
    }
 
    /* Fill rest with identity swizzle */
-   uint8_t identity[4] = { PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y,
-                           PIPE_SWIZZLE_Z, PIPE_SWIZZLE_W };
    for (int i = lima_tex->num_textures; i < ARRAY_SIZE(key->tex); i++)
       memcpy(key->tex[i].swizzle, identity, 4);
 

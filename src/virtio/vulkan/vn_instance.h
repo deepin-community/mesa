@@ -17,6 +17,7 @@
 
 #include "vn_cs.h"
 #include "vn_renderer.h"
+#include "vn_renderer_util.h"
 #include "vn_ring.h"
 
 /* require and request at least Vulkan 1.1 at both instance and device levels
@@ -27,7 +28,7 @@
 #ifdef ANDROID
 #define VN_MAX_API_VERSION VK_MAKE_VERSION(1, 1, VK_HEADER_VERSION)
 #else
-#define VN_MAX_API_VERSION VK_MAKE_VERSION(1, 2, VK_HEADER_VERSION)
+#define VN_MAX_API_VERSION VK_MAKE_VERSION(1, 3, VK_HEADER_VERSION)
 #endif
 
 struct vn_instance {
@@ -37,10 +38,11 @@ struct vn_instance {
    struct driOptionCache available_dri_options;
 
    struct vn_renderer *renderer;
-   struct vn_renderer_info renderer_info;
 
-   /* XXX staged features to be merged to core venus protocol */
-   VkVenusExperimentalFeatures100000MESA experimental;
+   struct vn_renderer_shmem_pool reply_shmem_pool;
+
+   mtx_t ring_idx_mutex;
+   uint64_t ring_idx_used_mask;
 
    struct {
       mtx_t mutex;
@@ -53,15 +55,11 @@ struct vn_instance {
 
       /* to synchronize renderer/ring */
       mtx_t roundtrip_mutex;
-      uint32_t roundtrip_next;
+      uint64_t roundtrip_next;
    } ring;
 
-   struct {
-      struct vn_renderer_shmem *shmem;
-      size_t size;
-      size_t used;
-      void *ptr;
-   } reply;
+   /* XXX staged features to be merged to core venus protocol */
+   VkVenusExperimentalFeatures100000MESA experimental;
 
    /* Between the driver and the app, VN_MAX_API_VERSION is what we advertise
     * and base.base.app_info.api_version is what the app requests.
@@ -73,6 +71,12 @@ struct vn_instance {
     */
    uint32_t renderer_api_version;
    uint32_t renderer_version;
+
+   /* for VN_CS_ENCODER_STORAGE_SHMEM_POOL */
+   struct {
+      mtx_t mutex;
+      struct vn_renderer_shmem_pool pool;
+   } cs_shmem;
 
    struct {
       mtx_t mutex;
@@ -91,16 +95,16 @@ VK_DEFINE_HANDLE_CASTS(vn_instance,
 
 VkResult
 vn_instance_submit_roundtrip(struct vn_instance *instance,
-                             uint32_t *roundtrip_seqno);
+                             uint64_t *roundtrip_seqno);
 
 void
 vn_instance_wait_roundtrip(struct vn_instance *instance,
-                           uint32_t roundtrip_seqno);
+                           uint64_t roundtrip_seqno);
 
 static inline void
 vn_instance_roundtrip(struct vn_instance *instance)
 {
-   uint32_t roundtrip_seqno;
+   uint64_t roundtrip_seqno;
    if (vn_instance_submit_roundtrip(instance, &roundtrip_seqno) == VK_SUCCESS)
       vn_instance_wait_roundtrip(instance, roundtrip_seqno);
 }
@@ -119,6 +123,10 @@ struct vn_instance_submit_command {
    /* when reply_size is non-zero, NULL can be returned on errors */
    struct vn_renderer_shmem *reply_shmem;
    struct vn_cs_decoder reply;
+
+   /* valid when instance ring submission succeeds */
+   bool ring_seqno_valid;
+   uint32_t ring_seqno;
 };
 
 static inline struct vn_cs_encoder *
@@ -154,6 +162,49 @@ vn_instance_free_command_reply(struct vn_instance *instance,
 {
    assert(submit->reply_shmem);
    vn_renderer_shmem_unref(instance->renderer, submit->reply_shmem);
+}
+
+static inline struct vn_renderer_shmem *
+vn_instance_cs_shmem_alloc(struct vn_instance *instance,
+                           size_t size,
+                           size_t *out_offset)
+{
+   struct vn_renderer_shmem *shmem;
+
+   mtx_lock(&instance->cs_shmem.mutex);
+   shmem = vn_renderer_shmem_pool_alloc(
+      instance->renderer, &instance->cs_shmem.pool, size, out_offset);
+   mtx_unlock(&instance->cs_shmem.mutex);
+
+   return shmem;
+}
+
+static inline int
+vn_instance_acquire_ring_idx(struct vn_instance *instance)
+{
+   mtx_lock(&instance->ring_idx_mutex);
+   int ring_idx = ffsll(~instance->ring_idx_used_mask) - 1;
+   if (ring_idx >= instance->renderer->info.max_timeline_count)
+      ring_idx = -1;
+   if (ring_idx > 0)
+      instance->ring_idx_used_mask |= (1ULL << (uint32_t)ring_idx);
+   mtx_unlock(&instance->ring_idx_mutex);
+
+   assert(ring_idx); /* never acquire the dedicated CPU ring */
+
+   /* returns -1 when no vacant rings */
+   return ring_idx;
+}
+
+static inline void
+vn_instance_release_ring_idx(struct vn_instance *instance, uint32_t ring_idx)
+{
+   assert(ring_idx > 0);
+
+   mtx_lock(&instance->ring_idx_mutex);
+   assert(instance->ring_idx_used_mask & (1ULL << ring_idx));
+   instance->ring_idx_used_mask &= ~(1ULL << ring_idx);
+   mtx_unlock(&instance->ring_idx_mutex);
 }
 
 #endif /* VN_INSTANCE_H */

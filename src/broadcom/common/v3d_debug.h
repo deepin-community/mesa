@@ -39,7 +39,9 @@ extern "C" {
  * list of debugging flags, as well as some macros for handling them.
  */
 
-extern uint32_t V3D_DEBUG;
+extern uint32_t v3d_mesa_debug;
+
+#define V3D_DBG(flag) unlikely(v3d_mesa_debug & V3D_DEBUG_ ## flag)
 
 #define V3D_DEBUG_SHADERDB          (1 << 0)
 #define V3D_DEBUG_TGSI              (1 << 1)
@@ -63,6 +65,11 @@ extern uint32_t V3D_DEBUG;
 #define V3D_DEBUG_TMU_16BIT         (1 << 19)
 #define V3D_DEBUG_NO_LOOP_UNROLL    (1 << 20)
 #define V3D_DEBUG_CL_NO_BIN         (1 << 21)
+#define V3D_DEBUG_DOUBLE_BUFFER     (1 << 22)
+#define V3D_DEBUG_CACHE             (1 << 23)
+#define V3D_DEBUG_NO_MERGE_JOBS     (1 << 24)
+#define V3D_DEBUG_OPT_COMPILE_TIME  (1 << 25)
+#define V3D_DEBUG_DISABLE_TFU       (1 << 26)
 
 #define V3D_DEBUG_SHADERS           (V3D_DEBUG_TGSI | V3D_DEBUG_NIR | \
                                      V3D_DEBUG_VIR | V3D_DEBUG_QPU | \
@@ -85,7 +92,7 @@ extern uint32_t V3D_DEBUG;
 #define dbg_printf(...)	fprintf(stderr, __VA_ARGS__)
 #endif /* HAVE_ANDROID_PLATFORM */
 
-extern uint32_t v3d_debug_flag_for_shader_stage(gl_shader_stage stage);
+extern bool v3d_debug_flag_for_shader_stage(gl_shader_stage stage);
 
 extern void v3d_process_debug_variable(void);
 

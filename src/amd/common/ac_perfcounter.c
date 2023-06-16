@@ -26,7 +26,7 @@
 #include "ac_perfcounter.h"
 
 #include "util/u_memory.h"
-#include "macros.h"
+#include "util/macros.h"
 
 /* cik_CB */
 static unsigned cik_CB_select0[] = {
@@ -1156,7 +1156,7 @@ bool ac_init_perfcounters(const struct radeon_info *info,
    const struct ac_pc_block_gfxdescr *blocks;
    unsigned num_blocks;
 
-   switch (info->chip_class) {
+   switch (info->gfx_level) {
    case GFX7:
       blocks = groups_CIK;
       num_blocks = ARRAY_SIZE(groups_CIK);
@@ -1234,4 +1234,16 @@ void ac_destroy_perfcounters(struct ac_perfcounters *pc)
       FREE(pc->blocks[i].selector_names);
    }
    FREE(pc->blocks);
+}
+
+struct ac_pc_block *ac_pc_get_block(const struct ac_perfcounters *pc,
+                                    enum ac_pc_gpu_block gpu_block)
+{
+   for (unsigned i = 0; i < pc->num_blocks; i++) {
+      struct ac_pc_block *block = &pc->blocks[i];
+      if (block->b->b->gpu_block == gpu_block) {
+         return block;
+      }
+   }
+   return NULL;
 }

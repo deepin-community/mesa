@@ -203,15 +203,17 @@ fd2_emit_state_binning(struct fd_context *ctx,
    }
 
    if (dirty & FD_DIRTY_VIEWPORT) {
+      struct pipe_viewport_state *vp = & ctx->viewport[0];
+
       OUT_PKT3(ring, CP_SET_CONSTANT, 9);
       OUT_RING(ring, 0x00000184);
-      OUT_RING(ring, fui(ctx->viewport.translate[0]));
-      OUT_RING(ring, fui(ctx->viewport.translate[1]));
-      OUT_RING(ring, fui(ctx->viewport.translate[2]));
+      OUT_RING(ring, fui(vp->translate[0]));
+      OUT_RING(ring, fui(vp->translate[1]));
+      OUT_RING(ring, fui(vp->translate[2]));
       OUT_RING(ring, fui(0.0f));
-      OUT_RING(ring, fui(ctx->viewport.scale[0]));
-      OUT_RING(ring, fui(ctx->viewport.scale[1]));
-      OUT_RING(ring, fui(ctx->viewport.scale[2]));
+      OUT_RING(ring, fui(vp->scale[0]));
+      OUT_RING(ring, fui(vp->scale[1]));
+      OUT_RING(ring, fui(vp->scale[2]));
       OUT_RING(ring, fui(0.0f));
    }
 
@@ -291,10 +293,10 @@ fd2_emit_state(struct fd_context *ctx, const enum fd_dirty_3d_state dirty)
       OUT_PKT3(ring, CP_SET_CONSTANT, 6);
       OUT_RING(ring, CP_REG(REG_A2XX_PA_SU_VTX_CNTL));
       OUT_RING(ring, rasterizer->pa_su_vtx_cntl);
-      OUT_RING(ring, fui(1.0)); /* PA_CL_GB_VERT_CLIP_ADJ */
-      OUT_RING(ring, fui(1.0)); /* PA_CL_GB_VERT_DISC_ADJ */
-      OUT_RING(ring, fui(1.0)); /* PA_CL_GB_HORZ_CLIP_ADJ */
-      OUT_RING(ring, fui(1.0)); /* PA_CL_GB_HORZ_DISC_ADJ */
+      OUT_RING(ring, fui(1.0f)); /* PA_CL_GB_VERT_CLIP_ADJ */
+      OUT_RING(ring, fui(1.0f)); /* PA_CL_GB_VERT_DISC_ADJ */
+      OUT_RING(ring, fui(1.0f)); /* PA_CL_GB_HORZ_CLIP_ADJ */
+      OUT_RING(ring, fui(1.0f)); /* PA_CL_GB_HORZ_DISC_ADJ */
 
       if (rasterizer->base.offset_tri) {
          /* TODO: why multiply scale by 2 ? without it deqp test fails
@@ -333,27 +335,29 @@ fd2_emit_state(struct fd_context *ctx, const enum fd_dirty_3d_state dirty)
    }
 
    if (dirty & FD_DIRTY_VIEWPORT) {
+      struct pipe_viewport_state *vp = & ctx->viewport[0];
+
       OUT_PKT3(ring, CP_SET_CONSTANT, 7);
       OUT_RING(ring, CP_REG(REG_A2XX_PA_CL_VPORT_XSCALE));
-      OUT_RING(ring, fui(ctx->viewport.scale[0]));     /* PA_CL_VPORT_XSCALE */
-      OUT_RING(ring, fui(ctx->viewport.translate[0])); /* PA_CL_VPORT_XOFFSET */
-      OUT_RING(ring, fui(ctx->viewport.scale[1]));     /* PA_CL_VPORT_YSCALE */
-      OUT_RING(ring, fui(ctx->viewport.translate[1])); /* PA_CL_VPORT_YOFFSET */
-      OUT_RING(ring, fui(ctx->viewport.scale[2]));     /* PA_CL_VPORT_ZSCALE */
-      OUT_RING(ring, fui(ctx->viewport.translate[2])); /* PA_CL_VPORT_ZOFFSET */
+      OUT_RING(ring, fui(vp->scale[0]));     /* PA_CL_VPORT_XSCALE */
+      OUT_RING(ring, fui(vp->translate[0])); /* PA_CL_VPORT_XOFFSET */
+      OUT_RING(ring, fui(vp->scale[1]));     /* PA_CL_VPORT_YSCALE */
+      OUT_RING(ring, fui(vp->translate[1])); /* PA_CL_VPORT_YOFFSET */
+      OUT_RING(ring, fui(vp->scale[2]));     /* PA_CL_VPORT_ZSCALE */
+      OUT_RING(ring, fui(vp->translate[2])); /* PA_CL_VPORT_ZOFFSET */
 
       /* set viewport in C65/C66, for a20x hw binning and fragcoord.z */
       OUT_PKT3(ring, CP_SET_CONSTANT, 9);
       OUT_RING(ring, 0x00000184);
 
-      OUT_RING(ring, fui(ctx->viewport.translate[0]));
-      OUT_RING(ring, fui(ctx->viewport.translate[1]));
-      OUT_RING(ring, fui(ctx->viewport.translate[2]));
+      OUT_RING(ring, fui(vp->translate[0]));
+      OUT_RING(ring, fui(vp->translate[1]));
+      OUT_RING(ring, fui(vp->translate[2]));
       OUT_RING(ring, fui(0.0f));
 
-      OUT_RING(ring, fui(ctx->viewport.scale[0]));
-      OUT_RING(ring, fui(ctx->viewport.scale[1]));
-      OUT_RING(ring, fui(ctx->viewport.scale[2]));
+      OUT_RING(ring, fui(vp->scale[0]));
+      OUT_RING(ring, fui(vp->scale[1]));
+      OUT_RING(ring, fui(vp->scale[2]));
       OUT_RING(ring, fui(0.0f));
    }
 

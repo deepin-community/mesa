@@ -38,8 +38,9 @@
 
 
 struct pipe_resource;
-struct st_framebuffer_iface;
+struct pipe_frontend_drawable;
 struct stw_pixelformat_info;
+struct pipe_frontend_screen;
 
 enum stw_framebuffer_owner
 {
@@ -83,14 +84,13 @@ struct stw_framebuffer
    
    HWND hWnd;
 
-   int iPixelFormat;
    const struct stw_pixelformat_info *pfi;
 
    /* A pixel format that can be used by GDI */
    int iDisplayablePixelFormat;
    enum stw_framebuffer_owner owner;
 
-   struct st_framebuffer_iface *stfb;
+   struct pipe_frontend_drawable *drawable;
 
    /*
     * Mutable members. 
@@ -129,7 +129,13 @@ struct stw_framebuffer
    struct stw_winsys_framebuffer *winsys_framebuffer;
 
    /* For WGL_EXT_swap_control */
+   int swap_interval;
    int64_t prev_swap_time;
+
+#ifdef _GAMING_XBOX
+   /* For the WndProc hook chain */
+   WNDPROC prev_wndproc;
+#endif
 
    /** 
     * This is protected by stw_device::fb_mutex, not the mutex above.
@@ -152,7 +158,11 @@ struct stw_framebuffer
  * must be called when done 
  */
 struct stw_framebuffer *
-stw_framebuffer_create(HWND hwnd, int iPixelFormat, enum stw_framebuffer_owner owner);
+stw_framebuffer_create(HWND hwnd, const struct stw_pixelformat_info *pfi, enum stw_framebuffer_owner owner,
+                       struct pipe_frontend_screen *fscreen);
+
+struct stw_framebuffer *
+stw_pbuffer_create(const struct stw_pixelformat_info *pfi, int iWidth, int iHeight, struct pipe_frontend_screen *fscreen);
 
 
 /**
@@ -166,7 +176,7 @@ stw_framebuffer_reference_locked(struct stw_framebuffer *fb);
 
 void
 stw_framebuffer_release_locked(struct stw_framebuffer *fb,
-                               struct st_context_iface *stctx);
+                               struct st_context *st);
 
 /**
  * Search a framebuffer with a matching HWND.
@@ -223,9 +233,9 @@ stw_framebuffer_cleanup(void);
 
 
 static inline struct stw_st_framebuffer *
-stw_st_framebuffer(struct st_framebuffer_iface *stfb)
+stw_st_framebuffer(struct pipe_frontend_drawable *drawable)
 {
-   return (struct stw_st_framebuffer *) stfb;
+   return (struct stw_st_framebuffer *) drawable;
 }
 
 

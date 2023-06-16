@@ -102,6 +102,18 @@ fd4_draw_vbo(struct fd_context *ctx, const struct pipe_draw_info *info,
       .sprite_coord_mode = ctx->rasterizer->sprite_coord_mode,
    };
 
+   /* Check if we actually need the tg4 workarounds */
+   if (ir3_get_shader_info(emit.key.vs)->uses_texture_gather) {
+      emit.key.key.has_per_samp = true;
+      memcpy(emit.key.key.vsampler_swizzles, fd4_ctx->vsampler_swizzles,
+            sizeof(emit.key.key.vsampler_swizzles));
+   }
+   if (ir3_get_shader_info(emit.key.fs)->uses_texture_gather) {
+      emit.key.key.has_per_samp = true;
+      memcpy(emit.key.key.fsampler_swizzles, fd4_ctx->fsampler_swizzles,
+            sizeof(emit.key.key.fsampler_swizzles));
+   }
+
    if (info->mode != PIPE_PRIM_MAX && !indirect && !info->primitive_restart &&
        !u_trim_pipe_prim(info->mode, (unsigned *)&draw->count))
       return false;
@@ -116,6 +128,8 @@ fd4_draw_vbo(struct fd_context *ctx, const struct pipe_draw_info *info,
    /* bail if compile failed: */
    if (!emit.prog)
       return false;
+
+   fd_blend_tracking(ctx);
 
    const struct ir3_shader_variant *vp = fd4_emit_get_vp(&emit);
    const struct ir3_shader_variant *fp = fd4_emit_get_fp(&emit);
@@ -164,9 +178,22 @@ fd4_draw_vbo(struct fd_context *ctx, const struct pipe_draw_info *info,
    return true;
 }
 
+static void
+fd4_draw_vbos(struct fd_context *ctx, const struct pipe_draw_info *info,
+              unsigned drawid_offset,
+              const struct pipe_draw_indirect_info *indirect,
+              const struct pipe_draw_start_count_bias *draws,
+              unsigned num_draws,
+              unsigned index_offset)
+   assert_dt
+{
+   for (unsigned i = 0; i < num_draws; i++)
+      fd4_draw_vbo(ctx, info, drawid_offset, indirect, &draws[i], index_offset);
+}
+
 void
 fd4_draw_init(struct pipe_context *pctx) disable_thread_safety_analysis
 {
    struct fd_context *ctx = fd_context(pctx);
-   ctx->draw_vbo = fd4_draw_vbo;
+   ctx->draw_vbos = fd4_draw_vbos;
 }

@@ -28,6 +28,7 @@
 #include "virgl_resource.h"
 #include "virgl_screen.h"
 #include "virgl_staging_mgr.h"
+#include "virgl_encode.h" // for declaration of virgl_encode_copy_transfer
 
 /* A (soft) limit for the amount of memory we want to allow for queued staging
  * resources. This is used to decide when we should force a flush, in order to
@@ -42,11 +43,69 @@ enum virgl_transfer_map_type {
    /* Map a range of a staging buffer. The updated contents should be transferred
     * with a copy transfer.
     */
-   VIRGL_TRANSFER_MAP_STAGING,
+   VIRGL_TRANSFER_MAP_WRITE_TO_STAGING,
 
    /* Reallocate the underlying virgl_hw_res. */
    VIRGL_TRANSFER_MAP_REALLOC,
+
+   /* Map type for read of texture data from host to guest
+    * using staging buffer. */
+   VIRGL_TRANSFER_MAP_READ_FROM_STAGING,
+   /* Map type for write of texture data to host using staging
+    * buffer that needs a readback first. */
+   VIRGL_TRANSFER_MAP_WRITE_TO_STAGING_WITH_READBACK,
 };
+
+/* Check if copy transfer from host can be used:
+ *  1. if resource is a texture,
+ *  2. if renderer supports copy transfer from host,
+ *  3. the host is not GLES (no fake FP64)
+ *  4. the format can be rendered to and the format is a readback format
+ *     or the format is a scanout format and we can read back from scanout
+ */
+static bool virgl_can_readback_from_rendertarget(struct virgl_screen *vs,
+                                                 struct virgl_resource *res)
+{
+   return res->b.nr_samples < 2 &&
+         vs->base.is_format_supported(&vs->base, res->b.format, res->b.target,
+                                      res->b.nr_samples, res->b.nr_samples,
+                                      PIPE_BIND_RENDER_TARGET);
+}
+
+static bool virgl_can_readback_from_scanout(struct virgl_screen *vs,
+                                            struct virgl_resource *res,
+                                            int bind)
+{
+   return (vs->caps.caps.v2.capability_bits_v2 & VIRGL_CAP_V2_SCANOUT_USES_GBM) &&
+         (bind & VIRGL_BIND_SCANOUT) &&
+         virgl_has_scanout_format(vs, res->b.format, true);
+}
+
+static bool virgl_can_use_staging(struct virgl_screen *vs,
+                                  struct virgl_resource *res)
+{
+   return (vs->caps.caps.v2.capability_bits_v2 & VIRGL_CAP_V2_COPY_TRANSFER_BOTH_DIRECTIONS) &&
+         (res->b.target != PIPE_BUFFER);
+}
+
+static bool is_stencil_array(struct virgl_resource *res)
+{
+   const struct util_format_description *descr = util_format_description(res->b.format);
+   return (res->b.array_size > 1 || res->b.depth0 > 1) && util_format_has_stencil(descr);
+}
+
+static bool virgl_can_copy_transfer_from_host(struct virgl_screen *vs,
+                                              struct virgl_resource *res,
+                                              int bind)
+{
+   return virgl_can_use_staging(vs, res) &&
+         !is_stencil_array(res) &&
+         !(bind & VIRGL_BIND_SHARED) &&
+         virgl_has_readback_format(&vs->base, pipe_to_virgl_format(res->b.format), false) &&
+         ((!(vs->caps.caps.v2.capability_bits & VIRGL_CAP_HOST_IS_GLES)) ||
+          virgl_can_readback_from_rendertarget(vs, res) ||
+          virgl_can_readback_from_scanout(vs, res, bind));
+}
 
 /* We need to flush to properly sync the transfer with the current cmdbuf.
  * But there are cases where the flushing can be skipped:
@@ -95,7 +154,8 @@ static bool virgl_res_needs_readback(struct virgl_context *vctx,
 
 static enum virgl_transfer_map_type
 virgl_resource_transfer_prepare(struct virgl_context *vctx,
-                                struct virgl_transfer *xfer)
+                                struct virgl_transfer *xfer,
+                                bool is_blob)
 {
    struct virgl_screen *vs = virgl_screen(vctx->base.screen);
    struct virgl_winsys *vws = vs->vws;
@@ -142,12 +202,11 @@ virgl_resource_transfer_prepare(struct virgl_context *vctx,
    /* When the resource is busy but its content can be discarded, we can
     * replace its HW resource or use a staging buffer to avoid waiting.
     */
-   if (wait &&
+   if (wait && !is_blob &&
        (xfer->base.usage & (PIPE_MAP_DISCARD_RANGE |
                             PIPE_MAP_DISCARD_WHOLE_RESOURCE)) &&
        likely(!(virgl_debug & VIRGL_DEBUG_XFER))) {
       bool can_realloc = false;
-      bool can_staging = false;
 
       /* A PIPE_MAP_DISCARD_WHOLE_RESOURCE transfer may be followed by
        * PIPE_MAP_UNSYNCHRONIZED transfers to non-overlapping regions.
@@ -157,14 +216,12 @@ virgl_resource_transfer_prepare(struct virgl_context *vctx,
        */
       if (xfer->base.usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE) {
          can_realloc = virgl_can_rebind_resource(vctx, &res->b);
-      } else {
-         can_staging = vctx->supports_staging;
       }
 
       /* discard implies no readback */
       assert(!readback);
 
-      if (can_realloc || can_staging) {
+      if (can_realloc || vctx->supports_staging) {
          /* Both map types have some costs.  Do them only when the resource is
           * (or will be) busy for real.  Otherwise, set wait to false.
           */
@@ -172,7 +229,8 @@ virgl_resource_transfer_prepare(struct virgl_context *vctx,
          if (wait) {
             map_type = (can_realloc) ?
                VIRGL_TRANSFER_MAP_REALLOC :
-               VIRGL_TRANSFER_MAP_STAGING;
+               VIRGL_TRANSFER_MAP_WRITE_TO_STAGING;
+
             wait = false;
 
             /* There is normally no need to flush either, unless the amount of
@@ -188,11 +246,15 @@ virgl_resource_transfer_prepare(struct virgl_context *vctx,
 
    /* readback has some implications */
    if (readback) {
-      /* Readback is yet another command and is transparent to the state
-       * trackers.  It should be waited for in all cases, including when
-       * PIPE_MAP_UNSYNCHRONIZED is set.
+      /* If we are performing readback for textures and renderer supports
+       * copy_transfer_from_host, then we can return here with proper map.
        */
-      wait = true;
+      if (res->use_staging) {
+         if (xfer->base.usage & PIPE_MAP_READ)
+            return VIRGL_TRANSFER_MAP_READ_FROM_STAGING;
+         else
+            return VIRGL_TRANSFER_MAP_WRITE_TO_STAGING_WITH_READBACK;
+      }
 
       /* When the transfer queue has pending writes to this transfer's region,
        * we have to flush before readback.
@@ -216,12 +278,26 @@ virgl_resource_transfer_prepare(struct virgl_context *vctx,
       return VIRGL_TRANSFER_MAP_ERROR;
 
    if (readback) {
-      vws->transfer_get(vws, res->hw_res, &xfer->base.box, xfer->base.stride,
-                        xfer->l_stride, xfer->offset, xfer->base.level);
+      /* Readback is yet another command and is transparent to the state
+       * trackers.  It should be waited for in all cases, including when
+       * PIPE_MAP_UNSYNCHRONIZED is set.
+       */
+      if (!is_blob) {
+         vws->resource_wait(vws, res->hw_res);
+         vws->transfer_get(vws, res->hw_res, &xfer->base.box, xfer->base.stride,
+                           xfer->l_stride, xfer->offset, xfer->base.level);
+      }
+      /* transfer_get puts the resource into a maybe_busy state, so we will have
+       * to wait another time if we want to use that resource. */
+      wait = true;
    }
 
    if (wait)
       vws->resource_wait(vws, res->hw_res);
+
+   if (res->use_staging) {
+      map_type = VIRGL_TRANSFER_MAP_WRITE_TO_STAGING;
+   }
 
    return map_type;
 }
@@ -330,6 +406,36 @@ virgl_staging_map(struct virgl_context *vctx,
    return map_addr;
 }
 
+/* Maps a region from staging to service the transfer from host.
+ * This function should be called only for texture readbacks
+ * from host. */
+static void *
+virgl_staging_read_map(struct virgl_context *vctx,
+                  struct virgl_transfer *vtransfer)
+{
+   struct virgl_screen *vscreen = virgl_screen(vctx->base.screen);
+   struct virgl_winsys *vws = vscreen->vws;
+   assert(vtransfer->base.resource->target != PIPE_BUFFER);
+   void *map_addr;
+
+   /* There are two possibilities to perform readback via:
+    * a) calling transfer_get();
+    * b) calling submit_cmd() with encoded transfer inside cmd.
+    * 
+    * For b) we need:
+    *   1. select offset from staging buffer
+    *   2. encode this transfer in wire
+    *   3. flush the execbuffer to the host
+    *   4. wait till copy on the host is done
+    */
+   map_addr = virgl_staging_map(vctx, vtransfer);
+   vtransfer->direction = VIRGL_TRANSFER_FROM_HOST;
+   virgl_encode_copy_transfer(vctx, vtransfer);
+   vctx->base.flush(&vctx->base, NULL, 0);
+   vws->resource_wait(vws, vtransfer->copy_src_hw_res);
+   return map_addr;
+}
+
 static bool
 virgl_resource_realloc(struct virgl_context *vctx, struct virgl_resource *res)
 {
@@ -340,8 +446,12 @@ virgl_resource_realloc(struct virgl_context *vctx, struct virgl_resource *res)
 
    vbind = pipe_to_virgl_bind(vs, templ->bind);
    vflags = pipe_to_virgl_flags(vs, templ->flags);
+
+   int alloc_size = res->use_staging ? 1 : res->metadata.total_size;
+
    hw_res = vs->vws->resource_create(vs->vws,
                                      templ->target,
+                                     NULL,
                                      templ->format,
                                      vbind,
                                      templ->width0,
@@ -351,7 +461,7 @@ virgl_resource_realloc(struct virgl_context *vctx, struct virgl_resource *res)
                                      templ->last_level,
                                      templ->nr_samples,
                                      vflags,
-                                     res->metadata.total_size);
+                                     alloc_size);
    if (!hw_res)
       return false;
 
@@ -380,7 +490,8 @@ virgl_resource_transfer_map(struct pipe_context *ctx,
                             struct pipe_transfer **transfer)
 {
    struct virgl_context *vctx = virgl_context(ctx);
-   struct virgl_winsys *vws = virgl_screen(ctx->screen)->vws;
+   struct virgl_screen *vscreen = virgl_screen(ctx->screen);
+   struct virgl_winsys *vws = vscreen->vws;
    struct virgl_resource *vres = virgl_resource(resource);
    struct virgl_transfer *trans;
    enum virgl_transfer_map_type map_type;
@@ -389,10 +500,24 @@ virgl_resource_transfer_map(struct pipe_context *ctx,
    /* Multisampled resources require resolve before mapping. */
    assert(resource->nr_samples <= 1);
 
+   /* If virgl resource was created using persistence and coherency flags,
+    * then its memory mapping can be only made in accordance to these
+    * flags. We record the "usage" flags in struct virgl_transfer and
+    * then virgl_buffer_transfer_unmap() uses them to differentiate
+    * unmapping of a host blob resource from guest.
+    */
+   if (resource->flags & PIPE_RESOURCE_FLAG_MAP_PERSISTENT)
+      usage |= PIPE_MAP_PERSISTENT;
+
+   if (resource->flags & PIPE_RESOURCE_FLAG_MAP_COHERENT)
+      usage |= PIPE_MAP_COHERENT;
+
+   bool is_blob = usage & (PIPE_MAP_COHERENT | PIPE_MAP_PERSISTENT);
+
    trans = virgl_resource_create_transfer(vctx, resource,
                                           &vres->metadata, level, usage, box);
 
-   map_type = virgl_resource_transfer_prepare(vctx, trans);
+   map_type = virgl_resource_transfer_prepare(vctx, trans, is_blob);
    switch (map_type) {
    case VIRGL_TRANSFER_MAP_REALLOC:
       if (!virgl_resource_realloc(vctx, vres)) {
@@ -408,10 +533,22 @@ virgl_resource_transfer_map(struct pipe_context *ctx,
       else
          map_addr = NULL;
       break;
-   case VIRGL_TRANSFER_MAP_STAGING:
+   case VIRGL_TRANSFER_MAP_WRITE_TO_STAGING:
       map_addr = virgl_staging_map(vctx, trans);
       /* Copy transfers don't make use of hw_res_map at the moment. */
       trans->hw_res_map = NULL;
+      trans->direction = VIRGL_TRANSFER_TO_HOST;
+      break;
+   case VIRGL_TRANSFER_MAP_READ_FROM_STAGING:
+      map_addr = virgl_staging_read_map(vctx, trans);
+      /* Copy transfers don't make use of hw_res_map at the moment. */
+      trans->hw_res_map = NULL;
+      break;
+   case VIRGL_TRANSFER_MAP_WRITE_TO_STAGING_WITH_READBACK:
+      map_addr = virgl_staging_read_map(vctx, trans);
+      /* Copy transfers don't make use of hw_res_map at the moment. */
+      trans->hw_res_map = NULL;
+      trans->direction = VIRGL_TRANSFER_TO_HOST;
       break;
    case VIRGL_TRANSFER_MAP_ERROR:
    default:
@@ -500,12 +637,14 @@ static void virgl_resource_layout(struct pipe_resource *pt,
       metadata->total_size = 0;
 }
 
-static struct pipe_resource *virgl_resource_create(struct pipe_screen *screen,
-                                                   const struct pipe_resource *templ)
+static struct pipe_resource *virgl_resource_create_front(struct pipe_screen *screen,
+                                                         const struct pipe_resource *templ,
+                                                         const void *map_front_private)
 {
    unsigned vbind, vflags;
    struct virgl_screen *vs = virgl_screen(screen);
    struct virgl_resource *res = CALLOC_STRUCT(virgl_resource);
+   uint32_t alloc_size;
 
    res->b = *templ;
    res->b.screen = &vs->base;
@@ -523,7 +662,18 @@ static struct pipe_resource *virgl_resource_create(struct pipe_screen *screen,
       vbind |= VIRGL_BIND_PREFER_EMULATED_BGRA;
    }
 
+   // If renderer supports copy transfer from host, and we either have support
+   // for then for textures alloc minimum size of bo
+   // This size is not passed to the host
+   res->use_staging = virgl_can_copy_transfer_from_host(vs, res, vbind);
+
+   if (res->use_staging)
+      alloc_size = 1;
+   else
+      alloc_size = res->metadata.total_size;
+   
    res->hw_res = vs->vws->resource_create(vs->vws, templ->target,
+                                          map_front_private,
                                           templ->format, vbind,
                                           templ->width0,
                                           templ->height0,
@@ -532,7 +682,7 @@ static struct pipe_resource *virgl_resource_create(struct pipe_screen *screen,
                                           templ->last_level,
                                           templ->nr_samples,
                                           vflags,
-                                          res->metadata.total_size);
+                                          alloc_size);
    if (!res->hw_res) {
       FREE(res);
       return NULL;
@@ -551,6 +701,12 @@ static struct pipe_resource *virgl_resource_create(struct pipe_screen *screen,
 
 }
 
+static struct pipe_resource *virgl_resource_create(struct pipe_screen *screen,
+                                                   const struct pipe_resource *templ)
+{
+   return virgl_resource_create_front(screen, templ, NULL);
+}
+
 static struct pipe_resource *virgl_resource_from_handle(struct pipe_screen *screen,
                                                         const struct pipe_resource *templ,
                                                         struct winsys_handle *whandle,
@@ -558,6 +714,8 @@ static struct pipe_resource *virgl_resource_from_handle(struct pipe_screen *scre
 {
    uint32_t winsys_stride, plane_offset, plane;
    uint64_t modifier;
+   uint32_t storage_size;
+
    struct virgl_screen *vs = virgl_screen(screen);
    if (templ->target == PIPE_BUFFER)
       return NULL;
@@ -588,6 +746,19 @@ static struct pipe_resource *virgl_resource_from_handle(struct pipe_screen *scre
       FREE(res);
       return NULL;
    }
+
+   /*
+   *  If the overall resource is larger than a single page in size, we can
+   *  compare it with the amount of memory allocated on the guest to determine
+   *  if we should be using the staging path.
+   *
+   *  If not, the decision is not as clear. However, since the resource can
+   *  fit within a single page, the import will function correctly.
+   */
+  storage_size = vs->vws->resource_get_storage_size(vs->vws, res->hw_res);
+
+   if (res->metadata.total_size > storage_size)
+      res->use_staging = 1;
 
    /* assign blob resource a type in case it was created untyped */
    if (res->blob_mem && plane == 0 &&
@@ -639,6 +810,7 @@ static struct pipe_resource *virgl_resource_from_handle(struct pipe_screen *scre
 
 void virgl_init_screen_resource_functions(struct pipe_screen *screen)
 {
+    screen->resource_create_front = virgl_resource_create_front;
     screen->resource_create = virgl_resource_create;
     screen->resource_from_handle = virgl_resource_from_handle;
     screen->resource_get_handle = virgl_resource_get_handle;
@@ -714,14 +886,11 @@ virgl_resource_create_transfer(struct virgl_context *vctx,
    offset += blocksy * metadata->stride[level];
    offset += blocksx * util_format_get_blocksize(format);
 
-   trans = slab_alloc(&vctx->transfer_pool);
+   trans = slab_zalloc(&vctx->transfer_pool);
    if (!trans)
       return NULL;
 
-   /* note that trans is not zero-initialized */
-   trans->base.resource = NULL;
    pipe_resource_reference(&trans->base.resource, pres);
-   trans->hw_res = NULL;
    vws->resource_reference(vws, &trans->hw_res, virgl_resource(pres)->hw_res);
 
    trans->base.level = level;
@@ -731,9 +900,6 @@ virgl_resource_create_transfer(struct virgl_context *vctx,
    trans->base.layer_stride = metadata->layer_stride[level];
    trans->offset = offset;
    util_range_init(&trans->range);
-   trans->copy_src_hw_res = NULL;
-   trans->copy_src_offset = 0;
-   trans->resolve_transfer = NULL;
 
    if (trans->base.resource->target != PIPE_TEXTURE_3D &&
        trans->base.resource->target != PIPE_TEXTURE_CUBE &&

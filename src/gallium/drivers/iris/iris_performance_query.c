@@ -25,6 +25,8 @@
 #include "iris_context.h"
 #include "iris_perf.h"
 
+#include "main/mtypes.h"
+
 struct iris_perf_query {
    struct gl_perf_query_object base;
    struct intel_perf_query_object *query;
@@ -66,7 +68,7 @@ iris_init_perf_query_info(struct pipe_context *pipe)
 
    iris_perf_init_vtbl(perf_cfg);
 
-   intel_perf_init_metrics(perf_cfg, &screen->devinfo, screen->fd,
+   intel_perf_init_metrics(perf_cfg, screen->devinfo, screen->fd,
                            true /* pipeline_statistics */,
                            true /* register snapshots */);
 
@@ -75,8 +77,8 @@ iris_init_perf_query_info(struct pipe_context *pipe)
                          ice,
                          ice,
                          screen->bufmgr,
-                         &screen->devinfo,
-                         ice->batches[IRIS_BATCH_RENDER].hw_ctx_id,
+                         screen->devinfo,
+                         ice->batches[IRIS_BATCH_RENDER].ctx_id,
                          screen->fd);
 
    return perf_cfg->n_queries;
@@ -174,14 +176,27 @@ iris_get_perf_counter_info(struct pipe_context *pipe,
    const struct intel_perf_query_info *info = &perf_cfg->queries[query_index];
    const struct intel_perf_query_counter *counter =
       &info->counters[counter_index];
+   struct intel_perf_query_result results;
 
-   *name = counter->name;
+   intel_perf_query_result_clear(&results);
+
+   *name = INTEL_DEBUG(DEBUG_PERF_SYMBOL_NAMES) ?
+      counter->symbol_name : counter->name;
    *desc = counter->desc;
    *offset = counter->offset;
    *data_size = intel_perf_query_counter_get_size(counter);
    *type_enum = counter->type;
    *data_type_enum = counter->data_type;
-   *raw_max = counter->raw_max;
+
+   if (counter->oa_counter_max_uint64) {
+      if (counter->data_type == INTEL_PERF_COUNTER_DATA_TYPE_FLOAT ||
+          counter->data_type == INTEL_PERF_COUNTER_DATA_TYPE_DOUBLE)
+         *raw_max = counter->oa_counter_max_float(perf_cfg, info, &results);
+      else
+         *raw_max = counter->oa_counter_max_uint64(perf_cfg, info, &results);
+   } else {
+      *raw_max = 0;
+   }
 }
 
 static void

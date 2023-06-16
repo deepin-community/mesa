@@ -25,7 +25,7 @@
 #include "gl_nir_linker.h"
 #include "ir_uniform.h" /* for gl_uniform_storage */
 #include "linker_util.h"
-#include "main/mtypes.h"
+#include "main/shader_types.h"
 
 /**
  * This file contains code to do a nir-based linking for uniform blocks. This
@@ -134,8 +134,8 @@ link_blocks_are_compatible(const struct gl_uniform_block *a,
    /* We are explicitly ignoring the names, so it would be good to check that
     * this is happening.
     */
-   assert(a->Name == NULL);
-   assert(b->Name == NULL);
+   assert(a->name.string == NULL);
+   assert(b->name.string == NULL);
 
    if (a->NumUniforms != b->NumUniforms)
       return false;
@@ -326,7 +326,7 @@ iterate_type_count_variables(const struct glsl_type *type,
       else
          field_type = glsl_get_array_element(type);
 
-      if (glsl_type_is_leaf(field_type))
+      if (glsl_type_is_leaf(field_type) || glsl_type_is_unsized_array(field_type))
          (*num_variables)++;
       else
          iterate_type_count_variables(field_type, num_variables);
@@ -374,17 +374,13 @@ iterate_type_fill_variables(const struct glsl_type *type,
                             struct gl_shader_program *prog,
                             struct gl_uniform_block *block)
 {
-   unsigned length = glsl_get_length(type);
-   if (length == 0)
-      return;
-
    unsigned struct_base_offset;
 
    bool struct_or_ifc = glsl_type_is_struct_or_ifc(type);
    if (struct_or_ifc)
       struct_base_offset = *offset;
 
-   for (unsigned i = 0; i < length; i++) {
+   for (unsigned i = 0; i < glsl_get_length(type); i++) {
       const struct glsl_type *field_type;
 
       if (struct_or_ifc) {
@@ -395,7 +391,7 @@ iterate_type_fill_variables(const struct glsl_type *type,
          field_type = glsl_get_array_element(type);
       }
 
-      if (glsl_type_is_leaf(field_type)) {
+      if (glsl_type_is_leaf(field_type) || glsl_type_is_unsized_array(field_type)) {
          fill_individual_variable(field_type, variables, variable_index,
                                   offset, prog, block);
       } else {
@@ -468,7 +464,8 @@ fill_block(struct gl_uniform_block *block,
 {
    const struct glsl_type *type = glsl_without_array(var->type);
 
-   block->Name = NULL; /* ARB_gl_spirv: allowed to ignore names */
+   block->name.string = NULL; /* ARB_gl_spirv: allowed to ignore names */
+   resource_name_updated(&block->name);
    /* From ARB_gl_spirv spec:
     *    "Vulkan uses only one binding point for a resource array,
     *     while OpenGL still uses multiple binding points, so binding
@@ -541,7 +538,6 @@ fill_block(struct gl_uniform_block *block,
  */
 static void
 link_linked_shader_uniform_blocks(void *mem_ctx,
-                                  struct gl_context *ctx,
                                   struct gl_shader_program *prog,
                                   struct gl_linked_shader *shader,
                                   struct gl_uniform_block **blocks,
@@ -583,8 +579,7 @@ link_linked_shader_uniform_blocks(void *mem_ctx,
 }
 
 bool
-gl_nir_link_uniform_blocks(struct gl_context *ctx,
-                           struct gl_shader_program *prog)
+gl_nir_link_uniform_blocks(struct gl_shader_program *prog)
 {
    void *mem_ctx = ralloc_context(NULL);
    bool ret = false;
@@ -598,11 +593,11 @@ gl_nir_link_uniform_blocks(struct gl_context *ctx,
       if (!linked)
          continue;
 
-      link_linked_shader_uniform_blocks(mem_ctx, ctx, prog, linked,
+      link_linked_shader_uniform_blocks(mem_ctx, prog, linked,
                                         &ubo_blocks, &num_ubo_blocks,
                                         BLOCK_UBO);
 
-      link_linked_shader_uniform_blocks(mem_ctx, ctx, prog, linked,
+      link_linked_shader_uniform_blocks(mem_ctx, prog, linked,
                                         &ssbo_blocks, &num_ssbo_blocks,
                                         BLOCK_SSBO);
 

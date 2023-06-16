@@ -50,6 +50,8 @@ static const nir_shader_compiler_options options = {
    .lower_insert_byte = true,
    .lower_insert_word = true,
    .force_indirect_unrolling = nir_var_all,
+   .force_indirect_unrolling_sampler = true,
+   .max_unroll_iterations = 32,
 };
 
 const nir_shader_compiler_options *
@@ -94,7 +96,7 @@ ir2_optimize_loop(nir_shader *s)
          OPT(s, nir_opt_dce);
       }
       progress |= OPT(s, nir_opt_loop_unroll);
-      progress |= OPT(s, nir_opt_if, false);
+      progress |= OPT(s, nir_opt_if, nir_opt_if_optimize_phi_true_false);
       progress |= OPT(s, nir_opt_remove_phis);
       progress |= OPT(s, nir_opt_undef);
 
@@ -110,6 +112,7 @@ ir2_optimize_nir(nir_shader *s, bool lower)
    struct nir_lower_tex_options tex_options = {
       .lower_txp = ~0u,
       .lower_rect = 0,
+      .lower_invalid_implicit_lod = true,
    };
 
    if (FD_DBG(DISASM)) {
@@ -1016,6 +1019,7 @@ loop_last_block(struct exec_list *list)
 static void
 emit_loop(struct ir2_context *ctx, nir_loop *nloop)
 {
+   assert(!nir_loop_has_continue_construct(nloop));
    ctx->loop_last_block[++ctx->loop_depth] = loop_last_block(&nloop->body);
    emit_cf_list(ctx, &nloop->body);
    ctx->loop_depth--;
@@ -1108,7 +1112,7 @@ ir2_nir_compile(struct ir2_context *ctx, bool binning)
    OPT_V(ctx->nir, nir_opt_move, nir_move_comparisons);
 
    OPT_V(ctx->nir, nir_lower_int_to_float);
-   OPT_V(ctx->nir, nir_lower_bool_to_float);
+   OPT_V(ctx->nir, nir_lower_bool_to_float, true);
    while (OPT(ctx->nir, nir_opt_algebraic))
       ;
    OPT_V(ctx->nir, nir_opt_algebraic_late);

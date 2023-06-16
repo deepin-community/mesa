@@ -29,7 +29,7 @@
 #include "program/prog_statevars.h"
 #include "util/bitscan.h"
 #include "builtin_functions.h"
-#include "main/mtypes.h"
+#include "main/shader_types.h"
 
 using namespace ir_builder;
 
@@ -471,7 +471,7 @@ lower_blend_equation_advanced(struct gl_linked_shader *sh, bool coherent)
    /* Lower early returns in main() so there's a single exit point
     * where we can insert our lowering code.
     */
-   do_lower_jumps(sh->ir, false, false, true, false, false);
+   do_lower_jumps(sh->ir, false, false, true, false);
 
    void *mem_ctx = ralloc_parent(sh->ir);
 

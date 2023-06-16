@@ -35,7 +35,7 @@
 #endif
 
 #include "pipe/p_compiler.h"
-#include "pipe/p_format.h"
+#include "util/format/u_formats.h"
 #include "frontend/api.h"
 
 #ifdef __cplusplus
@@ -66,6 +66,12 @@ stw_pixelformat_get_extended_count( HDC hdc );
 
 const struct stw_pixelformat_info *
 stw_pixelformat_get_info( int iPixelFormat );
+
+const struct stw_pixelformat_info *
+stw_pixelformat_get_info_from_hdc( HDC hdc );
+
+int
+stw_pixelformat_guess( HDC );
 
 int
 stw_pixelformat_choose( HDC hdc,

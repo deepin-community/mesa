@@ -19,6 +19,7 @@
 # SOFTWARE.
 
 files_vulkan_wsi = files('wsi_common.c')
+platform_deps = []
 
 if dep_libdrm.found()
   files_vulkan_wsi += files('wsi_common_drm.c')
@@ -37,7 +38,10 @@ if with_platform_wayland
 endif
 
 if with_platform_windows
-  files_vulkan_wsi += files('wsi_common_win32.c')
+  files_vulkan_wsi += files('wsi_common_win32.cpp')
+  platform_deps += dep_dxheaders
+else
+  files_vulkan_wsi += files('wsi_common_headless.c')
 endif
 
 if system_has_kms_drm and not with_platform_android
@@ -58,17 +62,22 @@ wsi_entrypoints = custom_target(
 libvulkan_wsi = static_library(
   'vulkan_wsi',
   [files_vulkan_wsi, wsi_entrypoints],
-  include_directories : [inc_include, inc_src],
+  include_directories : [inc_include, inc_src, inc_gallium],
   dependencies : [
-    vulkan_wsi_deps, dep_libdrm, idep_vulkan_util_headers, idep_xmlconfig,
+    vulkan_wsi_deps, dep_libdrm, dep_libudev, idep_vulkan_util_headers,
+    idep_vulkan_runtime_headers, idep_xmlconfig, idep_mesautil, platform_deps
   ],
-  c_args : [vulkan_wsi_args],
   gnu_symbol_visibility : 'hidden',
   build_by_default : false,
 )
 
 idep_vulkan_wsi_headers = declare_dependency(
+  dependencies : idep_vulkan_wsi_defines,
   include_directories : include_directories('.')
+)
+
+idep_vulkan_wsi_entrypoints_h = declare_dependency(
+  sources : [wsi_entrypoints[0]]
 )
 
 # This is likely a bug in the Meson VS backend, as MSVC with ninja works fine.
@@ -84,6 +93,8 @@ else
     # Instruct users of this library to link with --whole-archive.  Otherwise,
     # our weak function overloads may not resolve properly.
     link_whole : libvulkan_wsi,
-    dependencies : idep_vulkan_wsi_headers
+    dependencies : [
+      idep_vulkan_wsi_headers, dep_libudev
+    ]
   )
 endif

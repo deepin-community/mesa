@@ -244,7 +244,7 @@ D3DKMTGetMultisampleMethodList(D3DKMT_GETMULTISAMPLEMETHODLIST *pData)
 
 
 EXTERN_C NTSTATUS APIENTRY
-D3DKMTPresent(CONST D3DKMT_PRESENT *pData)
+D3DKMTPresent(D3DKMT_PRESENT *pData)
 {
    LOG_UNSUPPORTED_ENTRYPOINT();
    return STATUS_NOT_IMPLEMENTED;
@@ -280,7 +280,7 @@ D3DKMTQueryAdapterInfo(CONST D3DKMT_QUERYADAPTERINFO *pData)
          if (pResult->Version != KMTUMDVERSION_DX10 &&
              pResult->Version != KMTUMDVERSION_DX11) {
          DebugPrintf("%s: unsupported UMD version (%u)\n",
-                     __FUNCTION__, pResult->Version);
+                     __func__, pResult->Version);
             return STATUS_INVALID_PARAMETER;
          }
          HMODULE hModule = 0;
@@ -334,7 +334,7 @@ D3DKMTQueryAdapterInfo(CONST D3DKMT_QUERYADAPTERINFO *pData)
       return STATUS_SUCCESS;
    default:
       DebugPrintf("%s: unsupported query type (Type=%u, PrivateDriverDataSize=%u)\n",
-                  __FUNCTION__, pData->Type, pData->PrivateDriverDataSize);
+                  __func__, pData->Type, pData->PrivateDriverDataSize);
       ZeroMemory(pData->pPrivateDriverData, pData->PrivateDriverDataSize);
       return STATUS_NOT_IMPLEMENTED;
    }
@@ -409,7 +409,7 @@ D3DKMTSetVidPnSourceOwner(CONST D3DKMT_SETVIDPNSOURCEOWNER *pData)
 
 
 EXTERN_C NTSTATUS APIENTRY
-D3DKMTSetVidPnSourceOwner1(const void *pData)
+D3DKMTSetVidPnSourceOwner1(CONST D3DKMT_SETVIDPNSOURCEOWNER1 *pData)
 {
    LOG_UNSUPPORTED_ENTRYPOINT();
    return STATUS_NOT_IMPLEMENTED;

@@ -15,11 +15,11 @@
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
  * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * FELIX KUEHLING, OR ANY OTHER CONTRIBUTORS BE LIABLE FOR ANY CLAIM, 
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR 
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE 
+ * FELIX KUEHLING, OR ANY OTHER CONTRIBUTORS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+ * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
  * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- * 
+ *
  */
 /**
  * \file xmlconfig.c
@@ -59,6 +59,7 @@ static inline void regfree(regex_t* r) {}
 #include "strndup.h"
 #include "u_process.h"
 #include "os_file.h"
+#include "os_misc.h"
 
 /* For systems like Hurd */
 #ifndef PATH_MAX
@@ -272,7 +273,7 @@ findOption(const driOptionCache *cache, const char *name)
    /* this is just the starting point of the linear search for the option */
    for (i = 0; i < size; ++i, hash = (hash+1) & mask) {
       /* if we hit an empty entry then the option is not defined (yet) */
-      if (cache->info[hash].name == 0)
+      if (cache->info[hash].name == NULL)
          break;
       else if (!strcmp(name, cache->info[hash].name))
          break;
@@ -320,7 +321,7 @@ driParseOptionInfo(driOptionCache *info,
    /* Make the hash table big enough to fit more than the maximum number of
     * config options we've ever seen in a driver.
     */
-   info->tableSize = 6;
+   info->tableSize = 7;
    info->info = calloc((size_t)1 << info->tableSize, sizeof(driOptionInfo));
    info->values = calloc((size_t)1 << info->tableSize, sizeof(driOptionValue));
    if (info->info == NULL || info->values == NULL) {
@@ -347,11 +348,15 @@ driParseOptionInfo(driOptionCache *info,
       driOptionInfo *optinfo = &info->info[i];
       driOptionValue *optval = &info->values[i];
 
-      assert(!optinfo->name); /* No duplicate options in your list. */
+      if (optinfo->name) {
+         /* Duplicate options override the value, but the type must match. */
+         assert(optinfo->type == opt->info.type);
+      } else {
+         XSTRDUP(optinfo->name, name);
+      }
 
       optinfo->type = opt->info.type;
       optinfo->range = opt->info.range;
-      XSTRDUP(optinfo->name, name);
 
       switch (opt->info.type) {
       case DRI_BOOL:
@@ -378,7 +383,7 @@ driParseOptionInfo(driOptionCache *info,
       /* Built-in default values should always be valid. */
       assert(checkValue(optval, optinfo));
 
-      char *envVal = getenv(name);
+      const char *envVal = os_get_option(name);
       if (envVal != NULL) {
          driOptionValue v;
 
@@ -681,6 +686,7 @@ parseAppAttr(struct OptConfData *data, const char **attr)
    uint32_t i;
    const char *exec = NULL;
    const char *sha1 = NULL;
+   const char *exec_regexp = NULL;
    const char *application_name_match = NULL;
    const char *application_versions = NULL;
    driOptionInfo version_range = {
@@ -690,6 +696,7 @@ parseAppAttr(struct OptConfData *data, const char **attr)
    for (i = 0; attr[i]; i += 2) {
       if (!strcmp(attr[i], "name")) /* not needed here */;
       else if (!strcmp(attr[i], "executable")) exec = attr[i+1];
+      else if (!strcmp(attr[i], "executable_regexp")) exec_regexp = attr[i+1];
       else if (!strcmp(attr[i], "sha1")) sha1 = attr[i+1];
       else if (!strcmp(attr[i], "application_name_match"))
          application_name_match = attr[i+1];
@@ -699,6 +706,15 @@ parseAppAttr(struct OptConfData *data, const char **attr)
    }
    if (exec && strcmp(exec, data->execName)) {
       data->ignoringApp = data->inApp;
+   } else if (exec_regexp) {
+      regex_t re;
+
+      if (regcomp(&re, exec_regexp, REG_EXTENDED|REG_NOSUB) == 0) {
+         if (regexec(&re, data->execName, 0, NULL, 0) == REG_NOMATCH)
+            data->ignoringApp = data->inApp;
+         regfree(&re);
+      } else
+         XML_WARNING("Invalid executable_regexp=\"%s\".", exec_regexp);
    } else if (sha1) {
       /* SHA1_DIGEST_STRING_LENGTH includes terminating null byte */
       if (strlen(sha1) != (SHA1_DIGEST_STRING_LENGTH - 1)) {
@@ -998,7 +1014,10 @@ scandir_filter(const struct dirent *ent)
        (!S_ISREG(st.st_mode) && !S_ISLNK(st.st_mode)))
       return 0;
 #else
-   if (ent->d_type != DT_REG && ent->d_type != DT_LNK)
+   /* Allow through unknown file types for filesystems that don't support d_type
+    * The full filepath isn't available here to stat the file
+    */
+   if (ent->d_type != DT_REG && ent->d_type != DT_LNK && ent->d_type != DT_UNKNOWN)
       return 0;
 #endif
 
@@ -1022,9 +1041,25 @@ parseConfigDir(struct OptConfData *data, const char *dirname)
 
    for (i = 0; i < count; i++) {
       char filename[PATH_MAX];
+#ifdef DT_REG
+      unsigned char d_type = entries[i]->d_type;
+#endif
 
       snprintf(filename, PATH_MAX, "%s/%s", dirname, entries[i]->d_name);
       free(entries[i]);
+
+#ifdef DT_REG
+      /* In the case of unknown d_type, ensure it is a regular file
+       * This can be accomplished with stat on the full filepath
+       */
+      if (d_type == DT_UNKNOWN) {
+         struct stat st;
+         if (stat(filename, &st) != 0 ||
+             !S_ISREG(st.st_mode)) {
+            continue;
+         }
+      }
+#endif
 
       parseOneConfigFile(data, filename);
    }
@@ -1162,7 +1197,12 @@ driParseConfigFiles(driOptionCache *cache, const driOptionCache *info,
                     const char *engineName, uint32_t engineVersion)
 {
    initOptionCache(cache, info);
-   struct OptConfData userData;
+   struct OptConfData userData = {0};
+
+   if (!execname)
+      execname = os_get_option("MESA_DRICONF_EXECUTABLE_OVERRIDE");
+   if (!execname)
+      execname = util_get_process_name();
 
    userData.cache = cache;
    userData.screenNum = screenNum;
@@ -1173,7 +1213,7 @@ driParseConfigFiles(driOptionCache *cache, const driOptionCache *info,
    userData.applicationVersion = applicationVersion;
    userData.engineName = engineName ? engineName : "";
    userData.engineVersion = engineVersion;
-   userData.execName = execname ? execname : util_get_process_name();
+   userData.execName = execname;
 
 #if WITH_XMLCONFIG
    char *home;

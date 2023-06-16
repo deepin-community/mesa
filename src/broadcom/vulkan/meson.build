@@ -1,4 +1,4 @@
-# Copyright © 2019 Raspberry Pi
+# Copyright © 2019 Raspberry Pi Ltd
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -38,6 +38,7 @@ libv3dv_files = files(
   'v3dv_debug.h',
   'v3dv_descriptor_set.c',
   'v3dv_device.c',
+  'v3dv_event.c',
   'v3dv_formats.c',
   'v3dv_image.c',
   'v3dv_limits.h',
@@ -51,7 +52,7 @@ libv3dv_files = files(
   'v3dv_queue.c',
   'v3dv_uniforms.c',
   'v3dv_wsi.c',
-)
+) + [v3d_xml_pack, vk_common_entrypoints[0], wsi_entrypoints[0]]
 
 files_per_version = files(
   'v3dvx_cmd_buffer.c',
@@ -85,6 +86,7 @@ v3dv_deps = [
   idep_nir,
   idep_nir_headers,
   idep_vulkan_util,
+  idep_vulkan_runtime,
   idep_vulkan_wsi,
 ]
 
@@ -93,8 +95,14 @@ if with_platform_x11
 endif
 
 if with_platform_wayland
-  v3dv_deps += [dep_wayland_client, dep_wl_protocols]
+  v3dv_deps += dep_wayland_client
   libv3dv_files += [wayland_drm_client_protocol_h, wayland_drm_protocol_c]
+endif
+
+if with_platform_android
+  v3dv_deps += dep_android
+  v3dv_flags += '-DVK_USE_PLATFORM_ANDROID_KHR'
+  libv3dv_files += files('v3dv_android.c')
 endif
 
 per_version_libs = []
@@ -125,7 +133,8 @@ libvulkan_broadcom = shared_library(
   ],
   dependencies : v3dv_deps,
   c_args : v3dv_flags,
-  link_args : ['-Wl,--build-id=sha1', ld_args_bsymbolic, ld_args_gc_sections],
+  link_args : [vulkan_icd_link_args, '-Wl,--build-id=sha1', ld_args_bsymbolic, ld_args_gc_sections],
+  link_depends : vulkan_icd_link_depends,
   gnu_symbol_visibility : 'hidden',
   install : true,
 )
@@ -149,7 +158,7 @@ broadcom_icd = custom_target(
   output : 'broadcom_icd.@0@.json'.format(host_machine.cpu()),
   command : [
     prog_python, '@INPUT0@',
-    '--api-version', '1.0', '--xml', '@INPUT1@',
+    '--api-version', '1.2', '--xml', '@INPUT1@',
     '--lib-path', join_paths(get_option('prefix'), get_option('libdir'),
     		  	     'libvulkan_broadcom.so'),
     '--out', '@OUTPUT@',
@@ -158,3 +167,19 @@ broadcom_icd = custom_target(
   install_dir : with_vulkan_icd_dir,
   install : true,
 )
+
+_dev_icdname = 'broadcom_devenv_icd.@0@.json'.format(host_machine.cpu())
+_dev_icd = custom_target(
+  'broadcom_devenv_icd',
+  input : [vk_icd_gen, vk_api_xml],
+  output : _dev_icdname,
+  command : [
+    prog_python, '@INPUT0@',
+    '--api-version', '1.3', '--xml', '@INPUT1@',
+    '--lib-path', meson.current_build_dir() / 'libvulkan_broadcom.so',
+    '--out', '@OUTPUT@',
+  ],
+  build_by_default : true,
+)
+
+devenv.append('VK_ICD_FILENAMES', _dev_icd.full_path())

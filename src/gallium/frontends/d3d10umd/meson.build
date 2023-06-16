@@ -1,7 +1,7 @@
 inc_d3d10umd = include_directories('.')
 _c_args_d3d10umd = []
 
-if cc.get_id() == 'gcc'
+if cc.get_argument_syntax() == 'gcc'
   _c_args_d3d10umd += '-Wno-unknown-pragmas'
 endif
 
@@ -14,7 +14,7 @@ libd3d10umd = static_library(
     'Debug.cpp',
     'Device.cpp',
     'Draw.cpp',
-    'Dxgi.cpp',
+    'DxgiFns.cpp',
     'Format.cpp',
     'InputAssembly.cpp',
     'OutputMerger.cpp',

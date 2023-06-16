@@ -40,8 +40,8 @@
 #include "nouveau_gldefs.h"
 
 /* Caveats:
- *  ! pipe_sampler_state.normalized_coords is ignored - rectangle textures will
- *     use non-normalized coordinates, everything else won't
+ *  ! pipe_sampler_state.unnormalized_coords is ignored - rectangle textures
+ *     will use non-normalized coordinates, everything else won't
  *    (The relevant bit is in the TIC entry and not the TSC entry.)
  *
  *  ! pipe_sampler_state.seamless_cube_map is ignored - seamless filtering is
@@ -530,7 +530,7 @@ nv50_sampler_state_create(struct pipe_context *pipe,
    if (nouveau_screen(pipe->screen)->class_3d >= NVE4_3D_CLASS) {
       if (cso->seamless_cube_map)
          so->tsc[1] |= GK104_TSC_1_CUBEMAP_INTERFACE_FILTERING;
-      if (!cso->normalized_coords)
+      if (cso->unnormalized_coords)
          so->tsc[1] |= GK104_TSC_1_FLOAT_COORD_NORMALIZATION_FORCE_UNNORMALIZED_COORDS;
    } else {
       so->seamless_cube_map = cso->seamless_cube_map;
@@ -774,9 +774,12 @@ nv50_sp_state_create(struct pipe_context *pipe,
 static void
 nv50_sp_state_delete(struct pipe_context *pipe, void *hwcso)
 {
+   struct nv50_context *nv50 = nv50_context(pipe);
    struct nv50_program *prog = (struct nv50_program *)hwcso;
 
-   nv50_program_destroy(nv50_context(pipe), prog);
+   simple_mtx_lock(&nv50->screen->state_lock);
+   nv50_program_destroy(nv50, prog);
+   simple_mtx_unlock(&nv50->screen->state_lock);
 
    if (prog->pipe.type == PIPE_SHADER_IR_TGSI)
       FREE((void *)prog->pipe.tokens);
@@ -858,8 +861,7 @@ nv50_cp_state_create(struct pipe_context *pipe,
       return NULL;
    }
 
-   prog->cp.smem_size = cso->req_local_mem;
-   prog->cp.lmem_size = cso->req_private_mem;
+   prog->cp.smem_size = cso->static_shared_mem;
    prog->parm_size = cso->req_input_mem;
 
    return (void *)prog;
@@ -872,6 +874,21 @@ nv50_cp_state_bind(struct pipe_context *pipe, void *hwcso)
 
    nv50->compprog = hwcso;
    nv50->dirty_cp |= NV50_NEW_CP_PROGRAM;
+}
+
+static void
+nv50_get_compute_state_info(struct pipe_context *pipe, void *hwcso,
+                            struct pipe_compute_state_object_info *info)
+{
+   struct nv50_context *nv50 = nv50_context(pipe);
+   struct nv50_program *prog = (struct nv50_program *)hwcso;
+   uint16_t obj_class = nv50->screen->compute->oclass;
+   uint32_t smregs = obj_class >= NVA3_COMPUTE_CLASS ? 16384 : 8192;
+   uint32_t threads = smregs / align(prog->max_gpr, 4);
+
+   info->max_threads = MIN2(ROUND_DOWN_TO(threads, 32), 512);
+   info->private_memory = prog->tls_space;
+   info->preferred_simd_size = 32;
 }
 
 static void
@@ -1426,7 +1443,7 @@ nv50_set_global_bindings(struct pipe_context *pipe,
    unsigned i;
    const unsigned end = start + nr;
 
-   if (nv50->global_residents.size <= (end * sizeof(struct pipe_resource *))) {
+   if (nv50->global_residents.size < (end * sizeof(struct pipe_resource *))) {
       const unsigned old_size = nv50->global_residents.size;
       if (util_dynarray_resize(&nv50->global_residents, struct pipe_resource *, end)) {
          memset((uint8_t *)nv50->global_residents.data + old_size, 0,
@@ -1493,6 +1510,8 @@ nv50_init_state_functions(struct nv50_context *nv50)
    pipe->delete_fs_state = nv50_sp_state_delete;
    pipe->delete_gs_state = nv50_sp_state_delete;
    pipe->delete_compute_state = nv50_sp_state_delete;
+
+   pipe->get_compute_state_info = nv50_get_compute_state_info;
 
    pipe->set_blend_color = nv50_set_blend_color;
    pipe->set_stencil_ref = nv50_set_stencil_ref;

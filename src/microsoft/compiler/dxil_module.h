@@ -153,7 +153,16 @@ struct dxil_features {
             native_low_precision : 1,
             shading_rate : 1,
             raytracing_tier_1_1 : 1,
-            sampler_feedback : 1;
+            sampler_feedback : 1,
+            atomic_int64_typed : 1,
+            atomic_int64_tgsm : 1,
+            derivatives_in_mesh_or_amp : 1,
+            resource_descriptor_heap_indexing : 1,
+            sampler_descriptor_heap_indexing : 1,
+            unnamed : 1,
+            atomic_int64_heap_resource : 1,
+            advanced_texture_ops : 1,
+            writable_msaa : 1;
 };
 
 struct dxil_shader_info {
@@ -162,26 +171,56 @@ struct dxil_shader_info {
    unsigned has_per_sample_input:1;
 };
 
+struct dxil_func_def {
+   struct list_head head;
+   const struct dxil_func *func;
+
+   struct list_head instr_list;
+   int *basic_block_ids; /* maps from "user" ids to LLVM ids */
+   size_t num_basic_block_ids;
+   unsigned curr_block;
+};
+
 struct dxil_module {
    void *ralloc_ctx;
    enum dxil_shader_kind shader_kind;
    unsigned major_version, minor_version;
+   unsigned major_validator, minor_validator;
    struct dxil_features feats;
    unsigned raw_and_structured_buffers : 1;
    struct dxil_shader_info info;
 
    struct dxil_buffer buf;
 
+   /* The number of entries in the arrays below */
    unsigned num_sig_inputs;
    unsigned num_sig_outputs;
+   unsigned num_sig_patch_consts;
+
+   /* The number of "vectors" of elements. This is used to determine the sizes
+    * of the dependency tables.
+    */
    unsigned num_psv_inputs;
-   unsigned num_psv_outputs;
+   unsigned num_psv_outputs[4];
+   unsigned num_psv_patch_consts;
 
    struct dxil_signature_record inputs[DXIL_SHADER_MAX_IO_ROWS];
    struct dxil_signature_record outputs[DXIL_SHADER_MAX_IO_ROWS];
+   struct dxil_signature_record patch_consts[DXIL_SHADER_MAX_IO_ROWS];
+
+   /* This array is indexed using var->data.driver_location, which
+    * is not a direct match to IO rows, since a row is a vec4, and
+    * variables can occupy less than that, and several vars can
+    * be packed in a row. Hence the x4, but I doubt we can end up
+    * with more than 80x4 variables in practice. Maybe this array
+    * should be allocated dynamically based on on the maximum
+    * driver_location across all input vars.
+    */
+   unsigned input_mappings[DXIL_SHADER_MAX_IO_ROWS * 4];
 
    struct dxil_psv_signature_element psv_inputs[DXIL_SHADER_MAX_IO_ROWS];
    struct dxil_psv_signature_element psv_outputs[DXIL_SHADER_MAX_IO_ROWS];
+   struct dxil_psv_signature_element psv_patch_consts[DXIL_SHADER_MAX_IO_ROWS];
 
    struct _mesa_string_buffer *sem_string_table;
    struct dxil_psv_sem_index_table sem_index_table;
@@ -195,8 +234,8 @@ struct dxil_module {
    struct list_head type_list;
    struct list_head gvar_list;
    struct list_head func_list;
+   struct list_head func_def_list;
    struct list_head attr_set_list;
-   struct list_head instr_list;
    struct list_head const_list;
    struct list_head mdnode_list;
    struct list_head md_named_node_list;
@@ -207,9 +246,7 @@ struct dxil_module {
 
    struct rb_tree *functions;
 
-   int *basic_block_ids; /* maps from "user" ids to LLVM ids */
-   size_t num_basic_block_ids;
-   unsigned curr_block;
+   struct dxil_func_def *cur_emitting_func;
 };
 
 struct dxil_instr;
@@ -233,9 +270,10 @@ dxil_add_global_ptr_var(struct dxil_module *m, const char *name,
                         enum dxil_address_space as, int align,
                         const struct dxil_value *value);
 
-const struct dxil_func *
+struct dxil_func_def *
 dxil_add_function_def(struct dxil_module *m, const char *name,
-                      const struct dxil_type *type);
+                      const struct dxil_type *type, unsigned num_blocks,
+                      const char *const *attr_keys, const char *const *attr_values);
 
 const struct dxil_func *
 dxil_add_function_decl(struct dxil_module *m, const char *name,
@@ -276,6 +314,18 @@ dxil_module_get_resret_type(struct dxil_module *m, enum overload_type overload);
 
 const struct dxil_type *
 dxil_module_get_dimret_type(struct dxil_module *m);
+
+const struct dxil_type *
+dxil_module_get_samplepos_type(struct dxil_module *m);
+
+const struct dxil_type *
+dxil_module_get_res_bind_type(struct dxil_module *m);
+
+const struct dxil_type *
+dxil_module_get_res_props_type(struct dxil_module *m);
+
+const struct dxil_type *
+dxil_module_get_fouri32_type(struct dxil_module *m);
 
 const struct dxil_type *
 dxil_module_get_struct_type(struct dxil_module *m,
@@ -347,6 +397,35 @@ dxil_module_get_array_const(struct dxil_module *m, const struct dxil_type *type,
 const struct dxil_value *
 dxil_module_get_undef(struct dxil_module *m, const struct dxil_type *type);
 
+const struct dxil_value *
+dxil_module_get_res_bind_const(struct dxil_module *m,
+                               uint32_t lower_bound,
+                               uint32_t upper_bound,
+                               uint32_t space,
+                               uint8_t class);
+
+const struct dxil_value *
+dxil_module_get_res_props_const(struct dxil_module *m,
+                                enum dxil_resource_class class,
+                                const struct dxil_mdnode *mdnode);
+
+const struct dxil_value *
+dxil_module_get_srv_res_props_const(struct dxil_module *m,
+                                    const nir_tex_instr *tex);
+
+const struct dxil_value *
+dxil_module_get_sampler_res_props_const(struct dxil_module *m,
+                                        bool is_shadow);
+
+const struct dxil_value *
+dxil_module_get_uav_res_props_const(struct dxil_module *m,
+                                    nir_intrinsic_instr *intr);
+
+const struct dxil_value *
+dxil_module_get_buffer_res_props_const(struct dxil_module *m,
+                                       enum dxil_resource_class class,
+                                       enum dxil_resource_kind kind);
+
 const struct dxil_mdnode *
 dxil_get_metadata_string(struct dxil_module *m, const char *str);
 
@@ -368,6 +447,9 @@ dxil_get_metadata_int32(struct dxil_module *m, int32_t value);
 
 const struct dxil_mdnode *
 dxil_get_metadata_int64(struct dxil_module *m, int64_t value);
+
+const struct dxil_mdnode *
+dxil_get_metadata_float32(struct dxil_module *m, float value);
 
 const struct dxil_mdnode *
 dxil_get_metadata_node(struct dxil_module *m,
@@ -413,8 +495,8 @@ dxil_instr_get_return_value(struct dxil_instr *instr);
 struct dxil_instr *
 dxil_emit_phi(struct dxil_module *m, const struct dxil_type *type);
 
-void
-dxil_phi_set_incoming(struct dxil_instr *instr,
+bool
+dxil_phi_add_incoming(struct dxil_instr *instr,
                       const struct dxil_value *incoming_values[],
                       const unsigned incoming_blocks[],
                       size_t num_incoming);

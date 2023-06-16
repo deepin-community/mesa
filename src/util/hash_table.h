@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright © 2009,2012 Intel Corporation
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -31,7 +31,6 @@
 #include <stdlib.h>
 #include <inttypes.h>
 #include <stdbool.h>
-#include "c99_compat.h"
 #include "macros.h"
 
 #ifdef __cplusplus
@@ -119,6 +118,7 @@ uint32_t _mesa_hash_int(const void *key);
 uint32_t _mesa_hash_uint(const void *key);
 uint32_t _mesa_hash_u32(const void *key);
 uint32_t _mesa_hash_string(const void *key);
+uint32_t _mesa_hash_string_with_length(const void *_key, unsigned length);
 uint32_t _mesa_hash_pointer(const void *pointer);
 
 bool _mesa_key_int_equal(const void *a, const void *b);

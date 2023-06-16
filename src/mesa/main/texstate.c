@@ -29,7 +29,7 @@
  */
 
 #include <stdio.h>
-#include "glheader.h"
+#include "util/glheader.h"
 #include "bufferobj.h"
 #include "context.h"
 #include "enums.h"
@@ -41,7 +41,9 @@
 #include "state.h"
 #include "util/bitscan.h"
 #include "util/bitset.h"
+#include "api_exec_decl.h"
 
+#include "state_tracker/st_cb_texture.h"
 
 /**
  * Default texture combine environment state.  This is used to initialize
@@ -702,7 +704,7 @@ update_single_program_texture(struct gl_context *ctx, struct gl_program *prog,
     * Mesa implements this by creating a hidden texture object with a pixel of
     * that value.
     */
-   texObj = _mesa_get_fallback_texture(ctx, target_index);
+   texObj = _mesa_get_fallback_texture(ctx, target_index, !!(prog->ShadowSamplers & BITFIELD_BIT(unit)));
    assert(texObj);
 
    return texObj;
@@ -868,7 +870,7 @@ fix_missing_textures_for_atifs(struct gl_context *ctx,
 
       if (!ctx->Texture.Unit[unit]._Current) {
          struct gl_texture_object *texObj =
-            _mesa_get_fallback_texture(ctx, target_index);
+            _mesa_get_fallback_texture(ctx, target_index, false);
          _mesa_reference_texobj(&ctx->Texture.Unit[unit]._Current, texObj);
          BITSET_SET(enabled_texture_units, unit);
          ctx->Texture._MaxEnabledTexImageUnit =
@@ -1005,10 +1007,10 @@ alloc_proxy_textures( struct gl_context *ctx )
 
    for (tgt = 0; tgt < NUM_TEXTURE_TARGETS; tgt++) {
       if (!(ctx->Texture.ProxyTex[tgt]
-            = ctx->Driver.NewTextureObject(ctx, 0, targets[tgt]))) {
+            = _mesa_new_texture_object(ctx, 0, targets[tgt]))) {
          /* out of memory, free what we did allocate */
          while (--tgt >= 0) {
-            ctx->Driver.DeleteTexture(ctx, ctx->Texture.ProxyTex[tgt]);
+            _mesa_delete_texture_object(ctx, ctx->Texture.ProxyTex[tgt]);
          }
          return GL_FALSE;
       }
@@ -1029,23 +1031,6 @@ _mesa_init_texture(struct gl_context *ctx)
 
    /* Texture group */
    ctx->Texture.CurrentUnit = 0;      /* multitexture */
-
-   /* Appendix F.2 of the OpenGL ES 3.0 spec says:
-    *
-    *     "OpenGL ES 3.0 requires that all cube map filtering be
-    *     seamless. OpenGL ES 2.0 specified that a single cube map face be
-    *     selected and used for filtering."
-    *
-    * Unfortunatley, a call to _mesa_is_gles3 below will only work if
-    * the driver has already computed and set ctx->Version, however drivers
-    * seem to call _mesa_initialize_context (which calls this) early
-    * in the CreateContext hook and _mesa_compute_version much later (since
-    * it needs information about available extensions). So, we will
-    * enable seamless cubemaps by default since GLES2. This should work
-    * for most implementations and drivers that don't support seamless
-    * cubemaps for GLES2 can still disable it.
-    */
-   ctx->Texture.CubeMapSeamless = ctx->API == API_OPENGLES2;
 
    for (u = 0; u < ARRAY_SIZE(ctx->Texture.Unit); u++) {
       struct gl_texture_unit *texUnit = &ctx->Texture.Unit[u];
@@ -1132,7 +1117,7 @@ _mesa_free_texture_data(struct gl_context *ctx)
 
    /* Free proxy texture objects */
    for (tgt = 0; tgt < NUM_TEXTURE_TARGETS; tgt++)
-      ctx->Driver.DeleteTexture(ctx, ctx->Texture.ProxyTex[tgt]);
+      _mesa_delete_texture_object(ctx, ctx->Texture.ProxyTex[tgt]);
 
    /* GL_ARB_texture_buffer_object */
    _mesa_reference_buffer_object(ctx, &ctx->Texture.BufferObject, NULL);

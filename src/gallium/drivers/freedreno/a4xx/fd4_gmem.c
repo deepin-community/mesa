@@ -103,7 +103,7 @@ emit_mrt(struct fd_ringbuffer *ring, unsigned nr_bufs,
          else
             pformat = util_format_linear(pformat);
 
-         debug_assert(psurf->u.tex.first_layer == psurf->u.tex.last_layer);
+         assert(psurf->u.tex.first_layer == psurf->u.tex.last_layer);
 
          offset = fd_resource_offset(rsc, psurf->u.tex.level,
                                      psurf->u.tex.first_layer);
@@ -146,6 +146,14 @@ use_hw_binning(struct fd_batch *batch)
 {
    const struct fd_gmem_stateobj *gmem = batch->gmem_state;
 
+   /* workaround: Like on a3xx, hw binning and scissor optimization
+    * don't play nice together.
+    *
+    * Disable binning if scissor optimization is used.
+    */
+   if (gmem->minx || gmem->miny)
+      return false;
+
    if ((gmem->maxpw * gmem->maxph) > 32)
       return false;
 
@@ -170,7 +178,7 @@ emit_gmem2mem_surf(struct fd_batch *batch, bool stencil, uint32_t base,
       return;
 
    if (stencil) {
-      debug_assert(rsc->stencil);
+      assert(rsc->stencil);
       rsc = rsc->stencil;
       pformat = rsc->b.b.format;
    }
@@ -179,7 +187,7 @@ emit_gmem2mem_surf(struct fd_batch *batch, bool stencil, uint32_t base,
       fd_resource_offset(rsc, psurf->u.tex.level, psurf->u.tex.first_layer);
    pitch = fd_resource_pitch(rsc, psurf->u.tex.level);
 
-   debug_assert(psurf->u.tex.first_layer == psurf->u.tex.last_layer);
+   assert(psurf->u.tex.first_layer == psurf->u.tex.last_layer);
 
    OUT_PKT0(ring, REG_A4XX_RB_COPY_CONTROL, 4);
    OUT_RING(ring, A4XX_RB_COPY_CONTROL_MSAA_RESOLVE(MSAA_ONE) |
@@ -242,12 +250,12 @@ fd4_emit_tile_gmem2mem(struct fd_batch *batch,
    OUT_RING(ring, 0x80000); /* GRAS_CL_CLIP_CNTL */
 
    OUT_PKT0(ring, REG_A4XX_GRAS_CL_VPORT_XOFFSET_0, 6);
-   OUT_RING(ring, A4XX_GRAS_CL_VPORT_XOFFSET_0((float)pfb->width / 2.0));
-   OUT_RING(ring, A4XX_GRAS_CL_VPORT_XSCALE_0((float)pfb->width / 2.0));
-   OUT_RING(ring, A4XX_GRAS_CL_VPORT_YOFFSET_0((float)pfb->height / 2.0));
-   OUT_RING(ring, A4XX_GRAS_CL_VPORT_YSCALE_0(-(float)pfb->height / 2.0));
-   OUT_RING(ring, A4XX_GRAS_CL_VPORT_ZOFFSET_0(0.0));
-   OUT_RING(ring, A4XX_GRAS_CL_VPORT_ZSCALE_0(1.0));
+   OUT_RING(ring, A4XX_GRAS_CL_VPORT_XOFFSET_0((float)pfb->width / 2.0f));
+   OUT_RING(ring, A4XX_GRAS_CL_VPORT_XSCALE_0((float)pfb->width / 2.0f));
+   OUT_RING(ring, A4XX_GRAS_CL_VPORT_YOFFSET_0((float)pfb->height / 2.0f));
+   OUT_RING(ring, A4XX_GRAS_CL_VPORT_YSCALE_0(-(float)pfb->height / 2.0f));
+   OUT_RING(ring, A4XX_GRAS_CL_VPORT_ZOFFSET_0(0.0f));
+   OUT_RING(ring, A4XX_GRAS_CL_VPORT_ZSCALE_0(1.0f));
 
    OUT_PKT0(ring, REG_A4XX_RB_RENDER_CONTROL, 1);
    OUT_RING(ring, A4XX_RB_RENDER_CONTROL_DISABLE_COLOR_PIPE | 0xa); /* XXX */
@@ -408,12 +416,12 @@ fd4_emit_tile_mem2gmem(struct fd_batch *batch,
                      A4XX_GRAS_SU_MODE_CONTROL_RENDERING_PASS);
 
    OUT_PKT0(ring, REG_A4XX_GRAS_CL_VPORT_XOFFSET_0, 6);
-   OUT_RING(ring, A4XX_GRAS_CL_VPORT_XOFFSET_0((float)bin_w / 2.0));
-   OUT_RING(ring, A4XX_GRAS_CL_VPORT_XSCALE_0((float)bin_w / 2.0));
-   OUT_RING(ring, A4XX_GRAS_CL_VPORT_YOFFSET_0((float)bin_h / 2.0));
-   OUT_RING(ring, A4XX_GRAS_CL_VPORT_YSCALE_0(-(float)bin_h / 2.0));
-   OUT_RING(ring, A4XX_GRAS_CL_VPORT_ZOFFSET_0(0.0));
-   OUT_RING(ring, A4XX_GRAS_CL_VPORT_ZSCALE_0(1.0));
+   OUT_RING(ring, A4XX_GRAS_CL_VPORT_XOFFSET_0((float)bin_w / 2.0f));
+   OUT_RING(ring, A4XX_GRAS_CL_VPORT_XSCALE_0((float)bin_w / 2.0f));
+   OUT_RING(ring, A4XX_GRAS_CL_VPORT_YOFFSET_0((float)bin_h / 2.0f));
+   OUT_RING(ring, A4XX_GRAS_CL_VPORT_YSCALE_0(-(float)bin_h / 2.0f));
+   OUT_RING(ring, A4XX_GRAS_CL_VPORT_ZOFFSET_0(0.0f));
+   OUT_RING(ring, A4XX_GRAS_CL_VPORT_ZSCALE_0(1.0f));
 
    OUT_PKT0(ring, REG_A4XX_GRAS_SC_WINDOW_SCISSOR_BR, 2);
    OUT_RING(ring, A4XX_GRAS_SC_WINDOW_SCISSOR_BR_X(bin_w - 1) |

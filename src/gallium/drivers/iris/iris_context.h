@@ -25,14 +25,17 @@
 
 #include "pipe/p_context.h"
 #include "pipe/p_state.h"
+#include "util/perf/u_trace.h"
 #include "util/set.h"
 #include "util/slab.h"
 #include "util/u_debug.h"
+#include "util/macros.h"
 #include "util/u_threaded_context.h"
 #include "intel/blorp/blorp.h"
 #include "intel/dev/intel_debug.h"
 #include "intel/common/intel_l3_config.h"
 #include "intel/compiler/brw_compiler.h"
+#include "intel/ds/intel_driver_ds.h"
 #include "iris_batch.h"
 #include "iris_binder.h"
 #include "iris_fence.h"
@@ -45,13 +48,12 @@ struct blorp_batch;
 struct blorp_params;
 
 #define IRIS_MAX_TEXTURE_BUFFER_SIZE (1 << 27)
-#define IRIS_MAX_TEXTURE_SAMPLERS 32
 /* IRIS_MAX_ABOS and IRIS_MAX_SSBOS must be the same. */
 #define IRIS_MAX_ABOS 16
 #define IRIS_MAX_SSBOS 16
 #define IRIS_MAX_VIEWPORTS 16
 #define IRIS_MAX_CLIP_PLANES 8
-#define IRIS_MAX_GLOBAL_BINDINGS 32
+#define IRIS_MAX_GLOBAL_BINDINGS 128
 
 enum iris_param_domain {
    BRW_PARAM_DOMAIN_BUILTIN = 0,
@@ -115,6 +117,7 @@ enum {
 #define IRIS_DIRTY_VERTEX_BUFFER_FLUSHES          (1ull << 32)
 #define IRIS_DIRTY_RENDER_MISC_BUFFER_FLUSHES     (1ull << 33)
 #define IRIS_DIRTY_COMPUTE_MISC_BUFFER_FLUSHES    (1ull << 34)
+#define IRIS_DIRTY_VFG                            (1ull << 35)
 
 #define IRIS_ALL_DIRTY_FOR_COMPUTE (IRIS_DIRTY_COMPUTE_RESOLVES_AND_FLUSHES | \
                                     IRIS_DIRTY_COMPUTE_MISC_BUFFER_FLUSHES)
@@ -203,14 +206,23 @@ enum iris_nos_dep {
  * Program cache keys for state based recompiles.
  */
 
-struct iris_base_prog_key {
-   unsigned program_string_id;
-};
+/* Provide explicit padding for each member, to ensure that the compiler
+ * initializes every bit in the shader cache keys.  The keys will be compared
+ * with memcmp.
+ */
+PRAGMA_DIAGNOSTIC_PUSH
+PRAGMA_DIAGNOSTIC_ERROR(-Wpadded)
 
 /**
  * Note, we need to take care to have padding explicitly declared
  * for key since we will directly memcmp the whole struct.
  */
+struct iris_base_prog_key {
+   unsigned program_string_id;
+   bool limit_trig_input_range;
+   unsigned padding:24;
+};
+
 struct iris_vue_prog_key {
    struct iris_base_prog_key base;
 
@@ -225,11 +237,12 @@ struct iris_vs_prog_key {
 struct iris_tcs_prog_key {
    struct iris_vue_prog_key vue;
 
-   uint16_t tes_primitive_mode;
+   enum tess_primitive_mode _tes_primitive_mode;
 
    uint8_t input_vertices;
 
    bool quads_workaround;
+   unsigned padding:16;
 
    /** A bitfield of per-patch outputs written. */
    uint32_t patch_outputs_written;
@@ -255,6 +268,9 @@ struct iris_gs_prog_key {
 struct iris_fs_prog_key {
    struct iris_base_prog_key base;
 
+   uint64_t input_slots_valid;
+   uint8_t color_outputs_valid;
+
    unsigned nr_color_regions:5;
    bool flat_shade:1;
    bool alpha_test_replicate_alpha:1;
@@ -264,9 +280,7 @@ struct iris_fs_prog_key {
    bool multisample_fbo:1;
    bool force_dual_color_blend:1;
    bool coherent_fb_fetch:1;
-
-   uint8_t color_outputs_valid;
-   uint64_t input_slots_valid;
+   uint64_t padding:43;
 };
 
 struct iris_cs_prog_key {
@@ -283,6 +297,9 @@ union iris_any_prog_key {
    struct iris_fs_prog_key fs;
    struct iris_cs_prog_key cs;
 };
+
+/* Restore the pack alignment to default. */
+PRAGMA_DIAGNOSTIC_POP
 
 /** @} */
 
@@ -338,12 +355,17 @@ enum pipe_control_flags
    PIPE_CONTROL_DEPTH_CACHE_FLUSH               = (1 << 24),
    PIPE_CONTROL_TILE_CACHE_FLUSH                = (1 << 25),
    PIPE_CONTROL_FLUSH_HDC                       = (1 << 26),
+   PIPE_CONTROL_PSS_STALL_SYNC                  = (1 << 27),
+   PIPE_CONTROL_L3_READ_ONLY_CACHE_INVALIDATE   = (1 << 28),
+   PIPE_CONTROL_UNTYPED_DATAPORT_CACHE_FLUSH    = (1 << 29),
 };
 
 #define PIPE_CONTROL_CACHE_FLUSH_BITS \
    (PIPE_CONTROL_DEPTH_CACHE_FLUSH |  \
     PIPE_CONTROL_DATA_CACHE_FLUSH |   \
     PIPE_CONTROL_TILE_CACHE_FLUSH |   \
+    PIPE_CONTROL_FLUSH_HDC | \
+    PIPE_CONTROL_UNTYPED_DATAPORT_CACHE_FLUSH |   \
     PIPE_CONTROL_RENDER_TARGET_FLUSH)
 
 #define PIPE_CONTROL_CACHE_INVALIDATE_BITS  \
@@ -352,6 +374,22 @@ enum pipe_control_flags
     PIPE_CONTROL_VF_CACHE_INVALIDATE |      \
     PIPE_CONTROL_TEXTURE_CACHE_INVALIDATE | \
     PIPE_CONTROL_INSTRUCTION_INVALIDATE)
+
+#define PIPE_CONTROL_L3_RO_INVALIDATE_BITS       \
+   (PIPE_CONTROL_L3_READ_ONLY_CACHE_INVALIDATE | \
+    PIPE_CONTROL_CONST_CACHE_INVALIDATE)
+
+#define PIPE_CONTROL_GRAPHICS_BITS \
+   (PIPE_CONTROL_RENDER_TARGET_FLUSH |          \
+    PIPE_CONTROL_DEPTH_CACHE_FLUSH |            \
+    PIPE_CONTROL_TILE_CACHE_FLUSH |             \
+    PIPE_CONTROL_DEPTH_STALL |                  \
+    PIPE_CONTROL_STALL_AT_SCOREBOARD |          \
+    PIPE_CONTROL_PSS_STALL_SYNC |               \
+    PIPE_CONTROL_VF_CACHE_INVALIDATE |          \
+    PIPE_CONTROL_GLOBAL_SNAPSHOT_COUNT_RESET |  \
+    PIPE_CONTROL_L3_READ_ONLY_CACHE_INVALIDATE |\
+    PIPE_CONTROL_WRITE_DEPTH_COUNT)
 
 enum iris_predicate_state {
    /* The first two states are used if we can determine whether to draw
@@ -426,7 +464,8 @@ enum iris_surface_group {
    IRIS_SURFACE_GROUP_RENDER_TARGET,
    IRIS_SURFACE_GROUP_RENDER_TARGET_READ,
    IRIS_SURFACE_GROUP_CS_WORK_GROUPS,
-   IRIS_SURFACE_GROUP_TEXTURE,
+   IRIS_SURFACE_GROUP_TEXTURE_LOW64,
+   IRIS_SURFACE_GROUP_TEXTURE_HIGH64,
    IRIS_SURFACE_GROUP_IMAGE,
    IRIS_SURFACE_GROUP_UBO,
    IRIS_SURFACE_GROUP_SSBO,
@@ -450,6 +489,8 @@ struct iris_binding_table {
 
    /** Mask of surfaces used in each group. */
    uint64_t used_mask[IRIS_SURFACE_GROUP_COUNT];
+
+   uint64_t samplers_used_mask;
 };
 
 /**
@@ -532,24 +573,27 @@ struct iris_shader_state {
    struct iris_image_view image[PIPE_MAX_SHADER_IMAGES];
 
    struct iris_state_ref sampler_table;
-   struct iris_sampler_state *samplers[IRIS_MAX_TEXTURE_SAMPLERS];
-   struct iris_sampler_view *textures[IRIS_MAX_TEXTURE_SAMPLERS];
+   struct iris_sampler_state *samplers[IRIS_MAX_SAMPLERS];
+   struct iris_sampler_view *textures[IRIS_MAX_TEXTURES];
 
    /** Bitfield of which constant buffers are bound (non-null). */
    uint32_t bound_cbufs;
    uint32_t dirty_cbufs;
 
    /** Bitfield of which image views are bound (non-null). */
-   uint32_t bound_image_views;
+   uint64_t bound_image_views;
 
    /** Bitfield of which sampler views are bound (non-null). */
-   uint32_t bound_sampler_views;
+   BITSET_DECLARE(bound_sampler_views, IRIS_MAX_TEXTURES);
 
    /** Bitfield of which shader storage buffers are bound (non-null). */
    uint32_t bound_ssbos;
 
    /** Bitfield of which shader storage buffers are writable. */
    uint32_t writable_ssbos;
+
+   /** Array of aux usages used for our shader's images in the current draw */
+   enum isl_aux_usage image_aux_usage[PIPE_MAX_SHADER_IMAGES];
 };
 
 /**
@@ -568,18 +612,10 @@ struct iris_stream_output_target {
    bool zero_offset;
 };
 
-/**
- * A pool containing SAMPLER_BORDER_COLOR_STATE entries.
- *
- * See iris_border_color.c for more information.
- */
-struct iris_border_color_pool {
-   struct iris_bo *bo;
-   void *map;
-   unsigned insert_point;
-
-   /** Map from border colors to offsets in the buffer. */
-   struct hash_table *ht;
+enum iris_context_priority {
+   IRIS_CONTEXT_MEDIUM_PRIORITY = 0,
+   IRIS_CONTEXT_LOW_PRIORITY,
+   IRIS_CONTEXT_HIGH_PRIORITY
 };
 
 /**
@@ -592,7 +628,10 @@ struct iris_context {
    struct threaded_context *thrctx;
 
    /** A debug callback for KHR_debug output. */
-   struct pipe_debug_callback dbg;
+   struct util_debug_callback dbg;
+
+   /** Whether the context protected (through EGL_EXT_protected_content) */
+   bool protected;
 
    /** A device reset status callback for notifying that the GPU is hosed. */
    struct pipe_device_reset_callback reset;
@@ -609,8 +648,12 @@ struct iris_context {
    struct blorp_context blorp;
 
    struct iris_batch batches[IRIS_BATCH_COUNT];
+   enum iris_context_priority priority;
+   bool has_engines_context;
 
    struct u_upload_mgr *query_buffer_uploader;
+
+   struct intel_ds_device ds;
 
    struct {
       struct {
@@ -694,6 +737,10 @@ struct iris_context {
 
    struct intel_perf_context *perf_ctx;
 
+   /** Frame number for u_trace */
+   uint32_t tracing_begin_frame;
+   uint32_t tracing_end_frame;
+
    /** Frame number for debug prints */
    uint32_t frame;
 
@@ -736,6 +783,8 @@ struct iris_context {
 
       /** The last compute grid size */
       uint32_t last_grid[3];
+      /** The last compute grid dimensions */
+      uint32_t last_grid_dim;
       /** Reference to the BO containing the compute grid size */
       struct iris_state_ref grid_size;
       /** Reference to the SURFACE_STATE for the compute grid resource */
@@ -757,6 +806,9 @@ struct iris_context {
 
       /** Are stencil writes enabled?  (Stencil buffer may or may not exist.) */
       bool stencil_writes_enabled;
+
+      /** Do we have integer RT in current framebuffer state? */
+      bool has_integer_rt;
 
       /** GenX-specific current state */
       struct iris_genx_state *genx;
@@ -794,6 +846,9 @@ struct iris_context {
       /** Is a PIPE_QUERY_PRIMITIVES_GENERATED query active? */
       bool prims_generated_query_active;
 
+      /** Is a PIPE_QUERY_OCCLUSION_COUNTER query active? */
+      bool occlusion_query_active;
+
       /** 3DSTATE_STREAMOUT and 3DSTATE_SO_DECL_LIST packets */
       uint32_t *streamout;
 
@@ -804,12 +859,10 @@ struct iris_context {
       struct iris_state_ref null_fb;
 
       struct u_upload_mgr *surface_uploader;
-      struct u_upload_mgr *bindless_uploader;
+      struct u_upload_mgr *scratch_surface_uploader;
       struct u_upload_mgr *dynamic_uploader;
 
       struct iris_binder binder;
-
-      struct iris_border_color_pool border_color_pool;
 
       /** The high 16-bits of the last VBO/index buffer addresses */
       uint16_t last_vbo_high_bits[33];
@@ -836,6 +889,9 @@ struct iris_context {
 
       /** Last rendering scale argument provided to genX(emit_hashing_mode). */
       unsigned current_hash_scale;
+
+      /** Resource holding the pixel pipe hashing tables. */
+      struct pipe_resource *pixel_hashing_tables;
    } state;
 };
 
@@ -843,7 +899,7 @@ struct iris_context {
    if (INTEL_DEBUG(DEBUG_PERF))                        \
       dbg_printf(__VA_ARGS__);                         \
    if (unlikely(dbg))                                  \
-      pipe_debug_message(dbg, PERF_INFO, __VA_ARGS__); \
+      util_debug_message(dbg, PERF_INFO, __VA_ARGS__); \
 } while(0)
 
 struct pipe_context *
@@ -870,6 +926,8 @@ void iris_fill_cs_push_const_buffer(struct brw_cs_prog_data *cs_prog_data,
 
 
 /* iris_blit.c */
+#define IRIS_BLORP_RELOC_FLAGS_EXEC_OBJECT_WRITE      (1 << 2)
+
 void iris_blorp_surf_for_resource(struct isl_device *isl_dev,
                                   struct blorp_surf *surf,
                                   struct pipe_resource *p_res,
@@ -884,6 +942,18 @@ void iris_copy_region(struct blorp_context *blorp,
                       struct pipe_resource *src,
                       unsigned src_level,
                       const struct pipe_box *src_box);
+
+static inline enum blorp_batch_flags
+iris_blorp_flags_for_batch(struct iris_batch *batch)
+{
+   if (batch->name == IRIS_BATCH_COMPUTE)
+      return BLORP_BATCH_USE_COMPUTE;
+
+   if (batch->name == IRIS_BATCH_BLITTER)
+      return BLORP_BATCH_USE_BLITTER;
+
+   return 0;
+}
 
 /* iris_draw.c */
 
@@ -914,14 +984,6 @@ void iris_flush_all_caches(struct iris_batch *batch);
       iris_flush_all_caches(batch);
 
 void iris_init_flush_functions(struct pipe_context *ctx);
-
-/* iris_border_color.c */
-
-void iris_init_border_color_pool(struct iris_context *ice);
-void iris_destroy_border_color_pool(struct iris_context *ice);
-void iris_border_color_pool_reserve(struct iris_context *ice, unsigned count);
-uint32_t iris_upload_border_color(struct iris_context *ice,
-                                  union pipe_color_union *color);
 
 /* iris_program.c */
 void iris_upload_ubo_ssbo_surf_state(struct iris_context *ice,
@@ -1050,11 +1112,9 @@ void iris_predraw_resolve_framebuffer(struct iris_context *ice,
 void iris_predraw_flush_buffers(struct iris_context *ice,
                                 struct iris_batch *batch,
                                 gl_shader_stage stage);
-void iris_postdraw_update_resolve_tracking(struct iris_context *ice,
-                                           struct iris_batch *batch);
-void iris_cache_flush_for_render(struct iris_batch *batch,
-                                 struct iris_bo *bo,
-                                 enum isl_aux_usage aux_usage);
+void iris_postdraw_update_resolve_tracking(struct iris_context *ice);
+void iris_postdraw_update_image_resolve_tracking(struct iris_context *ice,
+                                                 gl_shader_stage stage);
 int iris_get_driver_query_info(struct pipe_screen *pscreen, unsigned index,
                                struct pipe_driver_query_info *info);
 int iris_get_driver_query_group_info(struct pipe_screen *pscreen,

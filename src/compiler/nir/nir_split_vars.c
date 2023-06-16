@@ -49,7 +49,7 @@ get_complex_used_vars(nir_shader *shader, void *mem_ctx)
              * nir_deref_instr_has_complex_use is recursive.
              */
             if (deref->deref_type == nir_deref_type_var &&
-                nir_deref_instr_has_complex_use(deref))
+                nir_deref_instr_has_complex_use(deref, 0))
                _mesa_set_add(complex_vars, deref->var);
          }
       }
@@ -77,19 +77,6 @@ struct field {
 
    nir_variable *var;
 };
-
-static const struct glsl_type *
-wrap_type_in_array(const struct glsl_type *type,
-                   const struct glsl_type *array_type)
-{
-   if (!glsl_type_is_array(array_type))
-      return type;
-
-   const struct glsl_type *elem_type =
-      wrap_type_in_array(type, glsl_get_array_element(array_type));
-   assert(glsl_get_explicit_stride(array_type) == 0);
-   return glsl_array_type(elem_type, glsl_get_length(array_type), 0);
-}
 
 static int
 num_array_levels_in_array_of_vector_type(const struct glsl_type *type)
@@ -141,7 +128,7 @@ init_field_for_type(struct field *field, struct field *parent,
    } else {
       const struct glsl_type *var_type = type;
       for (struct field *f = field->parent; f; f = f->parent)
-         var_type = wrap_type_in_array(var_type, f->type);
+         var_type = glsl_type_wrap_in_arrays(var_type, f->type);
 
       nir_variable_mode mode = state->base_var->data.mode;
       if (mode == nir_var_function_temp) {
@@ -149,6 +136,7 @@ init_field_for_type(struct field *field, struct field *parent,
       } else {
          field->var = nir_variable_create(state->shader, mode, var_type, name);
       }
+      field->var->data.ray_query = state->base_var->data.ray_query;
    }
 }
 
@@ -311,13 +299,14 @@ nir_split_struct_vars(nir_shader *shader, nir_variable_mode modes)
       _mesa_pointer_hash_table_create(mem_ctx);
    struct set *complex_vars = NULL;
 
-   assert((modes & (nir_var_shader_temp | nir_var_function_temp)) == modes);
+   assert((modes & (nir_var_shader_temp | nir_var_ray_hit_attrib | nir_var_function_temp)) == modes);
 
    bool has_global_splits = false;
-   if (modes & nir_var_shader_temp) {
+   nir_variable_mode global_modes = modes & (nir_var_shader_temp | nir_var_ray_hit_attrib);
+   if (global_modes) {
       has_global_splits = split_var_list_structs(shader, NULL,
                                                  &shader->variables,
-                                                 nir_var_shader_temp,
+                                                 global_modes,
                                                  var_field_map,
                                                  &complex_vars,
                                                  mem_ctx);
@@ -538,6 +527,7 @@ create_split_array_vars(struct array_var_info *var_info,
          split->var = nir_variable_create(shader, mode,
                                           var_info->split_var_type, name);
       }
+      split->var->data.ray_query = var_info->base_var->data.ray_query;
    } else {
       assert(var_info->levels[level].split);
       split->num_splits = var_info->levels[level].array_len;
@@ -875,13 +865,13 @@ nir_split_array_vars(nir_shader *shader, nir_variable_mode modes)
    struct hash_table *var_info_map = _mesa_pointer_hash_table_create(mem_ctx);
    struct set *complex_vars = NULL;
 
-   assert((modes & (nir_var_shader_temp | nir_var_function_temp)) == modes);
+   assert((modes & (nir_var_shader_temp | nir_var_ray_hit_attrib | nir_var_function_temp)) == modes);
 
    bool has_global_array = false;
-   if (modes & nir_var_shader_temp) {
+   if (modes & (nir_var_shader_temp | nir_var_ray_hit_attrib)) {
       has_global_array = init_var_list_array_infos(shader,
                                                    &shader->variables,
-                                                   nir_var_shader_temp,
+                                                   modes,
                                                    var_info_map,
                                                    &complex_vars,
                                                    mem_ctx);
@@ -916,10 +906,10 @@ nir_split_array_vars(nir_shader *shader, nir_variable_mode modes)
    }
 
    bool has_global_splits = false;
-   if (modes & nir_var_shader_temp) {
+   if (modes & (nir_var_shader_temp | nir_var_ray_hit_attrib)) {
       has_global_splits = split_var_list_arrays(shader, NULL,
                                                 &shader->variables,
-                                                nir_var_shader_temp,
+                                                modes,
                                                 var_info_map, mem_ctx);
    }
 
@@ -1055,7 +1045,7 @@ mark_deref_if_complex(nir_deref_instr *deref,
    if (!(deref->var->data.mode & modes))
       return;
 
-   if (!nir_deref_instr_has_complex_use(deref))
+   if (!nir_deref_instr_has_complex_use(deref, 0))
       return;
 
    struct vec_var_usage *usage =

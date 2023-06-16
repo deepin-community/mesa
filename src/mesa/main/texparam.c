@@ -30,7 +30,7 @@
  */
 
 #include <stdbool.h>
-#include "main/glheader.h"
+#include "util/glheader.h"
 #include "main/blend.h"
 #include "main/context.h"
 #include "main/enums.h"
@@ -46,6 +46,10 @@
 #include "main/texstate.h"
 #include "program/prog_instruction.h"
 #include "util/u_math.h"
+#include "api_exec_decl.h"
+
+#include "state_tracker/st_cb_texture.h"
+#include "state_tracker/st_sampler_view.h"
 
 /**
  * Use macro to resolve undefined clamping behaviour when using lroundf
@@ -68,7 +72,7 @@ validate_texture_wrap_mode(struct gl_context * ctx, GLenum target, GLenum wrap)
       /* GL_CLAMP was removed in the core profile, and it has never existed in
        * OpenGL ES.
        */
-      supported = (ctx->API == API_OPENGL_COMPAT)
+      supported = _mesa_is_desktop_gl_compat(ctx)
          && (target != GL_TEXTURE_EXTERNAL_OES);
       break;
 
@@ -77,7 +81,7 @@ validate_texture_wrap_mode(struct gl_context * ctx, GLenum target, GLenum wrap)
       break;
 
    case GL_CLAMP_TO_BORDER:
-      supported = ctx->API != API_OPENGLES && e->ARB_texture_border_clamp
+      supported = ctx->API != API_OPENGLES
          && (target != GL_TEXTURE_EXTERNAL_OES);
       break;
 
@@ -244,12 +248,6 @@ _mesa_target_allows_setting_sampler_parameters(GLenum target)
 }
 
 
-static inline GLboolean
-is_wrap_gl_clamp(GLint param)
-{
-   return param == GL_CLAMP || param == GL_MIRROR_CLAMP_EXT;
-}
-
 /**
  * Set an integer-valued texture parameter
  * \return GL_TRUE if legal AND the value changed, GL_FALSE otherwise
@@ -336,8 +334,7 @@ set_tex_parameteri(struct gl_context *ctx,
          return GL_FALSE;
       if (validate_texture_wrap_mode(ctx, texObj->Target, params[0])) {
          flush(ctx);
-         if (is_wrap_gl_clamp(texObj->Sampler.Attrib.WrapS) != is_wrap_gl_clamp(params[0]))
-            ctx->NewDriverState |= ctx->DriverFlags.NewSamplersWithClamp;
+         update_sampler_gl_clamp(ctx, &texObj->Sampler, is_wrap_gl_clamp(texObj->Sampler.Attrib.WrapS), is_wrap_gl_clamp(params[0]), WRAP_S);
          texObj->Sampler.Attrib.WrapS = params[0];
          texObj->Sampler.Attrib.state.wrap_s = wrap_to_gallium(params[0]);
          _mesa_lower_gl_clamp(ctx, &texObj->Sampler);
@@ -353,8 +350,7 @@ set_tex_parameteri(struct gl_context *ctx,
          return GL_FALSE;
       if (validate_texture_wrap_mode(ctx, texObj->Target, params[0])) {
          flush(ctx);
-         if (is_wrap_gl_clamp(texObj->Sampler.Attrib.WrapT) != is_wrap_gl_clamp(params[0]))
-            ctx->NewDriverState |= ctx->DriverFlags.NewSamplersWithClamp;
+         update_sampler_gl_clamp(ctx, &texObj->Sampler, is_wrap_gl_clamp(texObj->Sampler.Attrib.WrapT), is_wrap_gl_clamp(params[0]), WRAP_T);
          texObj->Sampler.Attrib.WrapT = params[0];
          texObj->Sampler.Attrib.state.wrap_t = wrap_to_gallium(params[0]);
          _mesa_lower_gl_clamp(ctx, &texObj->Sampler);
@@ -370,8 +366,7 @@ set_tex_parameteri(struct gl_context *ctx,
          return GL_FALSE;
       if (validate_texture_wrap_mode(ctx, texObj->Target, params[0])) {
          flush(ctx);
-         if (is_wrap_gl_clamp(texObj->Sampler.Attrib.WrapR) != is_wrap_gl_clamp(params[0]))
-            ctx->NewDriverState |= ctx->DriverFlags.NewSamplersWithClamp;
+         update_sampler_gl_clamp(ctx, &texObj->Sampler, is_wrap_gl_clamp(texObj->Sampler.Attrib.WrapR), is_wrap_gl_clamp(params[0]), WRAP_R);
          texObj->Sampler.Attrib.WrapR = params[0];
          texObj->Sampler.Attrib.state.wrap_r = wrap_to_gallium(params[0]);
          _mesa_lower_gl_clamp(ctx, &texObj->Sampler);
@@ -420,6 +415,10 @@ set_tex_parameteri(struct gl_context *ctx,
          texObj->Attrib.BaseLevel = MIN2(texObj->Attrib.ImmutableLevels - 1, params[0]);
       else
          texObj->Attrib.BaseLevel = params[0];
+      if (texObj->Attrib.BaseLevel < MAX_TEXTURE_LEVELS) {
+         _mesa_update_teximage_format_swizzle(ctx, texObj->Image[0][texObj->Attrib.BaseLevel], texObj->Attrib.DepthMode);
+         _mesa_update_texture_object_swizzle(ctx, texObj);
+      }
 
       return GL_TRUE;
 
@@ -514,7 +513,7 @@ set_tex_parameteri(struct gl_context *ctx,
       /* GL_DEPTH_TEXTURE_MODE_ARB is removed in core-profile and it has never
        * existed in OpenGL ES.
        */
-      if (ctx->API == API_OPENGL_COMPAT && ctx->Extensions.ARB_depth_texture) {
+      if (_mesa_is_desktop_gl_compat(ctx)) {
          if (texObj->Attrib.DepthMode == params[0])
             return GL_FALSE;
          if (params[0] == GL_LUMINANCE ||
@@ -523,6 +522,10 @@ set_tex_parameteri(struct gl_context *ctx,
              (ctx->Extensions.ARB_texture_rg && params[0] == GL_RED)) {
             flush(ctx);
             texObj->Attrib.DepthMode = params[0];
+            if (texObj->Attrib.BaseLevel < MAX_TEXTURE_LEVELS) {
+               _mesa_update_teximage_format_swizzle(ctx, texObj->Image[0][texObj->Attrib.BaseLevel], texObj->Attrib.DepthMode);
+               _mesa_update_texture_object_swizzle(ctx, texObj);
+            }
             return GL_TRUE;
          }
          goto invalid_param;
@@ -573,6 +576,7 @@ set_tex_parameteri(struct gl_context *ctx,
          flush(ctx);
          texObj->Attrib.Swizzle[comp] = params[0];
          set_swizzle_component(&texObj->Attrib._Swizzle, comp, swz);
+         _mesa_update_texture_object_swizzle(ctx, texObj);
          return GL_TRUE;
       }
       goto invalid_pname;
@@ -587,6 +591,7 @@ set_tex_parameteri(struct gl_context *ctx,
             if (swz >= 0) {
                texObj->Attrib.Swizzle[comp] = params[comp];
                set_swizzle_component(&texObj->Attrib._Swizzle, comp, swz);
+               _mesa_update_texture_object_swizzle(ctx, texObj);
             }
             else {
                _mesa_error(ctx, GL_INVALID_ENUM,
@@ -662,6 +667,46 @@ set_tex_parameteri(struct gl_context *ctx,
          return GL_TRUE;
       }
       goto invalid_pname;
+
+   case GL_TEXTURE_SPARSE_ARB:
+   case GL_VIRTUAL_PAGE_SIZE_INDEX_ARB:
+      if (!_mesa_has_ARB_sparse_texture(ctx))
+         goto invalid_pname;
+
+      if (texObj->Immutable)
+         goto invalid_operation;
+
+      if (pname == GL_TEXTURE_SPARSE_ARB) {
+         /* ARB_sparse_texture spec:
+          *
+          *   INVALID_VALUE is generated if <pname> is TEXTURE_SPARSE_ARB, <param>
+          *   is TRUE and <target> is not one of TEXTURE_2D, TEXTURE_2D_ARRAY,
+          *   TEXTURE_CUBE_MAP, TEXTURE_CUBE_MAP_ARRAY, TEXTURE_3D, or
+          *   TEXTURE_RECTANGLE.
+          *
+          * ARB_sparse_texture2 also allow TEXTURE_2D_MULTISAMPLE and
+          * TEXTURE_2D_MULTISAMPLE_ARRAY.
+          */
+         if (params[0] &&
+             texObj->Target != GL_TEXTURE_2D &&
+             texObj->Target != GL_TEXTURE_2D_ARRAY &&
+             texObj->Target != GL_TEXTURE_CUBE_MAP &&
+             texObj->Target != GL_TEXTURE_CUBE_MAP_ARRAY &&
+             texObj->Target != GL_TEXTURE_3D &&
+             texObj->Target != GL_TEXTURE_RECTANGLE &&
+             (!_mesa_has_ARB_sparse_texture2(ctx) ||
+              (texObj->Target != GL_TEXTURE_2D_MULTISAMPLE &&
+               texObj->Target != GL_TEXTURE_2D_MULTISAMPLE_ARRAY))) {
+            _mesa_error(ctx, GL_INVALID_VALUE,
+                        "glTex%sParameter(target=%d)", suffix, texObj->Target);
+            return GL_FALSE;
+         }
+
+         texObj->IsSparse = !!params[0];
+      } else
+         texObj->VirtualPageSizeIndex = params[0];
+
+      return GL_TRUE;
 
    default:
       goto invalid_pname;
@@ -802,13 +847,8 @@ set_tex_parameterf(struct gl_context *ctx,
       /* Border color exists in desktop OpenGL since 1.0 for GL_CLAMP.  In
        * OpenGL ES 2.0+, it only exists in when GL_OES_texture_border_clamp is
        * enabled.  It is never available in OpenGL ES 1.x.
-       *
-       * FIXME: Every driver that supports GLES2 has this extension.  Elide
-       * the check?
        */
-      if (ctx->API == API_OPENGLES ||
-          (ctx->API == API_OPENGLES2 &&
-           !ctx->Extensions.ARB_texture_border_clamp))
+      if (_mesa_is_gles1(ctx))
          goto invalid_pname;
 
       if (!_mesa_target_allows_setting_sampler_parameters(texObj->Target))
@@ -856,6 +896,41 @@ invalid_enum:
    return GL_FALSE;
 }
 
+static bool
+texparam_invalidates_sampler_views(GLenum pname)
+{
+   switch (pname) {
+      /*
+       * Changing any of these texture parameters means we must create
+       * new sampler views.
+       */
+   case GL_ALL_ATTRIB_BITS: /* meaning is all pnames, internal */
+   case GL_TEXTURE_BASE_LEVEL:
+   case GL_TEXTURE_MAX_LEVEL:
+   case GL_DEPTH_TEXTURE_MODE:
+   case GL_DEPTH_STENCIL_TEXTURE_MODE:
+   case GL_TEXTURE_SRGB_DECODE_EXT:
+   case GL_TEXTURE_SWIZZLE_R:
+   case GL_TEXTURE_SWIZZLE_G:
+   case GL_TEXTURE_SWIZZLE_B:
+   case GL_TEXTURE_SWIZZLE_A:
+   case GL_TEXTURE_SWIZZLE_RGBA:
+   case GL_TEXTURE_BUFFER_SIZE:
+   case GL_TEXTURE_BUFFER_OFFSET:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static void
+_mesa_texture_parameter_invalidate(struct gl_context *ctx,
+                                   struct gl_texture_object *texObj,
+                                   GLenum pname)
+{
+   if (texparam_invalidates_sampler_views(pname))
+      st_texture_release_all_sampler_views(st_context(ctx), texObj);
+}
 
 void
 _mesa_texture_parameterf(struct gl_context *ctx,
@@ -884,6 +959,8 @@ _mesa_texture_parameterf(struct gl_context *ctx,
    case GL_TEXTURE_SWIZZLE_G_EXT:
    case GL_TEXTURE_SWIZZLE_B_EXT:
    case GL_TEXTURE_SWIZZLE_A_EXT:
+   case GL_TEXTURE_SPARSE_ARB:
+   case GL_VIRTUAL_PAGE_SIZE_INDEX_ARB:
       {
          GLint p[4];
          p[0] = (param > 0) ?
@@ -909,8 +986,8 @@ _mesa_texture_parameterf(struct gl_context *ctx,
       }
    }
 
-   if (ctx->Driver.TexParameter && need_update) {
-      ctx->Driver.TexParameter(ctx, texObj, pname);
+   if (need_update) {
+      _mesa_texture_parameter_invalidate(ctx, texObj, pname);
    }
 }
 
@@ -937,6 +1014,8 @@ _mesa_texture_parameterfv(struct gl_context *ctx,
    case GL_TEXTURE_SRGB_DECODE_EXT:
    case GL_TEXTURE_REDUCTION_MODE_EXT:
    case GL_TEXTURE_CUBE_MAP_SEAMLESS:
+   case GL_TEXTURE_SPARSE_ARB:
+   case GL_VIRTUAL_PAGE_SIZE_INDEX_ARB:
       {
          /* convert float param to int */
          GLint p[4];
@@ -977,8 +1056,8 @@ _mesa_texture_parameterfv(struct gl_context *ctx,
       need_update = set_tex_parameterf(ctx, texObj, pname, params, dsa);
    }
 
-   if (ctx->Driver.TexParameter && need_update) {
-      ctx->Driver.TexParameter(ctx, texObj, pname);
+   if (need_update) {
+      _mesa_texture_parameter_invalidate(ctx, texObj, pname);
    }
 }
 
@@ -1021,8 +1100,8 @@ _mesa_texture_parameteri(struct gl_context *ctx,
       }
    }
 
-   if (ctx->Driver.TexParameter && need_update) {
-      ctx->Driver.TexParameter(ctx, texObj, pname);
+   if (need_update) {
+      _mesa_texture_parameter_invalidate(ctx, texObj, pname);
    }
 }
 
@@ -1064,8 +1143,8 @@ _mesa_texture_parameteriv(struct gl_context *ctx,
       need_update = set_tex_parameteri(ctx, texObj, pname, params, dsa);
    }
 
-   if (ctx->Driver.TexParameter && need_update) {
-      ctx->Driver.TexParameter(ctx, texObj, pname);
+   if (need_update) {
+      _mesa_texture_parameter_invalidate(ctx, texObj, pname);
    }
 }
 
@@ -1559,7 +1638,7 @@ _mesa_legal_get_tex_level_parameter_target(struct gl_context *ctx, GLenum target
    case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
    case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
    case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
-      return ctx->Extensions.ARB_texture_cube_map;
+      return GL_TRUE;
    case GL_TEXTURE_2D_MULTISAMPLE:
    case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
       return ctx->Extensions.ARB_texture_multisample;
@@ -1580,9 +1659,13 @@ _mesa_legal_get_tex_level_parameter_target(struct gl_context *ctx, GLenum target
        *
        * From the OpenGL 3.1 spec:
        * "target may also be TEXTURE_BUFFER, indicating the texture buffer."
+       *
+       * From ARB_texture_buffer_range, GL_TEXTURE is a valid target in
+       * GetTexLevelParameter.
        */
       return (_mesa_is_desktop_gl(ctx) && ctx->Version >= 31) ||
-             _mesa_has_OES_texture_buffer(ctx);
+             _mesa_has_OES_texture_buffer(ctx) ||
+             _mesa_has_ARB_texture_buffer_range(ctx);
    case GL_TEXTURE_CUBE_MAP_ARRAY:
       return _mesa_has_texture_cube_map_array(ctx);
    }
@@ -1596,9 +1679,8 @@ _mesa_legal_get_tex_level_parameter_target(struct gl_context *ctx, GLenum target
    case GL_PROXY_TEXTURE_1D:
    case GL_PROXY_TEXTURE_2D:
    case GL_PROXY_TEXTURE_3D:
-      return GL_TRUE;
    case GL_PROXY_TEXTURE_CUBE_MAP:
-      return ctx->Extensions.ARB_texture_cube_map;
+      return GL_TRUE;
    case GL_PROXY_TEXTURE_CUBE_MAP_ARRAY:
       return ctx->Extensions.ARB_texture_cube_map_array;
    case GL_TEXTURE_RECTANGLE_NV:
@@ -1731,8 +1813,6 @@ get_tex_level_parameter_image(struct gl_context *ctx,
          }
          break;
       case GL_TEXTURE_DEPTH_SIZE_ARB:
-         if (!ctx->Extensions.ARB_depth_texture)
-            goto invalid_pname;
          *params = _mesa_get_format_bits(texFormat, pname);
          break;
       case GL_TEXTURE_STENCIL_SIZE:
@@ -2223,8 +2303,7 @@ get_tex_parameterfv(struct gl_context *ctx,
          *params = ENUM_TO_FLOAT(obj->Sampler.Attrib.WrapR);
          break;
       case GL_TEXTURE_BORDER_COLOR:
-         if (ctx->API == API_OPENGLES ||
-             !ctx->Extensions.ARB_texture_border_clamp)
+         if (_mesa_is_gles1(ctx))
             goto invalid_pname;
 
          if (_mesa_get_clamp_fragment_color(ctx, ctx->DrawBuffer)) {
@@ -2300,7 +2379,7 @@ get_tex_parameterfv(struct gl_context *ctx,
          /* GL_DEPTH_TEXTURE_MODE_ARB is removed in core-profile and it has
           * never existed in OpenGL ES.
           */
-         if (ctx->API != API_OPENGL_COMPAT || !ctx->Extensions.ARB_depth_texture)
+         if (ctx->API != API_OPENGL_COMPAT)
             goto invalid_pname;
          *params = (GLfloat) obj->Attrib.DepthMode;
          break;
@@ -2413,7 +2492,8 @@ get_tex_parameterfv(struct gl_context *ctx,
          break;
 
       case GL_IMAGE_FORMAT_COMPATIBILITY_TYPE:
-         if (!ctx->Extensions.ARB_shader_image_load_store)
+         if (!ctx->Extensions.ARB_shader_image_load_store &&
+             !_mesa_is_gles31(ctx))
             goto invalid_pname;
          *params = (GLfloat) obj->Attrib.ImageFormatCompatibilityType;
          break;
@@ -2428,6 +2508,24 @@ get_tex_parameterfv(struct gl_context *ctx,
          if (!ctx->Extensions.EXT_memory_object)
             goto invalid_pname;
          *params = ENUM_TO_FLOAT(obj->TextureTiling);
+         break;
+
+      case GL_TEXTURE_SPARSE_ARB:
+         if (!_mesa_has_ARB_sparse_texture(ctx))
+            goto invalid_pname;
+         *params = (GLfloat) obj->IsSparse;
+         break;
+
+      case GL_VIRTUAL_PAGE_SIZE_INDEX_ARB:
+         if (!_mesa_has_ARB_sparse_texture(ctx))
+            goto invalid_pname;
+         *params = (GLfloat) obj->VirtualPageSizeIndex;
+         break;
+
+      case GL_NUM_SPARSE_LEVELS_ARB:
+         if (!_mesa_has_ARB_sparse_texture(ctx))
+            goto invalid_pname;
+         *params = (GLfloat) obj->NumSparseLevels;
          break;
 
       default:
@@ -2468,8 +2566,7 @@ get_tex_parameteriv(struct gl_context *ctx,
          *params = (GLint) obj->Sampler.Attrib.WrapR;
          break;
       case GL_TEXTURE_BORDER_COLOR:
-         if (ctx->API == API_OPENGLES ||
-             !ctx->Extensions.ARB_texture_border_clamp)
+         if (_mesa_is_gles1(ctx))
             goto invalid_pname;
 
          {
@@ -2569,7 +2666,7 @@ get_tex_parameteriv(struct gl_context *ctx,
          *params = (GLint) obj->Sampler.Attrib.CompareFunc;
          break;
       case GL_DEPTH_TEXTURE_MODE_ARB:
-         if (ctx->API != API_OPENGL_COMPAT || !ctx->Extensions.ARB_depth_texture)
+         if (ctx->API != API_OPENGL_COMPAT)
             goto invalid_pname;
          *params = (GLint) obj->Attrib.DepthMode;
          break;
@@ -2686,7 +2783,8 @@ get_tex_parameteriv(struct gl_context *ctx,
          break;
 
       case GL_IMAGE_FORMAT_COMPATIBILITY_TYPE:
-         if (!ctx->Extensions.ARB_shader_image_load_store)
+         if (!ctx->Extensions.ARB_shader_image_load_store &&
+             !_mesa_is_gles31(ctx))
             goto invalid_pname;
          *params = obj->Attrib.ImageFormatCompatibilityType;
          break;
@@ -2701,6 +2799,24 @@ get_tex_parameteriv(struct gl_context *ctx,
          if (!ctx->Extensions.EXT_memory_object)
             goto invalid_pname;
          *params = (GLint) obj->TextureTiling;
+         break;
+
+      case GL_TEXTURE_SPARSE_ARB:
+         if (!_mesa_has_ARB_sparse_texture(ctx))
+            goto invalid_pname;
+         *params = obj->IsSparse;
+         break;
+
+      case GL_VIRTUAL_PAGE_SIZE_INDEX_ARB:
+         if (!_mesa_has_ARB_sparse_texture(ctx))
+            goto invalid_pname;
+         *params = obj->VirtualPageSizeIndex;
+         break;
+
+      case GL_NUM_SPARSE_LEVELS_ARB:
+         if (!_mesa_has_ARB_sparse_texture(ctx))
+            goto invalid_pname;
+         *params = obj->NumSparseLevels;
          break;
 
       default:

@@ -765,9 +765,10 @@ get_sample_count(const struct pipe_resource *res)
  * the blit src/dst formats are identical, ignoring the resource formats.
  * Otherwise, check for format casting and compatibility.
  */
-boolean
+bool
 util_can_blit_via_copy_region(const struct pipe_blit_info *blit,
-                              boolean tight_format_check)
+                              bool tight_format_check,
+                              bool render_condition_bound)
 {
    const struct util_format_description *src_desc, *dst_desc;
 
@@ -782,9 +783,11 @@ util_can_blit_via_copy_region(const struct pipe_blit_info *blit,
    }
    else {
       /* do loose format compatibility checking */
-      if (blit->src.resource->format != blit->src.format ||
-          blit->dst.resource->format != blit->dst.format ||
-          !util_is_format_compatible(src_desc, dst_desc)) {
+      if ((blit->src.format != blit->dst.format ||
+           src_desc != dst_desc) &&
+          (blit->src.resource->format != blit->src.format ||
+           blit->dst.resource->format != blit->dst.format ||
+           !util_is_format_compatible(src_desc, dst_desc))) {
          return FALSE;
       }
    }
@@ -797,7 +800,7 @@ util_can_blit_via_copy_region(const struct pipe_blit_info *blit,
        blit->scissor_enable ||
        blit->num_window_rectangles > 0 ||
        blit->alpha_blend ||
-       blit->render_condition_enable) {
+       (blit->render_condition_enable && render_condition_bound)) {
       return FALSE;
    }
 
@@ -840,11 +843,12 @@ util_can_blit_via_copy_region(const struct pipe_blit_info *blit,
  * It returns FALSE otherwise and the caller must fall back to a more generic
  * codepath for the blit operation. (e.g. by using u_blitter)
  */
-boolean
+bool
 util_try_blit_via_copy_region(struct pipe_context *ctx,
-                              const struct pipe_blit_info *blit)
+                              const struct pipe_blit_info *blit,
+                              bool render_condition_bound)
 {
-   if (util_can_blit_via_copy_region(blit, FALSE)) {
+   if (util_can_blit_via_copy_region(blit, FALSE, render_condition_bound)) {
       ctx->resource_copy_region(ctx, blit->dst.resource, blit->dst.level,
                                 blit->dst.box.x, blit->dst.box.y,
                                 blit->dst.box.z,

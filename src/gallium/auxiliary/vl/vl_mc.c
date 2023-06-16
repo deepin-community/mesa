@@ -86,7 +86,7 @@ calc_line(struct pipe_screen *screen, struct ureg_program *shader)
 
    tmp = ureg_DECL_temporary(shader);
 
-   if (screen->get_param(screen, PIPE_CAP_TGSI_FS_POSITION_IS_SYSVAL))
+   if (screen->get_param(screen, PIPE_CAP_FS_POSITION_IS_SYSVAL))
       pos = ureg_DECL_system_value(shader, TGSI_SEMANTIC_POSITION, 0);
    else
       pos = ureg_DECL_fs_input(shader, TGSI_SEMANTIC_POSITION, VS_O_VPOS,
@@ -391,7 +391,6 @@ init_pipe_state(struct vl_mc *r)
    sampler.mag_img_filter = PIPE_TEX_FILTER_LINEAR;
    sampler.compare_mode = PIPE_TEX_COMPARE_NONE;
    sampler.compare_func = PIPE_FUNC_ALWAYS;
-   sampler.normalized_coords = 1;
    r->sampler_ref = r->pipe->create_sampler_state(r->pipe, &sampler);
    if (!r->sampler_ref)
       goto error_sampler_ref;

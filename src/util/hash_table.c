@@ -659,13 +659,18 @@ _mesa_hash_u32(const void *key)
 uint32_t
 _mesa_hash_string(const void *_key)
 {
+   return _mesa_hash_string_with_length(_key, strlen((const char *)_key));
+}
+
+uint32_t
+_mesa_hash_string_with_length(const void *_key, unsigned length)
+{
    uint32_t hash = 0;
    const char *key = _key;
-   size_t len = strlen(key);
 #if defined(_WIN64) || defined(__x86_64__)
-   hash = (uint32_t)XXH64(key, len, hash);
+   hash = (uint32_t)XXH64(key, length, hash);
 #else
-   hash = XXH32(key, len, hash);
+   hash = XXH32(key, length, hash);
 #endif
    return hash;
 }
@@ -770,15 +775,15 @@ _mesa_hash_table_u64_create(void *mem_ctx)
    STATIC_ASSERT(FREED_KEY_VALUE != DELETED_KEY_VALUE);
    struct hash_table_u64 *ht;
 
-   ht = CALLOC_STRUCT(hash_table_u64);
+   ht = rzalloc(mem_ctx, struct hash_table_u64);
    if (!ht)
       return NULL;
 
    if (sizeof(void *) == 8) {
-      ht->table = _mesa_hash_table_create(mem_ctx, _mesa_hash_pointer,
+      ht->table = _mesa_hash_table_create(ht, _mesa_hash_pointer,
                                           _mesa_key_pointer_equal);
    } else {
-      ht->table = _mesa_hash_table_create(mem_ctx, key_u64_hash,
+      ht->table = _mesa_hash_table_create(ht, key_u64_hash,
                                           key_u64_equals);
    }
 
@@ -816,10 +821,7 @@ _mesa_hash_table_u64_destroy(struct hash_table_u64 *ht)
 {
    if (!ht)
       return;
-
-   _mesa_hash_table_u64_clear(ht);
-   _mesa_hash_table_destroy(ht->table, NULL);
-   free(ht);
+   ralloc_free(ht);
 }
 
 void

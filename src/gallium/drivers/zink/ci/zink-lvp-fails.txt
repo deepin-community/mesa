@@ -1,11 +1,20 @@
-dEQP-GLES2.functional.clipping.point.wide_point_clip,Fail
-dEQP-GLES2.functional.clipping.point.wide_point_clip_viewport_center,Fail
-dEQP-GLES2.functional.clipping.point.wide_point_clip_viewport_corner,Fail
+# #6115
+spec@arb_tessellation_shader@execution@variable-indexing@tes-both-input-array-float-index-rd,Crash
+spec@arb_tessellation_shader@execution@variable-indexing@tes-both-input-array-vec2-index-rd,Crash
+spec@arb_tessellation_shader@execution@variable-indexing@tes-both-input-array-vec3-index-rd,Crash
+spec@arb_tessellation_shader@execution@variable-indexing@tes-both-input-array-vec4-index-rd,Crash
+
+# #6322
+spec@arb_framebuffer_object@fbo-blit-scaled-linear,Fail
+
+#kopper regressions/changes
+spec@egl_chromium_sync_control@conformance,Fail
+spec@egl_chromium_sync_control@conformance@eglGetSyncValuesCHROMIUM_msc_and_sbc_test,Fail
+spec@egl_chromium_sync_control@conformance@eglGetSyncValuesCHROMIUM_ust_test,Fail
+
+
 dEQP-GLES3.functional.clipping.line.wide_line_clip_viewport_center,Fail
 dEQP-GLES3.functional.clipping.line.wide_line_clip_viewport_corner,Fail
-dEQP-GLES3.functional.clipping.point.wide_point_clip,Fail
-dEQP-GLES3.functional.clipping.point.wide_point_clip_viewport_center,Fail
-dEQP-GLES3.functional.clipping.point.wide_point_clip_viewport_corner,Fail
 dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_mag,Fail
 dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_mag_reverse_dst_x,Fail
 dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_mag_reverse_src_dst_x,Fail
@@ -16,29 +25,17 @@ dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_min_reverse_dst_x,Fail
 dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_min_reverse_src_dst_x,Fail
 dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_min_reverse_src_dst_y,Fail
 dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_min_reverse_src_x,Fail
-KHR-GL32.transform_feedback.capture_vertex_interleaved_test,Fail
-KHR-GL32.transform_feedback.capture_vertex_separate_test,Fail
-KHR-GL32.transform_feedback.discard_vertex_test,Fail
-KHR-GL32.transform_feedback.draw_xfb_instanced_test,Crash
-KHR-GL32.transform_feedback.draw_xfb_stream_instanced_test,Crash
-KHR-GL32.transform_feedback.query_vertex_interleaved_test,Fail
-KHR-GL32.transform_feedback.query_vertex_separate_test,Fail
 dEQP-GLES2.functional.clipping.line.wide_line_clip_viewport_center,Fail
 dEQP-GLES2.functional.clipping.line.wide_line_clip_viewport_corner,Fail
 
-glx@glx-copy-sub-buffer,Fail
-glx@glx-copy-sub-buffer samples=2,Fail
-glx@glx-copy-sub-buffer samples=4,Fail
-glx@glx-multithread-texture,Fail
-glx@glx-swap-copy,Fail
+# this test tries to be error-compatible with nvidia. spoiler: mesa isn't, and no driver can pass it
+glx@glx_arb_create_context@invalid flag,Fail
+
 glx@glx-swap-pixmap-bad,Fail
 glx@glx-visuals-depth,Crash
-glx@glx-visuals-depth -pixmap,Crash
-glx@glx-visuals-stencil,Crash
-glx@glx-visuals-stencil -pixmap,Crash
-glx@glx-query-drawable-glx_fbconfig_id-window,Fail
 glx@glx_arb_create_context_es2_profile@invalid opengl es version,Fail
 glx@glx_arb_create_context_no_error@no error,Fail
+
 glx@glx_ext_import_context@free context,Fail
 glx@glx_ext_import_context@get context id,Fail
 glx@glx_ext_import_context@get current display,Fail
@@ -48,7 +45,6 @@ glx@glx_ext_import_context@imported context has same context id,Fail
 glx@glx_ext_import_context@make current- multi process,Fail
 glx@glx_ext_import_context@make current- single process,Fail
 glx@glx_ext_import_context@query context info,Fail
-shaders@glsl-fs-pointcoord,Fail
 shaders@point-vertex-id divisor,Fail
 shaders@point-vertex-id gl_instanceid,Fail
 shaders@point-vertex-id gl_instanceid divisor,Fail
@@ -56,16 +52,12 @@ shaders@point-vertex-id gl_vertexid,Fail
 shaders@point-vertex-id gl_vertexid divisor,Fail
 shaders@point-vertex-id gl_vertexid gl_instanceid,Fail
 shaders@point-vertex-id gl_vertexid gl_instanceid divisor,Fail
-spec@!opengl 1.0@gl-1.0-edgeflag,Fail
-spec@!opengl 1.0@gl-1.0-edgeflag-quads,Fail
 spec@!opengl 1.0@gl-1.0-no-op-paths,Fail
-spec@!opengl 1.0@gl-1.0-swapbuffers-behavior,Fail
 spec@!opengl 1.1@linestipple,Fail
 spec@!opengl 1.1@linestipple@Factor 2x,Fail
 spec@!opengl 1.1@linestipple@Factor 3x,Fail
 spec@!opengl 1.1@linestipple@Line loop,Fail
 spec@!opengl 1.1@linestipple@Line strip,Fail
-spec@!opengl 1.1@polygon-offset,Fail
 spec@!opengl 1.1@polygon-mode,Fail
 spec@!opengl 1.1@polygon-mode-facing,Fail
 spec@!opengl 1.1@polygon-mode-offset,Fail
@@ -82,35 +74,12 @@ spec@!opengl 1.1@polygon-mode-offset@config 5: Expected blue pixel in center,Fai
 spec@!opengl 1.1@polygon-mode-offset@config 6: Expected blue pixel in center,Fail
 spec@!opengl 1.1@polygon-mode-offset@config 6: Expected white pixel on right edge,Fail
 spec@!opengl 1.1@polygon-mode-offset@config 6: Expected white pixel on top edge,Fail
-spec@!opengl 1.1@read-front,Fail
-spec@!opengl 1.1@read-front clear-front-first,Fail
-spec@!opengl 1.1@read-front clear-front-first samples=2,Fail
-spec@!opengl 1.1@read-front clear-front-first samples=4,Fail
-spec@!opengl 1.1@read-front samples=2,Fail
-spec@!opengl 1.1@read-front samples=4,Fail
 spec@!opengl 1.2@copyteximage 3d,Fail
-spec@!opengl 2.0@depth-tex-modes-glsl,Fail
-spec@!opengl 2.0@gl-2.0-edgeflag,Fail
-spec@!opengl 2.0@gl-2.0-edgeflag-immediate,Fail
 spec@!opengl 2.1@pbo,Fail
 spec@!opengl 2.1@pbo@test_polygon_stip,Fail
 spec@!opengl 2.1@polygon-stipple-fs,Fail
-spec@!opengl 3.0@sampler-cube-shadow,Fail
-spec@!opengl 3.2@gl-3.2-adj-prims cull-back pv-first,Fail
-spec@!opengl 3.2@gl-3.2-adj-prims cull-front pv-first,Fail
-spec@!opengl 3.2@gl-3.2-adj-prims line cull-back pv-first,Fail
-spec@!opengl 3.2@gl-3.2-adj-prims line cull-front pv-first,Fail
-spec@!opengl 3.2@gl-3.2-adj-prims pv-first,Fail
-spec@!opengl es 2.0@glsl-fs-pointcoord,Fail
-spec@!opengl es 3.0@gles-3.0-transform-feedback-uniform-buffer-object,Fail
-spec@arb_depth_texture@depth-tex-modes,Fail
-spec@arb_framebuffer_object@fbo-gl_pointcoord,Fail
-spec@arb_get_program_binary@restore-sso-program,Fail
 spec@arb_gpu_shader_fp64@execution@arb_gpu_shader_fp64-tf-separate,Fail
 spec@arb_pipeline_statistics_query@arb_pipeline_statistics_query-frag,Fail
-spec@arb_point_parameters@arb_point_parameters-point-attenuation,Fail
-spec@arb_point_parameters@arb_point_parameters-point-attenuation@Aliased combinations,Fail
-spec@arb_point_parameters@arb_point_parameters-point-attenuation@Antialiased combinations,Fail
 spec@arb_point_sprite@arb_point_sprite-checkerboard,Fail
 spec@arb_point_sprite@arb_point_sprite-mipmap,Fail
 spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceindex,Fail
@@ -147,268 +116,8 @@ spec@arb_sample_shading@samplemask 4 all@1.000000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 4 all@noms mask_in_one,Fail
 spec@arb_sample_shading@samplemask 4 all@noms partition,Fail
 spec@arb_sample_shading@samplemask 4 all@sample mask_in_one,Fail
-spec@arb_seamless_cube_map@arb_seamless_cubemap,Fail
 spec@arb_shader_texture_lod@execution@arb_shader_texture_lod-texgrad,Fail
-spec@arb_texture_cube_map_array@arb_texture_cube_map_array-sampler-cube-array-shadow,Fail
-spec@arb_texture_float@fbo-blending-formats,Fail
-spec@arb_texture_float@fbo-blending-formats@GL_INTENSITY16F_ARB,Fail
-spec@arb_texture_float@fbo-blending-formats@GL_INTENSITY32F_ARB,Fail
-spec@arb_texture_float@fbo-blending-formats@GL_LUMINANCE16F_ARB,Fail
-spec@arb_texture_float@fbo-blending-formats@GL_LUMINANCE32F_ARB,Fail
-spec@arb_texture_float@fbo-blending-formats@GL_RGB32F,Fail
-spec@arb_texture_view@rendering-formats,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16 as GL_R16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16 as GL_R16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16 as GL_R16UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16 as GL_R16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16 as GL_RG8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16 as GL_RG8UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16 as GL_RG8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16F as GL_R16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16F as GL_R16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16F as GL_RG8,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16F as GL_RG8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16I as GL_R16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16I as GL_R16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16I as GL_RG8,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16I as GL_RG8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16I as GL_RG8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16UI as GL_R16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16UI as GL_R16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16UI as GL_R16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16UI as GL_RG8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16UI as GL_RG8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16_SNORM as GL_R16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16_SNORM as GL_R16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16_SNORM as GL_R16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16_SNORM as GL_R16UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16_SNORM as GL_RG8,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16_SNORM as GL_RG8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16_SNORM as GL_RG8UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R16_SNORM as GL_RG8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32F as GL_RG16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32F as GL_RG16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32F as GL_RG16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32F as GL_RG16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32F as GL_RGB10_A2,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32F as GL_RGBA8,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32F as GL_RGBA8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32F as GL_RGBA8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32I as GL_RG16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32I as GL_RG16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32I as GL_RG16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32I as GL_RG16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32I as GL_RGB10_A2,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32I as GL_RGBA8,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32I as GL_RGBA8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32I as GL_RGBA8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32UI as GL_RG16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32UI as GL_RG16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32UI as GL_RG16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32UI as GL_RG16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32UI as GL_RGB10_A2,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32UI as GL_RGBA8,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32UI as GL_RGBA8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R32UI as GL_RGBA8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R8 as GL_R8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R8 as GL_R8UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R8 as GL_R8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R8I as GL_R8,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R8UI as GL_R8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R8UI as GL_R8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R8_SNORM as GL_R8,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R8_SNORM as GL_R8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_R8_SNORM as GL_R8UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16 as GL_R32F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16 as GL_R32I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16 as GL_R32UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16 as GL_RG16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16 as GL_RG16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16 as GL_RG16UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16 as GL_RG16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16 as GL_RGB10_A2UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16 as GL_RGBA8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16 as GL_RGBA8UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16 as GL_RGBA8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16F as GL_R32F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16F as GL_RG16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16F as GL_RG16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16F as GL_RGB10_A2,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16F as GL_RGBA8,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16F as GL_RGBA8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16I as GL_R32F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16I as GL_R32I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16I as GL_RG16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16I as GL_RG16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16I as GL_RGB10_A2,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16I as GL_RGBA8,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16I as GL_RGBA8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16I as GL_RGBA8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16UI as GL_R32F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16UI as GL_R32I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16UI as GL_RG16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16UI as GL_RG16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16UI as GL_RG16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16UI as GL_RGBA8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16UI as GL_RGBA8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_R32F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_R32I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_R32UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_RG16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_RG16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_RG16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_RG16UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_RGB10_A2,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_RGB10_A2UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_RGBA8,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_RGBA8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_RGBA8UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_RGBA8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG32F as GL_RGBA16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG32F as GL_RGBA16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG32F as GL_RGBA16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG32F as GL_RGBA16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG32I as GL_RGBA16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG32I as GL_RGBA16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG32I as GL_RGBA16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG32I as GL_RGBA16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG32UI as GL_RGBA16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG32UI as GL_RGBA16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG32UI as GL_RGBA16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG32UI as GL_RGBA16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8 as GL_R16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8 as GL_R16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8 as GL_R16UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8 as GL_R16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8 as GL_RG8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8 as GL_RG8UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8 as GL_RG8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8I as GL_R16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8I as GL_R16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8I as GL_R16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8I as GL_R16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8I as GL_RG8,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8UI as GL_R16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8UI as GL_R16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8UI as GL_R16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8UI as GL_RG8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8UI as GL_RG8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8_SNORM as GL_R16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8_SNORM as GL_R16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8_SNORM as GL_R16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8_SNORM as GL_R16UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8_SNORM as GL_R16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8_SNORM as GL_RG8,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8_SNORM as GL_RG8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RG8_SNORM as GL_RG8UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_R32F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_R32I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_R32UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_RG16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_RG16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_RG16UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_RG16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_RGB10_A2UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_RGBA8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_RGBA8UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_RGBA8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB10_A2UI as GL_R32F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB10_A2UI as GL_R32I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB10_A2UI as GL_RG16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB10_A2UI as GL_RG16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB10_A2UI as GL_RG16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB10_A2UI as GL_RGBA8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB10_A2UI as GL_RGBA8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB16 as GL_RGB16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB16 as GL_RGB16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB16 as GL_RGB16UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB16 as GL_RGB16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB16F as GL_RGB16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB16F as GL_RGB16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB16I as GL_RGB16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB16I as GL_RGB16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB16UI as GL_RGB16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB16UI as GL_RGB16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB16UI as GL_RGB16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB16_SNORM as GL_RGB16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB16_SNORM as GL_RGB16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB16_SNORM as GL_RGB16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB16_SNORM as GL_RGB16UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB8 as GL_RGB8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB8 as GL_RGB8UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB8 as GL_RGB8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB8I as GL_RGB8,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB8UI as GL_RGB8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB8UI as GL_RGB8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB8_SNORM as GL_RGB8,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB8_SNORM as GL_RGB8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGB8_SNORM as GL_RGB8UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16 as GL_RG32F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16 as GL_RG32I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16 as GL_RG32UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16 as GL_RGBA16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16 as GL_RGBA16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16 as GL_RGBA16UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16 as GL_RGBA16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16F as GL_RG32F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16F as GL_RGBA16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16F as GL_RGBA16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16I as GL_RG32F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16I as GL_RG32I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16I as GL_RGBA16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16I as GL_RGBA16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16UI as GL_RG32F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16UI as GL_RG32I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16UI as GL_RGBA16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16UI as GL_RGBA16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16UI as GL_RGBA16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16_SNORM as GL_RG32F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16_SNORM as GL_RG32I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16_SNORM as GL_RG32UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16_SNORM as GL_RGBA16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16_SNORM as GL_RGBA16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16_SNORM as GL_RGBA16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA16_SNORM as GL_RGBA16UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8 as GL_R32F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8 as GL_R32I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8 as GL_R32UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8 as GL_RG16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8 as GL_RG16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8 as GL_RG16UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8 as GL_RG16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8 as GL_RGB10_A2UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8 as GL_RGBA8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8 as GL_RGBA8UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8 as GL_RGBA8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8I as GL_R32F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8I as GL_R32I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8I as GL_RG16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8I as GL_RG16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8I as GL_RG16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8I as GL_RG16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8I as GL_RGB10_A2,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8I as GL_RGBA8,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8UI as GL_R32F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8UI as GL_R32I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8UI as GL_RG16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8UI as GL_RG16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8UI as GL_RG16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8UI as GL_RGBA8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8UI as GL_RGBA8_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_R32F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_R32I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_R32UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_RG16,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_RG16F,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_RG16I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_RG16UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_RG16_SNORM,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_RGB10_A2,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_RGB10_A2UI,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_RGBA8,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_RGBA8I,Fail
-spec@arb_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_RGBA8UI,Fail
-spec@egl 1.4@egl-copy-buffers,Fail
+
 spec@egl 1.4@eglterminate then unbind context,Fail
 spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_depth_component24,Fail
 spec@egl_khr_surfaceless_context@viewport,Fail
@@ -430,355 +139,123 @@ spec@ext_framebuffer_multisample@interpolation 4 centroid-disabled,Fail
 spec@ext_framebuffer_multisample@interpolation 4 centroid-edges,Fail
 spec@ext_framebuffer_multisample@interpolation 4 non-centroid-deriv-disabled,Fail
 spec@ext_framebuffer_multisample@interpolation 4 non-centroid-disabled,Fail
-spec@ext_framebuffer_object@fbo-blending-formats,Fail
-spec@ext_framebuffer_object@fbo-blending-formats@GL_INTENSITY,Fail
-spec@ext_framebuffer_object@fbo-blending-formats@GL_INTENSITY12,Fail
-spec@ext_framebuffer_object@fbo-blending-formats@GL_INTENSITY16,Fail
-spec@ext_framebuffer_object@fbo-blending-formats@GL_INTENSITY4,Fail
-spec@ext_framebuffer_object@fbo-blending-formats@GL_INTENSITY8,Fail
-spec@ext_framebuffer_object@fbo-blending-formats@GL_LUMINANCE12,Fail
-spec@ext_framebuffer_object@fbo-blending-formats@GL_LUMINANCE16,Fail
-spec@ext_framebuffer_object@fbo-blending-formats@GL_RGB10,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-export,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-export-tex,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-intel_external_sampler_only,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-invalid_attributes,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-invalid_hints,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-missing_attributes,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-ownership_transfer,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-refcount,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-reimport-bug,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_argb8888,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_ayuv,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_nv12,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_p010,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_p012,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_p016,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_uyvy,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_xrgb8888,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_xyuv,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_y210,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_y212,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_y216,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_y410,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_y412,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_y416,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_yuv420,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_yuyv,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_yvu420,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-transcode-nv12-as-r8-gr88,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-unsupported_format,Fail
 spec@ext_packed_float@query-rgba-signed-components,Fail
-spec@ext_texture_snorm@fbo-blending-formats,Fail
-spec@ext_texture_snorm@fbo-blending-formats@GL_INTENSITY16_SNORM,Fail
-spec@ext_texture_snorm@fbo-blending-formats@GL_INTENSITY8_SNORM,Fail
-spec@ext_texture_snorm@fbo-blending-formats@GL_INTENSITY_SNORM,Fail
-spec@ext_texture_snorm@fbo-blending-formats@GL_LUMINANCE16_SNORM,Fail
-spec@ext_texture_snorm@fbo-blending-formats@GL_LUMINANCE8_SNORM,Fail
-spec@ext_texture_snorm@fbo-blending-formats@GL_LUMINANCE_SNORM,Fail
-spec@ext_texture_swizzle@depth_texture_mode_and_swizzle,Fail
-spec@ext_transform_feedback2@counting with pause,Fail
-spec@ext_transform_feedback@generatemipmap prims_generated,Fail
 spec@intel_performance_query@intel_performance_query-issue_2235,Fail
-spec@khr_texture_compression_astc@array-gl,Fail
-spec@khr_texture_compression_astc@array-gl@12x12 Block Dim,Fail
-spec@khr_texture_compression_astc@array-gl@5x5 Block Dim,Fail
-spec@khr_texture_compression_astc@miptree-gl ldr,Fail
-spec@khr_texture_compression_astc@miptree-gl ldr@LDR Profile,Fail
-spec@khr_texture_compression_astc@miptree-gl srgb,Fail
-spec@khr_texture_compression_astc@miptree-gl srgb@sRGB decode,Fail
+
 spec@khr_texture_compression_astc@miptree-gl srgb-fp,Fail
 spec@khr_texture_compression_astc@miptree-gl srgb-fp@sRGB decode full precision,Fail
-spec@khr_texture_compression_astc@miptree-gl srgb-sd,Fail
-spec@khr_texture_compression_astc@miptree-gl srgb-sd@sRGB skip decode,Fail
-spec@khr_texture_compression_astc@miptree-gles ldr,Fail
-spec@khr_texture_compression_astc@miptree-gles ldr@LDR Profile,Fail
-spec@khr_texture_compression_astc@miptree-gles srgb,Fail
-spec@khr_texture_compression_astc@miptree-gles srgb@sRGB decode,Fail
 spec@khr_texture_compression_astc@miptree-gles srgb-fp,Fail
 spec@khr_texture_compression_astc@miptree-gles srgb-fp@sRGB decode full precision,Fail
-spec@khr_texture_compression_astc@miptree-gles srgb-sd,Fail
-spec@khr_texture_compression_astc@miptree-gles srgb-sd@sRGB skip decode,Fail
-spec@khr_texture_compression_astc@sliced-3d-miptree-gl ldr,Fail
-spec@khr_texture_compression_astc@sliced-3d-miptree-gl ldr@LDR Profile,Fail
-spec@khr_texture_compression_astc@sliced-3d-miptree-gl srgb,Fail
-spec@khr_texture_compression_astc@sliced-3d-miptree-gl srgb@sRGB decode,Fail
 spec@khr_texture_compression_astc@sliced-3d-miptree-gl srgb-fp,Fail
 spec@khr_texture_compression_astc@sliced-3d-miptree-gl srgb-fp@sRGB decode full precision,Fail
-spec@khr_texture_compression_astc@sliced-3d-miptree-gles ldr,Fail
-spec@khr_texture_compression_astc@sliced-3d-miptree-gles ldr@LDR Profile,Fail
-spec@khr_texture_compression_astc@sliced-3d-miptree-gles srgb,Fail
-spec@khr_texture_compression_astc@sliced-3d-miptree-gles srgb@sRGB decode,Fail
 spec@khr_texture_compression_astc@sliced-3d-miptree-gles srgb-fp,Fail
 spec@khr_texture_compression_astc@sliced-3d-miptree-gles srgb-fp@sRGB decode full precision,Fail
 spec@!opengl 3.0@clearbuffer-depth-cs-probe,Fail
 spec@arb_post_depth_coverage@arb_post_depth_coverage-multisampling,Fail
 spec@arb_shader_image_load_store@early-z,Fail
 spec@arb_shader_image_load_store@early-z@occlusion query test/early-z pass,Fail
-spec@arb_shader_image_load_store@indexing,Fail
-spec@arb_shader_image_load_store@indexing@Compute shader/dynamically uniform indexing test,Fail
-spec@arb_shader_image_load_store@indexing@Fragment shader/dynamically uniform indexing test,Fail
-spec@arb_shader_image_load_store@indexing@Geometry shader/dynamically uniform indexing test,Fail
-spec@arb_shader_image_load_store@indexing@Tessellation control shader/dynamically uniform indexing test,Fail
-spec@arb_shader_image_load_store@indexing@Tessellation evaluation shader/dynamically uniform indexing test,Fail
-spec@arb_shader_image_load_store@indexing@Vertex shader/dynamically uniform indexing test,Fail
-spec@arb_shader_image_load_store@invalid,Fail
-spec@arb_shader_image_load_store@invalid@imageLoad/incompatible format test/imageBuffer,Fail
-spec@khr_texture_compression_astc@array-gles,Fail
-spec@khr_texture_compression_astc@array-gles@12x12 Block Dim,Fail
-spec@khr_texture_compression_astc@array-gles@5x5 Block Dim,Fail
-spec@oes_egl_image_external_essl3@oes_egl_image_external_essl3,Fail
-spec@oes_egl_image_external_essl3@oes_egl_image_external_essl3@oes_egl_image_external_essl3_imageLoad,Fail
-spec@oes_egl_image_external_essl3@oes_egl_image_external_essl3@oes_egl_image_external_essl3_imageStore,Fail
-spec@oes_texture_view@rendering-formats,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB16 as GL_RGB16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB16I as GL_RGB16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB16UI as GL_RGB16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB16_SNORM as GL_RGB16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16 as GL_R16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16 as GL_R16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16 as GL_R16UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16 as GL_R16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16 as GL_RG8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16 as GL_RG8UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16 as GL_RG8_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16F as GL_R16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16F as GL_R16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16F as GL_RG8,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16F as GL_RG8_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16I as GL_R16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16I as GL_R16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16I as GL_RG8,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16I as GL_RG8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16I as GL_RG8_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16UI as GL_R16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16UI as GL_R16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16UI as GL_R16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16UI as GL_RG8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16UI as GL_RG8_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16_SNORM as GL_R16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16_SNORM as GL_R16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16_SNORM as GL_R16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16_SNORM as GL_R16UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16_SNORM as GL_RG8,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16_SNORM as GL_RG8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16_SNORM as GL_RG8UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R16_SNORM as GL_RG8_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32F as GL_RG16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32F as GL_RG16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32F as GL_RG16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32F as GL_RG16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32F as GL_RGB10_A2,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32F as GL_RGBA8,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32F as GL_RGBA8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32F as GL_RGBA8_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32I as GL_RG16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32I as GL_RG16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32I as GL_RG16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32I as GL_RG16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32I as GL_RGB10_A2,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32I as GL_RGBA8,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32I as GL_RGBA8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32I as GL_RGBA8_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32UI as GL_RG16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32UI as GL_RG16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32UI as GL_RG16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32UI as GL_RG16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32UI as GL_RGB10_A2,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32UI as GL_RGBA8,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32UI as GL_RGBA8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R32UI as GL_RGBA8_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R8 as GL_R8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R8 as GL_R8UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R8 as GL_R8_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R8I as GL_R8,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R8UI as GL_R8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R8UI as GL_R8_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R8_SNORM as GL_R8,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R8_SNORM as GL_R8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_R8_SNORM as GL_R8UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16 as GL_R32F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16 as GL_R32I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16 as GL_R32UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16 as GL_RG16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16 as GL_RG16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16 as GL_RG16UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16 as GL_RG16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16 as GL_RGB10_A2UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16 as GL_RGBA8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16 as GL_RGBA8UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16 as GL_RGBA8_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16F as GL_R32F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16F as GL_RG16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16F as GL_RG16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16F as GL_RGB10_A2,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16F as GL_RGBA8,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16F as GL_RGBA8_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16I as GL_R32F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16I as GL_R32I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16I as GL_RG16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16I as GL_RG16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16I as GL_RGB10_A2,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16I as GL_RGBA8,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16I as GL_RGBA8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16I as GL_RGBA8_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16UI as GL_R32F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16UI as GL_R32I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16UI as GL_RG16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16UI as GL_RG16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16UI as GL_RG16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16UI as GL_RGBA8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16UI as GL_RGBA8_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_R32F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_R32I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_R32UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_RG16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_RG16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_RG16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_RG16UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_RGB10_A2,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_RGB10_A2UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_RGBA8,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_RGBA8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_RGBA8UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG16_SNORM as GL_RGBA8_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG32F as GL_RGBA16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG32F as GL_RGBA16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG32F as GL_RGBA16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG32F as GL_RGBA16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG32I as GL_RGBA16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG32I as GL_RGBA16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG32I as GL_RGBA16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG32I as GL_RGBA16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG32UI as GL_RGBA16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG32UI as GL_RGBA16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG32UI as GL_RGBA16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG32UI as GL_RGBA16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8 as GL_R16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8 as GL_R16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8 as GL_R16UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8 as GL_R16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8 as GL_RG8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8 as GL_RG8UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8 as GL_RG8_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8I as GL_R16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8I as GL_R16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8I as GL_R16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8I as GL_R16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8I as GL_RG8,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8UI as GL_R16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8UI as GL_R16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8UI as GL_R16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8UI as GL_RG8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8UI as GL_RG8_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8_SNORM as GL_R16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8_SNORM as GL_R16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8_SNORM as GL_R16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8_SNORM as GL_R16UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8_SNORM as GL_R16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8_SNORM as GL_RG8,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8_SNORM as GL_RG8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RG8_SNORM as GL_RG8UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_R32F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_R32I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_R32UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_RG16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_RG16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_RG16UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_RG16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_RGB10_A2UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_RGBA8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_RGBA8UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB10_A2 as GL_RGBA8_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB10_A2UI as GL_R32F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB10_A2UI as GL_R32I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB10_A2UI as GL_RG16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB10_A2UI as GL_RG16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB10_A2UI as GL_RG16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB10_A2UI as GL_RGBA8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB10_A2UI as GL_RGBA8_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB16 as GL_RGB16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB16F as GL_RGB16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB16F as GL_RGB16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB16I as GL_RGB16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB16UI as GL_RGB16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB16_SNORM as GL_RGB16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB8I as GL_RGB8,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGB8_SNORM as GL_RGB8,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16 as GL_RG32F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16 as GL_RG32I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16 as GL_RG32UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16 as GL_RGBA16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16 as GL_RGBA16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16 as GL_RGBA16UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16 as GL_RGBA16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16F as GL_RG32F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16F as GL_RGBA16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16F as GL_RGBA16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16I as GL_RG32F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16I as GL_RG32I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16I as GL_RGBA16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16I as GL_RGBA16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16UI as GL_RG32F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16UI as GL_RG32I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16UI as GL_RGBA16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16UI as GL_RGBA16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16UI as GL_RGBA16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16_SNORM as GL_RG32F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16_SNORM as GL_RG32I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16_SNORM as GL_RG32UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16_SNORM as GL_RGBA16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16_SNORM as GL_RGBA16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16_SNORM as GL_RGBA16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA16_SNORM as GL_RGBA16UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8 as GL_R32F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8 as GL_R32I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8 as GL_R32UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8 as GL_RG16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8 as GL_RG16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8 as GL_RG16UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8 as GL_RG16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8 as GL_RGB10_A2UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8 as GL_RGBA8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8 as GL_RGBA8UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8 as GL_RGBA8_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8I as GL_R32F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8I as GL_R32I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8I as GL_RG16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8I as GL_RG16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8I as GL_RG16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8I as GL_RG16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8I as GL_RGB10_A2,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8I as GL_RGBA8,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8UI as GL_R32F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8UI as GL_R32I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8UI as GL_RG16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8UI as GL_RG16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8UI as GL_RG16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8UI as GL_RGBA8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8UI as GL_RGBA8_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_R32F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_R32I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_R32UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_RG16,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_RG16F,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_RG16I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_RG16UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_RG16_SNORM,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_RGB10_A2,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_RGB10_A2UI,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_RGBA8,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_RGBA8I,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_RGBA8UI,Fail
 
+spec@arb_shader_image_load_store@execution@image-array-out-of-bounds-access-load,Crash
+spec@arb_shader_image_load_store@execution@image-array-out-of-bounds-access-store,Crash
 
 #literally no driver can pass these
 spec@!opengl 1.0@rasterpos,Fail
 spec@!opengl 1.0@rasterpos@glsl_vs_gs_linked,Fail
 spec@!opengl 1.0@rasterpos@glsl_vs_tes_linked,Fail
-spec@arb_direct_state_access@gettextureimage-formats,Crash
-spec@ext_texture_integer@fbo-integer,Fail
 
-#these need format conversions that gallium doesn't implement yet
-spec@arb_texture_buffer_object@formats (fs- arb),Crash
-spec@arb_texture_buffer_object@formats (vs- arb),Crash
+
+spec@arb_arrays_of_arrays@execution@image_store@basic-imagestore-mixed-const-non-const-uniform-index,Fail
+spec@arb_arrays_of_arrays@execution@image_store@basic-imagestore-mixed-const-non-const-uniform-index2,Fail
+spec@arb_arrays_of_arrays@execution@image_store@basic-imagestore-non-const-uniform-index,Fail
+spec@arb_gl_spirv@execution@xfb@vs_block_array,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@frag-conversion-explicit-dmat2-mat2,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@frag-conversion-explicit-dmat2x3-mat2x3,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@frag-conversion-explicit-dmat2x4-mat2x4,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@frag-conversion-explicit-dmat3-mat3,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@frag-conversion-explicit-dmat3x2-mat3x2,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@frag-conversion-explicit-dmat3x4-mat3x4,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@frag-conversion-explicit-dmat4-mat4,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@frag-conversion-explicit-dmat4x2-mat4x2,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@frag-conversion-explicit-dmat4x3-mat4x3,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@frag-conversion-explicit-double-float,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@frag-conversion-explicit-dvec2-vec2,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@frag-conversion-explicit-dvec3-vec3,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@frag-conversion-explicit-dvec4-vec4,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@geom-conversion-explicit-dmat2-mat2,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@geom-conversion-explicit-dmat2x3-mat2x3,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@geom-conversion-explicit-dmat2x4-mat2x4,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@geom-conversion-explicit-dmat3-mat3,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@geom-conversion-explicit-dmat3x2-mat3x2,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@geom-conversion-explicit-dmat3x4-mat3x4,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@geom-conversion-explicit-dmat4-mat4,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@geom-conversion-explicit-dmat4x2-mat4x2,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@geom-conversion-explicit-dmat4x3-mat4x3,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@geom-conversion-explicit-double-float,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@geom-conversion-explicit-dvec2-vec2,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@geom-conversion-explicit-dvec3-vec3,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@geom-conversion-explicit-dvec4-vec4,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@vert-conversion-explicit-dmat2-mat2,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@vert-conversion-explicit-dmat2x3-mat2x3,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@vert-conversion-explicit-dmat2x4-mat2x4,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@vert-conversion-explicit-dmat3-mat3,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@vert-conversion-explicit-dmat3x2-mat3x2,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@vert-conversion-explicit-dmat3x4-mat3x4,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@vert-conversion-explicit-dmat4-mat4,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@vert-conversion-explicit-dmat4x2-mat4x2,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@vert-conversion-explicit-dmat4x3-mat4x3,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@vert-conversion-explicit-double-float,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@vert-conversion-explicit-dvec2-vec2,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@vert-conversion-explicit-dvec3-vec3,Fail
+spec@arb_gpu_shader_fp64@execution@conversion@vert-conversion-explicit-dvec4-vec4,Fail
+spec@arb_shader_storage_buffer_object@execution@ssbo-atomiccompswap-int,Fail
+spec@arb_tessellation_shader@execution@gs-primitiveid-instanced,Fail
+spec@glsl-1.50@execution@primitive-id-no-gs-quad-strip,Fail
+spec@glsl-1.50@execution@primitive-id-no-gs-quads,Fail
+spec@glsl-4.00@execution@conversion@frag-conversion-explicit-dmat2-mat2,Fail
+spec@glsl-4.00@execution@conversion@frag-conversion-explicit-dmat2x3-mat2x3,Fail
+spec@glsl-4.00@execution@conversion@frag-conversion-explicit-dmat2x4-mat2x4,Fail
+spec@glsl-4.00@execution@conversion@frag-conversion-explicit-dmat3-mat3,Fail
+spec@glsl-4.00@execution@conversion@frag-conversion-explicit-dmat3x2-mat3x2,Fail
+spec@glsl-4.00@execution@conversion@frag-conversion-explicit-dmat3x4-mat3x4,Fail
+spec@glsl-4.00@execution@conversion@frag-conversion-explicit-dmat4-mat4,Fail
+spec@glsl-4.00@execution@conversion@frag-conversion-explicit-dmat4x2-mat4x2,Fail
+spec@glsl-4.00@execution@conversion@frag-conversion-explicit-dmat4x3-mat4x3,Fail
+spec@glsl-4.00@execution@conversion@frag-conversion-explicit-double-float,Fail
+spec@glsl-4.00@execution@conversion@frag-conversion-explicit-dvec2-vec2,Fail
+spec@glsl-4.00@execution@conversion@frag-conversion-explicit-dvec3-vec3,Fail
+spec@glsl-4.00@execution@conversion@frag-conversion-explicit-dvec4-vec4,Fail
+spec@glsl-4.00@execution@conversion@geom-conversion-explicit-dmat2-mat2,Fail
+spec@glsl-4.00@execution@conversion@geom-conversion-explicit-dmat2x3-mat2x3,Fail
+spec@glsl-4.00@execution@conversion@geom-conversion-explicit-dmat2x4-mat2x4,Fail
+spec@glsl-4.00@execution@conversion@geom-conversion-explicit-dmat3-mat3,Fail
+spec@glsl-4.00@execution@conversion@geom-conversion-explicit-dmat3x2-mat3x2,Fail
+spec@glsl-4.00@execution@conversion@geom-conversion-explicit-dmat3x4-mat3x4,Fail
+spec@glsl-4.00@execution@conversion@geom-conversion-explicit-dmat4-mat4,Fail
+spec@glsl-4.00@execution@conversion@geom-conversion-explicit-dmat4x2-mat4x2,Fail
+spec@glsl-4.00@execution@conversion@geom-conversion-explicit-dmat4x3-mat4x3,Fail
+spec@glsl-4.00@execution@conversion@geom-conversion-explicit-double-float,Fail
+spec@glsl-4.00@execution@conversion@geom-conversion-explicit-dvec2-vec2,Fail
+spec@glsl-4.00@execution@conversion@geom-conversion-explicit-dvec3-vec3,Fail
+spec@glsl-4.00@execution@conversion@geom-conversion-explicit-dvec4-vec4,Fail
+spec@glsl-4.00@execution@conversion@vert-conversion-explicit-dmat2-mat2,Fail
+spec@glsl-4.00@execution@conversion@vert-conversion-explicit-dmat2x3-mat2x3,Fail
+spec@glsl-4.00@execution@conversion@vert-conversion-explicit-dmat2x4-mat2x4,Fail
+spec@glsl-4.00@execution@conversion@vert-conversion-explicit-dmat3-mat3,Fail
+spec@glsl-4.00@execution@conversion@vert-conversion-explicit-dmat3x2-mat3x2,Fail
+spec@glsl-4.00@execution@conversion@vert-conversion-explicit-dmat3x4-mat3x4,Fail
+spec@glsl-4.00@execution@conversion@vert-conversion-explicit-dmat4-mat4,Fail
+spec@glsl-4.00@execution@conversion@vert-conversion-explicit-dmat4x2-mat4x2,Fail
+spec@glsl-4.00@execution@conversion@vert-conversion-explicit-dmat4x3-mat4x3,Fail
+spec@glsl-4.00@execution@conversion@vert-conversion-explicit-double-float,Fail
+spec@glsl-4.00@execution@conversion@vert-conversion-explicit-dvec2-vec2,Fail
+spec@glsl-4.00@execution@conversion@vert-conversion-explicit-dvec3-vec3,Fail
+spec@glsl-4.00@execution@conversion@vert-conversion-explicit-dvec4-vec4,Fail
+spec@glsl-4.50@execution@ssbo-atomiccompswap-int,Fail
+
+# New CTS failures in 1.3.5.0
+KHR-GL46.polygon_offset_clamp.PolygonOffsetClampMinMax,Fail
+KHR-GL46.polygon_offset_clamp.PolygonOffsetClampZeroInfinity,Fail
+spec@arb_texture_cube_map_array@texsubimage cube_map_array,Fail
+
+spec@ext_transform_feedback@tessellation quad_strip wireframe,Fail
+spec@ext_transform_feedback@tessellation quads wireframe,Fail

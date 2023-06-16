@@ -25,12 +25,14 @@
  *
  **************************************************************************/
 
+#include "util/format/format_utils.h"
 #include "util/u_cpu_detect.h"
 #include "util/u_helpers.h"
 #include "util/u_inlines.h"
 #include "util/u_upload_mgr.h"
 #include "util/u_thread.h"
 #include "util/os_time.h"
+#include "util/perf/cpu_trace.h"
 #include <inttypes.h>
 
 /**
@@ -395,6 +397,8 @@ util_throttle_memory_usage(struct pipe_context *pipe,
    if (!t->max_mem_usage)
       return;
 
+   MESA_TRACE_FUNC();
+
    struct pipe_screen *screen = pipe->screen;
    struct pipe_fence_handle **fence = NULL;
    unsigned ring_size = ARRAY_SIZE(t->ring);
@@ -459,6 +463,21 @@ util_throttle_memory_usage(struct pipe_context *pipe,
    t->ring[t->flush_index].mem_usage += memory_size;
 }
 
+void
+util_sw_query_memory_info(struct pipe_screen *pscreen,
+                          struct pipe_memory_info *info)
+{
+   /* Provide query_memory_info from CPU reported memory */
+   uint64_t size;
+
+   if (!os_get_available_system_memory(&size))
+      return;
+   info->avail_staging_memory = size / 1024;
+   if (!os_get_total_physical_memory(&size))
+      return;
+   info->total_staging_memory = size / 1024;
+}
+
 bool
 util_lower_clearsize_to_dword(const void *clearValue, int *clearValueSize, uint32_t *clamped)
 {
@@ -517,4 +536,30 @@ util_init_pipe_vertex_state(struct pipe_screen *screen,
    for (unsigned i = 0; i < num_elements; i++)
       state->input.elements[i] = elements[i];
    state->input.full_velem_mask = full_velem_mask;
+}
+
+/**
+ * Clamp color value to format range.
+ */
+union pipe_color_union
+util_clamp_color(enum pipe_format format,
+                 const union pipe_color_union *color)
+{
+   union pipe_color_union clamp_color = *color;
+   int i;
+
+   for (i = 0; i < util_format_get_nr_components(format); i++) {
+      uint8_t bits = util_format_get_component_bits(format, UTIL_FORMAT_COLORSPACE_RGB, i);
+
+      if (util_format_is_unorm(format))
+         clamp_color.ui[i] = _mesa_unorm_to_unorm(clamp_color.ui[i], bits, bits);
+      else if (util_format_is_snorm(format))
+         clamp_color.i[i] = _mesa_snorm_to_snorm(clamp_color.i[i], bits, bits);
+      else if (util_format_is_pure_uint(format))
+         clamp_color.ui[i] = _mesa_unsigned_to_unsigned(clamp_color.ui[i], bits);
+      else if (util_format_is_pure_sint(format))
+         clamp_color.i[i] = _mesa_signed_to_signed(clamp_color.i[i], bits);
+   }
+
+   return clamp_color;
 }

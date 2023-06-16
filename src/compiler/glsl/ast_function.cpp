@@ -25,7 +25,8 @@
 #include "ast.h"
 #include "compiler/glsl_types.h"
 #include "ir.h"
-#include "main/mtypes.h"
+#include "main/shader_types.h"
+#include "main/consts_exts.h"
 #include "main/shaderobj.h"
 #include "builtin_functions.h"
 
@@ -631,7 +632,7 @@ generate_call(exec_list *instructions, ir_function_signature *sig,
     * instructions; just generate an ir_constant.
     */
    if (state->is_version(120, 100) ||
-       state->ctx->Const.AllowGLSLBuiltinConstantExpression) {
+       state->consts->AllowGLSLBuiltinConstantExpression) {
       ir_constant *value = sig->constant_expression_value(ctx,
                                                           actual_parameters,
                                                           NULL);
@@ -650,6 +651,7 @@ generate_call(exec_list *instructions, ir_function_signature *sig,
       ir_variable *var;
 
       var = new(ctx) ir_variable(sig->return_type, name, ir_var_temporary);
+      var->data.precision = sig->return_precision;
       instructions->push_tail(var);
 
       ralloc_free(name);
@@ -1264,8 +1266,7 @@ process_vec_mat_constructor(exec_list *instructions,
          assert(var->type->is_vector());
          assert(i < 4);
          ir_dereference *lhs = new(ctx) ir_dereference_variable(var);
-         assignment = new(ctx) ir_assignment(lhs, rhs, NULL,
-                                             (unsigned)(1 << i));
+         assignment = new(ctx) ir_assignment(lhs, rhs, 1u << i);
       }
 
       instructions->push_tail(assignment);
@@ -1455,15 +1456,7 @@ emit_inline_vector_constructor(const glsl_type *type,
    const unsigned lhs_components = type->components();
    if (single_scalar_parameter(parameters)) {
       ir_rvalue *first_param = (ir_rvalue *)parameters->get_head_raw();
-      ir_rvalue *rhs = new(ctx) ir_swizzle(first_param, 0, 0, 0, 0,
-                                           lhs_components);
-      ir_dereference_variable *lhs = new(ctx) ir_dereference_variable(var);
-      const unsigned mask = (1U << lhs_components) - 1;
-
-      assert(rhs->type == lhs->type);
-
-      ir_instruction *inst = new(ctx) ir_assignment(lhs, rhs, NULL, mask);
-      instructions->push_tail(inst);
+      return new(ctx) ir_swizzle(first_param, 0, 0, 0, 0, lhs_components);
    } else {
       unsigned base_component = 0;
       unsigned base_lhs_component = 0;
@@ -1532,7 +1525,7 @@ emit_inline_vector_constructor(const glsl_type *type,
          ir_rvalue *rhs = new(ctx) ir_constant(rhs_type, &data);
 
          ir_instruction *inst =
-            new(ctx) ir_assignment(lhs, rhs, NULL, constant_mask);
+            new(ctx) ir_assignment(lhs, rhs, constant_mask);
          instructions->push_tail(inst);
       }
 
@@ -1566,7 +1559,7 @@ emit_inline_vector_constructor(const glsl_type *type,
                new(ctx) ir_swizzle(param, 0, 1, 2, 3, rhs_components);
 
             ir_instruction *inst =
-               new(ctx) ir_assignment(lhs, rhs, NULL, write_mask);
+               new(ctx) ir_assignment(lhs, rhs, write_mask);
             instructions->push_tail(inst);
          }
 
@@ -1617,7 +1610,7 @@ assign_to_matrix_column(ir_variable *var, unsigned column, unsigned row_base,
    /* Mask of fields to be written in the assignment. */
    const unsigned write_mask = ((1U << count) - 1) << row_base;
 
-   return new(mem_ctx) ir_assignment(column_ref, src, NULL, write_mask);
+   return new(mem_ctx) ir_assignment(column_ref, src, write_mask);
 }
 
 
@@ -1685,7 +1678,7 @@ emit_inline_matrix_constructor(const glsl_type *type,
       ir_dereference *const rhs_ref =
          new(ctx) ir_dereference_variable(rhs_var);
 
-      inst = new(ctx) ir_assignment(rhs_ref, first_param, NULL, 0x01);
+      inst = new(ctx) ir_assignment(rhs_ref, first_param, 0x01);
       instructions->push_tail(inst);
 
       /* Assign the temporary vector to each column of the destination matrix
@@ -1834,7 +1827,7 @@ emit_inline_matrix_constructor(const glsl_type *type,
          }
 
          ir_instruction *inst =
-            new(ctx) ir_assignment(lhs, rhs, NULL, write_mask);
+            new(ctx) ir_assignment(lhs, rhs, write_mask);
          instructions->push_tail(inst);
       }
    } else {

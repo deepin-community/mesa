@@ -130,7 +130,7 @@ generate_tex(struct brw_codegen *p,
       case SHADER_OPCODE_TXD:
          if (inst->shadow_compare) {
             /* Gfx7.5+.  Otherwise, lowered by brw_lower_texture_gradients(). */
-            assert(devinfo->is_haswell);
+            assert(devinfo->verx10 == 75);
             msg_type = HSW_SAMPLER_MESSAGE_SAMPLE_DERIV_COMPARE;
          } else {
             msg_type = GFX5_SAMPLER_MESSAGE_SAMPLE_DERIVS;
@@ -271,11 +271,6 @@ generate_tex(struct brw_codegen *p,
    if (inst->opcode == SHADER_OPCODE_TXS)
       return_format = BRW_SAMPLER_RETURN_FORMAT_UINT32;
 
-   uint32_t base_binding_table_index = (inst->opcode == SHADER_OPCODE_TG4 ||
-         inst->opcode == SHADER_OPCODE_TG4_OFFSET)
-         ? prog_data->base.binding_table.gather_texture_start
-         : prog_data->base.binding_table.texture_start;
-
    if (surface_index.file == BRW_IMMEDIATE_VALUE &&
        sampler_index.file == BRW_IMMEDIATE_VALUE) {
       uint32_t surface = surface_index.ud;
@@ -285,7 +280,7 @@ generate_tex(struct brw_codegen *p,
                  dst,
                  inst->base_mrf,
                  src,
-                 surface + base_binding_table_index,
+                 surface,
                  sampler % 16,
                  msg_type,
                  1, /* response length */
@@ -314,8 +309,6 @@ generate_tex(struct brw_codegen *p,
             brw_OR(p, addr, addr, surface_reg);
          }
       }
-      if (base_binding_table_index)
-         brw_ADD(p, addr, addr, brw_imm_ud(base_binding_table_index));
       brw_AND(p, addr, addr, brw_imm_ud(0xfff));
 
       brw_pop_insn_state(p);
@@ -738,7 +731,8 @@ static void
 generate_tcs_get_instance_id(struct brw_codegen *p, struct brw_reg dst)
 {
    const struct intel_device_info *devinfo = p->devinfo;
-   const bool ivb = devinfo->is_ivybridge || devinfo->is_baytrail;
+   const bool ivb = devinfo->platform == INTEL_PLATFORM_IVB ||
+                    devinfo->platform == INTEL_PLATFORM_BYT;
 
    /* "Instance Count" comes as part of the payload in r0.2 bits 23:17.
     *
@@ -1058,7 +1052,8 @@ generate_tcs_create_barrier_header(struct brw_codegen *p,
                                    struct brw_reg dst)
 {
    const struct intel_device_info *devinfo = p->devinfo;
-   const bool ivb = devinfo->is_ivybridge || devinfo->is_baytrail;
+   const bool ivb = devinfo->platform == INTEL_PLATFORM_IVB ||
+                    devinfo->platform == INTEL_PLATFORM_BYT;
    struct brw_reg m0_2 = get_element_ud(dst, 2);
    unsigned instances = ((struct brw_tcs_prog_data *) prog_data)->instances;
 
@@ -1158,7 +1153,7 @@ generate_scratch_read(struct brw_codegen *p,
 
    if (devinfo->ver >= 6)
       msg_type = GFX6_DATAPORT_READ_MESSAGE_OWORD_DUAL_BLOCK_READ;
-   else if (devinfo->ver == 5 || devinfo->is_g4x)
+   else if (devinfo->verx10 >= 45)
       msg_type = G45_DATAPORT_READ_MESSAGE_OWORD_DUAL_BLOCK_READ;
    else
       msg_type = BRW_DATAPORT_READ_MESSAGE_OWORD_DUAL_BLOCK_READ;
@@ -1301,7 +1296,7 @@ generate_pull_constant_load(struct brw_codegen *p,
 
    if (devinfo->ver >= 6)
       msg_type = GFX6_DATAPORT_READ_MESSAGE_OWORD_DUAL_BLOCK_READ;
-   else if (devinfo->ver == 5 || devinfo->is_g4x)
+   else if (devinfo->verx10 >= 45)
       msg_type = G45_DATAPORT_READ_MESSAGE_OWORD_DUAL_BLOCK_READ;
    else
       msg_type = BRW_DATAPORT_READ_MESSAGE_OWORD_DUAL_BLOCK_READ;
@@ -1528,7 +1523,7 @@ generate_code(struct brw_codegen *p,
 {
    const struct intel_device_info *devinfo = p->devinfo;
    const char *stage_abbrev = _mesa_shader_stage_to_abbrev(nir->info.stage);
-   struct disasm_info *disasm_info = disasm_initialize(devinfo, cfg);
+   struct disasm_info *disasm_info = disasm_initialize(p->isa, cfg);
 
    /* `send_count` explicitly does not include spills or fills, as we'd
     * like to use it as a metric for intentional memory access or other
@@ -1820,7 +1815,7 @@ generate_code(struct brw_codegen *p,
          send_count++;
          break;
 
-      case VS_OPCODE_URB_WRITE:
+      case VEC4_VS_OPCODE_URB_WRITE:
          generate_vs_urb_write(p, inst);
          send_count++;
          break;
@@ -1845,12 +1840,12 @@ generate_code(struct brw_codegen *p,
          send_count++;
          break;
 
-      case GS_OPCODE_URB_WRITE:
+      case VEC4_GS_OPCODE_URB_WRITE:
          generate_gs_urb_write(p, inst);
          send_count++;
          break;
 
-      case GS_OPCODE_URB_WRITE_ALLOCATE:
+      case VEC4_GS_OPCODE_URB_WRITE_ALLOCATE:
          generate_gs_urb_write_allocate(p, inst);
          send_count++;
          break;
@@ -1906,12 +1901,6 @@ generate_code(struct brw_codegen *p,
          generate_gs_get_instance_id(p, dst);
          break;
 
-      case SHADER_OPCODE_SHADER_TIME_ADD:
-         brw_shader_time_add(p, src[0],
-                             prog_data->base.binding_table.shader_time_start);
-         send_count++;
-         break;
-
       case VEC4_OPCODE_UNTYPED_ATOMIC:
          assert(src[2].file == BRW_IMMEDIATE_VALUE);
          brw_untyped_atomic(p, dst, src[0], src[1], src[2].ud, inst->mlen,
@@ -1937,19 +1926,15 @@ generate_code(struct brw_codegen *p,
       case SHADER_OPCODE_MEMORY_FENCE:
          brw_memory_fence(p, dst, src[0], BRW_OPCODE_SEND,
                           brw_message_target(inst->sfid),
+                          inst->desc,
                           /* commit_enable */ false,
                           /* bti */ 0);
          send_count++;
          break;
 
-      case SHADER_OPCODE_FIND_LIVE_CHANNEL: {
-         const struct brw_reg mask =
-            brw_stage_has_packed_dispatch(devinfo, nir->info.stage,
-                                          &prog_data->base) ? brw_imm_ud(~0u) :
-            brw_dmask_reg();
-         brw_find_live_channel(p, dst, mask);
+      case SHADER_OPCODE_FIND_LIVE_CHANNEL:
+         brw_find_live_channel(p, dst, false);
          break;
-      }
 
       case SHADER_OPCODE_BROADCAST:
          assert(inst->force_writemask_all);
@@ -2002,7 +1987,7 @@ generate_code(struct brw_codegen *p,
          brw_set_default_access_mode(p, BRW_ALIGN_1);
 
          /* When converting from DF->F, we set destination's stride as 2 as an
-          * aligment requirement. But in IVB/BYT, each DF implicitly writes
+          * alignment requirement. But in IVB/BYT, each DF implicitly writes
           * two floats, being the first one the converted value. So we don't
           * need to explicitly set stride 2, but 1.
           */
@@ -2120,7 +2105,7 @@ generate_code(struct brw_codegen *p,
          generate_zero_oob_push_regs(p, &prog_data->base, dst, src[0]);
          break;
 
-      case TCS_OPCODE_URB_WRITE:
+      case VEC4_TCS_OPCODE_URB_WRITE:
          generate_tcs_urb_write(p, inst, src[0]);
          send_count++;
          break;
@@ -2130,11 +2115,11 @@ generate_code(struct brw_codegen *p,
          send_count++;
          break;
 
-      case TCS_OPCODE_SET_INPUT_URB_OFFSETS:
+      case VEC4_TCS_OPCODE_SET_INPUT_URB_OFFSETS:
          generate_tcs_input_urb_offsets(p, dst, src[0], src[1]);
          break;
 
-      case TCS_OPCODE_SET_OUTPUT_URB_OFFSETS:
+      case VEC4_TCS_OPCODE_SET_OUTPUT_URB_OFFSETS:
          generate_tcs_output_urb_offsets(p, dst, src[0], src[1]);
          break;
 
@@ -2188,10 +2173,22 @@ generate_code(struct brw_codegen *p,
          break;
 
       case BRW_OPCODE_DIM:
-         assert(devinfo->is_haswell);
+         assert(devinfo->verx10 == 75);
          assert(src[0].type == BRW_REGISTER_TYPE_DF);
          assert(dst.type == BRW_REGISTER_TYPE_DF);
          brw_DIM(p, dst, retype(src[0], BRW_REGISTER_TYPE_F));
+         break;
+
+      case SHADER_OPCODE_RND_MODE: {
+         assert(src[0].file == BRW_IMMEDIATE_VALUE);
+         /*
+          * Changes the floating point rounding mode updating the control
+          * register field defined at cr0.0[5-6] bits.
+          */
+         enum brw_rnd_mode mode =
+            (enum brw_rnd_mode) (src[0].d << BRW_CR0_RND_MODE_SHIFT);
+         brw_float_controls_mode(p, mode, BRW_CR0_RND_MODE_MASK);
+      }
          break;
 
       default:
@@ -2226,7 +2223,7 @@ generate_code(struct brw_codegen *p,
 #else
    if (unlikely(debug_enabled))
 #endif
-      brw_validate_instructions(devinfo, p->store,
+      brw_validate_instructions(&compiler->isa, p->store,
                                 0, p->next_insn_offset,
                                 disasm_info);
 
@@ -2272,6 +2269,7 @@ generate_code(struct brw_codegen *p,
                         fill_count, send_count, before_size, after_size);
    if (stats) {
       stats->dispatch_width = 0;
+      stats->max_dispatch_width = 0;
       stats->instructions = before_size / 16;
       stats->sends = send_count;
       stats->loops = loop_count;
@@ -2293,7 +2291,7 @@ brw_vec4_generate_assembly(const struct brw_compiler *compiler,
                            bool debug_enabled)
 {
    struct brw_codegen *p = rzalloc(mem_ctx, struct brw_codegen);
-   brw_init_codegen(compiler->devinfo, p, mem_ctx);
+   brw_init_codegen(&compiler->isa, p, mem_ctx);
    brw_set_default_access_mode(p, BRW_ALIGN_16);
 
    generate_code(p, compiler, log_data, nir, prog_data, cfg, perf, stats,

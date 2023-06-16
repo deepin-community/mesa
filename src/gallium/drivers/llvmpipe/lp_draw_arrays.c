@@ -74,7 +74,7 @@ llvmpipe_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
    }
 
    if (lp->dirty)
-      llvmpipe_update_derived( lp );
+      llvmpipe_update_derived(lp);
 
    /*
     * Map vertex buffers
@@ -139,7 +139,8 @@ llvmpipe_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
       }
    }
    draw_collect_pipeline_statistics(draw,
-                                    lp->active_statistics_queries > 0);
+                                    lp->active_statistics_queries > 0 &&
+                                    !lp->queries_disabled);
 
    draw_collect_primitives_generated(draw,
                                      lp->active_primgen_queries &&

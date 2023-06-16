@@ -45,10 +45,14 @@ struct iris_fs_prog_key;
 struct iris_cs_prog_key;
 enum iris_program_cache_id;
 
+struct u_trace;
+
 #define READ_ONCE(x) (*(volatile __typeof__(x) *)&(x))
 #define WRITE_ONCE(x, v) *(volatile __typeof__(x) *)&(x) = (v)
 
-#define IRIS_MAX_TEXTURE_SAMPLERS 32
+#define IRIS_MAX_TEXTURES 128
+#define IRIS_MAX_SAMPLERS 32
+#define IRIS_MAX_IMAGES 64
 #define IRIS_MAX_SOL_BUFFERS 4
 #define IRIS_MAP_BUFFER_ALIGNMENT 64
 
@@ -65,8 +69,8 @@ struct iris_vtable {
                                unsigned drawid_offset,
                                const struct pipe_draw_indirect_info *indirect,
                                const struct pipe_draw_start_count_bias *sc);
-   void (*update_surface_base_address)(struct iris_batch *batch,
-                                       struct iris_binder *binder);
+   void (*update_binder_address)(struct iris_batch *batch,
+                                 struct iris_binder *binder);
    void (*upload_compute_state)(struct iris_context *ice,
                                 struct iris_batch *batch,
                                 const struct pipe_grid_info *grid);
@@ -136,6 +140,7 @@ struct iris_vtable {
    void (*populate_cs_key)(const struct iris_context *ice,
                            struct iris_cs_prog_key *key);
    void (*lost_genx_state)(struct iris_context *ice, struct iris_batch *batch);
+   void (*disable_rhwo_optimization)(struct iris_batch *batch, bool disable);
 };
 
 struct iris_address {
@@ -161,9 +166,6 @@ struct iris_screen {
     */
    int winsys_fd;
 
-   /** PCI ID for our GPU device */
-   int pci_id;
-
    struct iris_vtable vtbl;
 
    /** Global program_string_id counter (see get_program_string_id()) */
@@ -179,13 +181,14 @@ struct iris_screen {
       bool disable_throttling;
       bool always_flush_cache;
       bool sync_compile;
+      bool limit_trig_input_range;
+      float lower_depth_range_rate;
    } driconf;
 
    /** Does the kernel support various features (KERNEL_HAS_* bitfield)? */
    unsigned kernel_features;
-#define KERNEL_HAS_WAIT_FOR_SUBMIT (1<<0)
-
-   uint64_t aperture_bytes;
+#define KERNEL_HAS_WAIT_FOR_SUBMIT   (1U<<0)
+#define KERNEL_HAS_PROTECTED_CONTEXT (1U<<1)
 
    /**
     * Last sequence number allocated by the cache tracking mechanism.
@@ -196,7 +199,7 @@ struct iris_screen {
     */
    uint64_t last_seqno;
 
-   struct intel_device_info devinfo;
+   const struct intel_device_info *devinfo;
    struct isl_device isl_dev;
    struct iris_bufmgr *bufmgr;
    struct brw_compiler *compiler;

@@ -40,6 +40,8 @@
 
 #include "xm_api.h"
 #include "main/errors.h"
+#include "main/config.h"
+#include "pipe/p_compiler.h"
 #include "util/u_math.h"
 #include "util/u_memory.h"
 
@@ -102,21 +104,20 @@ struct __GLXcontextRec
 };
 
 
-
-static pipe_tsd ContextTSD;
+thread_local GLXContext ContextTSD;
 
 /** Set current context for calling thread */
 static void
 SetCurrentContext(GLXContext c)
 {
-   pipe_tsd_set(&ContextTSD, c);
+   ContextTSD = c;
 }
 
 /** Get current context for calling thread */
 static GLXContext
 GetCurrentContext(void)
 {
-   return pipe_tsd_get(&ContextTSD);
+   return ContextTSD;
 }
 
 
@@ -278,7 +279,7 @@ save_glx_visual( Display *dpy, XVisualInfo *vinfo,
 /**
  * Return the default number of bits for the Z buffer.
  * If defined, use the MESA_GLX_DEPTH_BITS env var value.
- * Otherwise, use the DEFAULT_SOFTWARE_DEPTH_BITS constant.
+ * Otherwise, use 24.
  * XXX probably do the same thing for stencil, accum, etc.
  */
 static GLint
@@ -1391,8 +1392,14 @@ glXQueryExtension( Display *dpy, int *errorBase, int *eventBase )
 PUBLIC void
 glXDestroyContext( Display *dpy, GLXContext ctx )
 {
-   if (ctx) {
-      GLXContext glxCtx = ctx;
+   GLXContext glxCtx = ctx;
+
+   if (glxCtx == NULL || glxCtx->xid == None)
+      return;
+
+   if (ctx->currentDpy) {
+      ctx->xid = None;
+   } else {
       (void) dpy;
       XMesaDestroyContext( glxCtx->xmesaContext );
       XMesaGarbageCollect();

@@ -32,14 +32,27 @@
 bool
 radv_is_instruction_timing_enabled(void)
 {
-   return getenv("RADV_THREAD_TRACE_PIPELINE");
+   return debug_get_bool_option("RADV_THREAD_TRACE_INSTRUCTION_TIMING", true);
 }
 
 static bool
 radv_se_is_disabled(struct radv_device *device, unsigned se)
 {
+   /* FIXME: SQTT only works on SE0 for some unknown reasons. */
+   if (device->physical_device->rad_info.gfx_level == GFX11 && se != 0)
+      return true;
+
    /* No active CU on the SE means it is disabled. */
    return device->physical_device->rad_info.cu_mask[se][0] == 0;
+}
+
+static uint32_t
+gfx11_get_thread_trace_ctrl(struct radv_device *device, bool enable)
+{
+   return S_0367B0_MODE(enable) | S_0367B0_HIWATER(5) | S_0367B0_UTIL_TIMER(1) |
+          S_0367B0_RT_FREQ(2) | /* 4096 clk */
+          S_0367B0_DRAW_EVENT_EN(1) | S_0367B0_SPI_STALL_EN(1) | S_0367B0_SQ_STALL_EN(1) |
+          S_0367B0_REG_AT_HWM(2);
 }
 
 static uint32_t
@@ -51,15 +64,33 @@ gfx10_get_thread_trace_ctrl(struct radv_device *device, bool enable)
                                 S_008D1C_SPI_STALL_EN(1) | S_008D1C_SQ_STALL_EN(1) |
                                 S_008D1C_REG_DROP_ON_STALL(0);
 
-   if (device->physical_device->rad_info.chip_class == GFX10_3)
+   if (device->physical_device->rad_info.gfx_level == GFX10_3)
       thread_trace_ctrl |= S_008D1C_LOWATER_OFFSET(4);
+
+   if (device->physical_device->rad_info.has_sqtt_auto_flush_mode_bug)
+      thread_trace_ctrl |= S_008D1C_AUTO_FLUSH_MODE(1);
 
    return thread_trace_ctrl;
 }
 
 static void
+radv_emit_wait_for_idle(struct radv_device *device, struct radeon_cmdbuf *cs, int family)
+{
+   enum rgp_flush_bits sqtt_flush_bits = 0;
+   si_cs_emit_cache_flush(
+      device->ws, cs, device->physical_device->rad_info.gfx_level, NULL, 0,
+      family == AMD_IP_COMPUTE && device->physical_device->rad_info.gfx_level >= GFX7,
+      (family == RADV_QUEUE_COMPUTE
+          ? RADV_CMD_FLAG_CS_PARTIAL_FLUSH
+          : (RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_PS_PARTIAL_FLUSH)) |
+         RADV_CMD_FLAG_INV_ICACHE | RADV_CMD_FLAG_INV_SCACHE | RADV_CMD_FLAG_INV_VCACHE |
+         RADV_CMD_FLAG_INV_L2,
+      &sqtt_flush_bits, 0);
+}
+
+static void
 radv_emit_thread_trace_start(struct radv_device *device, struct radeon_cmdbuf *cs,
-                             uint32_t queue_family_index)
+                             enum radv_queue_family qf)
 {
    uint32_t shifted_size = device->thread_trace.buffer_size >> SQTT_BUFFER_ALIGN_SHIFT;
    struct radeon_info *rad_info = &device->physical_device->rad_info;
@@ -79,7 +110,39 @@ radv_emit_thread_trace_start(struct radv_device *device, struct radeon_cmdbuf *c
          cs, R_030800_GRBM_GFX_INDEX,
          S_030800_SE_INDEX(se) | S_030800_SH_INDEX(0) | S_030800_INSTANCE_BROADCAST_WRITES(1));
 
-      if (device->physical_device->rad_info.chip_class >= GFX10) {
+      if (device->physical_device->rad_info.gfx_level >= GFX11) {
+         /* Order seems important for the following 2 registers. */
+         radeon_set_uconfig_reg(cs, R_0367A4_SQ_THREAD_TRACE_BUF0_SIZE,
+                                S_0367A4_SIZE(shifted_size) | S_0367A4_BASE_HI(shifted_va >> 32));
+
+         radeon_set_uconfig_reg(cs, R_0367A0_SQ_THREAD_TRACE_BUF0_BASE, shifted_va);
+
+         radeon_set_uconfig_reg(cs, R_0367B4_SQ_THREAD_TRACE_MASK,
+                                S_0367B4_WTYPE_INCLUDE(0x7f) | /* all shader stages */
+                                   S_0367B4_SA_SEL(0) | S_0367B4_WGP_SEL(first_active_cu / 2) |
+                                   S_0367B4_SIMD_SEL(0));
+
+         uint32_t thread_trace_token_mask = S_0367B8_REG_INCLUDE(
+            V_0367B8_REG_INCLUDE_SQDEC | V_0367B8_REG_INCLUDE_SHDEC | V_0367B8_REG_INCLUDE_GFXUDEC |
+            V_0367B8_REG_INCLUDE_COMP | V_0367B8_REG_INCLUDE_CONTEXT | V_0367B8_REG_INCLUDE_CONFIG);
+
+         /* Performance counters with SQTT are considered deprecated. */
+         uint32_t token_exclude = V_0367B8_TOKEN_EXCLUDE_PERF;
+
+         if (!radv_is_instruction_timing_enabled()) {
+            /* Reduce SQTT traffic when instruction timing isn't enabled. */
+            token_exclude |= V_0367B8_TOKEN_EXCLUDE_VMEMEXEC | V_0367B8_TOKEN_EXCLUDE_ALUEXEC |
+                             V_0367B8_TOKEN_EXCLUDE_VALUINST | V_0367B8_TOKEN_EXCLUDE_IMMEDIATE |
+                             V_0367B8_TOKEN_EXCLUDE_INST;
+         }
+         thread_trace_token_mask |= S_0367B8_TOKEN_EXCLUDE(token_exclude);
+
+         radeon_set_uconfig_reg(cs, R_0367B8_SQ_THREAD_TRACE_TOKEN_MASK, thread_trace_token_mask);
+
+         /* Should be emitted last (it enables thread traces). */
+         radeon_set_uconfig_reg(cs, R_0367B0_SQ_THREAD_TRACE_CTRL,
+                                gfx11_get_thread_trace_ctrl(device, true));
+      } else if (device->physical_device->rad_info.gfx_level >= GFX10) {
          /* Order seems important for the following 2 registers. */
          radeon_set_privileged_config_reg(
             cs, R_008D04_SQ_THREAD_TRACE_BUF0_SIZE,
@@ -131,7 +194,7 @@ radv_emit_thread_trace_start(struct radv_device *device, struct radeon_cmdbuf *c
                                       S_030CC8_REG_STALL_EN(1) | S_030CC8_SPI_STALL_EN(1) |
                                       S_030CC8_SQ_STALL_EN(1);
 
-         if (device->physical_device->rad_info.chip_class < GFX9) {
+         if (device->physical_device->rad_info.gfx_level < GFX9) {
             thread_trace_mask |= S_030CC8_RANDOM_SEED(0xffff);
          }
 
@@ -150,7 +213,7 @@ radv_emit_thread_trace_start(struct radv_device *device, struct radeon_cmdbuf *c
 
          radeon_set_uconfig_reg(cs, R_030CEC_SQ_THREAD_TRACE_HIWATER, S_030CEC_HIWATER(4));
 
-         if (device->physical_device->rad_info.chip_class == GFX9) {
+         if (device->physical_device->rad_info.gfx_level == GFX9) {
             /* Reset thread trace status errors. */
             radeon_set_uconfig_reg(cs, R_030CE8_SQ_THREAD_TRACE_STATUS, S_030CE8_UTC_ERROR(0));
          }
@@ -162,7 +225,7 @@ radv_emit_thread_trace_start(struct radv_device *device, struct radeon_cmdbuf *c
             S_030CD8_AUTOFLUSH_EN(1) | /* periodically flush SQTT data to memory */
             S_030CD8_MODE(1);
 
-         if (device->physical_device->rad_info.chip_class == GFX9) {
+         if (device->physical_device->rad_info.gfx_level == GFX9) {
             /* Count SQTT traffic in TCC perf counters. */
             thread_trace_mode |= S_030CD8_TC_PERF_EN(1);
          }
@@ -177,8 +240,7 @@ radv_emit_thread_trace_start(struct radv_device *device, struct radeon_cmdbuf *c
                              S_030800_INSTANCE_BROADCAST_WRITES(1));
 
    /* Start the thread trace with a different event based on the queue. */
-   if (queue_family_index == RADV_QUEUE_COMPUTE &&
-       device->physical_device->rad_info.chip_class >= GFX7) {
+   if (qf == RADV_QUEUE_COMPUTE) {
       radeon_set_sh_reg(cs, R_00B878_COMPUTE_THREAD_TRACE_ENABLE, S_00B878_THREAD_TRACE_ENABLE(1));
    } else {
       radeon_emit(cs, PKT3(PKT3_EVENT_WRITE, 0, 0));
@@ -204,18 +266,26 @@ static const uint32_t gfx10_thread_trace_info_regs[] = {
    R_008D24_SQ_THREAD_TRACE_DROPPED_CNTR,
 };
 
+static const uint32_t gfx11_thread_trace_info_regs[] = {
+   R_0367BC_SQ_THREAD_TRACE_WPTR,
+   R_0367D0_SQ_THREAD_TRACE_STATUS,
+   R_0367E8_SQ_THREAD_TRACE_DROPPED_CNTR,
+};
 static void
 radv_copy_thread_trace_info_regs(struct radv_device *device, struct radeon_cmdbuf *cs,
                                  unsigned se_index)
 {
+   const struct radv_physical_device *pdevice = device->physical_device;
    const uint32_t *thread_trace_info_regs = NULL;
 
-   if (device->physical_device->rad_info.chip_class >= GFX10) {
+   if (device->physical_device->rad_info.gfx_level >= GFX11) {
+      thread_trace_info_regs = gfx11_thread_trace_info_regs;
+   } else if (device->physical_device->rad_info.gfx_level >= GFX10) {
       thread_trace_info_regs = gfx10_thread_trace_info_regs;
-   } else if (device->physical_device->rad_info.chip_class == GFX9) {
+   } else if (device->physical_device->rad_info.gfx_level == GFX9) {
       thread_trace_info_regs = gfx9_thread_trace_info_regs;
    } else {
-      assert(device->physical_device->rad_info.chip_class == GFX8);
+      assert(device->physical_device->rad_info.gfx_level == GFX8);
       thread_trace_info_regs = gfx8_thread_trace_info_regs;
    }
 
@@ -233,17 +303,41 @@ radv_copy_thread_trace_info_regs(struct radv_device *device, struct radeon_cmdbu
       radeon_emit(cs, (info_va + i * 4));
       radeon_emit(cs, (info_va + i * 4) >> 32);
    }
+
+   if (pdevice->rad_info.gfx_level >= GFX11) {
+      /* On GFX11, SQ_THREAD_TRACE_WPTR is incremented from the "initial WPTR address" instead of 0.
+       * To get the number of bytes (in units of 32 bytes) written by SQTT, the workaround is to
+       * substract SQ_THREAD_TRACE_WPTR from the "initial WPTR address" as follow:
+       *
+       * 1) get the current buffer base address for this SE
+       * 2) shift right by 5 bits because SQ_THREAD_TRACE_WPTR is 32-byte aligned
+       * 3) mask off the higher 3 bits because WPTR.OFFSET is 29 bits
+       */
+      uint64_t data_va =
+         ac_thread_trace_get_data_va(&pdevice->rad_info, &device->thread_trace, va, se_index);
+      uint64_t shifted_data_va = (data_va >> 5);
+      uint32_t init_wptr_value = shifted_data_va & 0x1fffffff;
+
+      radeon_emit(cs, PKT3(PKT3_ATOMIC_MEM, 7, 0));
+      radeon_emit(cs, ATOMIC_OP(TC_OP_ATOMIC_SUB_32));
+      radeon_emit(cs, info_va);         /* addr lo */
+      radeon_emit(cs, info_va >> 32);   /* addr hi */
+      radeon_emit(cs, init_wptr_value); /* data lo */
+      radeon_emit(cs, 0);               /* data hi */
+      radeon_emit(cs, 0);               /* compare data lo */
+      radeon_emit(cs, 0);               /* compare data hi */
+      radeon_emit(cs, 0);               /* loop interval */
+   }
 }
 
 static void
 radv_emit_thread_trace_stop(struct radv_device *device, struct radeon_cmdbuf *cs,
-                            uint32_t queue_family_index)
+                            enum radv_queue_family qf)
 {
    unsigned max_se = device->physical_device->rad_info.max_se;
 
    /* Stop the thread trace with a different event based on the queue. */
-   if (queue_family_index == RADV_QUEUE_COMPUTE &&
-       device->physical_device->rad_info.chip_class >= GFX7) {
+   if (qf == RADV_QUEUE_COMPUTE) {
       radeon_set_sh_reg(cs, R_00B878_COMPUTE_THREAD_TRACE_ENABLE, S_00B878_THREAD_TRACE_ENABLE(0));
    } else {
       radeon_emit(cs, PKT3(PKT3_EVENT_WRITE, 0, 0));
@@ -252,6 +346,11 @@ radv_emit_thread_trace_stop(struct radv_device *device, struct radeon_cmdbuf *cs
 
    radeon_emit(cs, PKT3(PKT3_EVENT_WRITE, 0, 0));
    radeon_emit(cs, EVENT_TYPE(V_028A90_THREAD_TRACE_FINISH) | EVENT_INDEX(0));
+
+   if (device->physical_device->rad_info.has_sqtt_rb_harvest_bug) {
+      /* Some chips with disabled RBs should wait for idle because FINISH_DONE doesn't work. */
+      radv_emit_wait_for_idle(device, cs, qf);
+   }
 
    for (unsigned se = 0; se < max_se; se++) {
       if (radv_se_is_disabled(device, se))
@@ -262,17 +361,44 @@ radv_emit_thread_trace_stop(struct radv_device *device, struct radeon_cmdbuf *cs
          cs, R_030800_GRBM_GFX_INDEX,
          S_030800_SE_INDEX(se) | S_030800_SH_INDEX(0) | S_030800_INSTANCE_BROADCAST_WRITES(1));
 
-      if (device->physical_device->rad_info.chip_class >= GFX10) {
+      if (device->physical_device->rad_info.gfx_level >= GFX11) {
          /* Make sure to wait for the trace buffer. */
          radeon_emit(cs, PKT3(PKT3_WAIT_REG_MEM, 5, 0));
          radeon_emit(
             cs,
             WAIT_REG_MEM_NOT_EQUAL); /* wait until the register is equal to the reference value */
-         radeon_emit(cs, R_008D20_SQ_THREAD_TRACE_STATUS >> 2); /* register */
+         radeon_emit(cs, R_0367D0_SQ_THREAD_TRACE_STATUS >> 2); /* register */
          radeon_emit(cs, 0);
          radeon_emit(cs, 0);                       /* reference value */
-         radeon_emit(cs, ~C_008D20_FINISH_DONE);
+         radeon_emit(cs, ~C_0367D0_FINISH_DONE);
          radeon_emit(cs, 4);                       /* poll interval */
+
+         /* Disable the thread trace mode. */
+         radeon_set_uconfig_reg(cs, R_0367B0_SQ_THREAD_TRACE_CTRL,
+                                gfx11_get_thread_trace_ctrl(device, false));
+
+         /* Wait for thread trace completion. */
+         radeon_emit(cs, PKT3(PKT3_WAIT_REG_MEM, 5, 0));
+         radeon_emit(
+            cs, WAIT_REG_MEM_EQUAL); /* wait until the register is equal to the reference value */
+         radeon_emit(cs, R_0367D0_SQ_THREAD_TRACE_STATUS >> 2); /* register */
+         radeon_emit(cs, 0);
+         radeon_emit(cs, 0);              /* reference value */
+         radeon_emit(cs, ~C_0367D0_BUSY); /* mask */
+         radeon_emit(cs, 4);              /* poll interval */
+      } else if (device->physical_device->rad_info.gfx_level >= GFX10) {
+         if (!device->physical_device->rad_info.has_sqtt_rb_harvest_bug) {
+            /* Make sure to wait for the trace buffer. */
+            radeon_emit(cs, PKT3(PKT3_WAIT_REG_MEM, 5, 0));
+            radeon_emit(
+               cs,
+               WAIT_REG_MEM_NOT_EQUAL); /* wait until the register is equal to the reference value */
+            radeon_emit(cs, R_008D20_SQ_THREAD_TRACE_STATUS >> 2); /* register */
+            radeon_emit(cs, 0);
+            radeon_emit(cs, 0);                       /* reference value */
+            radeon_emit(cs, ~C_008D20_FINISH_DONE);
+            radeon_emit(cs, 4);                       /* poll interval */
+         }
 
          /* Disable the thread trace mode. */
          radeon_set_privileged_config_reg(cs, R_008D1C_SQ_THREAD_TRACE_CTRL,
@@ -312,10 +438,16 @@ radv_emit_thread_trace_stop(struct radv_device *device, struct radeon_cmdbuf *cs
 }
 
 void
-radv_emit_thread_trace_userdata(const struct radv_device *device, struct radeon_cmdbuf *cs,
-                                const void *data, uint32_t num_dwords)
+radv_emit_thread_trace_userdata(struct radv_cmd_buffer *cmd_buffer, const void *data,
+                                uint32_t num_dwords)
 {
+   struct radv_device *device = cmd_buffer->device;
+   struct radeon_cmdbuf *cs = cmd_buffer->cs;
    const uint32_t *dwords = (uint32_t *)data;
+
+   /* SQTT user data packets aren't supported on SDMA queues. */
+   if (cmd_buffer->qf == RADV_QUEUE_TRANSFER)
+      return;
 
    while (num_dwords > 0) {
       uint32_t count = MIN2(num_dwords, 2);
@@ -324,7 +456,7 @@ radv_emit_thread_trace_userdata(const struct radv_device *device, struct radeon_
 
       /* Without the perfctr bit the CP might not always pass the
        * write on correctly. */
-      if (device->physical_device->rad_info.chip_class >= GFX10)
+      if (device->physical_device->rad_info.gfx_level >= GFX10)
          radeon_set_uconfig_reg_seq_perfctr(cs, R_030D08_SQ_THREAD_TRACE_USERDATA_2, count);
       else
          radeon_set_uconfig_reg_seq(cs, R_030D08_SQ_THREAD_TRACE_USERDATA_2, count);
@@ -335,15 +467,15 @@ radv_emit_thread_trace_userdata(const struct radv_device *device, struct radeon_
    }
 }
 
-static void
+void
 radv_emit_spi_config_cntl(struct radv_device *device, struct radeon_cmdbuf *cs, bool enable)
 {
-   if (device->physical_device->rad_info.chip_class >= GFX9) {
+   if (device->physical_device->rad_info.gfx_level >= GFX9) {
       uint32_t spi_config_cntl =
          S_031100_GPR_WRITE_PRIORITY(0x2c688) | S_031100_EXP_PRIORITY_ORDER(3) |
          S_031100_ENABLE_SQG_TOP_EVENTS(enable) | S_031100_ENABLE_SQG_BOP_EVENTS(enable);
 
-      if (device->physical_device->rad_info.chip_class >= GFX10)
+      if (device->physical_device->rad_info.gfx_level >= GFX10)
          spi_config_cntl |= S_031100_PS_PKR_PRIORITY_CNTL(3);
 
       radeon_set_uconfig_reg(cs, R_031100_SPI_CONFIG_CNTL, spi_config_cntl);
@@ -355,31 +487,19 @@ radv_emit_spi_config_cntl(struct radv_device *device, struct radeon_cmdbuf *cs, 
    }
 }
 
-static void
+void
 radv_emit_inhibit_clockgating(struct radv_device *device, struct radeon_cmdbuf *cs, bool inhibit)
 {
-   if (device->physical_device->rad_info.chip_class >= GFX10) {
+   if (device->physical_device->rad_info.gfx_level >= GFX11)
+      return; /* not needed */
+
+   if (device->physical_device->rad_info.gfx_level >= GFX10) {
       radeon_set_uconfig_reg(cs, R_037390_RLC_PERFMON_CLK_CNTL,
                              S_037390_PERFMON_CLOCK_STATE(inhibit));
-   } else if (device->physical_device->rad_info.chip_class >= GFX8) {
+   } else if (device->physical_device->rad_info.gfx_level >= GFX8) {
       radeon_set_uconfig_reg(cs, R_0372FC_RLC_PERFMON_CLK_CNTL,
                              S_0372FC_PERFMON_CLOCK_STATE(inhibit));
    }
-}
-
-static void
-radv_emit_wait_for_idle(struct radv_device *device, struct radeon_cmdbuf *cs, int family)
-{
-   enum rgp_flush_bits sqtt_flush_bits = 0;
-   si_cs_emit_cache_flush(
-      cs, device->physical_device->rad_info.chip_class, NULL, 0,
-      family == RING_COMPUTE && device->physical_device->rad_info.chip_class >= GFX7,
-      (family == RADV_QUEUE_COMPUTE
-          ? RADV_CMD_FLAG_CS_PARTIAL_FLUSH
-          : (RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_PS_PARTIAL_FLUSH)) |
-         RADV_CMD_FLAG_INV_ICACHE | RADV_CMD_FLAG_INV_SCACHE | RADV_CMD_FLAG_INV_VCACHE |
-         RADV_CMD_FLAG_INV_L2,
-      &sqtt_flush_bits, 0);
 }
 
 static bool
@@ -448,6 +568,9 @@ radv_thread_trace_init(struct radv_device *device)
    if (!radv_thread_trace_init_bo(device))
       return false;
 
+   if (!radv_device_acquire_performance_counters(device))
+      return false;
+
    list_inithead(&thread_trace_data->rgp_pso_correlation.record);
    simple_mtx_init(&thread_trace_data->rgp_pso_correlation.lock, mtx_plain);
 
@@ -465,6 +588,8 @@ radv_thread_trace_finish(struct radv_device *device)
 {
    struct ac_thread_trace_data *thread_trace_data = &device->thread_trace;
    struct radeon_winsys *ws = device->ws;
+
+   free(device->thread_trace.trigger_file);
 
    radv_thread_trace_finish_bo(device);
 
@@ -507,7 +632,7 @@ bool
 radv_begin_thread_trace(struct radv_queue *queue)
 {
    struct radv_device *device = queue->device;
-   int family = queue->vk.queue_family_index;
+   enum radv_queue_family family = queue->state.qf;
    struct radeon_winsys *ws = device->ws;
    struct radeon_cmdbuf *cs;
    VkResult result;
@@ -518,7 +643,7 @@ radv_begin_thread_trace(struct radv_queue *queue)
       device->thread_trace.start_cs[family] = NULL;
    }
 
-   cs = ws->cs_create(ws, family);
+   cs = ws->cs_create(ws, radv_queue_ring(queue), false);
    if (!cs)
       return false;
 
@@ -532,9 +657,10 @@ radv_begin_thread_trace(struct radv_queue *queue)
       radeon_emit(cs, PKT3(PKT3_NOP, 0, 0));
       radeon_emit(cs, 0);
       break;
+   default:
+      unreachable("Incorrect queue family");
+      break;
    }
-
-   radv_cs_add_buffer(ws, cs, device->thread_trace.bo);
 
    /* Make sure to wait-for-idle before starting SQTT. */
    radv_emit_wait_for_idle(device, cs, family);
@@ -545,8 +671,20 @@ radv_begin_thread_trace(struct radv_queue *queue)
    /* Enable SQG events that collects thread trace data. */
    radv_emit_spi_config_cntl(device, cs, true);
 
+   radv_perfcounter_emit_spm_reset(cs);
+
+   if (device->spm_trace.bo) {
+      /* Enable all shader stages by default. */
+      radv_perfcounter_emit_shaders(cs, 0x7f);
+
+      radv_emit_spm_setup(device, cs);
+   }
+
    /* Start SQTT. */
    radv_emit_thread_trace_start(device, cs, family);
+
+   if (device->spm_trace.bo)
+      radv_perfcounter_emit_spm_start(device, cs, family);
 
    result = ws->cs_finalize(cs);
    if (result != VK_SUCCESS) {
@@ -563,7 +701,7 @@ bool
 radv_end_thread_trace(struct radv_queue *queue)
 {
    struct radv_device *device = queue->device;
-   int family = queue->vk.queue_family_index;
+   enum radv_queue_family family = queue->state.qf;
    struct radeon_winsys *ws = device->ws;
    struct radeon_cmdbuf *cs;
    VkResult result;
@@ -574,7 +712,7 @@ radv_end_thread_trace(struct radv_queue *queue)
       device->thread_trace.stop_cs[family] = NULL;
    }
 
-   cs = ws->cs_create(ws, family);
+   cs = ws->cs_create(ws, radv_queue_ring(queue), false);
    if (!cs)
       return false;
 
@@ -588,15 +726,21 @@ radv_end_thread_trace(struct radv_queue *queue)
       radeon_emit(cs, PKT3(PKT3_NOP, 0, 0));
       radeon_emit(cs, 0);
       break;
+   default:
+      unreachable("Incorrect queue family");
+      break;
    }
-
-   radv_cs_add_buffer(ws, cs, device->thread_trace.bo);
 
    /* Make sure to wait-for-idle before stopping SQTT. */
    radv_emit_wait_for_idle(device, cs, family);
 
+   if (device->spm_trace.bo)
+      radv_perfcounter_emit_spm_stop(device, cs, family);
+
    /* Stop SQTT. */
    radv_emit_thread_trace_stop(device, cs, family);
+
+   radv_perfcounter_emit_spm_reset(cs);
 
    /* Restore previous state by disabling SQG events. */
    radv_emit_spi_config_cntl(device, cs, false);
@@ -652,7 +796,7 @@ radv_get_thread_trace(struct radv_queue *queue, struct ac_thread_trace *thread_t
       thread_trace_se.shader_engine = se;
 
       /* RGP seems to expect units of WGP on GFX10+. */
-      thread_trace_se.compute_unit = device->physical_device->rad_info.chip_class >= GFX10
+      thread_trace_se.compute_unit = device->physical_device->rad_info.gfx_level >= GFX10
                                         ? (first_active_cu / 2)
                                         : first_active_cu;
 

@@ -26,6 +26,7 @@
 
 #include "framework.h"
 #include "vulkan/vulkan.h"
+#include <functional>
 
 enum QoShaderDeclType {
    QoShaderDeclType_ubo,
@@ -61,7 +62,7 @@ struct QoShaderModuleCreateInfo {
 };
 
 extern ac_shader_config config;
-extern radv_shader_info info;
+extern aco_shader_info info;
 extern std::unique_ptr<aco::Program> program;
 extern aco::Builder bld;
 extern aco::Temp inputs[16];
@@ -70,18 +71,20 @@ namespace aco {
 struct ra_test_policy;
 }
 
-void create_program(enum chip_class chip_class, aco::Stage stage,
+void create_program(enum amd_gfx_level gfx_level, aco::Stage stage,
                     unsigned wave_size=64, enum radeon_family family=CHIP_UNKNOWN);
-bool setup_cs(const char *input_spec, enum chip_class chip_class,
+bool setup_cs(const char *input_spec, enum amd_gfx_level gfx_level,
               enum radeon_family family=CHIP_UNKNOWN, const char* subvariant = "",
               unsigned wave_size=64);
 
 void finish_program(aco::Program *program);
 void finish_validator_test();
 void finish_opt_test();
+void finish_setup_reduce_temp_test();
 void finish_ra_test(aco::ra_test_policy, bool lower=false);
 void finish_optimizer_postRA_test();
 void finish_to_hw_instr_test();
+void finish_waitcnt_test();
 void finish_insert_nops_test();
 void finish_form_hard_clause_test();
 void finish_assembler_test();
@@ -91,11 +94,24 @@ void writeout(unsigned i, aco::Builder::Result res);
 void writeout(unsigned i, aco::Operand op);
 void writeout(unsigned i, aco::Operand op0, aco::Operand op1);
 
-aco::Temp fneg(aco::Temp src);
-aco::Temp fabs(aco::Temp src);
+aco::Temp fneg(aco::Temp src, aco::Builder b=bld);
+aco::Temp fabs(aco::Temp src, aco::Builder b=bld);
+aco::Temp f2f32(aco::Temp src, aco::Builder b=bld);
+aco::Temp f2f16(aco::Temp src, aco::Builder b=bld);
+aco::Temp u2u16(aco::Temp src, aco::Builder b=bld);
+aco::Temp fadd(aco::Temp src0, aco::Temp src1, aco::Builder b=bld);
+aco::Temp fmul(aco::Temp src0, aco::Temp src1, aco::Builder b=bld);
+aco::Temp fma(aco::Temp src0, aco::Temp src1, aco::Temp src2, aco::Builder b=bld);
+aco::Temp fsat(aco::Temp src, aco::Builder b=bld);
+aco::Temp fmin(aco::Temp src0, aco::Temp src1, aco::Builder b=bld);
+aco::Temp fmax(aco::Temp src0, aco::Temp src1, aco::Builder b=bld);
+aco::Temp ext_ushort(aco::Temp src, unsigned idx, aco::Builder b=bld);
+aco::Temp ext_ubyte(aco::Temp src, unsigned idx, aco::Builder b=bld);
+void emit_divergent_if_else(aco::Program* prog, aco::Builder& b, aco::Operand cond, std::function<void()> then,
+                            std::function<void()> els);
 
 /* vulkan helpers */
-VkDevice get_vk_device(enum chip_class chip_class);
+VkDevice get_vk_device(enum amd_gfx_level gfx_level);
 VkDevice get_vk_device(enum radeon_family family);
 
 void print_pipeline_ir(VkDevice device, VkPipeline pipeline, VkShaderStageFlagBits stages,

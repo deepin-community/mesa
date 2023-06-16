@@ -37,6 +37,9 @@
 #include "teximage.h"
 #include "texobj.h"
 #include "hash.h"
+#include "api_exec_decl.h"
+
+#include "state_tracker/st_gen_mipmap.h"
 
 bool
 _mesa_is_valid_generate_texture_mipmap_target(struct gl_context *ctx,
@@ -52,10 +55,10 @@ _mesa_is_valid_generate_texture_mipmap_target(struct gl_context *ctx,
       error = false;
       break;
    case GL_TEXTURE_3D:
-      error = ctx->API == API_OPENGLES;
+      error = _mesa_is_gles1(ctx);
       break;
    case GL_TEXTURE_CUBE_MAP:
-      error = !ctx->Extensions.ARB_texture_cube_map;
+      error = false;
       break;
    case GL_TEXTURE_1D_ARRAY:
       error = _mesa_is_gles(ctx) || !ctx->Extensions.EXT_texture_array;
@@ -158,7 +161,7 @@ generate_texture_mipmap(struct gl_context *ctx,
        *
        * and this text is gone from the GLES 3.0 spec.
        */
-      if (ctx->API == API_OPENGLES2 && ctx->Version < 30 &&
+      if (_mesa_is_gles2(ctx) && ctx->Version < 30 &&
           _mesa_is_format_compressed(srcImage->TexFormat)) {
          _mesa_unlock_texture(ctx, texObj);
          _mesa_error(ctx, GL_INVALID_OPERATION, "generate mipmaps on compressed texture");
@@ -174,12 +177,12 @@ generate_texture_mipmap(struct gl_context *ctx,
    if (target == GL_TEXTURE_CUBE_MAP) {
       GLuint face;
       for (face = 0; face < 6; face++) {
-         ctx->Driver.GenerateMipmap(ctx,
-                      GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, texObj);
+         st_generate_mipmap(ctx,
+                            GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, texObj);
       }
    }
    else {
-      ctx->Driver.GenerateMipmap(ctx, target, texObj);
+      st_generate_mipmap(ctx, target, texObj);
    }
    _mesa_unlock_texture(ctx, texObj);
 }

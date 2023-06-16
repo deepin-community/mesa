@@ -29,9 +29,9 @@
 #define sizeof_field(type, field) sizeof(((type *)0)->field)
 
 void
-anv_nir_compute_push_layout(const struct anv_physical_device *pdevice,
+anv_nir_compute_push_layout(nir_shader *nir,
+                            const struct anv_physical_device *pdevice,
                             bool robust_buffer_access,
-                            nir_shader *nir,
                             struct brw_stage_prog_data *prog_data,
                             struct anv_pipeline_bind_map *map,
                             void *mem_ctx)
@@ -67,12 +67,13 @@ anv_nir_compute_push_layout(const struct anv_physical_device *pdevice,
                break;
             }
 
-            case nir_intrinsic_load_desc_set_address_intel:
-               push_start = MIN2(push_start,
-                  offsetof(struct anv_push_constants, desc_sets));
-               push_end = MAX2(push_end, push_start +
+            case nir_intrinsic_load_desc_set_address_intel: {
+               unsigned base = offsetof(struct anv_push_constants, desc_sets);
+               push_start = MIN2(push_start, base);
+               push_end = MAX2(push_end, base +
                   sizeof_field(struct anv_push_constants, desc_sets));
                break;
+            }
 
             default:
                break;
@@ -84,9 +85,8 @@ anv_nir_compute_push_layout(const struct anv_physical_device *pdevice,
    const bool has_push_intrinsic = push_start <= push_end;
 
    const bool push_ubo_ranges =
-      pdevice->info.verx10 >= 75 &&
       has_const_ubo && nir->info.stage != MESA_SHADER_COMPUTE &&
-      !brw_shader_stage_is_bindless(nir->info.stage);
+      !brw_shader_stage_requires_bindless_resources(nir->info.stage);
 
    if (push_ubo_ranges && robust_buffer_access) {
       /* We can't on-the-fly adjust our push ranges because doing so would
@@ -118,7 +118,7 @@ anv_nir_compute_push_layout(const struct anv_physical_device *pdevice,
     * push_end (no push constants is indicated by push_start = UINT_MAX).
     */
    push_start = MIN2(push_start, push_end);
-   push_start = align_down_u32(push_start, 32);
+   push_start = ROUND_DOWN_TO(push_start, 32);
 
    /* For vec4 our push data size needs to be aligned to a vec4 and for
     * scalar, it needs to be aligned to a DWORD.
@@ -157,7 +157,7 @@ anv_nir_compute_push_layout(const struct anv_physical_device *pdevice,
                    * brw_nir_lower_rt_intrinsics.c).
                    */
                   unsigned base_offset =
-                     brw_shader_stage_is_bindless(nir->info.stage) ? 0 : push_start;
+                     brw_shader_stage_requires_bindless_resources(nir->info.stage) ? 0 : push_start;
                   intrin->intrinsic = nir_intrinsic_load_uniform;
                   nir_intrinsic_set_base(intrin,
                                          nir_intrinsic_base(intrin) -

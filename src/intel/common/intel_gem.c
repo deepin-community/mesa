@@ -23,6 +23,10 @@
 #include "intel_gem.h"
 #include "drm-uapi/i915_drm.h"
 
+#include "i915/intel_engine.h"
+#include "i915/intel_gem.h"
+#include "xe/intel_gem.h"
+
 bool
 intel_gem_supports_syncobj_wait(int fd)
 {
@@ -54,4 +58,98 @@ intel_gem_supports_syncobj_wait(int fd)
     * DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT flag.
     */
    return ret == -1 && errno == ETIME;
+}
+
+bool
+intel_gem_create_context(int fd, uint32_t *context_id)
+{
+   return i915_gem_create_context(fd, context_id);
+}
+
+bool
+intel_gem_destroy_context(int fd, uint32_t context_id)
+{
+   return i915_gem_destroy_context(fd, context_id);
+}
+
+bool
+intel_gem_create_context_engines(int fd,
+                                 const struct intel_query_engine_info *info,
+                                 int num_engines, enum intel_engine_class *engine_classes,
+                                 uint32_t *context_id)
+{
+   return i915_gem_create_context_engines(fd, info, num_engines,
+                                          engine_classes, context_id);
+}
+
+bool
+intel_gem_set_context_param(int fd, uint32_t context, uint32_t param,
+                            uint64_t value)
+{
+   return i915_gem_set_context_param(fd, context, param, value);
+}
+
+bool
+intel_gem_get_context_param(int fd, uint32_t context, uint32_t param,
+                            uint64_t *value)
+{
+   return i915_gem_get_context_param(fd, context, param, value);
+}
+
+bool
+intel_gem_read_render_timestamp(int fd,
+                                enum intel_kmd_type kmd_type,
+                                uint64_t *value)
+{
+   switch (kmd_type) {
+   case INTEL_KMD_TYPE_I915:
+      return i915_gem_read_render_timestamp(fd, value);
+   case INTEL_KMD_TYPE_XE:
+      return xe_gem_read_render_timestamp(fd, value);
+   default:
+      unreachable("Missing");
+      return false;
+   }
+}
+
+bool
+intel_gem_create_context_ext(int fd, enum intel_gem_create_context_flags flags,
+                             uint32_t *ctx_id)
+{
+   return i915_gem_create_context_ext(fd, flags, ctx_id);
+}
+
+bool
+intel_gem_supports_protected_context(int fd, enum intel_kmd_type kmd_type)
+{
+   switch (kmd_type) {
+   case INTEL_KMD_TYPE_I915:
+      return i915_gem_supports_protected_context(fd);
+   case INTEL_KMD_TYPE_XE:
+      /* TODO: so far Xe don't have support for protected contexts/engines */
+      return false;
+   default:
+      unreachable("Missing");
+      return false;
+   }
+}
+
+bool
+intel_gem_get_param(int fd, uint32_t param, int *value)
+{
+   return i915_gem_get_param(fd, param, value);
+}
+
+bool
+intel_gem_can_render_on_fd(int fd, enum intel_kmd_type kmd_type)
+{
+   switch (kmd_type) {
+   case INTEL_KMD_TYPE_I915:
+      return i915_gem_can_render_on_fd(fd);
+   case INTEL_KMD_TYPE_XE:
+      return xe_gem_can_render_on_fd(fd);
+   default:
+      unreachable("Missing");
+      return false;
+   }
 }

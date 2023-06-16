@@ -1,4 +1,3 @@
-# coding=utf-8
 COPYRIGHT = """\
 /*
  * Copyright 2020 Intel Corporation
@@ -28,14 +27,12 @@ COPYRIGHT = """\
 import argparse
 import math
 import os
-import xml.etree.ElementTree as et
 
-from collections import OrderedDict, namedtuple
 from mako.template import Template
 
 # Mesa-local imports must be declared in meson variable
 # '{file_without_suffix}_depend_files'.
-from vk_extensions import *
+from vk_entrypoints import get_entrypoints_from_xml
 
 # We generate a static hash table for entry point lookup
 # (vkGetProcAddress). We use a linear congruential generator for our hash
@@ -217,9 +214,6 @@ vk_device_dispatch_table_get_if_supported(
     const struct vk_instance_extension_table *instance_exts,
     const struct vk_device_extension_table *device_exts);
 
-extern struct vk_physical_device_dispatch_table vk_physical_device_trampolines;
-extern struct vk_device_dispatch_table vk_device_trampolines;
-
 #ifdef __cplusplus
 }
 #endif
@@ -230,11 +224,7 @@ extern struct vk_device_dispatch_table vk_device_trampolines;
 TEMPLATE_C = Template(COPYRIGHT + """\
 /* This file generated from ${filename}, don't edit directly. */
 
-#include "vk_device.h"
 #include "vk_dispatch_table.h"
-#include "vk_instance.h"
-#include "vk_object.h"
-#include "vk_physical_device.h"
 
 #include "util/macros.h"
 #include "string.h"
@@ -471,7 +461,30 @@ vk_device_entrypoint_is_enabled(int index, uint32_t core_version,
 #ifdef _MSC_VER
 VKAPI_ATTR void VKAPI_CALL vk_entrypoint_stub(void)
 {
-   unreachable(!"Entrypoint not implemented");
+   unreachable("Entrypoint not implemented");
+}
+
+static const void *get_function_target(const void *func)
+{
+   const uint8_t *address = func;
+#ifdef _M_X64
+   /* Incremental linking may indirect through relative jump */
+   if (*address == 0xE9)
+   {
+      /* Compute JMP target if the first byte is opcode 0xE9 */
+      uint32_t offset;
+      memcpy(&offset, address + 1, 4);
+      address += offset + 5;
+   }
+#else
+   /* Add other platforms here if necessary */
+#endif
+   return address;
+}
+
+static bool vk_function_is_stub(PFN_vkVoidFunction func)
+{
+   return (func == vk_entrypoint_stub) || (get_function_target(func) == get_function_target(vk_entrypoint_stub));
 }
 #endif
 
@@ -489,7 +502,7 @@ void vk_${type}_dispatch_table_from_entrypoints(
         for (unsigned i = 0; i < ARRAY_SIZE(${type}_compaction_table); i++) {
 #ifdef _MSC_VER
             assert(entry[i] != NULL);
-            if (entry[i] == vk_entrypoint_stub)
+            if (vk_function_is_stub(entry[i]))
 #else
             if (entry[i] == NULL)
 #endif
@@ -503,7 +516,7 @@ void vk_${type}_dispatch_table_from_entrypoints(
             unsigned disp_index = ${type}_compaction_table[i];
 #ifdef _MSC_VER
             assert(entry[i] != NULL);
-            if (disp[disp_index] == NULL && entry[i] != vk_entrypoint_stub)
+            if (disp[disp_index] == NULL && !vk_function_is_stub(entry[i]))
 #else
             if (disp[disp_index] == NULL)
 #endif
@@ -597,92 +610,6 @@ vk_device_dispatch_table_get_if_supported(
 
     return vk_device_dispatch_table_get_for_entry_index(table, entry_index);
 }
-
-% for e in physical_device_entrypoints:
-  % if e.alias:
-    <% continue %>
-  % endif
-  % if e.guard is not None:
-#ifdef ${e.guard}
-  % endif
-static VKAPI_ATTR ${e.return_type} VKAPI_CALL
-${e.prefixed_name('vk_tramp')}(${e.decl_params()})
-{
-    <% assert e.params[0].type == 'VkPhysicalDevice' %>
-    VK_FROM_HANDLE(vk_physical_device, vk_physical_device, ${e.params[0].name});
-  % if e.return_type == 'void':
-    vk_physical_device->dispatch_table.${e.name}(${e.call_params()});
-  % else:
-    return vk_physical_device->dispatch_table.${e.name}(${e.call_params()});
-  % endif
-}
-  % if e.guard is not None:
-#endif
-  % endif
-% endfor
-
-struct vk_physical_device_dispatch_table vk_physical_device_trampolines = {
-% for e in physical_device_entrypoints:
-  % if e.alias:
-    <% continue %>
-  % endif
-  % if e.guard is not None:
-#ifdef ${e.guard}
-  % endif
-    .${e.name} = ${e.prefixed_name('vk_tramp')},
-  % if e.guard is not None:
-#endif
-  % endif
-% endfor
-};
-
-% for e in device_entrypoints:
-  % if e.alias:
-    <% continue %>
-  % endif
-  % if e.guard is not None:
-#ifdef ${e.guard}
-  % endif
-static VKAPI_ATTR ${e.return_type} VKAPI_CALL
-${e.prefixed_name('vk_tramp')}(${e.decl_params()})
-{
-  % if e.params[0].type == 'VkDevice':
-    VK_FROM_HANDLE(vk_device, vk_device, ${e.params[0].name});
-    % if e.return_type == 'void':
-    vk_device->dispatch_table.${e.name}(${e.call_params()});
-    % else:
-    return vk_device->dispatch_table.${e.name}(${e.call_params()});
-    % endif
-  % elif e.params[0].type in ('VkCommandBuffer', 'VkQueue'):
-    struct vk_object_base *vk_object = (struct vk_object_base *)${e.params[0].name};
-    % if e.return_type == 'void':
-    vk_object->device->dispatch_table.${e.name}(${e.call_params()});
-    % else:
-    return vk_object->device->dispatch_table.${e.name}(${e.call_params()});
-    % endif
-  % else:
-    assert(!"Unhandled device child trampoline case: ${e.params[0].type}");
-  % endif
-}
-  % if e.guard is not None:
-#endif
-  % endif
-% endfor
-
-struct vk_device_dispatch_table vk_device_trampolines = {
-% for e in device_entrypoints:
-  % if e.alias:
-    <% continue %>
-  % endif
-  % if e.guard is not None:
-#ifdef ${e.guard}
-  % endif
-    .${e.name} = ${e.prefixed_name('vk_tramp')},
-  % if e.guard is not None:
-#endif
-  % endif
-% endfor
-};
 """)
 
 U32_MASK = 2**32 - 1
@@ -690,7 +617,7 @@ U32_MASK = 2**32 - 1
 PRIME_FACTOR = 5024183
 PRIME_STEP = 19
 
-class StringIntMapEntry(object):
+class StringIntMapEntry:
     def __init__(self, string, num):
         self.string = string
         self.num = num
@@ -706,10 +633,10 @@ class StringIntMapEntry(object):
 def round_to_pow2(x):
     return 2**int(math.ceil(math.log(x, 2)))
 
-class StringIntMap(object):
+class StringIntMap:
     def __init__(self):
         self.baked = False
-        self.strings = dict()
+        self.strings = {}
 
     def add_string(self, string, num):
         assert not self.baked
@@ -741,153 +668,6 @@ class StringIntMap(object):
                 level = level + 1
             self.collisions[min(level, 9)] += 1
             self.mapping[h & self.hash_mask] = idx
-
-EntrypointParam = namedtuple('EntrypointParam', 'type name decl len')
-
-class EntrypointBase(object):
-    def __init__(self, name):
-        assert name.startswith('vk')
-        self.name = name[2:]
-        self.alias = None
-        self.guard = None
-        self.entry_table_index = None
-        # Extensions which require this entrypoint
-        self.core_version = None
-        self.extensions = []
-
-    def prefixed_name(self, prefix):
-        return prefix + '_' + self.name
-
-class Entrypoint(EntrypointBase):
-    def __init__(self, name, return_type, params, guard=None):
-        super(Entrypoint, self).__init__(name)
-        self.return_type = return_type
-        self.params = params
-        self.guard = guard
-        self.aliases = []
-        self.disp_table_index = None
-
-    def is_physical_device_entrypoint(self):
-        return self.params[0].type in ('VkPhysicalDevice', )
-
-    def is_device_entrypoint(self):
-        return self.params[0].type in ('VkDevice', 'VkCommandBuffer', 'VkQueue')
-
-    def decl_params(self):
-        return ', '.join(p.decl for p in self.params)
-
-    def call_params(self):
-        return ', '.join(p.name for p in self.params)
-
-class EntrypointAlias(EntrypointBase):
-    def __init__(self, name, entrypoint):
-        super(EntrypointAlias, self).__init__(name)
-        self.alias = entrypoint
-        entrypoint.aliases.append(self)
-
-    def is_physical_device_entrypoint(self):
-        return self.alias.is_physical_device_entrypoint()
-
-    def is_device_entrypoint(self):
-        return self.alias.is_device_entrypoint()
-
-    def prefixed_name(self, prefix):
-        return self.alias.prefixed_name(prefix)
-
-    @property
-    def params(self):
-        return self.alias.params
-
-    @property
-    def return_type(self):
-        return self.alias.return_type
-
-    @property
-    def disp_table_index(self):
-        return self.alias.disp_table_index
-
-    def decl_params(self):
-        return self.alias.decl_params()
-
-    def call_params(self):
-        return self.alias.call_params()
-
-def get_entrypoints(doc, entrypoints_to_defines):
-    """Extract the entry points from the registry."""
-    entrypoints = OrderedDict()
-
-    for command in doc.findall('./commands/command'):
-        if 'alias' in command.attrib:
-            alias = command.attrib['name']
-            target = command.attrib['alias']
-            entrypoints[alias] = EntrypointAlias(alias, entrypoints[target])
-        else:
-            name = command.find('./proto/name').text
-            ret_type = command.find('./proto/type').text
-            params = [EntrypointParam(
-                type=p.find('./type').text,
-                name=p.find('./name').text,
-                decl=''.join(p.itertext()),
-                len=p.attrib.get('len', None)
-            ) for p in command.findall('./param')]
-            guard = entrypoints_to_defines.get(name)
-            # They really need to be unique
-            assert name not in entrypoints
-            entrypoints[name] = Entrypoint(name, ret_type, params, guard)
-
-    for feature in doc.findall('./feature'):
-        assert feature.attrib['api'] == 'vulkan'
-        version = VkVersion(feature.attrib['number'])
-        for command in feature.findall('./require/command'):
-            e = entrypoints[command.attrib['name']]
-            assert e.core_version is None
-            e.core_version = version
-
-    for extension in doc.findall('.extensions/extension'):
-        if extension.attrib['supported'] != 'vulkan':
-            continue
-
-        ext_name = extension.attrib['name']
-
-        ext = Extension(ext_name, 1, True)
-        ext.type = extension.attrib['type']
-
-        for command in extension.findall('./require/command'):
-            e = entrypoints[command.attrib['name']]
-            assert e.core_version is None
-            e.extensions.append(ext)
-
-    return entrypoints.values()
-
-
-def get_entrypoints_defines(doc):
-    """Maps entry points to extension defines."""
-    entrypoints_to_defines = {}
-
-    platform_define = {}
-    for platform in doc.findall('./platforms/platform'):
-        name = platform.attrib['name']
-        define = platform.attrib['protect']
-        platform_define[name] = define
-
-    for extension in doc.findall('./extensions/extension[@platform]'):
-        platform = extension.attrib['platform']
-        define = platform_define[platform]
-
-        for entrypoint in extension.findall('./require/command'):
-            fullname = entrypoint.attrib['name']
-            entrypoints_to_defines[fullname] = define
-
-    return entrypoints_to_defines
-
-def get_entrypoints_from_xml(xml_files):
-    entrypoints = []
-
-    for filename in xml_files:
-        doc = et.parse(filename)
-        entrypoints += get_entrypoints(doc, get_entrypoints_defines(doc))
-
-    return entrypoints
 
 def main():
     parser = argparse.ArgumentParser()
@@ -963,12 +743,10 @@ def main():
         # to print a useful stack trace and prints it, then exits with
         # status 1, if python is run with debug; otherwise it just raises
         # the exception
-        if __debug__:
-            import sys
-            from mako import exceptions
-            sys.stderr.write(exceptions.text_error_template().render() + '\n')
-            sys.exit(1)
-        raise
+        import sys
+        from mako import exceptions
+        print(exceptions.text_error_template().render(), file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == '__main__':

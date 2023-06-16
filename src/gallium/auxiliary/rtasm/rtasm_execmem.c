@@ -33,7 +33,7 @@
 
 #include "pipe/p_compiler.h"
 #include "util/u_debug.h"
-#include "os/os_thread.h"
+#include "util/u_thread.h"
 #include "util/u_memory.h"
 
 #include "rtasm_execmem.h"
@@ -42,14 +42,11 @@
 #define MAP_ANONYMOUS MAP_ANON
 #endif
 
-#if defined(PIPE_OS_WINDOWS)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN 1
-#endif
+#if DETECT_OS_WINDOWS
 #include <windows.h>
 #endif
 
-#if defined(PIPE_OS_UNIX)
+#if DETECT_OS_UNIX
 
 
 /*
@@ -76,7 +73,7 @@ init_heap(void)
       exec_heap = u_mmInit( 0, EXEC_HEAP_SIZE );
    
    if (!exec_mem)
-      exec_mem = (unsigned char *) mmap(0, EXEC_HEAP_SIZE, 
+      exec_mem = (unsigned char *) mmap(NULL, EXEC_HEAP_SIZE,
 					PROT_EXEC | PROT_READ | PROT_WRITE, 
 					MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
@@ -128,7 +125,7 @@ rtasm_exec_free(void *addr)
 }
 
 
-#elif defined(PIPE_OS_WINDOWS)
+#elif DETECT_OS_WINDOWS
 
 
 /*

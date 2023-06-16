@@ -28,7 +28,7 @@
 #include "pipe/p_video_codec.h"
 #include "util/u_memory.h"
 #include "util/u_video.h"
-#include "vl/vl_rbsp.h"
+#include "util/vl_rbsp.h"
 
 #include "entrypoint.h"
 #include "vid_dec.h"
@@ -623,7 +623,7 @@ static void vid_dec_h265_BeginFrame(vid_dec_PrivateType *priv)
       templat.profile = priv->profile;
       templat.entrypoint = PIPE_VIDEO_ENTRYPOINT_BITSTREAM;
       templat.chroma_format = PIPE_VIDEO_CHROMA_FORMAT_420;
-      templat.expect_chunked_decode = true;
+      templat.expect_chunked_decode = false;
       templat.width = priv->codec_data.h265.pic_width_in_luma_samples;
       templat.height = priv->codec_data.h265.pic_height_in_luma_samples;
       templat.level =  priv->codec_data.h265.level_idc;
@@ -795,7 +795,7 @@ static void slice_header(vid_dec_PrivateType *priv, struct vl_rbsp *rbsp,
    if (priv->picture.h265.RAPPicFlag != is_rap_picture(nal_unit_type))
       vid_dec_h265_EndFrame(priv);
    priv->picture.h265.RAPPicFlag = is_rap_picture(nal_unit_type);
-
+   priv->picture.h265.IntraPicFlag = is_rap_picture(nal_unit_type);
    num_st_rps = sps->num_short_term_ref_pic_sets;
 
    if (priv->picture.h265.CurrRpsIdx != num_st_rps)

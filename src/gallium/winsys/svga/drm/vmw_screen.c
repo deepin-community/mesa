@@ -87,7 +87,7 @@ vmw_winsys_screen_deinit_mksstat(struct vmw_winsys_screen *vws)
       uint32_t expected = __atomic_load_n(&vws->mksstat_tls[i].pid, __ATOMIC_ACQUIRE);
 
       if (expected == -1U) {
-         fprintf(stderr, "%s encountered locked mksstat TLS entry at index %lu.\n", __FUNCTION__, i);
+         fprintf(stderr, "%s encountered locked mksstat TLS entry at index %lu.\n", __func__, i);
          continue;
       }
 
@@ -103,12 +103,12 @@ vmw_winsys_screen_deinit_mksstat(struct vmw_winsys_screen *vws)
          assert(vws->mksstat_tls[i].stat_id != -1UL);
 
          if (drmCommandWrite(vws->ioctl.drm_fd, DRM_VMW_MKSSTAT_REMOVE, &arg, sizeof(arg))) {
-            fprintf(stderr, "%s could not ioctl: %s\n", __FUNCTION__, strerror(errno));
+            fprintf(stderr, "%s could not ioctl: %s\n", __func__, strerror(errno));
          } else if (munmap(vws->mksstat_tls[i].stat_pages, vmw_svga_winsys_stats_len())) {
-            fprintf(stderr, "%s could not munmap: %s\n", __FUNCTION__, strerror(errno));
+            fprintf(stderr, "%s could not munmap: %s\n", __func__, strerror(errno));
          }
       } else {
-         fprintf(stderr, "%s encountered volatile mksstat TLS entry at index %lu.\n", __FUNCTION__, i);
+         fprintf(stderr, "%s encountered volatile mksstat TLS entry at index %lu.\n", __func__, i);
       }
    }
 }
@@ -158,7 +158,12 @@ vmw_winsys_create( int fd )
    vws->base.have_gb_dma = !vws->force_coherent;
    vws->base.need_to_rebind_resources = FALSE;
    vws->base.have_transfer_from_buffer_cmd = vws->base.have_vgpu10;
-   vws->base.have_constant_buffer_offset_cmd = FALSE;
+   vws->base.have_constant_buffer_offset_cmd =
+      vws->ioctl.have_drm_2_20 && vws->base.have_sm5;
+   vws->base.have_index_vertex_buffer_offset_cmd = FALSE;
+   vws->base.have_rasterizer_state_v2_cmd =
+      vws->ioctl.have_drm_2_20 && vws->base.have_sm5;
+
    getenv_val = getenv("SVGA_FORCE_KERNEL_UNMAPS");
    vws->cache_maps = !getenv_val || strcmp(getenv_val, "0") == 0;
    vws->fence_ops = vmw_fence_ops_create(vws);

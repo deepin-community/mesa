@@ -100,7 +100,7 @@ image_address(nir_builder *b, const struct intel_device_info *devinfo,
                           nir_channel(b, coord, 1));
    } else {
       unsigned dims = glsl_get_sampler_coordinate_components(deref->type);
-      coord = nir_channels(b, coord, (1 << dims) - 1);
+      coord = nir_trim_vector(b, coord, dims);
    }
 
    nir_ssa_def *offset = load_image_param(b, deref, OFFSET);
@@ -200,7 +200,7 @@ image_address(nir_builder *b, const struct intel_device_info *devinfo,
       /* Multiply by the Bpp value. */
       addr = nir_imul(b, idx, nir_channel(b, stride, 0));
 
-      if (devinfo->ver < 8 && !devinfo->is_baytrail) {
+      if (devinfo->ver < 8 && devinfo->platform != INTEL_PLATFORM_BYT) {
          /* Take into account the two dynamically specified shifts.  Both are
           * used to implement swizzling of X-tiled surfaces.  For Y-tiled
           * surfaces only one bit needs to be XOR-ed with bit 6 of the memory
@@ -457,7 +457,7 @@ convert_color_for_store(nir_builder *b, const struct intel_device_info *devinfo,
    struct format_info image = get_format_info(image_fmt);
    struct format_info lower = get_format_info(lower_fmt);
 
-   color = nir_channels(b, color, (1 << image.chans) - 1);
+   color = nir_trim_vector(b, color, image.chans);
 
    if (image_fmt == lower_fmt)
       return color;
@@ -725,6 +725,7 @@ brw_nir_lower_storage_image(nir_shader *shader,
 
    const nir_lower_image_options image_options = {
       .lower_cube_size = true,
+      .lower_image_samples_to_one = true,
    };
 
    progress |= nir_lower_image(shader, &image_options);

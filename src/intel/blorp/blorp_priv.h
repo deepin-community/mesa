@@ -45,6 +45,8 @@ enum {
    BLORP_NUM_BT_ENTRIES
 };
 
+#define BLORP_SAMPLER_INDEX 0
+
 struct brw_blorp_surface_info
 {
    bool enabled;
@@ -202,8 +204,23 @@ brw_blorp_get_urb_length(const struct brw_wm_prog_data *prog_data)
    return MAX2((prog_data->num_varying_inputs + 1) / 2, 1);
 }
 
+enum blorp_shader_type {
+   BLORP_SHADER_TYPE_COPY,
+   BLORP_SHADER_TYPE_BLIT,
+   BLORP_SHADER_TYPE_CLEAR,
+   BLORP_SHADER_TYPE_MCS_PARTIAL_RESOLVE,
+   BLORP_SHADER_TYPE_LAYER_OFFSET_VS,
+   BLORP_SHADER_TYPE_GFX4_SF,
+};
+
+enum blorp_shader_pipeline {
+   BLORP_SHADER_PIPELINE_RENDER,
+   BLORP_SHADER_PIPELINE_COMPUTE,
+};
+
 struct blorp_params
 {
+   enum blorp_op op;
    uint32_t x0;
    uint32_t y0;
    uint32_t x1;
@@ -237,24 +254,16 @@ struct blorp_params
 
    bool use_pre_baked_binding_table;
    uint32_t pre_baked_binding_table_offset;
-   enum intel_measure_snapshot_type snapshot_type;
+   enum blorp_shader_type shader_type;
+   enum blorp_shader_pipeline shader_pipeline;
 };
+
+enum intel_measure_snapshot_type
+blorp_op_to_intel_measure_snapshot(enum blorp_op op);
+
+const char *blorp_op_to_name(enum blorp_op op);
 
 void blorp_params_init(struct blorp_params *params);
-
-enum blorp_shader_type {
-   BLORP_SHADER_TYPE_COPY,
-   BLORP_SHADER_TYPE_BLIT,
-   BLORP_SHADER_TYPE_CLEAR,
-   BLORP_SHADER_TYPE_MCS_PARTIAL_RESOLVE,
-   BLORP_SHADER_TYPE_LAYER_OFFSET_VS,
-   BLORP_SHADER_TYPE_GFX4_SF,
-};
-
-enum blorp_shader_pipeline {
-   BLORP_SHADER_PIPELINE_RENDER,
-   BLORP_SHADER_PIPELINE_COMPUTE,
-};
 
 struct brw_blorp_base_key
 {
@@ -403,10 +412,14 @@ struct brw_blorp_blit_prog_key
  * Used internally by gfx6_blorp_exec() and gfx7_blorp_exec().
  */
 
+bool blorp_blitter_supports_aux(const struct intel_device_info *devinfo,
+                                enum isl_aux_usage aux_usage);
+
 void brw_blorp_init_wm_prog_key(struct brw_wm_prog_key *wm_key);
 void brw_blorp_init_cs_prog_key(struct brw_cs_prog_key *cs_key);
 
 const char *blorp_shader_type_to_name(enum blorp_shader_type type);
+const char *blorp_shader_pipeline_to_name(enum blorp_shader_pipeline pipe);
 
 const unsigned *
 blorp_compile_fs(struct blorp_context *blorp, void *mem_ctx,

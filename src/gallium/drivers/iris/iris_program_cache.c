@@ -157,7 +157,7 @@ iris_upload_shader(struct iris_screen *screen,
                    const void *key,
                    const void *assembly)
 {
-   const struct intel_device_info *devinfo = &screen->devinfo;
+   const struct intel_device_info *devinfo = screen->devinfo;
 
    u_upload_alloc(uploader, 0, shader->prog_data->program_size, 64,
                   &shader->assembly.offset, &shader->assembly.res,
@@ -179,7 +179,7 @@ iris_upload_shader(struct iris_screen *screen,
          .value = shader_data_addr >> 32,
       },
    };
-   brw_write_shader_relocs(&screen->devinfo, shader->map,
+   brw_write_shader_relocs(&screen->compiler->isa, shader->map,
                            shader->prog_data, reloc_values,
                            ARRAY_SIZE(reloc_values));
 

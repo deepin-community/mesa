@@ -37,11 +37,11 @@
 #ifndef U_SSE_H_
 #define U_SSE_H_
 
-#include "pipe/p_config.h"
+#include "util/detect.h"
 #include "pipe/p_compiler.h"
 #include "util/u_debug.h"
 
-#if defined(PIPE_ARCH_SSE)
+#if DETECT_ARCH_SSE
 
 #include <emmintrin.h>
 
@@ -52,121 +52,6 @@ union m128i {
    ushort us[8];
    uint ui[4];
 };
-
-static inline void u_print_epi8(const char *name, __m128i r)
-{
-   union { __m128i m; ubyte ub[16]; } u;
-   u.m = r;
-
-   debug_printf("%s: "
-                "%02x/"
-                "%02x/"
-                "%02x/"
-                "%02x/"
-                "%02x/"
-                "%02x/"
-                "%02x/"
-                "%02x/"
-                "%02x/"
-                "%02x/"
-                "%02x/"
-                "%02x/"
-                "%02x/"
-                "%02x/"
-                "%02x/"
-                "%02x\n",
-                name,
-                u.ub[0],  u.ub[1],  u.ub[2],  u.ub[3],
-                u.ub[4],  u.ub[5],  u.ub[6],  u.ub[7],
-                u.ub[8],  u.ub[9],  u.ub[10], u.ub[11],
-                u.ub[12], u.ub[13], u.ub[14], u.ub[15]);
-}
-
-static inline void u_print_epi16(const char *name, __m128i r)
-{
-   union { __m128i m; ushort us[8]; } u;
-   u.m = r;
-
-   debug_printf("%s: "
-                "%04x/"
-                "%04x/"
-                "%04x/"
-                "%04x/"
-                "%04x/"
-                "%04x/"
-                "%04x/"
-                "%04x\n",
-                name,
-                u.us[0],  u.us[1],  u.us[2],  u.us[3],
-                u.us[4],  u.us[5],  u.us[6],  u.us[7]);
-}
-
-static inline void u_print_epi32(const char *name, __m128i r)
-{
-   union { __m128i m; uint ui[4]; } u;
-   u.m = r;
-
-   debug_printf("%s: "
-                "%08x/"
-                "%08x/"
-                "%08x/"
-                "%08x\n",
-                name,
-                u.ui[0],  u.ui[1],  u.ui[2],  u.ui[3]);
-}
-
-static inline void u_print_ps(const char *name, __m128 r)
-{
-   union { __m128 m; float f[4]; } u;
-   u.m = r;
-
-   debug_printf("%s: "
-                "%f/"
-                "%f/"
-                "%f/"
-                "%f\n",
-                name,
-                u.f[0],  u.f[1],  u.f[2],  u.f[3]);
-}
-
-
-#define U_DUMP_EPI32(a) u_print_epi32(#a, a)
-#define U_DUMP_EPI16(a) u_print_epi16(#a, a)
-#define U_DUMP_EPI8(a)  u_print_epi8(#a, a)
-#define U_DUMP_PS(a)    u_print_ps(#a, a)
-
-
-
-#if defined(PIPE_ARCH_SSSE3)
-
-#include <tmmintrin.h>
-
-#else /* !PIPE_ARCH_SSSE3 */
-
-/**
- * Describe _mm_shuffle_epi8() with gcc extended inline assembly, for cases
- * where -mssse3 is not supported/enabled.
- *
- * MSVC will never get in here as its intrinsics support do not rely on
- * compiler command line options.
- */
-static __inline __m128i
-#ifdef __clang__
-   __attribute__((__always_inline__, __nodebug__))
-#else
-   __attribute__((__gnu_inline__, __always_inline__, __artificial__))
-#endif
-_mm_shuffle_epi8(__m128i a, __m128i mask)
-{
-    __m128i result;
-    __asm__("pshufb %1, %0"
-            : "=x" (result)
-            : "xm" (mask), "0" (a));
-    return result;
-}
-
-#endif /* !PIPE_ARCH_SSSE3 */
-
 
 /*
  * Provide an SSE implementation of _mm_mul_epi32() in terms of
@@ -700,6 +585,6 @@ util_sse2_stretch_row_8unorm(__m128i * restrict dst,
 
 
 
-#endif /* PIPE_ARCH_SSE */
+#endif /* DETECT_ARCH_SSE */
 
 #endif /* U_SSE_H_ */

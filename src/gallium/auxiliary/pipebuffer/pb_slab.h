@@ -47,7 +47,7 @@
 #include "pb_buffer.h"
 #include "util/simple_mtx.h"
 #include "util/list.h"
-#include "os/os_thread.h"
+#include "util/u_thread.h"
 
 struct pb_slab;
 struct pb_slabs;
@@ -133,6 +133,9 @@ struct pb_slabs
    slab_alloc_fn *slab_alloc;
    slab_free_fn *slab_free;
 };
+
+struct pb_slab_entry *
+pb_slab_alloc_reclaimed(struct pb_slabs *slabs, unsigned size, unsigned heap, bool reclaim_all);
 
 struct pb_slab_entry *
 pb_slab_alloc(struct pb_slabs *slabs, unsigned size, unsigned heap);

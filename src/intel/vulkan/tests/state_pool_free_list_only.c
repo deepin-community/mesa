@@ -35,11 +35,12 @@
 int main(void)
 {
    struct anv_physical_device physical_device = { };
-   struct anv_device device = {
-      .physical = &physical_device,
-   };
+   struct anv_device device = {};
    struct anv_state_pool state_pool;
 
+   test_device_info_init(&physical_device.info);
+   anv_device_set_physical(&device, &physical_device);
+   device.kmd_backend = anv_kmd_backend_get(INTEL_KMD_TYPE_STUB);
    pthread_mutex_init(&device.mutex, NULL);
    anv_bo_cache_init(&device.bo_cache, &device);
    anv_state_pool_init(&state_pool, &device, "test", 4096, 0, 4096);
@@ -64,5 +65,6 @@ int main(void)
    run_state_pool_test(&state_pool);
 
    anv_state_pool_finish(&state_pool);
+   anv_bo_cache_finish(&device.bo_cache);
    pthread_mutex_destroy(&device.mutex);
 }

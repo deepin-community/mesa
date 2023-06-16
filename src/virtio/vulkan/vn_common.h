@@ -24,10 +24,14 @@
 
 #include "c11/threads.h"
 #include "util/bitscan.h"
+#include "util/bitset.h"
 #include "util/compiler.h"
+#include "util/libsync.h"
 #include "util/list.h"
 #include "util/macros.h"
 #include "util/os_time.h"
+#include "util/perf/cpu_trace.h"
+#include "util/simple_mtx.h"
 #include "util/u_math.h"
 #include "util/xmlconfig.h"
 #include "vk_alloc.h"
@@ -42,55 +46,18 @@
 
 #define VN_DEFAULT_ALIGN 8
 
-#define VN_DEBUG(category) (unlikely(vn_debug & VN_DEBUG_##category))
+#define VN_DEBUG(category) (unlikely(vn_env.debug & VN_DEBUG_##category))
+#define VN_PERF(category) (unlikely(vn_env.perf & VN_PERF_##category))
 
 #define vn_error(instance, error)                                            \
    (VN_DEBUG(RESULT) ? vn_log_result((instance), (error), __func__) : (error))
 #define vn_result(instance, result)                                          \
    ((result) >= VK_SUCCESS ? (result) : vn_error((instance), (result)))
 
-#ifdef ANDROID
-
-#include <cutils/trace.h>
-
-#define VN_TRACE_BEGIN(name) atrace_begin(ATRACE_TAG_GRAPHICS, name)
-#define VN_TRACE_END() atrace_end(ATRACE_TAG_GRAPHICS)
-
-#else
-
-/* XXX we would like to use perfetto, but it lacks a C header */
-#define VN_TRACE_BEGIN(name)
-#define VN_TRACE_END()
-
-#endif /* ANDROID */
-
-#if __has_attribute(cleanup) && __has_attribute(unused)
-
-#define VN_TRACE_SCOPE(name)                                                 \
-   int _vn_trace_scope_##__LINE__                                            \
-      __attribute__((cleanup(vn_trace_scope_end), unused)) =                 \
-         vn_trace_scope_begin(name)
-
-static inline int
-vn_trace_scope_begin(const char *name)
-{
-   VN_TRACE_BEGIN(name);
-   return 0;
-}
-
-static inline void
-vn_trace_scope_end(int *scope)
-{
-   VN_TRACE_END();
-}
-
-#else
-
-#define VN_TRACE_SCOPE(name)
-
-#endif /* __has_attribute(cleanup) && __has_attribute(unused) */
-
-#define VN_TRACE_FUNC() VN_TRACE_SCOPE(__func__)
+#define VN_TRACE_BEGIN(name) MESA_TRACE_BEGIN(name)
+#define VN_TRACE_END() MESA_TRACE_END()
+#define VN_TRACE_SCOPE(name) MESA_TRACE_SCOPE(name)
+#define VN_TRACE_FUNC() MESA_TRACE_SCOPE(__func__)
 
 struct vn_instance;
 struct vn_physical_device;
@@ -122,6 +89,7 @@ struct vn_command_buffer;
 
 struct vn_cs_encoder;
 struct vn_cs_decoder;
+struct vn_ring;
 
 struct vn_renderer;
 struct vn_renderer_shmem;
@@ -133,6 +101,20 @@ enum vn_debug {
    VN_DEBUG_RESULT = 1ull << 1,
    VN_DEBUG_VTEST = 1ull << 2,
    VN_DEBUG_WSI = 1ull << 3,
+   VN_DEBUG_NO_ABORT = 1ull << 4,
+   VN_DEBUG_LOG_CTX_INFO = 1ull << 5,
+   VN_DEBUG_CACHE = 1ull << 6,
+};
+
+enum vn_perf {
+   VN_PERF_NO_ASYNC_SET_ALLOC = 1ull << 0,
+   VN_PERF_NO_ASYNC_BUFFER_CREATE = 1ull << 1,
+   VN_PERF_NO_ASYNC_QUEUE_SUBMIT = 1ull << 2,
+   VN_PERF_NO_EVENT_FEEDBACK = 1ull << 3,
+   VN_PERF_NO_FENCE_FEEDBACK = 1ull << 4,
+   VN_PERF_NO_MEMORY_SUBALLOC = 1ull << 5,
+   VN_PERF_NO_CMD_BATCHING = 1ull << 6,
+   VN_PERF_NO_TIMELINE_SEM_FEEDBACK = 1ull << 7,
 };
 
 typedef uint64_t vn_object_id;
@@ -165,10 +147,23 @@ struct vn_refcount {
    atomic_int count;
 };
 
-extern uint64_t vn_debug;
+struct vn_env {
+   uint64_t debug;
+   uint64_t perf;
+   /* zero will be overridden to UINT32_MAX as no limit */
+   uint32_t draw_cmd_batch_limit;
+   uint32_t relax_base_sleep_us;
+};
+extern struct vn_env vn_env;
+
+struct vn_relax_state {
+   struct vn_ring *ring;
+   uint32_t iter;
+   const char *reason;
+};
 
 void
-vn_debug_init(void);
+vn_env_init(void);
 
 void
 vn_trace_init(void);
@@ -183,7 +178,7 @@ vn_log_result(struct vn_instance *instance,
               const char *where);
 
 #define VN_REFCOUNT_INIT(val)                                                \
-   (struct vn_refcount) { .count = (val) }
+   (struct vn_refcount) { .count = (val), }
 
 static inline int
 vn_refcount_load_relaxed(const struct vn_refcount *ref)
@@ -231,8 +226,23 @@ vn_refcount_dec(struct vn_refcount *ref)
    return old == 1;
 }
 
+uint32_t
+vn_extension_get_spec_version(const char *name);
+
 void
-vn_relax(uint32_t *iter, const char *reason);
+vn_ring_monitor_release(struct vn_ring *ring);
+
+struct vn_relax_state
+vn_relax_init(struct vn_ring *ring, const char *reason);
+
+void
+vn_relax(struct vn_relax_state *state);
+
+static inline void
+vn_relax_fini(struct vn_relax_state *state)
+{
+   vn_ring_monitor_release(state->ring);
+}
 
 static_assert(sizeof(vn_object_id) >= sizeof(uintptr_t), "");
 

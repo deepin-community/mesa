@@ -30,6 +30,55 @@
 #include "compiler/brw_nir.h"
 #include "dev/intel_debug.h"
 
+enum intel_measure_snapshot_type
+blorp_op_to_intel_measure_snapshot(enum blorp_op op)
+{
+   enum intel_measure_snapshot_type vals[] = {
+#define MAP(name) [BLORP_OP_##name] = INTEL_SNAPSHOT_##name
+      MAP(BLIT),
+      MAP(COPY),
+      MAP(CCS_AMBIGUATE),
+      MAP(CCS_COLOR_CLEAR),
+      MAP(CCS_PARTIAL_RESOLVE),
+      MAP(CCS_RESOLVE),
+      MAP(HIZ_AMBIGUATE),
+      MAP(HIZ_CLEAR),
+      MAP(HIZ_RESOLVE),
+      MAP(MCS_COLOR_CLEAR),
+      MAP(MCS_PARTIAL_RESOLVE),
+      MAP(SLOW_COLOR_CLEAR),
+      MAP(SLOW_DEPTH_CLEAR),
+#undef MAP
+   };
+   assert(op < ARRAY_SIZE(vals));
+
+   return vals[op];
+}
+
+const char *blorp_op_to_name(enum blorp_op op)
+{
+   const char *names[] = {
+#define MAP(name) [BLORP_OP_##name] = #name
+      MAP(BLIT),
+      MAP(COPY),
+      MAP(CCS_AMBIGUATE),
+      MAP(CCS_COLOR_CLEAR),
+      MAP(CCS_PARTIAL_RESOLVE),
+      MAP(CCS_RESOLVE),
+      MAP(HIZ_AMBIGUATE),
+      MAP(HIZ_CLEAR),
+      MAP(HIZ_RESOLVE),
+      MAP(MCS_COLOR_CLEAR),
+      MAP(MCS_PARTIAL_RESOLVE),
+      MAP(SLOW_COLOR_CLEAR),
+      MAP(SLOW_DEPTH_CLEAR),
+#undef MAP
+   };
+   assert(op < ARRAY_SIZE(names));
+
+   return names[op];
+}
+
 const char *
 blorp_shader_type_to_name(enum blorp_shader_type type)
 {
@@ -46,12 +95,28 @@ blorp_shader_type_to_name(enum blorp_shader_type type)
    return shader_name[type];
 }
 
+const char *
+blorp_shader_pipeline_to_name(enum blorp_shader_pipeline pipe)
+{
+   static const char *pipeline_name[] = {
+      [BLORP_SHADER_PIPELINE_RENDER]  = "render",
+      [BLORP_SHADER_PIPELINE_COMPUTE] = "compute",
+   };
+   assert(pipe < ARRAY_SIZE(pipeline_name));
+
+   return pipeline_name[pipe];
+}
+
 void
 blorp_init(struct blorp_context *blorp, void *driver_ctx,
-           struct isl_device *isl_dev)
+           struct isl_device *isl_dev, const struct blorp_config *config)
 {
+   memset(blorp, 0, sizeof(*blorp));
+
    blorp->driver_ctx = driver_ctx;
    blorp->isl_dev = isl_dev;
+   if (config)
+      blorp->config = *config;
 }
 
 void
@@ -124,8 +189,9 @@ brw_blorp_surface_info_init(struct blorp_batch *batch,
       .swizzle = ISL_SWIZZLE_IDENTITY,
    };
 
-   info->view.array_len = MAX2(info->surf.logical_level0_px.depth,
-                               info->surf.logical_level0_px.array_len);
+   info->view.array_len =
+      MAX2(u_minify(info->surf.logical_level0_px.depth, level),
+           info->surf.logical_level0_px.array_len);
 
    if (!is_dest &&
        (info->surf.dim == ISL_SURF_DIM_3D ||
@@ -187,7 +253,7 @@ blorp_params_init(struct blorp_params *params)
 static void
 blorp_init_base_prog_key(struct brw_base_prog_key *key)
 {
-   for (int i = 0; i < MAX_SAMPLERS; i++)
+   for (int i = 0; i < BRW_MAX_SAMPLERS; i++)
       key->tex.swizzles[i] = SWIZZLE_XYZW;
 }
 
@@ -215,21 +281,15 @@ blorp_compile_fs(struct blorp_context *blorp, void *mem_ctx,
 {
    const struct brw_compiler *compiler = blorp->compiler;
 
-   nir->options =
-      compiler->glsl_compiler_options[MESA_SHADER_FRAGMENT].NirOptions;
+   nir->options = compiler->nir_options[MESA_SHADER_FRAGMENT];
 
    memset(wm_prog_data, 0, sizeof(*wm_prog_data));
 
    wm_prog_data->base.nr_params = 0;
    wm_prog_data->base.param = NULL;
 
-   /* BLORP always uses the first two binding table entries:
-    * - Surface 0 is the render target (which always start from 0)
-    * - Surface 1 is the source texture
-    */
-   wm_prog_data->base.binding_table.texture_start = BLORP_TEXTURE_BT_INDEX;
-
-   brw_preprocess_nir(compiler, nir, NULL);
+   struct brw_nir_compiler_opts opts = {};
+   brw_preprocess_nir(compiler, nir, &opts);
    nir_remove_dead_variables(nir, nir_var_shader_in, NULL);
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
@@ -261,10 +321,10 @@ blorp_compile_vs(struct blorp_context *blorp, void *mem_ctx,
 {
    const struct brw_compiler *compiler = blorp->compiler;
 
-   nir->options =
-      compiler->glsl_compiler_options[MESA_SHADER_VERTEX].NirOptions;
+   nir->options = compiler->nir_options[MESA_SHADER_VERTEX];
 
-   brw_preprocess_nir(compiler, nir, NULL);
+   struct brw_nir_compiler_opts opts = {};
+   brw_preprocess_nir(compiler, nir, &opts);
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
    vs_prog_data->inputs_read = nir->info.inputs_read;
@@ -289,6 +349,22 @@ blorp_compile_vs(struct blorp_context *blorp, void *mem_ctx,
    return brw_compile_vs(compiler, mem_ctx, &params);
 }
 
+static bool
+lower_base_workgroup_id(nir_builder *b, nir_instr *instr, UNUSED void *data)
+{
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+
+   nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+
+   if (intrin->intrinsic != nir_intrinsic_load_base_workgroup_id)
+      return false;
+
+   b->cursor = nir_instr_remove(&intrin->instr);
+   nir_ssa_def_rewrite_uses(&intrin->dest.ssa, nir_imm_zero(b, 3, 32));
+   return true;
+}
+
 const unsigned *
 blorp_compile_cs(struct blorp_context *blorp, void *mem_ctx,
                  struct nir_shader *nir,
@@ -297,18 +373,12 @@ blorp_compile_cs(struct blorp_context *blorp, void *mem_ctx,
 {
    const struct brw_compiler *compiler = blorp->compiler;
 
-   nir->options =
-      compiler->glsl_compiler_options[MESA_SHADER_COMPUTE].NirOptions;
+   nir->options = compiler->nir_options[MESA_SHADER_COMPUTE];
 
    memset(cs_prog_data, 0, sizeof(*cs_prog_data));
 
-   /* BLORP always uses the first two binding table entries:
-    * - Surface 0 is the destination image (which always start from 0)
-    * - Surface 1 is the source texture
-    */
-   cs_prog_data->base.binding_table.texture_start = BLORP_TEXTURE_BT_INDEX;
-
-   brw_preprocess_nir(compiler, nir, NULL);
+   struct brw_nir_compiler_opts opts = {};
+   brw_preprocess_nir(compiler, nir, &opts);
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
    NIR_PASS_V(nir, nir_lower_io, nir_var_uniform, type_size_scalar_bytes,
@@ -322,6 +392,8 @@ blorp_compile_cs(struct blorp_context *blorp, void *mem_ctx,
    cs_prog_data->base.param = rzalloc_array(NULL, uint32_t, nr_params);
 
    NIR_PASS_V(nir, brw_nir_lower_cs_intrinsics);
+   NIR_PASS_V(nir, nir_shader_instructions_pass, lower_base_workgroup_id,
+              nir_metadata_block_index | nir_metadata_dominance, NULL);
 
    struct brw_compile_cs_params params = {
       .nir = nir,
@@ -416,13 +488,13 @@ blorp_hiz_op(struct blorp_batch *batch, struct blorp_surf *surf,
    params.full_surface_hiz_op = true;
    switch (op) {
    case ISL_AUX_OP_FULL_RESOLVE:
-      params.snapshot_type = INTEL_SNAPSHOT_HIZ_RESOLVE;
+      params.op = BLORP_OP_HIZ_RESOLVE;
       break;
    case ISL_AUX_OP_AMBIGUATE:
-      params.snapshot_type = INTEL_SNAPSHOT_HIZ_AMBIGUATE;
+      params.op = BLORP_OP_HIZ_AMBIGUATE;
       break;
    case ISL_AUX_OP_FAST_CLEAR:
-      params.snapshot_type = INTEL_SNAPSHOT_HIZ_CLEAR;
+      params.op = BLORP_OP_HIZ_CLEAR;
       break;
    case ISL_AUX_OP_PARTIAL_RESOLVE:
    case ISL_AUX_OP_NONE:
@@ -461,10 +533,10 @@ blorp_hiz_op(struct blorp_batch *batch, struct blorp_surf *surf,
        * surfaces, not 8. But commit 1f112cc increased the alignment from 4 to
        * 8, which prevents the clobbering.
        */
-      params.x1 = minify(params.depth.surf.logical_level0_px.width,
-                         params.depth.view.base_level);
-      params.y1 = minify(params.depth.surf.logical_level0_px.height,
-                         params.depth.view.base_level);
+      params.x1 = u_minify(params.depth.surf.logical_level0_px.width,
+                           params.depth.view.base_level);
+      params.y1 = u_minify(params.depth.surf.logical_level0_px.height,
+                           params.depth.view.base_level);
       params.x1 = ALIGN(params.x1, 8);
       params.y1 = ALIGN(params.y1, 4);
 
@@ -503,10 +575,10 @@ blorp_hiz_op(struct blorp_batch *batch, struct blorp_surf *surf,
           * the base LOD extent. Just assert that the caller is accessing an
           * LOD that satisfies this requirement.
           */
-         assert(minify(params.depth.surf.logical_level0_px.width,
-                       params.depth.view.base_level) == params.x1);
-         assert(minify(params.depth.surf.logical_level0_px.height,
-                       params.depth.view.base_level) == params.y1);
+         assert(u_minify(params.depth.surf.logical_level0_px.width,
+                         params.depth.view.base_level) == params.x1);
+         assert(u_minify(params.depth.surf.logical_level0_px.height,
+                         params.depth.view.base_level) == params.y1);
       }
 
       params.dst.surf.samples = params.depth.surf.samples;

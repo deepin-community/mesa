@@ -28,7 +28,7 @@
 /**
  * @file
  * OS independent time-manipulation functions.
- * 
+ *
  * @author Jose Fonseca <jfonseca@vmware.com>
  */
 
@@ -42,6 +42,8 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#define ONE_SECOND_IN_NS INT64_C(1000000000)
 
 /* must be equal to PIPE_TIMEOUT_INFINITE */
 #define OS_TIMEOUT_INFINITE 0xffffffffffffffffull

@@ -37,8 +37,8 @@ public:
 
    fs_reg();
    fs_reg(struct ::brw_reg reg);
-   fs_reg(enum brw_reg_file file, int nr);
-   fs_reg(enum brw_reg_file file, int nr, enum brw_reg_type type);
+   fs_reg(enum brw_reg_file file, unsigned nr);
+   fs_reg(enum brw_reg_file file, unsigned nr, enum brw_reg_type type);
 
    bool equals(const fs_reg &r) const;
    bool negative_equals(const fs_reg &r) const;
@@ -121,8 +121,16 @@ horiz_offset(const fs_reg &reg, unsigned delta)
       if (reg.is_null()) {
          return reg;
       } else {
-         const unsigned stride = reg.hstride ? 1 << (reg.hstride - 1) : 0;
-         return byte_offset(reg, delta * stride * type_sz(reg.type));
+         const unsigned hstride = reg.hstride ? 1 << (reg.hstride - 1) : 0;
+         const unsigned vstride = reg.vstride ? 1 << (reg.vstride - 1) : 0;
+         const unsigned width = 1 << reg.width;
+
+         if (delta % width == 0) {
+            return byte_offset(reg, delta / width * vstride * type_sz(reg.type));
+         } else {
+            assert(vstride == hstride * width);
+            return byte_offset(reg, delta * hstride * type_sz(reg.type));
+         }
       }
    }
    unreachable("Invalid register file");
@@ -156,6 +164,11 @@ component(fs_reg reg, unsigned idx)
 {
    reg = horiz_offset(reg, idx);
    reg.stride = 0;
+   if (reg.file == ARF || reg.file == FIXED_GRF) {
+      reg.vstride = BRW_VERTICAL_STRIDE_0;
+      reg.width = BRW_WIDTH_1;
+      reg.hstride = BRW_HORIZONTAL_STRIDE_0;
+   }
    return reg;
 }
 
@@ -199,6 +212,31 @@ reg_padding(const fs_reg &r)
    return (MAX2(1, stride) - 1) * type_sz(r.type);
 }
 
+/* Do not call this directly. Call regions_overlap() instead. */
+static inline bool
+regions_overlap_MRF(const fs_reg &r, unsigned dr, const fs_reg &s, unsigned ds)
+{
+   if (r.nr & BRW_MRF_COMPR4) {
+      fs_reg t = r;
+      t.nr &= ~BRW_MRF_COMPR4;
+      /* COMPR4 regions are translated by the hardware during decompression
+       * into two separate half-regions 4 MRFs apart from each other.
+       *
+       * Note: swapping s and t in this parameter list eliminates one possible
+       * level of recursion (since the s in the called versions of
+       * regions_overlap_MRF can't be COMPR4), and that makes the compiled
+       * code a lot smaller.
+       */
+      return regions_overlap_MRF(s, ds, t, dr / 2) ||
+             regions_overlap_MRF(s, ds, byte_offset(t, 4 * REG_SIZE), dr / 2);
+   } else if (s.nr & BRW_MRF_COMPR4) {
+      return regions_overlap_MRF(s, ds, r, dr);
+   }
+
+   return !((r.nr * REG_SIZE + r.offset + dr) <= (s.nr * REG_SIZE + s.offset) ||
+            (s.nr * REG_SIZE + s.offset + ds) <= (r.nr * REG_SIZE + r.offset));
+}
+
 /**
  * Return whether the register region starting at \p r and spanning \p dr
  * bytes could potentially overlap the register region starting at \p s and
@@ -207,22 +245,17 @@ reg_padding(const fs_reg &r)
 static inline bool
 regions_overlap(const fs_reg &r, unsigned dr, const fs_reg &s, unsigned ds)
 {
-   if (r.file == MRF && (r.nr & BRW_MRF_COMPR4)) {
-      fs_reg t = r;
-      t.nr &= ~BRW_MRF_COMPR4;
-      /* COMPR4 regions are translated by the hardware during decompression
-       * into two separate half-regions 4 MRFs apart from each other.
-       */
-      return regions_overlap(t, dr / 2, s, ds) ||
-             regions_overlap(byte_offset(t, 4 * REG_SIZE), dr / 2, s, ds);
+   if (r.file != s.file)
+      return false;
 
-   } else if (s.file == MRF && (s.nr & BRW_MRF_COMPR4)) {
-      return regions_overlap(s, ds, r, dr);
-
-   } else {
-      return reg_space(r) == reg_space(s) &&
-             !(reg_offset(r) + dr <= reg_offset(s) ||
+   if (r.file == VGRF) {
+      return r.nr == s.nr &&
+             !(r.offset + dr <= s.offset || s.offset + ds <= r.offset);
+   } else if (r.file != MRF) {
+      return !(reg_offset(r) + dr <= reg_offset(s) ||
                reg_offset(s) + ds <= reg_offset(r));
+   } else {
+      return regions_overlap_MRF(r, dr, s, ds);
    }
 }
 
@@ -533,9 +566,12 @@ is_send(const fs_inst *inst)
  * assumed to complete in-order.
  */
 static inline bool
-is_unordered(const fs_inst *inst)
+is_unordered(const intel_device_info *devinfo, const fs_inst *inst)
 {
-   return is_send(inst) || inst->is_math();
+   return is_send(inst) || inst->is_math() ||
+          (devinfo->has_64bit_float_via_math_pipe &&
+           (get_exec_type(inst) == BRW_REGISTER_TYPE_DF ||
+            inst->dst.type == BRW_REGISTER_TYPE_DF));
 }
 
 /**
@@ -570,7 +606,8 @@ has_dst_aligned_region_restriction(const intel_device_info *devinfo,
 
    if (type_sz(dst_type) > 4 || type_sz(exec_type) > 4 ||
        (type_sz(exec_type) == 4 && is_dword_multiply))
-      return devinfo->is_cherryview || intel_device_info_is_9lp(devinfo) ||
+      return devinfo->platform == INTEL_PLATFORM_CHV ||
+             intel_device_info_is_9lp(devinfo) ||
              devinfo->verx10 >= 125;
 
    else if (brw_reg_type_is_floating_point(dst_type))
@@ -687,6 +724,6 @@ is_coalescing_payload(const brw::simple_allocator &alloc, const fs_inst *inst)
 }
 
 bool
-has_bank_conflict(const intel_device_info *devinfo, const fs_inst *inst);
+has_bank_conflict(const struct brw_isa_info *isa, const fs_inst *inst);
 
 #endif

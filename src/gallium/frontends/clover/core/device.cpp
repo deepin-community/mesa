@@ -30,6 +30,7 @@
 #include "util/u_debug.h"
 #include "spirv/invocation.hpp"
 #include "nir/invocation.hpp"
+#include "nir.h"
 #include <fstream>
 
 using namespace clover;
@@ -76,13 +77,7 @@ namespace {
           dev.max_const_buffer_size() < 64 * 1024 ||
           dev.max_const_buffers() < 8 ||
           dev.max_mem_local() < 16 * 1024 ||
-          dev.clc_version < CL_MAKE_VERSION(1, 0, 0) ||
-          (supports_images &&
-           (dev.max_images_read() < 128 ||
-            dev.max_images_write() < 8 ||
-            dev.max_image_size() < 8192 ||
-            dev.max_image_size_3d() < 2048 ||
-            dev.max_samplers() < 16))) {
+          dev.clc_version < CL_MAKE_VERSION(1, 0, 0)) {
          return version;
       }
       version = CL_MAKE_VERSION(1, 0, 0);
@@ -140,6 +135,27 @@ namespace {
 
       return version;
    }
+
+   static cl_device_type
+   parse_env_device_type() {
+      const char* val = getenv("CLOVER_DEVICE_TYPE");
+      if (!val) {
+         return 0;
+      }
+      if (strcmp(val, "cpu") == 0) {
+         return CL_DEVICE_TYPE_CPU;
+      }
+      if (strcmp(val, "gpu") == 0) {
+         return CL_DEVICE_TYPE_GPU;
+      }
+      if (strcmp(val, "accelerator") == 0) {
+         return CL_DEVICE_TYPE_ACCELERATOR;
+      }
+      /* CL_DEVICE_TYPE_CUSTOM isn't implemented
+      because CL_DEVICE_TYPE_CUSTOM is OpenCL 1.2
+      and Clover is OpenCL 1.1. */
+      return 0;
+   }
 }
 
 device::device(clover::platform &platform, pipe_loader_device *ldev) :
@@ -195,6 +211,11 @@ device::operator==(const device &dev) const {
 
 cl_device_type
 device::type() const {
+   cl_device_type type = parse_env_device_type();
+   if (type != 0) {
+      return type;
+   }
+
    switch (ldev->type) {
    case PIPE_LOADER_DEVICE_SOFTWARE:
       return CL_DEVICE_TYPE_CPU;
@@ -221,17 +242,19 @@ device::vendor_id() const {
 
 size_t
 device::max_images_read() const {
-   return PIPE_MAX_SHADER_SAMPLER_VIEWS;
+   return pipe->get_shader_param(pipe, PIPE_SHADER_COMPUTE,
+                                 PIPE_SHADER_CAP_MAX_SAMPLER_VIEWS);
 }
 
 size_t
 device::max_images_write() const {
-   return PIPE_MAX_SHADER_IMAGES;
+   return pipe->get_shader_param(pipe, PIPE_SHADER_COMPUTE,
+                                 PIPE_SHADER_CAP_MAX_SHADER_IMAGES);
 }
 
 size_t
 device::max_image_buffer_size() const {
-   return pipe->get_param(pipe, PIPE_CAP_MAX_TEXTURE_BUFFER_SIZE);
+   return pipe->get_param(pipe, PIPE_CAP_MAX_TEXEL_BUFFER_ELEMENTS_UINT);
 }
 
 cl_uint
@@ -276,7 +299,7 @@ device::max_mem_input() const {
 cl_ulong
 device::max_const_buffer_size() const {
    return pipe->get_shader_param(pipe, PIPE_SHADER_COMPUTE,
-                                 PIPE_SHADER_CAP_MAX_CONST_BUFFER_SIZE);
+                                 PIPE_SHADER_CAP_MAX_CONST_BUFFER0_SIZE);
 }
 
 cl_uint
@@ -316,13 +339,33 @@ device::max_printf_buffer_size() const {
 
 bool
 device::image_support() const {
-   return get_compute_param<uint32_t>(pipe, ir_format(),
-                                      PIPE_COMPUTE_CAP_IMAGES_SUPPORTED)[0];
+   bool supports_images = get_compute_param<uint32_t>(pipe, ir_format(),
+                                                      PIPE_COMPUTE_CAP_IMAGES_SUPPORTED)[0];
+   if (!supports_images)
+      return false;
+
+   /* If the gallium driver supports images, but does not support the
+    * minimum requirements for opencl 1.0 images, then don't claim to
+    * support images.
+    */
+   if (max_images_read() < 128 ||
+       max_images_write() < 8 ||
+       max_image_size() < 8192 ||
+       max_image_size_3d() < 2048 ||
+       max_samplers() < 16)
+      return false;
+
+   return true;
 }
 
 bool
 device::has_doubles() const {
-   return pipe->get_param(pipe, PIPE_CAP_DOUBLES);
+   nir_shader_compiler_options *options =
+         (nir_shader_compiler_options *)pipe->get_compiler_options(pipe,
+                                                                   PIPE_SHADER_IR_NIR,
+                                                                   PIPE_SHADER_COMPUTE);
+   return pipe->get_param(pipe, PIPE_CAP_DOUBLES) &&
+         !(options->lower_doubles_options & nir_lower_fp64_full_software);
 }
 
 bool

@@ -19,6 +19,14 @@
 # SOFTWARE.
 
 files_libintel_common = files(
+  'i915/intel_engine.c',
+  'i915/intel_engine.h',
+  'i915/intel_gem.c',
+  'i915/intel_gem.h',
+  'xe/intel_engine.c',
+  'xe/intel_engine.h',
+  'xe/intel_gem.c',
+  'xe/intel_gem.h',
   'intel_aux_map.c',
   'intel_aux_map.h',
   'intel_buffer_alloc.h',
@@ -26,8 +34,11 @@ files_libintel_common = files(
   'intel_decoder.h',
   'intel_disasm.c',
   'intel_disasm.h',
+  'intel_engine.c',
+  'intel_engine.h',
   'intel_gem.c',
   'intel_gem.h',
+  'intel_genX_state.h',
   'intel_guardband.h',
   'intel_l3_config.c',
   'intel_l3_config.h',
@@ -38,6 +49,7 @@ files_libintel_common = files(
   'intel_uuid.h',
   'intel_measure.c',
   'intel_measure.h',
+  'intel_pixel_hash.h'
 )
 
 files_batch_decoder = files(
@@ -60,7 +72,7 @@ libintel_common = static_library(
   c_args : [no_override_init_args],
   gnu_symbol_visibility : 'hidden',
   link_with : [libisl],
-  dependencies : [batch_decoder_dependencies, dep_libdrm, dep_thread, idep_genxml, idep_mesautil],
+  dependencies : [batch_decoder_dependencies, dep_libdrm, dep_thread, idep_genxml, idep_mesautil, idep_intel_dev],
 )
 
 libintel_extra_dependencies = []
@@ -74,8 +86,41 @@ idep_libintel_common = declare_dependency(
 )
 
 install_intel_gpu_tests = get_option('install-intel-gpu-tests')
+if install_intel_gpu_tests and not with_tests
+  error('`install-intel-gpu-tests` requires `build-tests`')
+endif
 
-if install_intel_gpu_tests
+if with_tests and not with_platform_android
+  gentest_xml = files('tests/gentest.xml')
+  _name = 'gentest_pack.h'
+  gentest_pack = custom_target(
+    _name,
+    input : [gen_pack_header_py, gentest_xml],
+    output : _name,
+    command : [prog_python, '@INPUT@'],
+    capture : true,
+    depend_files: gen_pack_header_deps
+  )
+
+  genxml_path = join_paths(dir_source_root,
+                           '@0@'.format(gentest_xml[0]))
+
+  test(
+    'genxml_test',
+    executable(
+      'genxml_test',
+      ['tests/genxml_test.c', gentest_pack],
+      include_directories : [inc_include, inc_src, inc_intel],
+      dependencies : [idep_mesautil, idep_intel_dev],
+      link_with : libintel_common,
+      c_args : [
+        '-DGENXML_PATH="@0@"'.format(genxml_path)
+      ],
+    ),
+    args : ['-quiet'],
+    suite : ['intel'],
+  )
+
   foreach g : [['70', 'gfx7'], ['75', 'hsw'], ['80', 'gfx8'],
                ['90', 'gfx9'], ['110', 'gfx11'], ['120', 'gfx12'],
                ['125', 'gfx125']]
@@ -88,40 +133,9 @@ if install_intel_gpu_tests
       ],
       gnu_symbol_visibility : 'hidden',
       include_directories : [inc_include, inc_src, inc_intel],
-      link_with : [libintel_dev],
-      dependencies : [dep_libdrm, idep_gtest, idep_genxml, idep_mesautil],
+      link_with : [libintel_common],
+      dependencies : [dep_libdrm, idep_gtest, idep_genxml, idep_mesautil, idep_intel_dev],
       install : install_intel_gpu_tests,
     )
   endforeach
-endif
-
-if with_tests and not with_platform_android
-  gentest_xml = files('tests/gentest.xml')
-  _name = 'gentest_pack.h'
-  gentest_pack = custom_target(
-    _name,
-    input : [gen_pack_header_py, gentest_xml],
-    output : _name,
-    command : [prog_python, '@INPUT@'],
-    capture : true,
-  )
-
-  genxml_path = join_paths(meson.source_root(),
-                           '@0@'.format(gentest_xml[0]))
-
-  test(
-    'genxml_test',
-    executable(
-      'genxml_test',
-      ['tests/genxml_test.c', gentest_pack],
-      include_directories : [inc_include, inc_src, inc_intel],
-      dependencies : idep_mesautil,
-      link_with : libintel_common,
-      c_args : [
-        '-DGENXML_PATH="@0@"'.format(genxml_path)
-      ],
-    ),
-    args : ['-quiet'],
-    suite : ['intel'],
-  )
 endif

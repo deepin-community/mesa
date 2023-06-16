@@ -288,10 +288,16 @@ block_add_normal_succs(nir_block *block)
       } else if (parent->type == nir_cf_node_loop) {
          nir_loop *loop = nir_cf_node_as_loop(parent);
 
-         nir_block *head_block = nir_loop_first_block(loop);
+         nir_block *cont_block;
+         if (block == nir_loop_last_block(loop)) {
+            cont_block = nir_loop_continue_target(loop);
+         } else {
+            assert(block == nir_loop_last_continue_block(loop));
+            cont_block = nir_loop_first_block(loop);
+         }
 
-         link_blocks(block, head_block, NULL);
-         nir_insert_phi_undef(head_block, block);
+         link_blocks(block, cont_block, NULL);
+         nir_insert_phi_undef(cont_block, block);
       } else {
          nir_function_impl *impl = nir_cf_node_as_function(parent);
          link_blocks(block, impl->end_block, NULL);
@@ -413,7 +419,8 @@ insert_non_block(nir_block *before, nir_cf_node *node, nir_block *after)
 {
    node->parent = before->cf_node.parent;
    exec_node_insert_after(&before->cf_node.node, &node->node);
-   link_block_to_non_block(before, node);
+   if (!nir_block_ends_in_jump(before))
+      link_block_to_non_block(before, node);
    link_non_block_to_block(node, after);
 }
 
@@ -428,6 +435,44 @@ nearest_loop(nir_cf_node *node)
    return nir_cf_node_as_loop(node);
 }
 
+void
+nir_loop_add_continue_construct(nir_loop *loop)
+{
+   assert(!nir_loop_has_continue_construct(loop));
+
+   nir_block *cont = nir_block_create(ralloc_parent(loop));
+   exec_list_push_tail(&loop->continue_list, &cont->cf_node.node);
+   cont->cf_node.parent = &loop->cf_node;
+
+   /* change predecessors and successors */
+   nir_block *header = nir_loop_first_block(loop);
+   nir_block *preheader = nir_block_cf_tree_prev(header);
+   set_foreach(header->predecessors, entry) {
+      nir_block *pred = (nir_block *) entry->key;
+      if (pred != preheader)
+         replace_successor(pred, header, cont);
+   }
+
+   link_blocks(cont, header, NULL);
+}
+
+void
+nir_loop_remove_continue_construct(nir_loop *loop)
+{
+   assert(nir_cf_list_is_empty_block(&loop->continue_list));
+
+   /* change predecessors and successors */
+   nir_block *header = nir_loop_first_block(loop);
+   nir_block *cont = nir_loop_first_continue_block(loop);
+   set_foreach(cont->predecessors, entry) {
+      nir_block *pred = (nir_block*) entry->key;
+      replace_successor(pred, cont, header);
+   }
+   block_remove_pred(header, cont);
+
+   exec_node_remove(&cont->cf_node.node);
+}
+
 static void
 remove_phi_src(nir_block *block, nir_block *pred)
 {
@@ -440,7 +485,7 @@ remove_phi_src(nir_block *block, nir_block *pred)
          if (src->pred == pred) {
             list_del(&src->src.use_link);
             exec_node_remove(&src->node);
-            free(src);
+            gc_free(src);
          }
       }
    }
@@ -481,8 +526,8 @@ nir_handle_add_jump(nir_block *block)
 
    case nir_jump_continue: {
       nir_loop *loop = nearest_loop(&block->cf_node);
-      nir_block *first_block = nir_loop_first_block(loop);
-      link_blocks(block, first_block, NULL);
+      nir_block *cont_block = nir_loop_continue_target(loop);
+      link_blocks(block, cont_block, NULL);
       break;
    }
 
@@ -532,23 +577,26 @@ update_if_uses(nir_cf_node *node)
       return;
 
    nir_if *if_stmt = nir_cf_node_as_if(node);
+   nir_src_set_parent_if(&if_stmt->condition, if_stmt);
 
-   if_stmt->condition.parent_if = if_stmt;
    if (if_stmt->condition.is_ssa) {
       list_addtail(&if_stmt->condition.use_link,
-                   &if_stmt->condition.ssa->if_uses);
+                   &if_stmt->condition.ssa->uses);
    } else {
       list_addtail(&if_stmt->condition.use_link,
-                   &if_stmt->condition.reg.reg->if_uses);
+                   &if_stmt->condition.reg.reg->uses);
    }
 }
 
 /**
  * Stitch two basic blocks together into one. The aggregate must have the same
  * predecessors as the first and the same successors as the second.
+ *
+ * Returns a cursor pointing at the end of the before block (i.e.m between the
+ * two blocks) once stiched together.
  */
 
-static void
+static nir_cursor
 stitch_blocks(nir_block *before, nir_block *after)
 {
    /*
@@ -566,7 +614,11 @@ stitch_blocks(nir_block *before, nir_block *after)
          remove_phi_src(after->successors[1], after);
       unlink_block_successors(after);
       exec_node_remove(&after->cf_node.node);
+
+      return nir_after_block(before);
    } else {
+      nir_instr *last_before_instr = nir_block_last_instr(before);
+
       move_successors(after, before);
 
       foreach_list_typed(nir_instr, instr, node, &after->instr_list) {
@@ -575,6 +627,9 @@ stitch_blocks(nir_block *before, nir_block *after)
 
       exec_list_append(&before->instr_list, &after->instr_list);
       exec_node_remove(&after->cf_node.node);
+
+      return last_before_instr ? nir_after_instr(last_before_instr) :
+                                 nir_before_block(before);
    }
 }
 
@@ -654,6 +709,8 @@ cleanup_cf_node(nir_cf_node *node, nir_function_impl *impl)
       nir_loop *loop = nir_cf_node_as_loop(node);
       foreach_list_typed(nir_cf_node, child, node, &loop->body)
          cleanup_cf_node(child, impl);
+      foreach_list_typed(nir_cf_node, child, node, &loop->continue_list)
+         cleanup_cf_node(child, impl);
       break;
    }
    case nir_cf_node_function: {
@@ -667,7 +724,11 @@ cleanup_cf_node(nir_cf_node *node, nir_function_impl *impl)
    }
 }
 
-void
+/**
+ * Extracts everything between two cursors.  Returns the cursor which is
+ * equivalent to the old begin/end curosors.
+ */
+nir_cursor
 nir_cf_extract(nir_cf_list *extracted, nir_cursor begin, nir_cursor end)
 {
    nir_block *block_begin, *block_end, *block_before, *block_after;
@@ -675,7 +736,7 @@ nir_cf_extract(nir_cf_list *extracted, nir_cursor begin, nir_cursor end)
    if (nir_cursors_equal(begin, end)) {
       exec_list_make_empty(&extracted->list);
       extracted->impl = NULL; /* we shouldn't need this */
-      return;
+      return begin;
    }
 
    split_block_cursor(begin, &block_before, &block_begin);
@@ -726,7 +787,7 @@ nir_cf_extract(nir_cf_list *extracted, nir_cursor begin, nir_cursor end)
       cf_node = next;
    }
 
-   stitch_blocks(block_before, block_after);
+   return stitch_blocks(block_before, block_after);
 }
 
 static void
@@ -765,6 +826,8 @@ relink_jump_halt_cf_node(nir_cf_node *node, nir_block *end_block)
       nir_loop *loop = nir_cf_node_as_loop(node);
       foreach_list_typed(nir_cf_node, child, node, &loop->body)
          relink_jump_halt_cf_node(child, end_block);
+      foreach_list_typed(nir_cf_node, child, node, &loop->continue_list)
+         relink_jump_halt_cf_node(child, end_block);
       break;
    }
 
@@ -776,13 +839,17 @@ relink_jump_halt_cf_node(nir_cf_node *node, nir_block *end_block)
    }
 }
 
-void
+/**
+ * Inserts a list at a given cursor. Returns the cursor at the end of the
+ * insertion (i.e., at the end of the instructions contained in cf_list).
+ */
+nir_cursor
 nir_cf_reinsert(nir_cf_list *cf_list, nir_cursor cursor)
 {
    nir_block *before, *after;
 
    if (exec_list_is_empty(&cf_list->list))
-      return;
+      return cursor;
 
    nir_function_impl *cursor_impl =
       nir_cf_node_get_function(&nir_cursor_current_block(cursor)->cf_node);
@@ -801,8 +868,8 @@ nir_cf_reinsert(nir_cf_list *cf_list, nir_cursor cursor)
 
    stitch_blocks(before,
                  nir_cf_node_as_block(nir_cf_node_next(&before->cf_node)));
-   stitch_blocks(nir_cf_node_as_block(nir_cf_node_prev(&after->cf_node)),
-                 after);
+   return stitch_blocks(nir_cf_node_as_block(nir_cf_node_prev(&after->cf_node)),
+                        after);
 }
 
 void

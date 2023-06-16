@@ -36,29 +36,33 @@
 #include "radv_amdgpu_surface.h"
 #include "radv_amdgpu_winsys_public.h"
 #include "radv_debug.h"
+#include "vk_drm_syncobj.h"
 #include "xf86drm.h"
 
 static bool
 do_winsys_init(struct radv_amdgpu_winsys *ws, int fd)
 {
-   if (!ac_query_gpu_info(fd, ws->dev, &ws->info, &ws->amdinfo))
+   if (!ac_query_gpu_info(fd, ws->dev, &ws->info))
+      return false;
+
+   if (!ac_query_pci_bus_info(fd, &ws->info))
       return false;
 
    if (ws->info.drm_minor < 23) {
-      fprintf(stderr, "radv: DRM 3.23+ is required (Linux kernel 4.15+)\n");
+      fprintf(stderr, "radv/amdgpu: DRM 3.23+ is required (Linux kernel 4.15+)\n");
       return false;
    }
 
    ws->addrlib = ac_addrlib_create(&ws->info, &ws->info.max_alignment);
    if (!ws->addrlib) {
-      fprintf(stderr, "amdgpu: Cannot create addrlib.\n");
+      fprintf(stderr, "radv/amdgpu: Cannot create addrlib.\n");
       return false;
    }
 
-   ws->info.num_rings[RING_DMA] = MIN2(ws->info.num_rings[RING_DMA], MAX_RINGS_PER_TYPE);
-   ws->info.num_rings[RING_COMPUTE] = MIN2(ws->info.num_rings[RING_COMPUTE], MAX_RINGS_PER_TYPE);
+   ws->info.ip[AMD_IP_SDMA].num_queues = MIN2(ws->info.ip[AMD_IP_SDMA].num_queues, MAX_RINGS_PER_TYPE);
+   ws->info.ip[AMD_IP_COMPUTE].num_queues = MIN2(ws->info.ip[AMD_IP_COMPUTE].num_queues, MAX_RINGS_PER_TYPE);
 
-   ws->use_ib_bos = ws->info.chip_class >= GFX7;
+   ws->use_ib_bos = ws->info.gfx_level >= GFX7;
    return true;
 }
 
@@ -137,7 +141,7 @@ radv_amdgpu_winsys_get_chip_name(struct radeon_winsys *rws)
    return amdgpu_get_marketing_name(dev);
 }
 
-static simple_mtx_t winsys_creation_mutex = _SIMPLE_MTX_INITIALIZER_NP;
+static simple_mtx_t winsys_creation_mutex = SIMPLE_MTX_INITIALIZER;
 static struct hash_table *winsyses = NULL;
 
 static void
@@ -163,21 +167,30 @@ radv_amdgpu_winsys_destroy(struct radeon_winsys *rws)
    if (!destroy)
       return;
 
-   for (unsigned i = 0; i < ws->syncobj_count; ++i)
-      amdgpu_cs_destroy_syncobj(ws->dev, ws->syncobj[i]);
-   free(ws->syncobj);
-
    u_rwlock_destroy(&ws->global_bo_list.lock);
    free(ws->global_bo_list.bos);
 
    if (ws->reserve_vmid)
       amdgpu_vm_unreserve_vmid(ws->dev, 0);
 
-   pthread_mutex_destroy(&ws->syncobj_lock);
    u_rwlock_destroy(&ws->log_bo_list_lock);
    ac_addrlib_destroy(ws->addrlib);
    amdgpu_device_deinitialize(ws->dev);
    FREE(rws);
+}
+
+static int
+radv_amdgpu_winsys_get_fd(struct radeon_winsys *rws)
+{
+   struct radv_amdgpu_winsys *ws = (struct radv_amdgpu_winsys *)rws;
+   return amdgpu_device_get_fd(ws->dev);
+}
+
+static const struct vk_sync_type *const *
+radv_amdgpu_winsys_get_sync_types(struct radeon_winsys *rws)
+{
+   struct radv_amdgpu_winsys *ws = (struct radv_amdgpu_winsys *)rws;
+   return ws->sync_types;
 }
 
 struct radeon_winsys *
@@ -188,15 +201,19 @@ radv_amdgpu_winsys_create(int fd, uint64_t debug_flags, uint64_t perftest_flags,
    struct radv_amdgpu_winsys *ws = NULL;
 
    r = amdgpu_device_initialize(fd, &drm_major, &drm_minor, &dev);
-   if (r)
+   if (r) {
+      fprintf(stderr, "radv/amdgpu: failed to initialize device.\n");
       return NULL;
+   }
 
    /* We have to keep this lock till insertion. */
    simple_mtx_lock(&winsys_creation_mutex);
    if (!winsyses)
       winsyses = _mesa_pointer_hash_table_create(NULL);
-   if (!winsyses)
+   if (!winsyses) {
+      fprintf(stderr, "radv/amdgpu: failed to alloc winsys hash table.\n");
       goto fail;
+   }
 
    struct hash_entry *entry = _mesa_hash_table_search(winsyses, dev);
    if (entry) {
@@ -213,7 +230,7 @@ radv_amdgpu_winsys_create(int fd, uint64_t debug_flags, uint64_t perftest_flags,
           ((debug_flags & RADV_DEBUG_HANG) && !ws->debug_log_bos) ||
           ((debug_flags & RADV_DEBUG_NO_IBS) && ws->use_ib_bos) ||
           (perftest_flags != ws->perftest)) {
-         fprintf(stderr, "amdgpu: Found options that differ from the existing winsys.\n");
+         fprintf(stderr, "radv/amdgpu: Found options that differ from the existing winsys.\n");
          return NULL;
       }
 
@@ -243,21 +260,37 @@ radv_amdgpu_winsys_create(int fd, uint64_t debug_flags, uint64_t perftest_flags,
    ws->reserve_vmid = reserve_vmid;
    if (ws->reserve_vmid) {
       r = amdgpu_vm_reserve_vmid(dev, 0);
-      if (r)
+      if (r) {
+         fprintf(stderr, "radv/amdgpu: failed to reserve vmid.\n");
          goto vmid_fail;
+      }
    }
+   int num_sync_types = 0;
+
+   ws->syncobj_sync_type = vk_drm_syncobj_get_type(amdgpu_device_get_fd(ws->dev));
+   if (ws->syncobj_sync_type.features) {
+      ws->sync_types[num_sync_types++] = &ws->syncobj_sync_type;
+      if (!(ws->syncobj_sync_type.features & VK_SYNC_FEATURE_TIMELINE)) {
+         ws->emulated_timeline_sync_type = vk_sync_timeline_get_type(&ws->syncobj_sync_type);
+         ws->sync_types[num_sync_types++] = &ws->emulated_timeline_sync_type.sync;
+      }
+   }
+
+   ws->sync_types[num_sync_types++] = NULL;
+   assert(num_sync_types <= ARRAY_SIZE(ws->sync_types));
 
    ws->perftest = perftest_flags;
    ws->zero_all_vram_allocs = debug_flags & RADV_DEBUG_ZERO_VRAM;
    u_rwlock_init(&ws->global_bo_list.lock);
    list_inithead(&ws->log_bo_list);
    u_rwlock_init(&ws->log_bo_list_lock);
-   pthread_mutex_init(&ws->syncobj_lock, NULL);
    ws->base.query_info = radv_amdgpu_winsys_query_info;
    ws->base.query_value = radv_amdgpu_winsys_query_value;
    ws->base.read_registers = radv_amdgpu_winsys_read_registers;
    ws->base.get_chip_name = radv_amdgpu_winsys_get_chip_name;
    ws->base.destroy = radv_amdgpu_winsys_destroy;
+   ws->base.get_fd = radv_amdgpu_winsys_get_fd;
+   ws->base.get_sync_types = radv_amdgpu_winsys_get_sync_types;
    radv_amdgpu_bo_init_functions(ws);
    radv_amdgpu_cs_init_functions(ws);
    radv_amdgpu_surface_init_functions(ws);

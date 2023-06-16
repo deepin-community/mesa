@@ -44,10 +44,6 @@ if with_opencl_icd
   clover_cpp_args += '-DHAVE_CLOVER_ICD'
 endif
 
-if with_opencl_native
-  clover_spirv_cpp_args += '-DHAVE_CLOVER_NATIVE'
-endif
-
 if with_opencl_spirv
   clover_spirv_cpp_args += '-DHAVE_CLOVER_SPIRV'
 endif
@@ -168,5 +164,5 @@ libclover = static_library(
   ],
   gnu_symbol_visibility : 'hidden',
   link_with : [libclllvm, libclspirv, libclnir],
-  dependencies : idep_mesautil,
+  dependencies : [idep_mesautil, idep_nir],
 )

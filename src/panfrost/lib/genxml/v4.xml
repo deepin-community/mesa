@@ -14,11 +14,12 @@
   </enum>
 
   <enum name="Attribute Special">
+    <value name="Point Coord Min Y" value="33"/>
     <value name="Vertex ID" value="34"/>
     <value name="Instance ID" value="36"/>
     <value name="Frag Coord" value="37"/>
     <value name="Front Facing" value="38"/>
-    <value name="Point Coord" value="97"/>
+    <value name="Point Coord Max Y" value="97"/>
   </enum>
 
   <enum name="Channel">
@@ -517,15 +518,15 @@
     <field name="High Depth Cull" size="1" start="0:17" type="bool" default="true"/>
     <field name="Primitive restart" size="2" start="0:19" type="Primitive Restart"/>
     <field name="Job Task Split" size="6" start="0:26" type="uint"/>
-    <field name="Base vertex offset" size="32" start="1:0" type="uint"/>
+    <field name="Base vertex offset" size="32" start="1:0" type="int"/>
     <field name="Primitive Restart Index" size="32" start="2:0" type="uint"/>
     <field name="Index count" size="32" start="3:0" type="uint" modifier="minus(1)"/>
     <field name="Indices" size="64" start="4:0" type="address"/>
   </struct>
 
   <struct name="Draw" size="30" align="64">
-    <field name="Four Components Per Vertex" size="1" start="0:0" type="bool"/>
-    <field name="Draw Descriptor Is 64b" size="1" start="0:1" type="bool"/>
+    <field name="Four Components Per Vertex" size="1" start="0:0" type="bool" default="true"/>
+    <field name="Draw Descriptor Is 64b" size="1" start="0:1" type="bool" default="true"/>
     <field name="Texture Descriptor Is 64b" size="1" start="0:2" type="bool" default="true"/>
     <field name="Occlusion query" size="2" start="0:3" type="Occlusion Mode" default="Disabled"/>
     <field name="Front face CCW" size="1" start="0:5" type="bool"/>
@@ -570,9 +571,9 @@
     <field name="Mipmap Mode" size="2" start="3" type="Mipmap Mode" default="Nearest"/>
     <field name="Normalized Coordinates" size="1" start="5" type="bool" default="true"/>
     <field name="Isotropic LOD" size="1" start="6" type="bool"/>
-    <field name="LOD Bias" size="16" start="0:16" type="int" default="0"/>
-    <field name="Minimum LOD" size="16" start="1:0" type="uint" default="0"/>
-    <field name="Maximum LOD" size="16" start="1:16" type="uint" default="1"/>
+    <field name="LOD Bias" size="16" start="0:16" type="slod" default="0"/>
+    <field name="Minimum LOD" size="16" start="1:0" type="ulod" default="0"/>
+    <field name="Maximum LOD" size="16" start="1:16" type="ulod" default="0"/>
     <field name="Wrap Mode S" size="4" start="2:0" type="Wrap Mode" default="Clamp to Edge"/>
     <field name="Wrap Mode T" size="4" start="2:4" type="Wrap Mode" default="Clamp to Edge"/>
     <field name="Wrap Mode R" size="4" start="2:8" type="Wrap Mode" default="Clamp to Edge"/>
@@ -659,8 +660,8 @@
     <field name="sRGB" size="1" start="24" type="bool"/>
     <field name="Dither disable" size="1" start="25" type="bool"/>
     <field name="Force seamless cubemaps" size="1" start="26" type="bool"/>
-    <field name="Depth Range 1" size="1" start="28" type="bool"/>
-    <field name="Depth Range 2" size="1" start="29" type="bool"/>
+    <field name="Front-facing depth bias" size="1" start="28" type="bool"/>
+    <field name="Back-facing depth bias" size="1" start="29" type="bool"/>
     <field name="Single-sampled lines" size="1" start="30" type="bool"/>
     <field name="Point snap" size="1" start="31" type="bool"/>
   </struct>

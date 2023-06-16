@@ -26,7 +26,6 @@
 #include "pipe/p_screen.h"
 #include "state_tracker/st_texture.h"
 #include "state_tracker/st_context.h"
-#include "state_tracker/st_cb_fbo.h"
 #include "main/texobj.h"
 
 #include "dri_helpers.h"
@@ -91,33 +90,45 @@ static unsigned dri2_fence_get_caps(__DRIscreen *_screen)
 static void *
 dri2_create_fence(__DRIcontext *_ctx)
 {
-   struct st_context_iface *stapi = dri_context(_ctx)->st;
+   struct dri_context *ctx = dri_context(_ctx);
+   struct st_context *st = ctx->st;
    struct dri2_fence *fence = CALLOC_STRUCT(dri2_fence);
 
    if (!fence)
       return NULL;
 
-   stapi->flush(stapi, 0, &fence->pipe_fence, NULL, NULL);
+   /* Wait for glthread to finish because we can't use pipe_context from
+    * multiple threads.
+    */
+   _mesa_glthread_finish(st->ctx);
+
+   st_context_flush(st, 0, &fence->pipe_fence, NULL, NULL);
 
    if (!fence->pipe_fence) {
       FREE(fence);
       return NULL;
    }
 
-   fence->driscreen = dri_screen(_ctx->driScreenPriv);
+   fence->driscreen = ctx->screen;
    return fence;
 }
 
 static void *
 dri2_create_fence_fd(__DRIcontext *_ctx, int fd)
 {
-   struct st_context_iface *stapi = dri_context(_ctx)->st;
-   struct pipe_context *ctx = stapi->pipe;
+   struct dri_context *dri_ctx = dri_context(_ctx);
+   struct st_context *st = dri_ctx->st;
+   struct pipe_context *ctx = st->pipe;
    struct dri2_fence *fence = CALLOC_STRUCT(dri2_fence);
+
+   /* Wait for glthread to finish because we can't use pipe_context from
+    * multiple threads.
+    */
+   _mesa_glthread_finish(st->ctx);
 
    if (fd == -1) {
       /* exporting driver created fence, flush: */
-      stapi->flush(stapi, ST_FLUSH_FENCE_FD, &fence->pipe_fence, NULL, NULL);
+      st_context_flush(st, ST_FLUSH_FENCE_FD, &fence->pipe_fence, NULL, NULL);
    } else {
       /* importing a foreign fence fd: */
       ctx->create_fence_fd(ctx, &fence->pipe_fence, fd, PIPE_FD_TYPE_NATIVE_SYNC);
@@ -127,7 +138,7 @@ dri2_create_fence_fd(__DRIcontext *_ctx, int fd)
       return NULL;
    }
 
-   fence->driscreen = dri_screen(_ctx->driScreenPriv);
+   fence->driscreen = dri_ctx->screen;
    return fence;
 }
 
@@ -212,7 +223,8 @@ dri2_client_wait_sync(__DRIcontext *_ctx, void *_fence, unsigned flags,
 static void
 dri2_server_wait_sync(__DRIcontext *_ctx, void *_fence, unsigned flags)
 {
-   struct pipe_context *ctx = dri_context(_ctx)->st->pipe;
+   struct st_context *st = dri_context(_ctx)->st;
+   struct pipe_context *ctx = st->pipe;
    struct dri2_fence *fence = (struct dri2_fence*)_fence;
 
    /* We might be called here with a NULL fence as a result of WaitSyncKHR
@@ -220,6 +232,11 @@ dri2_server_wait_sync(__DRIcontext *_ctx, void *_fence, unsigned flags)
     */
    if (!fence)
       return;
+
+   /* Wait for glthread to finish because we can't use pipe_context from
+    * multiple threads.
+    */
+   _mesa_glthread_finish(st->ctx);
 
    if (ctx->fence_server_sync)
       ctx->fence_server_sync(ctx, fence->pipe_fence);
@@ -241,14 +258,14 @@ const __DRI2fenceExtension dri2FenceExtension = {
 __DRIimage *
 dri2_lookup_egl_image(struct dri_screen *screen, void *handle)
 {
-   const __DRIimageLookupExtension *loader = screen->sPriv->dri2.image;
+   const __DRIimageLookupExtension *loader = screen->dri2.image;
    __DRIimage *img;
 
    if (!loader->lookupEGLImage)
       return NULL;
 
-   img = loader->lookupEGLImage(screen->sPriv,
-				handle, screen->sPriv->loaderPrivate);
+   img = loader->lookupEGLImage(opaque_dri_screen(screen),
+				handle, screen->loaderPrivate);
 
    return img;
 }
@@ -256,17 +273,17 @@ dri2_lookup_egl_image(struct dri_screen *screen, void *handle)
 boolean
 dri2_validate_egl_image(struct dri_screen *screen, void *handle)
 {
-   const __DRIimageLookupExtension *loader = screen->sPriv->dri2.image;
+   const __DRIimageLookupExtension *loader = screen->dri2.image;
 
-   return loader->validateEGLImage(handle, screen->sPriv->loaderPrivate);
+   return loader->validateEGLImage(handle, screen->loaderPrivate);
 }
 
 __DRIimage *
 dri2_lookup_egl_image_validated(struct dri_screen *screen, void *handle)
 {
-   const __DRIimageLookupExtension *loader = screen->sPriv->dri2.image;
+   const __DRIimageLookupExtension *loader = screen->dri2.image;
 
-   return loader->lookupEGLImageValidated(handle, screen->sPriv->loaderPrivate);
+   return loader->lookupEGLImageValidated(handle, screen->loaderPrivate);
 }
 
 __DRIimage *
@@ -274,12 +291,16 @@ dri2_create_image_from_renderbuffer2(__DRIcontext *context,
 				     int renderbuffer, void *loaderPrivate,
                                      unsigned *error)
 {
-   struct st_context *st_ctx = (struct st_context *)dri_context(context)->st;
-   struct gl_context *ctx = st_ctx->ctx;
-   struct pipe_context *p_ctx = st_ctx->pipe;
+   struct dri_context *dri_ctx = dri_context(context);
+   struct st_context *st = dri_ctx->st;
+   struct gl_context *ctx = st->ctx;
+   struct pipe_context *p_ctx = st->pipe;
    struct gl_renderbuffer *rb;
    struct pipe_resource *tex;
    __DRIimage *img;
+
+   /* Wait for glthread to finish to get up-to-date GL object lookups. */
+   _mesa_glthread_finish(st->ctx);
 
    /* Section 3.9 (EGLImage Specification and Management) of the EGL 1.5
     * specification says:
@@ -300,7 +321,7 @@ dri2_create_image_from_renderbuffer2(__DRIcontext *context,
       return NULL;
    }
 
-   tex = st_get_renderbuffer_resource(rb);
+   tex = rb->texture;
    if (!tex) {
       *error = __DRI_IMAGE_ERROR_BAD_PARAMETER;
       return NULL;
@@ -313,8 +334,10 @@ dri2_create_image_from_renderbuffer2(__DRIcontext *context,
    }
 
    img->dri_format = driGLFormatToImageFormat(rb->Format);
+   img->internal_format = rb->InternalFormat;
    img->loader_private = loaderPrivate;
-   img->sPriv = context->driScreenPriv;
+   img->screen = dri_ctx->screen;
+   img->in_fence_fd = -1;
 
    pipe_resource_reference(&img->texture, tex);
 
@@ -342,8 +365,8 @@ dri2_create_image_from_renderbuffer(__DRIcontext *context,
 void
 dri2_destroy_image(__DRIimage *img)
 {
-   const __DRIimageLoaderExtension *imgLoader = img->sPriv->image.loader;
-   const __DRIdri2LoaderExtension *dri2Loader = img->sPriv->dri2.loader;
+   const __DRIimageLoaderExtension *imgLoader = img->screen->image.loader;
+   const __DRIdri2LoaderExtension *dri2Loader = img->screen->dri2.loader;
 
    if (imgLoader && imgLoader->base.version >= 4 &&
          imgLoader->destroyLoaderImageState) {
@@ -354,6 +377,10 @@ dri2_destroy_image(__DRIimage *img)
    }
 
    pipe_resource_reference(&img->texture, NULL);
+
+   if (img->in_fence_fd != -1)
+      close(img->in_fence_fd);
+
    FREE(img);
 }
 
@@ -364,12 +391,16 @@ dri2_create_from_texture(__DRIcontext *context, int target, unsigned texture,
                          void *loaderPrivate)
 {
    __DRIimage *img;
-   struct st_context *st_ctx = (struct st_context *)dri_context(context)->st;
-   struct gl_context *ctx = st_ctx->ctx;
-   struct pipe_context *p_ctx = st_ctx->pipe;
+   struct dri_context *dri_ctx = dri_context(context);
+   struct st_context *st = dri_ctx->st;
+   struct gl_context *ctx = st->ctx;
+   struct pipe_context *p_ctx = st->pipe;
    struct gl_texture_object *obj;
    struct pipe_resource *tex;
    GLuint face = 0;
+
+   /* Wait for glthread to finish to get up-to-date GL object lookups. */
+   _mesa_glthread_finish(st->ctx);
 
    obj = _mesa_lookup_texture(ctx, texture);
    if (!obj || obj->Target != target) {
@@ -410,10 +441,12 @@ dri2_create_from_texture(__DRIcontext *context, int target, unsigned texture,
 
    img->level = level;
    img->layer = depth;
+   img->in_fence_fd = -1;
    img->dri_format = driGLFormatToImageFormat(obj->Image[face][level]->TexFormat);
+   img->internal_format = obj->Image[face][level]->InternalFormat;
 
    img->loader_private = loaderPrivate;
-   img->sPriv = context->driScreenPriv;
+   img->screen = dri_ctx->screen;
 
    pipe_resource_reference(&img->texture, tex);
 
@@ -436,9 +469,12 @@ static const struct dri2_format_mapping dri2_format_table[] = {
       { DRM_FORMAT_XBGR16161616F, __DRI_IMAGE_FORMAT_XBGR16161616F,
         __DRI_IMAGE_COMPONENTS_RGB,       PIPE_FORMAT_R16G16B16X16_FLOAT, 1,
         { { 0, 0, 0, __DRI_IMAGE_FORMAT_XBGR16161616F } } },
-      { __DRI_IMAGE_FOURCC_RGBA16161616, __DRI_IMAGE_FORMAT_ABGR16161616,
+      { DRM_FORMAT_ABGR16161616, __DRI_IMAGE_FORMAT_ABGR16161616,
         __DRI_IMAGE_COMPONENTS_RGBA,      PIPE_FORMAT_R16G16B16A16_UNORM, 1,
         { { 0, 0, 0, __DRI_IMAGE_FORMAT_ABGR16161616 } } },
+      { DRM_FORMAT_XBGR16161616, __DRI_IMAGE_FORMAT_XBGR16161616,
+        __DRI_IMAGE_COMPONENTS_RGB,      PIPE_FORMAT_R16G16B16X16_UNORM, 1,
+        { { 0, 0, 0, __DRI_IMAGE_FORMAT_XBGR16161616 } } },
       { DRM_FORMAT_ARGB2101010,   __DRI_IMAGE_FORMAT_ARGB2101010,
         __DRI_IMAGE_COMPONENTS_RGBA,      PIPE_FORMAT_B10G10R10A2_UNORM, 1,
         { { 0, 0, 0, __DRI_IMAGE_FORMAT_ARGB2101010 } } },
@@ -552,6 +588,10 @@ static const struct dri2_format_mapping dri2_format_table[] = {
           { 1, 1, 1, __DRI_IMAGE_FORMAT_GR1616 } } },
       { DRM_FORMAT_P016,          __DRI_IMAGE_FORMAT_NONE,
         __DRI_IMAGE_COMPONENTS_Y_UV,      PIPE_FORMAT_P016, 2,
+        { { 0, 0, 0, __DRI_IMAGE_FORMAT_R16 },
+          { 1, 1, 1, __DRI_IMAGE_FORMAT_GR1616 } } },
+      { DRM_FORMAT_P030,          __DRI_IMAGE_FORMAT_NONE,
+        __DRI_IMAGE_COMPONENTS_Y_UV,      PIPE_FORMAT_P030, 2,
         { { 0, 0, 0, __DRI_IMAGE_FORMAT_R16 },
           { 1, 1, 1, __DRI_IMAGE_FORMAT_GR1616 } } },
 
@@ -686,12 +726,8 @@ dri2_query_dma_buf_formats(__DRIscreen *_screen, int max, int *formats,
       const struct dri2_format_mapping *map = &dri2_format_table[i];
 
       /* The sRGB format is not a real FourCC as defined by drm_fourcc.h, so we
-       * must not leak it out to clients.  The RGBA16161616 format isn't
-       * real either, but at some point it could be.  Don't leak it out form
-       * now.
-       */
-      if (dri2_format_table[i].dri_fourcc == __DRI_IMAGE_FOURCC_SARGB8888 ||
-          dri2_format_table[i].dri_fourcc == __DRI_IMAGE_FOURCC_RGBA16161616)
+       * must not leak it out to clients. */
+      if (dri2_format_table[i].dri_fourcc == __DRI_IMAGE_FOURCC_SARGB8888)
          continue;
 
       if (pscreen->is_format_supported(pscreen, map->pipe_format,

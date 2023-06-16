@@ -29,15 +29,15 @@
 
 static struct pipe_surface *
 vc4_get_blit_surface(struct pipe_context *pctx,
-                     struct pipe_resource *prsc, unsigned level)
+                     struct pipe_resource *prsc, unsigned level,
+                     unsigned layer)
 {
         struct pipe_surface tmpl;
 
         memset(&tmpl, 0, sizeof(tmpl));
         tmpl.format = prsc->format;
         tmpl.u.tex.level = level;
-        tmpl.u.tex.first_layer = 0;
-        tmpl.u.tex.last_layer = 0;
+        tmpl.u.tex.first_layer = tmpl.u.tex.last_layer = layer;
 
         return pctx->create_surface(pctx, prsc, &tmpl);
 }
@@ -69,7 +69,9 @@ vc4_tile_blit(struct pipe_context *pctx, const struct pipe_blit_info *info)
         if (info->dst.box.x != info->src.box.x ||
             info->dst.box.y != info->src.box.y ||
             info->dst.box.width != info->src.box.width ||
-            info->dst.box.height != info->src.box.height) {
+            info->dst.box.height != info->src.box.height ||
+            info->dst.box.depth != info->src.box.depth ||
+            info->dst.box.depth != 1) {
                 return false;
         }
 
@@ -123,23 +125,16 @@ vc4_tile_blit(struct pipe_context *pctx, const struct pipe_blit_info *info)
         }
 
         struct pipe_surface *dst_surf =
-                vc4_get_blit_surface(pctx, info->dst.resource, info->dst.level);
+                vc4_get_blit_surface(pctx, info->dst.resource, info->dst.level,
+                                           info->dst.box.z);
         struct pipe_surface *src_surf =
-                vc4_get_blit_surface(pctx, info->src.resource, info->src.level);
+                vc4_get_blit_surface(pctx, info->src.resource, info->src.level,
+                                           info->src.box.z);
 
         vc4_flush_jobs_reading_resource(vc4, info->src.resource);
 
         struct vc4_job *job = vc4_get_job(vc4, dst_surf, NULL);
         pipe_surface_reference(&job->color_read, src_surf);
-
-        /* If we're resolving from MSAA to single sample, we still need to run
-         * the engine in MSAA mode for the load.
-         */
-        if (!job->msaa && info->src.resource->nr_samples > 1) {
-                job->msaa = true;
-                job->tile_width = 32;
-                job->tile_height = 32;
-        }
 
         job->draw_min_x = info->dst.box.x;
         job->draw_min_y = info->dst.box.y;
@@ -177,7 +172,7 @@ vc4_blitter_save(struct vc4_context *vc4)
         util_blitter_save_blend(vc4->blitter, vc4->blend);
         util_blitter_save_depth_stencil_alpha(vc4->blitter, vc4->zsa);
         util_blitter_save_stencil_ref(vc4->blitter, &vc4->stencil_ref);
-        util_blitter_save_sample_mask(vc4->blitter, vc4->sample_mask);
+        util_blitter_save_sample_mask(vc4->blitter, vc4->sample_mask, 0);
         util_blitter_save_framebuffer(vc4->blitter, &vc4->framebuffer);
         util_blitter_save_fragment_sampler_states(vc4->blitter,
                         vc4->fragtex.num_samplers,
@@ -402,7 +397,7 @@ fallback:
         /* Do an immediate SW fallback, since the render blit path
          * would just recurse.
          */
-        ok = util_try_blit_via_copy_region(pctx, info);
+        ok = util_try_blit_via_copy_region(pctx, info, false);
         assert(ok); (void)ok;
 
         return true;
@@ -450,7 +445,7 @@ vc4_blit(struct pipe_context *pctx, const struct pipe_blit_info *blit_info)
                 return;
 
         if (info.mask & PIPE_MASK_S) {
-                if (util_try_blit_via_copy_region(pctx, &info))
+                if (util_try_blit_via_copy_region(pctx, &info, false))
                         return;
 
                 info.mask &= ~PIPE_MASK_S;

@@ -48,16 +48,21 @@ coord_offset(nir_ssa_def *ssa)
       if (!alu->src[0].src.is_ssa)
          return -1;
 
-      int base_offset =
-         coord_offset(alu->src[0].src.ssa) + alu->src[0].swizzle[0];
+      int base_src_offset = coord_offset(alu->src[0].src.ssa);
+      if (base_src_offset < 0)
+         return -1;
+
+      int base_offset = base_src_offset + alu->src[0].swizzle[0];
 
       /* NOTE it might be possible to support more than 2D? */
       for (int i = 1; i < 2; i++) {
          if (!alu->src[i].src.is_ssa)
             return -1;
 
-         int nth_offset =
-            coord_offset(alu->src[i].src.ssa) + alu->src[i].swizzle[0];
+         int nth_src_offset = coord_offset(alu->src[i].src.ssa);
+         if (nth_src_offset < 0)
+            return -1;
+         int nth_offset = nth_src_offset + alu->src[i].swizzle[0];
 
          if (nth_offset != (base_offset + i))
             return -1;
@@ -84,6 +89,13 @@ coord_offset(nir_ssa_def *ssa)
       nir_instr_as_intrinsic(input->src[0].ssa->parent_instr);
 
    if (interp->intrinsic != nir_intrinsic_load_barycentric_pixel)
+      return -1;
+
+   /* interpolation modes such as noperspective aren't covered by the other
+    * test, we need to explicitly check for them here.
+    */
+   unsigned interp_mode = nir_intrinsic_interp_mode(interp);
+   if (interp_mode != INTERP_MODE_NONE && interp_mode != INTERP_MODE_SMOOTH)
       return -1;
 
    /* we also need a const input offset: */
@@ -181,7 +193,7 @@ lower_tex_prefetch_block(nir_block *block)
       int idx = nir_tex_instr_src_index(tex, nir_tex_src_coord);
       /* First source should be the sampling coordinate. */
       nir_tex_src *coord = &tex->src[idx];
-      debug_assert(coord->src.is_ssa);
+      assert(coord->src.is_ssa);
 
       if (ir3_nir_coord_offset(coord->src.ssa) >= 0) {
          tex->op = nir_texop_tex_prefetch;
@@ -196,14 +208,25 @@ lower_tex_prefetch_block(nir_block *block)
 static bool
 lower_tex_prefetch_func(nir_function_impl *impl)
 {
-   /* Only instructions in the the outer-most block are considered
-    * eligible for pre-dispatch, because they need to be move-able
-    * to the beginning of the shader to avoid locking down the
-    * register holding the pre-fetched result for too long.
+   /* Only instructions in the the outer-most block are considered eligible for
+    * pre-dispatch, because they need to be move-able to the beginning of the
+    * shader to avoid locking down the register holding the pre-fetched result
+    * for too long. However if there is a preamble we should skip the preamble
+    * and only look in the first block after the preamble instead, because that
+    * corresponds to the first block in the original program and texture fetches
+    * in the preamble are never pre-dispatchable.
     */
    nir_block *block = nir_start_block(impl);
-   if (!block)
-      return false;
+
+   nir_if *nif = nir_block_get_following_if(block);
+   if (nif) {
+      nir_instr *cond = nif->condition.ssa->parent_instr;
+      if (cond->type == nir_instr_type_intrinsic &&
+          nir_instr_as_intrinsic(cond)->intrinsic ==
+          nir_intrinsic_preamble_start_ir3) {
+         block = nir_cf_node_as_block(nir_cf_node_next(&nif->cf_node));
+      }
+   }
 
    bool progress = lower_tex_prefetch_block(block);
 

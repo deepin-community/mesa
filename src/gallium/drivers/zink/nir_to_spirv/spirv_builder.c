@@ -62,11 +62,12 @@ spirv_buffer_prepare(struct spirv_buffer *b, void *mem_ctx, size_t needed)
    return spirv_buffer_grow(b, mem_ctx, needed);
 }
 
-static inline void
+static inline uint32_t
 spirv_buffer_emit_word(struct spirv_buffer *b, uint32_t word)
 {
    assert(b->num_words < b->room);
-   b->words[b->num_words++] = word;
+   b->words[b->num_words] = word;
+   return b->num_words++;
 }
 
 static int
@@ -149,7 +150,7 @@ spirv_builder_emit_entry_point(struct spirv_builder *b,
         spirv_buffer_emit_word(&b->entry_points, interfaces[i]);
 }
 
-void
+uint32_t
 spirv_builder_emit_exec_mode_literal(struct spirv_builder *b, SpvId entry_point,
                                      SpvExecutionMode exec_mode, uint32_t param)
 {
@@ -157,7 +158,7 @@ spirv_builder_emit_exec_mode_literal(struct spirv_builder *b, SpvId entry_point,
    spirv_buffer_emit_word(&b->exec_modes, SpvOpExecutionMode | (4 << 16));
    spirv_buffer_emit_word(&b->exec_modes, entry_point);
    spirv_buffer_emit_word(&b->exec_modes, exec_mode);
-   spirv_buffer_emit_word(&b->exec_modes, param);
+   return spirv_buffer_emit_word(&b->exec_modes, param);
 }
 
 void
@@ -166,6 +167,18 @@ spirv_builder_emit_exec_mode_literal3(struct spirv_builder *b, SpvId entry_point
 {
    spirv_buffer_prepare(&b->exec_modes, b->mem_ctx, 6);
    spirv_buffer_emit_word(&b->exec_modes, SpvOpExecutionMode | (6 << 16));
+   spirv_buffer_emit_word(&b->exec_modes, entry_point);
+   spirv_buffer_emit_word(&b->exec_modes, exec_mode);
+   for (unsigned i = 0; i < 3; i++)
+      spirv_buffer_emit_word(&b->exec_modes, param[i]);
+}
+
+void
+spirv_builder_emit_exec_mode_id3(struct spirv_builder *b, SpvId entry_point,
+                                SpvExecutionMode exec_mode, SpvId param[3])
+{
+   spirv_buffer_prepare(&b->exec_modes, b->mem_ctx, 6);
+   spirv_buffer_emit_word(&b->exec_modes, SpvOpExecutionModeId | (6 << 16));
    spirv_buffer_emit_word(&b->exec_modes, entry_point);
    spirv_buffer_emit_word(&b->exec_modes, exec_mode);
    for (unsigned i = 0; i < 3; i++)
@@ -216,6 +229,14 @@ spirv_builder_emit_decoration(struct spirv_builder *b, SpvId target,
 }
 
 void
+spirv_builder_emit_rounding_mode(struct spirv_builder *b, SpvId target,
+                                 SpvFPRoundingMode rounding)
+{
+   uint32_t args[] = { rounding };
+   emit_decoration(b, target, SpvDecorationFPRoundingMode, args, ARRAY_SIZE(args));
+}
+
+void
 spirv_builder_emit_input_attachment_index(struct spirv_builder *b, SpvId target, uint32_t id)
 {
    uint32_t args[] = { id };
@@ -254,32 +275,32 @@ spirv_builder_emit_builtin(struct spirv_builder *b, SpvId target,
 }
 
 void
-spirv_builder_emit_vertex(struct spirv_builder *b, uint32_t stream)
+spirv_builder_emit_vertex(struct spirv_builder *b, uint32_t stream, bool multistream)
 {
    unsigned words = 1;
    SpvOp op = SpvOpEmitVertex;
-   if (stream > 0) {
+   if (multistream) {
       op = SpvOpEmitStreamVertex;
       words++;
    }
    spirv_buffer_prepare(&b->instructions, b->mem_ctx, words);
    spirv_buffer_emit_word(&b->instructions, op | (words << 16));
-   if (stream)
+   if (multistream)
       spirv_buffer_emit_word(&b->instructions, spirv_builder_const_uint(b, 32, stream));
 }
 
 void
-spirv_builder_end_primitive(struct spirv_builder *b, uint32_t stream)
+spirv_builder_end_primitive(struct spirv_builder *b, uint32_t stream, bool multistream)
 {
    unsigned words = 1;
    SpvOp op = SpvOpEndPrimitive;
-   if (stream > 0) {
+   if (multistream || stream > 0) {
       op = SpvOpEndStreamPrimitive;
       words++;
    }
    spirv_buffer_prepare(&b->instructions, b->mem_ctx, words);
    spirv_buffer_emit_word(&b->instructions, op | (words << 16));
-   if (stream)
+   if (multistream || stream > 0)
       spirv_buffer_emit_word(&b->instructions, spirv_builder_const_uint(b, 32, stream));
 }
 
@@ -402,6 +423,28 @@ spirv_builder_function_end(struct spirv_builder *b)
    spirv_buffer_prepare(&b->instructions, b->mem_ctx, 1);
    spirv_buffer_emit_word(&b->instructions, SpvOpFunctionEnd | (1 << 16));
 }
+
+SpvId
+spirv_builder_function_call(struct spirv_builder *b, SpvId result_type,
+                            SpvId function, const SpvId arguments[],
+                            size_t num_arguments)
+{
+   SpvId result = spirv_builder_new_id(b);
+
+   int words = 4 + num_arguments;
+   spirv_buffer_prepare(&b->instructions, b->mem_ctx, words);
+   spirv_buffer_emit_word(&b->instructions,
+                          SpvOpFunctionCall | (words << 16));
+   spirv_buffer_emit_word(&b->instructions, result_type);
+   spirv_buffer_emit_word(&b->instructions, result);
+   spirv_buffer_emit_word(&b->instructions, function);
+
+   for (int i = 0; i < num_arguments; ++i)
+      spirv_buffer_emit_word(&b->instructions, arguments[i]);
+
+   return result;
+}
+
 
 void
 spirv_builder_label(struct spirv_builder *b, SpvId label)
@@ -735,11 +778,48 @@ spirv_builder_emit_kill(struct spirv_builder *b)
    spirv_buffer_emit_word(&b->instructions, SpvOpKill | (1 << 16));
 }
 
+void
+spirv_builder_emit_terminate(struct spirv_builder *b)
+{
+   spirv_buffer_prepare(&b->instructions, b->mem_ctx, 1);
+   spirv_buffer_emit_word(&b->instructions, SpvOpTerminateInvocation | (1 << 16));
+}
+
+void
+spirv_builder_emit_demote(struct spirv_builder *b)
+{
+   spirv_buffer_prepare(&b->instructions, b->mem_ctx, 1);
+   spirv_buffer_emit_word(&b->instructions, SpvOpDemoteToHelperInvocation | (1 << 16));
+}
+
+SpvId
+spirv_is_helper_invocation(struct spirv_builder *b)
+{
+   SpvId result = spirv_builder_new_id(b);
+   SpvId result_type = spirv_builder_type_bool(b);
+
+   int words = 3;
+   spirv_buffer_prepare(&b->instructions, b->mem_ctx, words);
+   spirv_buffer_emit_word(&b->instructions, SpvOpIsHelperInvocationEXT | (words << 16));
+   spirv_buffer_emit_word(&b->instructions, result_type);
+   spirv_buffer_emit_word(&b->instructions, result);
+   return result;
+}
+
 SpvId
 spirv_builder_emit_vote(struct spirv_builder *b, SpvOp op, SpvId src)
 {
    return spirv_builder_emit_binop(b, op, spirv_builder_type_bool(b),
-                                   spirv_builder_const_uint(b, 32, SpvScopeWorkgroup), src);
+                                   spirv_builder_const_uint(b, 32, SpvScopeSubgroup), src);
+}
+
+static SpvId
+sparse_wrap_result_type(struct spirv_builder *b, SpvId result_type)
+{
+   SpvId types[2];
+   types[0] = spirv_builder_type_uint(b, 32);
+   types[1] = result_type;
+   return spirv_builder_type_struct(b, types, 2);
 }
 
 SpvId
@@ -754,23 +834,39 @@ spirv_builder_emit_image_sample(struct spirv_builder *b,
                                 SpvId dx,
                                 SpvId dy,
                                 SpvId const_offset,
-                                SpvId offset)
+                                SpvId offset,
+                                SpvId min_lod,
+                                bool sparse)
 {
    SpvId result = spirv_builder_new_id(b);
 
-   int opcode = SpvOpImageSampleImplicitLod;
    int operands = 5;
-   if (proj)
-      opcode += SpvOpImageSampleProjImplicitLod - SpvOpImageSampleImplicitLod;
-   if (lod || (dx && dy))
-      opcode += SpvOpImageSampleExplicitLod - SpvOpImageSampleImplicitLod;
-   if (dref) {
-      opcode += SpvOpImageSampleDrefImplicitLod - SpvOpImageSampleImplicitLod;
-      operands++;
+   int opcode;
+   if (sparse) {
+      opcode = SpvOpImageSparseSampleImplicitLod;
+      if (proj)
+         opcode += SpvOpImageSparseSampleProjImplicitLod - SpvOpImageSparseSampleImplicitLod;
+      if (lod || (dx && dy))
+         opcode += SpvOpImageSparseSampleExplicitLod - SpvOpImageSparseSampleImplicitLod;
+      if (dref) {
+         opcode += SpvOpImageSparseSampleDrefImplicitLod - SpvOpImageSparseSampleImplicitLod;
+         operands++;
+      }
+      result_type = sparse_wrap_result_type(b, result_type);
+   } else {
+      opcode = SpvOpImageSampleImplicitLod;
+      if (proj)
+         opcode += SpvOpImageSampleProjImplicitLod - SpvOpImageSampleImplicitLod;
+      if (lod || (dx && dy))
+         opcode += SpvOpImageSampleExplicitLod - SpvOpImageSampleImplicitLod;
+      if (dref) {
+         opcode += SpvOpImageSampleDrefImplicitLod - SpvOpImageSampleImplicitLod;
+         operands++;
+      }
    }
 
    SpvImageOperandsMask operand_mask = SpvImageOperandsMaskNone;
-   SpvId extra_operands[5];
+   SpvId extra_operands[6];
    int num_extra_operands = 1;
    if (bias) {
       extra_operands[num_extra_operands++] = bias;
@@ -791,6 +887,10 @@ spirv_builder_emit_image_sample(struct spirv_builder *b,
    } else if (offset) {
       extra_operands[num_extra_operands++] = offset;
       operand_mask |= SpvImageOperandsOffsetMask;
+   }
+   if (min_lod) {
+      extra_operands[num_extra_operands++] = min_lod;
+      operand_mask |= SpvImageOperandsMinLodMask;
    }
 
    /* finalize num_extra_operands / extra_operands */
@@ -842,13 +942,16 @@ spirv_builder_emit_image_read(struct spirv_builder *b,
                               SpvId coordinate,
                               SpvId lod,
                               SpvId sample,
-                              SpvId offset)
+                              SpvId offset,
+                              bool sparse)
 {
    SpvId result = spirv_builder_new_id(b);
 
    SpvImageOperandsMask operand_mask = SpvImageOperandsMaskNone;
    SpvId extra_operands[5];
    int num_extra_operands = 1;
+   if (sparse)
+      result_type = sparse_wrap_result_type(b, result_type);
    if (lod) {
       extra_operands[num_extra_operands++] = lod;
       operand_mask |= SpvImageOperandsLodMask;
@@ -865,7 +968,7 @@ spirv_builder_emit_image_read(struct spirv_builder *b,
    extra_operands[0] = operand_mask;
 
    spirv_buffer_prepare(&b->instructions, b->mem_ctx, 5 + num_extra_operands);
-   spirv_buffer_emit_word(&b->instructions, SpvOpImageRead |
+   spirv_buffer_emit_word(&b->instructions, (sparse ? SpvOpImageSparseRead : SpvOpImageRead) |
                           ((5 + num_extra_operands) << 16));
    spirv_buffer_emit_word(&b->instructions, result_type);
    spirv_buffer_emit_word(&b->instructions, result);
@@ -923,10 +1026,11 @@ spirv_builder_emit_image_gather(struct spirv_builder *b,
                                SpvId sample,
                                SpvId const_offset,
                                SpvId offset,
-                               SpvId dref)
+                               SpvId dref,
+                               bool sparse)
 {
    SpvId result = spirv_builder_new_id(b);
-   SpvId op = SpvOpImageGather;
+   SpvId op = sparse ? SpvOpImageSparseGather : SpvOpImageGather;
 
    SpvImageOperandsMask operand_mask = SpvImageOperandsMaskNone;
    SpvId extra_operands[4];
@@ -948,7 +1052,9 @@ spirv_builder_emit_image_gather(struct spirv_builder *b,
       operand_mask |= SpvImageOperandsOffsetMask;
    }
    if (dref)
-      op = SpvOpImageDrefGather;
+      op = sparse ? SpvOpImageSparseDrefGather : SpvOpImageDrefGather;
+   if (sparse)
+      result_type = sparse_wrap_result_type(b, result_type);
    /* finalize num_extra_operands / extra_operands */
    extra_operands[0] = operand_mask;
 
@@ -976,7 +1082,8 @@ spirv_builder_emit_image_fetch(struct spirv_builder *b,
                                SpvId lod,
                                SpvId sample,
                                SpvId const_offset,
-                               SpvId offset)
+                               SpvId offset,
+                               bool sparse)
 {
    SpvId result = spirv_builder_new_id(b);
 
@@ -999,12 +1106,14 @@ spirv_builder_emit_image_fetch(struct spirv_builder *b,
       extra_operands[num_extra_operands++] = offset;
       operand_mask |= SpvImageOperandsOffsetMask;
    }
+   if (sparse)
+      result_type = sparse_wrap_result_type(b, result_type);
 
    /* finalize num_extra_operands / extra_operands */
    extra_operands[0] = operand_mask;
 
    spirv_buffer_prepare(&b->instructions, b->mem_ctx, 5 + num_extra_operands);
-   spirv_buffer_emit_word(&b->instructions, SpvOpImageFetch |
+   spirv_buffer_emit_word(&b->instructions, (sparse ? SpvOpImageSparseFetch : SpvOpImageFetch) |
                           ((5 + num_extra_operands) << 16));
    spirv_buffer_emit_word(&b->instructions, result_type);
    spirv_buffer_emit_word(&b->instructions, result);
@@ -1197,6 +1306,12 @@ SpvId
 spirv_builder_type_int(struct spirv_builder *b, unsigned width)
 {
    uint32_t args[] = { width, 1 };
+   if (width == 8)
+      spirv_builder_emit_cap(b, SpvCapabilityInt8);
+   else if (width == 16)
+      spirv_builder_emit_cap(b, SpvCapabilityInt16);
+   else if (width == 64)
+      spirv_builder_emit_cap(b, SpvCapabilityInt64);
    return get_type_def(b, SpvOpTypeInt, args, ARRAY_SIZE(args));
 }
 
@@ -1204,6 +1319,12 @@ SpvId
 spirv_builder_type_uint(struct spirv_builder *b, unsigned width)
 {
    uint32_t args[] = { width, 0 };
+   if (width == 8)
+      spirv_builder_emit_cap(b, SpvCapabilityInt8);
+   else if (width == 16)
+      spirv_builder_emit_cap(b, SpvCapabilityInt16);
+   else if (width == 64)
+      spirv_builder_emit_cap(b, SpvCapabilityInt64);
    return get_type_def(b, SpvOpTypeInt, args, ARRAY_SIZE(args));
 }
 
@@ -1211,6 +1332,10 @@ SpvId
 spirv_builder_type_float(struct spirv_builder *b, unsigned width)
 {
    uint32_t args[] = { width };
+   if (width == 16)
+      spirv_builder_emit_cap(b, SpvCapabilityFloat16);
+   else if (width == 64)
+      spirv_builder_emit_cap(b, SpvCapabilityFloat64);
    return get_type_def(b, SpvOpTypeFloat, args, ARRAY_SIZE(args));
 }
 
@@ -1224,9 +1349,15 @@ spirv_builder_type_image(struct spirv_builder *b, SpvId sampled_type,
       sampled_type, dim, depth ? 1 : 0, arrayed ? 1 : 0, ms ? 1 : 0, sampled,
       image_format
    };
-   if (sampled == 2 && ms)
+   if (sampled == 2 && ms && dim != SpvDimSubpassData)
       spirv_builder_emit_cap(b, SpvCapabilityStorageImageMultisample);
    return get_type_def(b, SpvOpTypeImage, args, ARRAY_SIZE(args));
+}
+
+SpvId
+spirv_builder_emit_sampled_image(struct spirv_builder *b, SpvId result_type, SpvId image, SpvId sampler)
+{
+   return spirv_builder_emit_binop(b, SpvOpSampledImage, result_type, image, sampler);
 }
 
 SpvId
@@ -1234,6 +1365,13 @@ spirv_builder_type_sampled_image(struct spirv_builder *b, SpvId image_type)
 {
    uint32_t args[] = { image_type };
    return get_type_def(b, SpvOpTypeSampledImage, args, ARRAY_SIZE(args));
+}
+
+SpvId
+spirv_builder_type_sampler(struct spirv_builder *b)
+{
+   uint32_t args[1] = {0};
+   return get_type_def(b, SpvOpTypeSampler, args, 0);
 }
 
 SpvId
@@ -1418,7 +1556,7 @@ spirv_builder_const_bool(struct spirv_builder *b, bool val)
 SpvId
 spirv_builder_const_int(struct spirv_builder *b, int width, int64_t val)
 {
-   assert(width >= 16);
+   assert(width >= 8);
    SpvId type = spirv_builder_type_int(b, width);
    if (width <= 32)
       return emit_constant_32(b, type, val);
@@ -1430,6 +1568,12 @@ SpvId
 spirv_builder_const_uint(struct spirv_builder *b, int width, uint64_t val)
 {
    assert(width >= 8);
+   if (width == 8)
+      spirv_builder_emit_cap(b, SpvCapabilityInt8);
+   else if (width == 16)
+      spirv_builder_emit_cap(b, SpvCapabilityInt16);
+   else if (width == 64)
+      spirv_builder_emit_cap(b, SpvCapabilityInt64);
    SpvId type = spirv_builder_type_uint(b, width);
    if (width <= 32)
       return emit_constant_32(b, type, val);
@@ -1441,7 +1585,17 @@ SpvId
 spirv_builder_spec_const_uint(struct spirv_builder *b, int width)
 {
    assert(width <= 32);
-   return spirv_builder_emit_unop(b, SpvOpSpecConstant, spirv_builder_type_uint(b, width), 0);
+   SpvId const_type = spirv_builder_type_uint(b, width);
+   SpvId result = spirv_builder_new_id(b);
+   spirv_buffer_prepare(&b->types_const_defs, b->mem_ctx, 4);
+   spirv_buffer_emit_word(&b->types_const_defs, SpvOpSpecConstant | (4 << 16));
+   spirv_buffer_emit_word(&b->types_const_defs, const_type);
+   spirv_buffer_emit_word(&b->types_const_defs, result);
+   /* this is the default value for spec constants;
+    * if any users need a different default, add a param to pass for it
+    */
+   spirv_buffer_emit_word(&b->types_const_defs, 1);
+   return result;
 }
 
 SpvId
@@ -1449,12 +1603,15 @@ spirv_builder_const_float(struct spirv_builder *b, int width, double val)
 {
    assert(width >= 16);
    SpvId type = spirv_builder_type_float(b, width);
-   if (width == 16)
+   if (width == 16) {
+      spirv_builder_emit_cap(b, SpvCapabilityFloat16);
       return emit_constant_32(b, type, _mesa_float_to_half(val));
-   else if (width == 32)
+   } else if (width == 32)
       return emit_constant_32(b, type, u_bitcast_f2u(val));
-   else if (width == 64)
+   else if (width == 64) {
+      spirv_builder_emit_cap(b, SpvCapabilityFloat64);
       return emit_constant_64(b, type, u_bitcast_d2u(val));
+   }
 
    unreachable("unhandled float-width");
 }
@@ -1556,7 +1713,8 @@ spirv_builder_get_num_words(struct spirv_builder *b)
 
 size_t
 spirv_builder_get_words(struct spirv_builder *b, uint32_t *words,
-                        size_t num_words, uint32_t spirv_version)
+                        size_t num_words, uint32_t spirv_version,
+                        uint32_t *tcs_vertices_out_word)
 {
    assert(num_words >= spirv_builder_get_num_words(b));
 
@@ -1586,10 +1744,16 @@ spirv_builder_get_words(struct spirv_builder *b, uint32_t *words,
       &b->instructions
    };
 
+   bool find_tcs_vertices_out = *tcs_vertices_out_word > 0;
    for (int i = 0; i < ARRAY_SIZE(buffers); ++i) {
       const struct spirv_buffer *buffer = buffers[i];
-      for (int j = 0; j < buffer->num_words; ++j)
+      for (int j = 0; j < buffer->num_words; ++j) {
+         if (find_tcs_vertices_out && buffer == &b->exec_modes && *tcs_vertices_out_word == j) {
+            *tcs_vertices_out_word = written;
+            find_tcs_vertices_out = false;
+         }
          words[written++] = buffer->words[j];
+      }
    }
 
    assert(written == spirv_builder_get_num_words(b));

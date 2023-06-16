@@ -1,5 +1,5 @@
 /**********************************************************
- * Copyright 2008-2009 VMware, Inc.  All rights reserved.
+ * Copyright 2008-2023 VMware, Inc.  All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person
  * obtaining a copy of this software and associated documentation
@@ -33,6 +33,7 @@
 #include "util/u_memory.h"
 #include "util/u_transfer.h"
 #include "svga_screen_cache.h"
+#include "svga_context.h"
 
 struct pipe_context;
 struct pipe_screen;
@@ -74,13 +75,6 @@ struct svga_texture
    struct svga_winsys_surface *handle;
 
    /**
-    * Whether the host side surface is validated, either through the
-    * InvalidateGBSurface command or after the surface is updated
-    * or rendered to.
-    */
-   boolean validated;
-
-   /**
     * Whether the host side surface is imported and not created by this
     * driver.
     */
@@ -91,6 +85,11 @@ struct svga_texture
     */
    boolean can_use_upload;
 
+   /**
+    * Whether texture is modified.  Set if any of the dirty bits is set.
+    */
+   boolean modified;
+
    unsigned size;  /**< Approximate size in bytes */
 
    /** array indexed by cube face or 3D/array slice, one bit per mipmap level */
@@ -100,6 +99,8 @@ struct svga_texture
     *  Set if the level is marked as dirty.
     */
    ushort *dirty;
+
+   enum svga_surface_state surface_state;
 
    /**
     * A cached backing host side surface to be used if this texture is being
@@ -209,7 +210,6 @@ svga_define_texture_level(struct svga_texture *tex,
 {
    check_face_level(tex, face, level);
    tex->defined[face] |= 1 << level;
-   tex->validated = TRUE;
 }
 
 
@@ -223,30 +223,22 @@ svga_is_texture_level_defined(const struct svga_texture *tex,
 
 
 static inline void
-svga_set_texture_rendered_to(struct svga_texture *tex,
-                             unsigned face, unsigned level)
+svga_set_texture_rendered_to(struct svga_texture *tex)
 {
-   check_face_level(tex, face, level);
-   tex->rendered_to[face] |= 1 << level;
-   tex->validated = TRUE;
+   tex->surface_state = SVGA_SURFACE_STATE_RENDERED;
 }
 
 
 static inline void
-svga_clear_texture_rendered_to(struct svga_texture *tex,
-                               unsigned face, unsigned level)
+svga_clear_texture_rendered_to(struct svga_texture *tex)
 {
-   check_face_level(tex, face, level);
-   tex->rendered_to[face] &= ~(1 << level);
+   tex->surface_state = SVGA_SURFACE_STATE_UPDATED;
 }
 
-
 static inline boolean
-svga_was_texture_rendered_to(const struct svga_texture *tex,
-                             unsigned face, unsigned level)
+svga_was_texture_rendered_to(const struct svga_texture *tex)
 {
-   check_face_level(tex, face, level);
-   return !!(tex->rendered_to[face] & (1 << level));
+   return (tex->surface_state == SVGA_SURFACE_STATE_RENDERED);
 }
 
 static inline void
@@ -255,6 +247,7 @@ svga_set_texture_dirty(struct svga_texture *tex,
 {
    check_face_level(tex, face, level);
    tex->dirty[face] |= 1 << level;
+   tex->modified = TRUE;
 }
 
 static inline void
@@ -264,14 +257,21 @@ svga_clear_texture_dirty(struct svga_texture *tex)
    for (i = 0; i < tex->b.depth0 * tex->b.array_size; i++) {
       tex->dirty[i] = 0;
    }
+   tex->modified = FALSE;
 }
 
 static inline boolean
-svga_is_texture_dirty(const struct svga_texture *tex,
-                      unsigned face, unsigned level)
+svga_is_texture_level_dirty(const struct svga_texture *tex,
+                            unsigned face, unsigned level)
 {
    check_face_level(tex, face, level);
    return !!(tex->dirty[face] & (1 << level));
+}
+
+static inline boolean
+svga_is_texture_dirty(const struct svga_texture *tex)
+{
+   return tex->modified;
 }
 
 struct pipe_resource *

@@ -124,7 +124,7 @@ static const struct ac_rtld_symbol *find_symbol(const struct util_dynarray *symb
       if ((symbol->part_idx == ~0u || symbol->part_idx == part_idx) && !strcmp(name, symbol->name))
          return symbol;
    }
-   return 0;
+   return NULL;
 }
 
 static int compare_symbol_by_align(const void *lhsp, const void *rhsp)
@@ -156,7 +156,7 @@ static bool layout_symbols(struct ac_rtld_symbol *symbols, unsigned num_symbols,
       s->offset = total_size;
 
       if (total_size + s->size < total_size) {
-         report_errorf("%s: size overflow", __FUNCTION__);
+         report_errorf("%s: size overflow", __func__);
          return false;
       }
 
@@ -257,6 +257,7 @@ bool ac_rtld_open(struct ac_rtld_binary *binary, struct ac_rtld_open_info i)
    memset(binary, 0, sizeof(*binary));
    memcpy(&binary->options, &i.options, sizeof(binary->options));
    binary->wave_size = i.wave_size;
+   binary->gfx_level = i.info->gfx_level;
    binary->num_parts = i.num_parts;
    binary->parts = calloc(sizeof(*binary->parts), i.num_parts);
    if (!binary->parts)
@@ -294,11 +295,7 @@ bool ac_rtld_open(struct ac_rtld_binary *binary, struct ac_rtld_open_info i)
    util_dynarray_foreach (&binary->lds_symbols, struct ac_rtld_symbol, symbol)
       symbol->part_idx = ~0u;
 
-   unsigned max_lds_size = 64 * 1024;
-
-   if (i.info->chip_class == GFX6 ||
-       (i.shader_type != MESA_SHADER_COMPUTE && i.shader_type != MESA_SHADER_FRAGMENT))
-      max_lds_size = 32 * 1024;
+   unsigned max_lds_size = i.info->gfx_level == GFX6 ? 32 * 1024 : 64 * 1024;
 
    uint64_t shared_lds_size = 0;
    if (!layout_symbols(binary->lds_symbols.data, i.num_shared_lds_symbols, &shared_lds_size))
@@ -453,13 +450,17 @@ bool ac_rtld_open(struct ac_rtld_binary *binary, struct ac_rtld_open_info i)
     */
    unsigned prefetch_distance = 0;
 
-   if (!i.info->has_graphics && i.info->family >= CHIP_ALDEBARAN)
+   if (!i.info->has_graphics && i.info->family >= CHIP_MI200)
       prefetch_distance = 16;
-   else if (i.info->chip_class >= GFX10)
+   else if (i.info->gfx_level >= GFX10)
       prefetch_distance = 3;
 
-   if (prefetch_distance)
-      binary->rx_size = align(binary->rx_size + prefetch_distance * 64, 64);
+   if (prefetch_distance) {
+      if (i.info->gfx_level >= GFX11)
+         binary->rx_size = align(binary->rx_size + prefetch_distance * 64, 128);
+      else
+         binary->rx_size = align(binary->rx_size + prefetch_distance * 64, 64);
+   }
 
    return true;
 
@@ -526,7 +527,7 @@ bool ac_rtld_read_config(const struct radeon_info *info, struct ac_rtld_binary *
 
       /* TODO: be precise about scratch use? */
       struct ac_shader_config c = {0};
-      ac_parse_shader_binary_config(config_data, config_nbytes, binary->wave_size, true, info, &c);
+      ac_parse_shader_binary_config(config_data, config_nbytes, binary->wave_size, info, &c);
 
       config->num_sgprs = MAX2(config->num_sgprs, c.num_sgprs);
       config->num_vgprs = MAX2(config->num_vgprs, c.num_vgprs);
@@ -572,7 +573,7 @@ static bool resolve_symbol(const struct ac_rtld_upload_info *u, unsigned part_id
 
       /* TODO: resolve from other parts */
 
-      if (u->get_external_symbol(u->cb_data, name, value))
+      if (u->get_external_symbol(u->binary->gfx_level, u->cb_data, name, value))
          return true;
 
       report_errorf("symbol %s: unknown", name);

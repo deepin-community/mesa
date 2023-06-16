@@ -34,6 +34,9 @@ namespace aco {
 namespace {
 
 constexpr const size_t max_reg_cnt = 512;
+constexpr const size_t max_sgpr_cnt = 128;
+constexpr const size_t min_vgpr = 256;
+constexpr const size_t max_vgpr_cnt = 256;
 
 struct Idx {
    bool operator==(const Idx& other) const { return block == other.block && instr == other.instr; }
@@ -45,38 +48,89 @@ struct Idx {
    uint32_t instr;
 };
 
-Idx not_written_in_block{UINT32_MAX, 0};
-Idx clobbered{UINT32_MAX, 1};
+/** Indicates that a register was not yet written in the shader. */
+Idx not_written_yet{UINT32_MAX, 0};
+
+/** Indicates that an operand is constant or undefined, not written by any instruction. */
 Idx const_or_undef{UINT32_MAX, 2};
-Idx written_by_multiple_instrs{UINT32_MAX, 3};
+
+/** Indicates that a register was overwritten by different instructions in previous blocks. */
+Idx overwritten_untrackable{UINT32_MAX, 3};
+
+/** Indicates that a register was written by subdword operations. */
+Idx overwritten_subdword{UINT32_MAX, 4};
 
 struct pr_opt_ctx {
+   using Idx_array = std::array<Idx, max_reg_cnt>;
+
    Program* program;
    Block* current_block;
    uint32_t current_instr_idx;
    std::vector<uint16_t> uses;
-   std::vector<std::array<Idx, max_reg_cnt>> instr_idx_by_regs;
+   std::unique_ptr<Idx_array[]> instr_idx_by_regs;
+
+   pr_opt_ctx(Program* p)
+       : program(p), current_block(nullptr), current_instr_idx(0), uses(dead_code_analysis(p)),
+         instr_idx_by_regs(std::unique_ptr<Idx_array[]>{new Idx_array[p->blocks.size()]})
+   {}
+
+   ALWAYS_INLINE void reset_block_regs(const std::vector<uint32_t>& preds,
+                                       const unsigned block_index, const unsigned min_reg,
+                                       const unsigned num_regs)
+   {
+      const unsigned num_preds = preds.size();
+      const unsigned first_pred = preds[0];
+
+      /* Copy information from the first predecessor. */
+      memcpy(&instr_idx_by_regs[block_index][min_reg], &instr_idx_by_regs[first_pred][min_reg],
+             num_regs * sizeof(Idx));
+
+      /* Mark overwritten if it doesn't match with other predecessors. */
+      const unsigned until_reg = min_reg + num_regs;
+      for (unsigned i = 1; i < num_preds; ++i) {
+         unsigned pred = preds[i];
+         for (unsigned reg = min_reg; reg < until_reg; ++reg) {
+            Idx& idx = instr_idx_by_regs[block_index][reg];
+            if (idx == overwritten_untrackable)
+               continue;
+
+            if (idx != instr_idx_by_regs[pred][reg])
+               idx = overwritten_untrackable;
+         }
+      }
+   }
 
    void reset_block(Block* block)
    {
       current_block = block;
       current_instr_idx = 0;
 
-      if ((block->kind & block_kind_loop_header) || block->linear_preds.empty()) {
+      if (block->linear_preds.empty()) {
          std::fill(instr_idx_by_regs[block->index].begin(), instr_idx_by_regs[block->index].end(),
-                   not_written_in_block);
+                   not_written_yet);
+      } else if (block->kind & block_kind_loop_header) {
+         /* Instructions inside the loop may overwrite registers of temporaries that are
+          * not live inside the loop, but we can't detect that because we haven't processed
+          * the blocks in the loop yet. As a workaround, mark all registers as untrackable.
+          * TODO: Consider improving this in the future.
+          */
+         std::fill(instr_idx_by_regs[block->index].begin(), instr_idx_by_regs[block->index].end(),
+                   overwritten_untrackable);
       } else {
-         unsigned first_pred = block->linear_preds[0];
-         for (unsigned i = 0; i < max_reg_cnt; i++) {
-            bool all_same = std::all_of(
-               std::next(block->linear_preds.begin()), block->linear_preds.end(),
-               [&](unsigned pred)
-               { return instr_idx_by_regs[pred][i] == instr_idx_by_regs[first_pred][i]; });
+         reset_block_regs(block->linear_preds, block->index, 0, max_sgpr_cnt);
+         reset_block_regs(block->linear_preds, block->index, 251, 3);
 
-            if (all_same)
-               instr_idx_by_regs[block->index][i] = instr_idx_by_regs[first_pred][i];
-            else
-               instr_idx_by_regs[block->index][i] = not_written_in_block;
+         if (!block->logical_preds.empty()) {
+            /* We assume that VGPRs are only read by blocks which have a logical predecessor,
+             * ie. any block that reads any VGPR has at least 1 logical predecessor.
+             */
+            reset_block_regs(block->logical_preds, block->index, min_vgpr, max_vgpr_cnt);
+         } else {
+            /* If a block has no logical predecessors, it is not part of the
+             * logical CFG and therefore it also won't have any logical successors.
+             * Such a block does not write any VGPRs ever.
+             */
+            assert(block->logical_succs.empty());
          }
       }
    }
@@ -96,7 +150,7 @@ save_reg_writes(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
       Idx idx{ctx.current_block->index, ctx.current_instr_idx};
 
       if (def.regClass().is_subdword())
-         idx = clobbered;
+         idx = overwritten_subdword;
 
       assert((r + dw_size) <= max_reg_cnt);
       assert(def.size() == dw_size || def.regClass().is_subdword());
@@ -118,7 +172,7 @@ last_writer_idx(pr_opt_ctx& ctx, PhysReg physReg, RegClass rc)
                   ctx.instr_idx_by_regs[ctx.current_block->index].begin() + r + dw_size,
                   [instr_idx](Idx i) { return i == instr_idx; });
 
-   return all_same ? instr_idx : written_by_multiple_instrs;
+   return all_same ? instr_idx : overwritten_untrackable;
 }
 
 Idx
@@ -127,23 +181,20 @@ last_writer_idx(pr_opt_ctx& ctx, const Operand& op)
    if (op.isConstant() || op.isUndefined())
       return const_or_undef;
 
-   assert(op.physReg().reg() < max_reg_cnt);
-   Idx instr_idx = ctx.instr_idx_by_regs[ctx.current_block->index][op.physReg().reg()];
-
-#ifndef NDEBUG
-   /* Debug mode:  */
-   instr_idx = last_writer_idx(ctx, op.physReg(), op.regClass());
-   assert(instr_idx != written_by_multiple_instrs);
-#endif
-
-   return instr_idx;
+   return last_writer_idx(ctx, op.physReg(), op.regClass());
 }
 
+/**
+ * Check whether a register has been overwritten since the given location.
+ * This is an important part of checking whether certain optimizations are
+ * valid.
+ * Note that the decision is made based on registers and not on SSA IDs.
+ */
 bool
-is_clobbered_since(pr_opt_ctx& ctx, PhysReg reg, RegClass rc, const Idx& idx)
+is_overwritten_since(pr_opt_ctx& ctx, PhysReg reg, RegClass rc, const Idx& since_idx)
 {
-   /* If we didn't find an instruction, assume that the register is clobbered. */
-   if (!idx.found())
+   /* If we didn't find an instruction, assume that the register is overwritten. */
+   if (!since_idx.found())
       return true;
 
    /* TODO: We currently can't keep track of subdword registers. */
@@ -156,14 +207,14 @@ is_clobbered_since(pr_opt_ctx& ctx, PhysReg reg, RegClass rc, const Idx& idx)
 
    for (unsigned r = begin_reg; r < end_reg; ++r) {
       Idx& i = ctx.instr_idx_by_regs[current_block_idx][r];
-      if (i == clobbered || i == written_by_multiple_instrs)
+      if (i == overwritten_untrackable && current_block_idx > since_idx.block)
          return true;
-      else if (i == not_written_in_block)
+      else if (i == overwritten_untrackable || i == not_written_yet)
          continue;
 
       assert(i.found());
 
-      if (i.block > idx.block || (i.block == idx.block && i.instr > idx.instr))
+      if (i.block > since_idx.block || (i.block == since_idx.block && i.instr > since_idx.instr))
          return true;
    }
 
@@ -172,9 +223,9 @@ is_clobbered_since(pr_opt_ctx& ctx, PhysReg reg, RegClass rc, const Idx& idx)
 
 template <typename T>
 bool
-is_clobbered_since(pr_opt_ctx& ctx, const T& t, const Idx& idx)
+is_overwritten_since(pr_opt_ctx& ctx, const T& t, const Idx& idx)
 {
-   return is_clobbered_since(ctx, t.physReg(), t.regClass(), idx);
+   return is_overwritten_since(ctx, t.physReg(), t.regClass(), idx);
 }
 
 void
@@ -184,7 +235,7 @@ try_apply_branch_vcc(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
     *
     * vcc = ...                      ; last_vcc_wr
     * sX, scc = s_and_bXX vcc, exec  ; op0_instr
-    * (...vcc and exec must not be clobbered inbetween...)
+    * (...vcc and exec must not be overwritten inbetween...)
     * s_cbranch_XX scc               ; instr
     *
     * If possible, the above is optimized into:
@@ -194,7 +245,7 @@ try_apply_branch_vcc(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
     */
 
    /* Don't try to optimize this on GFX6-7 because SMEM may corrupt the vccz bit. */
-   if (ctx.program->chip_class < GFX8)
+   if (ctx.program->gfx_level < GFX8)
       return;
 
    if (instr->format != Format::PSEUDO_BRANCH || instr->operands.size() == 0 ||
@@ -207,15 +258,15 @@ try_apply_branch_vcc(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
    /* We need to make sure:
     * - the instructions that wrote the operand register and VCC are both found
     * - the operand register used by the branch, and VCC were both written in the current block
-    * - EXEC hasn't been clobbered since the last VCC write
-    * - VCC hasn't been clobbered since the operand register was written
+    * - EXEC hasn't been overwritten since the last VCC write
+    * - VCC hasn't been overwritten since the operand register was written
     *   (ie. the last VCC writer precedes the op0 writer)
     */
    if (!op0_instr_idx.found() || !last_vcc_wr_idx.found() ||
        op0_instr_idx.block != ctx.current_block->index ||
        last_vcc_wr_idx.block != ctx.current_block->index ||
-       is_clobbered_since(ctx, exec, ctx.program->lane_mask, last_vcc_wr_idx) ||
-       is_clobbered_since(ctx, vcc, ctx.program->lane_mask, op0_instr_idx))
+       is_overwritten_since(ctx, exec, ctx.program->lane_mask, last_vcc_wr_idx) ||
+       is_overwritten_since(ctx, vcc, ctx.program->lane_mask, op0_instr_idx))
       return;
 
    Instruction* op0_instr = ctx.get(op0_instr_idx);
@@ -267,10 +318,9 @@ try_optimize_scc_nocompare(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
       if (ctx.uses[instr->operands[0].tempId()] > 1)
          return;
 
-      /* Make sure both SCC and Operand 0 are written by the same instruction. */
+      /* Find the writer instruction of Operand 0. */
       Idx wr_idx = last_writer_idx(ctx, instr->operands[0]);
-      Idx sccwr_idx = last_writer_idx(ctx, scc, s1);
-      if (!wr_idx.found() || wr_idx != sccwr_idx)
+      if (!wr_idx.found())
          return;
 
       Instruction* wr_instr = ctx.get(wr_idx);
@@ -313,6 +363,49 @@ try_optimize_scc_nocompare(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
       default: return;
       }
 
+      /* Check whether both SCC and Operand 0 are written by the same instruction. */
+      Idx sccwr_idx = last_writer_idx(ctx, scc, s1);
+      if (wr_idx != sccwr_idx) {
+         /* Check whether the current instruction is the only user of its first operand. */
+         if (ctx.uses[wr_instr->definitions[1].tempId()] ||
+             ctx.uses[wr_instr->definitions[0].tempId()] > 1)
+            return;
+
+         /* Check whether the operands of the writer are overwritten. */
+         for (const Operand& op : wr_instr->operands) {
+            if (!op.isConstant() && is_overwritten_since(ctx, op, wr_idx))
+               return;
+         }
+
+         aco_opcode pulled_opcode = wr_instr->opcode;
+         if (instr->opcode == aco_opcode::s_cmp_eq_u32 ||
+             instr->opcode == aco_opcode::s_cmp_eq_i32 ||
+             instr->opcode == aco_opcode::s_cmp_eq_u64) {
+            /* When s_cmp_eq is used, it effectively inverts the SCC def.
+             * However, we can't simply invert the opcodes here because that
+             * would change the meaning of the program.
+             */
+            return;
+         }
+
+         Definition scc_def = instr->definitions[0];
+         ctx.uses[wr_instr->definitions[0].tempId()]--;
+
+         /* Copy the writer instruction, but use SCC from the current instr.
+          * This means that the original instruction will be eliminated.
+          */
+         if (wr_instr->format == Format::SOP2) {
+            instr.reset(create_instruction<SOP2_instruction>(pulled_opcode, Format::SOP2, 2, 2));
+            instr->operands[1] = wr_instr->operands[1];
+         } else if (wr_instr->format == Format::SOP1) {
+            instr.reset(create_instruction<SOP1_instruction>(pulled_opcode, Format::SOP1, 1, 2));
+         }
+         instr->definitions[0] = wr_instr->definitions[0];
+         instr->definitions[1] = scc_def;
+         instr->operands[0] = wr_instr->operands[0];
+         return;
+      }
+
       /* Use the SCC def from wr_instr */
       ctx.uses[instr->operands[0].tempId()]--;
       instr->operands[0] = Operand(wr_instr->definitions[1].getTemp(), scc);
@@ -327,11 +420,13 @@ try_optimize_scc_nocompare(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
             : aco_opcode::s_cmp_lg_u32;
    } else if ((instr->format == Format::PSEUDO_BRANCH && instr->operands.size() == 1 &&
                instr->operands[0].physReg() == scc) ||
-              instr->opcode == aco_opcode::s_cselect_b32) {
+              instr->opcode == aco_opcode::s_cselect_b32 ||
+              instr->opcode == aco_opcode::s_cselect_b64) {
 
       /* For cselect, operand 2 is the SCC condition */
       unsigned scc_op_idx = 0;
-      if (instr->opcode == aco_opcode::s_cselect_b32) {
+      if (instr->opcode == aco_opcode::s_cselect_b32 ||
+          instr->opcode == aco_opcode::s_cselect_b64) {
          scc_op_idx = 2;
       }
 
@@ -359,7 +454,8 @@ try_optimize_scc_nocompare(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
          if (instr->format == Format::PSEUDO_BRANCH)
             instr->opcode = instr->opcode == aco_opcode::p_cbranch_z ? aco_opcode::p_cbranch_nz
                                                                      : aco_opcode::p_cbranch_z;
-         else if (instr->opcode == aco_opcode::s_cselect_b32)
+         else if (instr->opcode == aco_opcode::s_cselect_b32 ||
+                  instr->opcode == aco_opcode::s_cselect_b64)
             std::swap(instr->operands[0], instr->operands[1]);
          else
             unreachable(
@@ -386,7 +482,7 @@ try_combine_dpp(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
     *
     */
 
-   if (!instr->isVALU() || instr->isDPP() || !can_use_DPP(instr, false))
+   if (!instr->isVALU() || instr->isDPP())
       return;
 
    for (unsigned i = 0; i < MIN2(2, instr->operands.size()); i++) {
@@ -394,9 +490,12 @@ try_combine_dpp(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
       if (!op_instr_idx.found())
          continue;
 
-      Instruction* mov = ctx.get(op_instr_idx);
+      const Instruction* mov = ctx.get(op_instr_idx);
       if (mov->opcode != aco_opcode::v_mov_b32 || !mov->isDPP())
          continue;
+      bool dpp8 = mov->isDPP8();
+      if (!can_use_DPP(instr, false, dpp8))
+         return;
 
       /* If we aren't going to remove the v_mov_b32, we have to ensure that it doesn't overwrite
        * it's own operand before we use it.
@@ -406,43 +505,192 @@ try_combine_dpp(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
          continue;
 
       /* Don't propagate DPP if the source register is overwritten since the move. */
-      if (is_clobbered_since(ctx, mov->operands[0], op_instr_idx))
+      if (is_overwritten_since(ctx, mov->operands[0], op_instr_idx))
          continue;
 
       if (i && !can_swap_operands(instr, &instr->opcode))
          continue;
 
-      /* anything else doesn't make sense in SSA */
-      assert(mov->dpp().row_mask == 0xf && mov->dpp().bank_mask == 0xf);
+      bool input_mods = instr_info.can_use_input_modifiers[(int)instr->opcode] &&
+                        instr_info.operand_size[(int)instr->opcode] == 32;
+      if (!dpp8 && (mov->dpp16().neg[0] || mov->dpp16().abs[0]) && !input_mods)
+         continue;
+
+      if (!dpp8) /* anything else doesn't make sense in SSA */
+         assert(mov->dpp16().row_mask == 0xf && mov->dpp16().bank_mask == 0xf);
 
       if (--ctx.uses[mov->definitions[0].tempId()])
          ctx.uses[mov->operands[0].tempId()]++;
 
-      convert_to_DPP(instr);
+      convert_to_DPP(instr, dpp8);
 
-      DPP_instruction* dpp = &instr->dpp();
       if (i) {
-         std::swap(dpp->operands[0], dpp->operands[1]);
-         std::swap(dpp->neg[0], dpp->neg[1]);
-         std::swap(dpp->abs[0], dpp->abs[1]);
+         std::swap(instr->operands[0], instr->operands[1]);
+         instr->valu().neg[0].swap(instr->valu().neg[1]);
+         instr->valu().abs[0].swap(instr->valu().abs[1]);
+         instr->valu().opsel[0].swap(instr->valu().opsel[1]);
       }
-      dpp->operands[0] = mov->operands[0];
-      dpp->dpp_ctrl = mov->dpp().dpp_ctrl;
-      dpp->bound_ctrl = true;
-      dpp->neg[0] ^= mov->dpp().neg[0] && !dpp->abs[0];
-      dpp->abs[0] |= mov->dpp().abs[0];
+
+      instr->operands[0] = mov->operands[0];
+
+      if (dpp8) {
+         DPP8_instruction* dpp = &instr->dpp8();
+         memcpy(dpp->lane_sel, mov->dpp8().lane_sel, sizeof(dpp->lane_sel));
+      } else {
+         DPP16_instruction* dpp = &instr->dpp16();
+         dpp->dpp_ctrl = mov->dpp16().dpp_ctrl;
+         dpp->bound_ctrl = true;
+         dpp->neg[0] ^= mov->dpp16().neg[0] && !dpp->abs[0];
+         dpp->abs[0] |= mov->dpp16().abs[0];
+      }
       return;
+   }
+}
+
+unsigned
+num_encoded_alu_operands(const aco_ptr<Instruction>& instr)
+{
+   if (instr->isSALU()) {
+      if (instr->isSOP2())
+         return 2;
+      else if (instr->isSOP1())
+         return 1;
+
+      return 0;
+   }
+
+   if (instr->isVALU()) {
+      if (instr->isVOP1())
+         return 1;
+      else if (instr->isVOPC() || instr->isVOP2())
+         return 2;
+      else if (instr->opcode == aco_opcode::v_writelane_b32_e64 ||
+               instr->opcode == aco_opcode::v_writelane_b32)
+         return 2; /* potentially VOP3, but reads VDST as SRC2 */
+      else if (instr->isVOP3() || instr->isVOP3P() || instr->isVINTERP_INREG())
+         return instr->operands.size();
+   }
+
+   return 0;
+}
+
+void
+try_reassign_split_vector(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
+{
+   /* Any unused split_vector definition can always use the same register
+    * as the operand. This avoids creating unnecessary copies.
+    */
+   if (instr->opcode == aco_opcode::p_split_vector) {
+      Operand& op = instr->operands[0];
+      if (!op.isTemp() || op.isKill())
+         return;
+
+      PhysReg reg = op.physReg();
+      for (Definition& def : instr->definitions) {
+         if (def.getTemp().type() == op.getTemp().type() && def.isKill())
+            def.setFixed(reg);
+
+         reg = reg.advance(def.bytes());
+      }
+
+      return;
+   }
+
+   /* We are looking for the following pattern:
+    *
+    * sA, sB = p_split_vector s[X:Y]
+    * ... X and Y not overwritten here ...
+    * use sA or sB <--- current instruction
+    *
+    * If possible, we propagate the registers from the p_split_vector
+    * operand into the current instruction and the above is optimized into:
+    *
+    * use sX or sY
+    *
+    * Thereby, we might violate register assignment rules.
+    * This optimization exists because it's too difficult to solve it
+    * in RA, and should be removed after we solved this in RA.
+    */
+
+   if (!instr->isVALU() && !instr->isSALU())
+      return;
+
+   for (unsigned i = 0; i < num_encoded_alu_operands(instr); i++) {
+      /* Find the instruction that writes the current operand. */
+      const Operand& op = instr->operands[i];
+      Idx op_instr_idx = last_writer_idx(ctx, op);
+      if (!op_instr_idx.found())
+         continue;
+
+      /* Check if the operand is written by p_split_vector. */
+      Instruction* split_vec = ctx.get(op_instr_idx);
+      if (split_vec->opcode != aco_opcode::p_split_vector)
+         continue;
+
+      Operand& split_op = split_vec->operands[0];
+
+      /* Don't do anything if the p_split_vector operand is not a temporary
+       * or is killed by the p_split_vector.
+       * In this case the definitions likely already reuse the same registers as the operand.
+       */
+      if (!split_op.isTemp() || split_op.isKill())
+         continue;
+
+      /* Only propagate operands of the same type */
+      if (split_op.getTemp().type() != op.getTemp().type())
+         continue;
+
+      /* Check if the p_split_vector operand's registers are overwritten. */
+      if (is_overwritten_since(ctx, split_op, op_instr_idx))
+         continue;
+
+      PhysReg reg = split_op.physReg();
+      for (Definition& def : split_vec->definitions) {
+         if (def.getTemp() != op.getTemp()) {
+            reg = reg.advance(def.bytes());
+            continue;
+         }
+
+         /* Don't propagate misaligned SGPRs.
+          * Note: No ALU instruction can take a variable larger than 64bit.
+          */
+         if (op.regClass() == s2 && reg.reg() % 2 != 0)
+            break;
+
+         /* If there is only one use (left), recolor the split_vector definition */
+         if (ctx.uses[op.tempId()] == 1)
+            def.setFixed(reg);
+         else
+            ctx.uses[op.tempId()]--;
+
+         /* Use the p_split_vector operand register directly.
+          *
+          * Note: this might violate register assignment rules to some extend
+          *       in case the definition does not get recolored, eventually.
+          */
+         instr->operands[i].setFixed(reg);
+         break;
+      }
    }
 }
 
 void
 process_instruction(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
 {
+   /* Don't try to optimize instructions which are already dead. */
+   if (!instr || is_dead(ctx.uses, instr.get())) {
+      instr.reset();
+      ctx.current_instr_idx++;
+      return;
+   }
+
    try_apply_branch_vcc(ctx, instr);
 
    try_optimize_scc_nocompare(ctx, instr);
 
    try_combine_dpp(ctx, instr);
+
+   try_reassign_split_vector(ctx, instr);
 
    if (instr)
       save_reg_writes(ctx, instr);
@@ -455,10 +703,7 @@ process_instruction(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
 void
 optimize_postRA(Program* program)
 {
-   pr_opt_ctx ctx;
-   ctx.program = program;
-   ctx.uses = dead_code_analysis(program);
-   ctx.instr_idx_by_regs.resize(program->blocks.size());
+   pr_opt_ctx ctx(program);
 
    /* Forward pass
     * Goes through each instruction exactly once, and can transform
@@ -476,10 +721,17 @@ optimize_postRA(Program* program)
     * no longer have any uses.
     */
    for (auto& block : program->blocks) {
-      auto new_end = std::remove_if(block.instructions.begin(), block.instructions.end(),
-                                    [&ctx](const aco_ptr<Instruction>& instr)
-                                    { return !instr || is_dead(ctx.uses, instr.get()); });
-      block.instructions.resize(new_end - block.instructions.begin());
+      std::vector<aco_ptr<Instruction>> instructions;
+      instructions.reserve(block.instructions.size());
+
+      for (aco_ptr<Instruction>& instr : block.instructions) {
+         if (!instr || is_dead(ctx.uses, instr.get()))
+            continue;
+
+         instructions.emplace_back(std::move(instr));
+      }
+
+      block.instructions = std::move(instructions);
    }
 }
 

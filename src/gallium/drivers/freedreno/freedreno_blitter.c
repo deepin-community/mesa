@@ -88,13 +88,13 @@ fd_blitter_pipe_begin(struct fd_context *ctx, bool render_cond) assert_dt
    util_blitter_save_so_targets(ctx->blitter, ctx->streamout.num_targets,
                                 ctx->streamout.targets);
    util_blitter_save_rasterizer(ctx->blitter, ctx->rasterizer);
-   util_blitter_save_viewport(ctx->blitter, &ctx->viewport);
-   util_blitter_save_scissor(ctx->blitter, &ctx->scissor);
+   util_blitter_save_viewport(ctx->blitter, &ctx->viewport[0]);
+   util_blitter_save_scissor(ctx->blitter, &ctx->scissor[0]);
    util_blitter_save_fragment_shader(ctx->blitter, ctx->prog.fs);
    util_blitter_save_blend(ctx->blitter, ctx->blend);
    util_blitter_save_depth_stencil_alpha(ctx->blitter, ctx->zsa);
    util_blitter_save_stencil_ref(ctx->blitter, &ctx->stencil_ref);
-   util_blitter_save_sample_mask(ctx->blitter, ctx->sample_mask);
+   util_blitter_save_sample_mask(ctx->blitter, ctx->sample_mask, ctx->min_samples);
    util_blitter_save_framebuffer(ctx->blitter, &ctx->framebuffer);
    util_blitter_save_fragment_sampler_states(
       ctx->blitter, ctx->tex[PIPE_SHADER_FRAGMENT].num_samplers,
@@ -166,7 +166,7 @@ fd_blitter_blit(struct fd_context *ctx, const struct pipe_blit_info *info)
    util_blitter_blit_generic(
       ctx->blitter, dst_view, &info->dst.box, src_view, &info->src.box,
       src->width0, src->height0, info->mask, info->filter,
-      info->scissor_enable ? &info->scissor : NULL, info->alpha_blend, false);
+      info->scissor_enable ? &info->scissor : NULL, info->alpha_blend, false, 0);
 
    pipe_surface_reference(&dst_view, NULL);
    pipe_sampler_view_reference(&src_view, NULL);

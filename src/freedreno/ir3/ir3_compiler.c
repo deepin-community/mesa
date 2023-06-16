@@ -38,6 +38,7 @@ static const struct debug_named_value shader_debug_options[] = {
    {"gs",         IR3_DBG_SHADER_GS,  "Print shader disasm for geometry shaders"},
    {"fs",         IR3_DBG_SHADER_FS,  "Print shader disasm for fragment shaders"},
    {"cs",         IR3_DBG_SHADER_CS,  "Print shader disasm for compute shaders"},
+   {"internal",   IR3_DBG_SHADER_INTERNAL, "Print shader disasm for internal shaders (normally not included in vs/fs/cs/etc)"},
    {"disasm",     IR3_DBG_DISASM,     "Dump NIR and adreno shader disassembly"},
    {"optmsgs",    IR3_DBG_OPTMSGS,    "Enable optimizer debug messages"},
    {"forces2en",  IR3_DBG_FORCES2EN,  "Force s2en mode for tex sampler instructions"},
@@ -45,6 +46,7 @@ static const struct debug_named_value shader_debug_options[] = {
    {"nofp16",     IR3_DBG_NOFP16,     "Don't lower mediump to fp16"},
    {"nocache",    IR3_DBG_NOCACHE,    "Disable shader cache"},
    {"spillall",   IR3_DBG_SPILLALL,   "Spill as much as possible to test the spiller"},
+   {"nopreamble", IR3_DBG_NOPREAMBLE, "Disable the preamble pass"},
 #ifdef DEBUG
    /* DEBUG-only options: */
    {"schedmsgs",  IR3_DBG_SCHEDMSGS,  "Enable scheduler debug messages"},
@@ -69,9 +71,64 @@ ir3_compiler_destroy(struct ir3_compiler *compiler)
    ralloc_free(compiler);
 }
 
+static const nir_shader_compiler_options ir3_base_options = {
+   .lower_fpow = true,
+   .lower_scmp = true,
+   .lower_flrp16 = true,
+   .lower_flrp32 = true,
+   .lower_flrp64 = true,
+   .lower_ffract = true,
+   .lower_fmod = true,
+   .lower_fdiv = true,
+   .lower_isign = true,
+   .lower_ldexp = true,
+   .lower_uadd_carry = true,
+   .lower_usub_borrow = true,
+   .lower_mul_high = true,
+   .lower_mul_2x32_64 = true,
+   .fuse_ffma16 = true,
+   .fuse_ffma32 = true,
+   .fuse_ffma64 = true,
+   .vertex_id_zero_based = false,
+   .lower_extract_byte = true,
+   .lower_extract_word = true,
+   .lower_insert_byte = true,
+   .lower_insert_word = true,
+   .lower_helper_invocation = true,
+   .lower_bitfield_insert_to_shifts = true,
+   .lower_bitfield_extract_to_shifts = true,
+   .lower_pack_half_2x16 = true,
+   .lower_pack_snorm_4x8 = true,
+   .lower_pack_snorm_2x16 = true,
+   .lower_pack_unorm_4x8 = true,
+   .lower_pack_unorm_2x16 = true,
+   .lower_unpack_half_2x16 = true,
+   .lower_unpack_snorm_4x8 = true,
+   .lower_unpack_snorm_2x16 = true,
+   .lower_unpack_unorm_4x8 = true,
+   .lower_unpack_unorm_2x16 = true,
+   .lower_pack_split = true,
+   .use_interpolated_input_intrinsics = true,
+   .lower_rotate = true,
+   .lower_to_scalar = true,
+   .has_imul24 = true,
+   .has_fsub = true,
+   .has_isub = true,
+   .force_indirect_unrolling_sampler = true,
+   .lower_uniforms_to_ubo = true,
+   .use_scoped_barrier = true,
+   .max_unroll_iterations = 32,
+
+   .lower_cs_local_index_to_id = true,
+   .lower_wpos_pntc = true,
+
+   .lower_int64_options = (nir_lower_int64_options)~0,
+   .lower_doubles_options = (nir_lower_doubles_options)~0,
+};
+
 struct ir3_compiler *
 ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
-                    bool robust_ubo_access)
+                    const struct ir3_compiler_options *options)
 {
    struct ir3_compiler *compiler = rzalloc(NULL, struct ir3_compiler);
 
@@ -86,7 +143,7 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
    compiler->dev = dev;
    compiler->dev_id = dev_id;
    compiler->gen = fd_dev_gen(dev_id);
-   compiler->robust_ubo_access = robust_ubo_access;
+   compiler->options = *options;
 
    /* All known GPU's have 32k local memory (aka shared) */
    compiler->local_mem_size = 32 * 1024;
@@ -94,6 +151,10 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
    compiler->branchstack_size = 64;
    compiler->wave_granularity = 2;
    compiler->max_waves = 16;
+
+   compiler->max_variable_workgroup_size = 1024;
+
+   const struct fd_dev_info *dev_info = fd_dev_info(compiler->dev_id);
 
    if (compiler->gen >= 6) {
       compiler->samgq_workaround = true;
@@ -103,13 +164,20 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
        * else, and separate limits. There seems to be a shared limit, but
        * it's higher than the vert or frag limits.
        *
-       * TODO: The shared limit seems to be different on different on
-       * different models.
+       * Also, according to the observation on a630/a650/a660, max_const_pipeline
+       * has to be 512 when all geometry stages are present. Otherwise a gpu hang
+       * happens. Accordingly maximum safe size for each stage should be under
+       * (max_const_pipeline / 5 (stages)) with 4 vec4's alignment considered for
+       * const files.
+       *
+       * Only when VS and FS stages are present, the limit is 640.
+       *
+       * TODO: The shared limit seems to be different on different models.
        */
-      compiler->max_const_pipeline = 640;
+      compiler->max_const_pipeline = 512;
       compiler->max_const_frag = 512;
       compiler->max_const_geom = 512;
-      compiler->max_const_safe = 128;
+      compiler->max_const_safe = 100;
 
       /* Compute shaders don't share a const file with the FS. Instead they
        * have their own file, which is smaller than the FS one.
@@ -124,11 +192,18 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
       /* TODO: implement private memory on earlier gen's */
       compiler->has_pvtmem = true;
 
-      compiler->tess_use_shared =
-            fd_dev_info(compiler->dev_id)->a6xx.tess_use_shared;
+      compiler->has_preamble = true;
 
-      compiler->storage_16bit =
-            fd_dev_info(compiler->dev_id)->a6xx.storage_16bit;
+      compiler->tess_use_shared = dev_info->a6xx.tess_use_shared;
+
+      compiler->has_getfiberid = dev_info->a6xx.has_getfiberid;
+
+      compiler->has_dp2acc = dev_info->a6xx.has_dp2acc;
+      compiler->has_dp4acc = dev_info->a6xx.has_dp4acc;
+
+      compiler->shared_consts_base_offset = 504;
+      compiler->shared_consts_size = 8;
+      compiler->geom_shared_consts_size_quirk = 16;
    } else {
       compiler->max_const_pipeline = 512;
       compiler->max_const_geom = 512;
@@ -142,8 +217,7 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
    }
 
    if (compiler->gen >= 6) {
-      compiler->reg_size_vec4 =
-            fd_dev_info(compiler->dev_id)->a6xx.reg_size_vec4;
+      compiler->reg_size_vec4 = dev_info->a6xx.reg_size_vec4;
    } else if (compiler->gen >= 4) {
       /* On a4xx-a5xx, using r24.x and above requires using the smallest
        * threadsize.
@@ -185,7 +259,46 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
       compiler->const_upload_unit = 8;
    }
 
-   ir3_disk_cache_init(compiler);
+   compiler->bool_type = (compiler->gen >= 5) ? TYPE_U16 : TYPE_U32;
+   compiler->has_shared_regfile = compiler->gen >= 5;
+
+   /* The driver can't request this unless preambles are supported. */
+   if (options->push_ubo_with_preamble)
+      assert(compiler->has_preamble);
+
+   /* Set up nir shader compiler options, using device-specific overrides of our base settings. */
+   compiler->nir_options = ir3_base_options;
+
+   if (compiler->gen >= 6) {
+      compiler->nir_options.vectorize_io = true,
+      compiler->nir_options.force_indirect_unrolling = nir_var_all,
+
+      compiler->nir_options.lower_device_index_to_zero = true,
+      compiler->nir_options.has_udot_4x8 = true,
+      compiler->nir_options.has_sudot_4x8 = true,
+      compiler->nir_options.has_udot_4x8 = dev_info->a6xx.has_dp2acc;
+      compiler->nir_options.has_sudot_4x8 = dev_info->a6xx.has_dp2acc;
+   } else if (compiler->gen >= 3 && compiler->gen <= 5) {
+      compiler->nir_options.vertex_id_zero_based = true;
+   } else if (compiler->gen <= 2) {
+      /* a2xx compiler doesn't handle indirect: */
+      compiler->nir_options.force_indirect_unrolling = nir_var_all;
+   }
+
+   /* 16-bit ALU op generation is mostly controlled by frontend compiler options, but
+    * this core NIR option enables some optimizations of 16-bit operations.
+    */
+   if (compiler->gen >= 5 && !(ir3_shader_debug & IR3_DBG_NOFP16))
+      compiler->nir_options.support_16bit_alu = true;
+
+   if (!options->disable_cache)
+      ir3_disk_cache_init(compiler);
 
    return compiler;
+}
+
+const nir_shader_compiler_options *
+ir3_get_compiler_options(struct ir3_compiler *compiler)
+{
+   return &compiler->nir_options;
 }

@@ -43,19 +43,28 @@
 
 #include <windows.h>
 
-#include "winddk/winddk_compat.h"
+#include "winddk_compat.h"
 
 //typedef LARGE_INTEGER PHYSICAL_ADDRESS;
 //typedef __success(return >= 0) LONG NTSTATUS;
 
-#define D3D10DDI_MINOR_HEADER_VERSION 1
+#define D3D10DDI_MINOR_HEADER_VERSION 2
+
+/* Unfortunately WinDDK's d3d10umddi.h defines D3D10.x constants as global
+ * const variables instead of preprocessor defines, causing LINK to fail due
+ * to duplicate symbols.  Include d3d10_1.h to avoid the issue.
+ */
+#ifdef _MSC_VER
+#include <d3d10_1.h>
+#endif
+
 #include <d3d10umddi.h>
 
 #include "Debug.h"
 
 #include "pipe/p_screen.h"
 #include "pipe/p_context.h"
-#include "pipe/p_format.h"
+#include "util/format/u_formats.h"
 #include "pipe/p_defines.h"
 
 #include "util/u_debug.h"

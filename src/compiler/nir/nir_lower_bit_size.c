@@ -38,7 +38,7 @@ static nir_ssa_def *convert_to_bit_size(nir_builder *bld, nir_ssa_def *src,
    if ((type & (nir_type_uint | nir_type_int)) && bit_size == 32 &&
        alu && (alu->op == nir_op_b2i8 || alu->op == nir_op_b2i16)) {
       nir_alu_instr *instr = nir_alu_instr_create(bld->shader, nir_op_b2i32);
-      nir_alu_src_copy(&instr->src[0], &alu->src[0]);
+      nir_alu_src_copy(&instr->src[0], &alu->src[0], instr);
       return nir_builder_alu_instr_finish_and_insert(bld, instr);
    }
 
@@ -79,8 +79,12 @@ lower_alu_instr(nir_builder *bld, nir_alu_instr *alu, unsigned bit_size)
          lowered_dst = nir_ushr_imm(bld, lowered_dst, dst_bit_size);
       else
          lowered_dst = nir_ishr_imm(bld, lowered_dst, dst_bit_size);
-   } else {
-      lowered_dst = nir_build_alu_src_arr(bld, op, srcs);
+   } else if (op == nir_op_iadd_sat || op == nir_op_isub_sat || op == nir_op_uadd_sat ||
+              op == nir_op_uadd_carry) {
+      if (op == nir_op_isub_sat)
+         lowered_dst = nir_isub(bld, srcs[0], srcs[1]);
+      else
+         lowered_dst = nir_iadd(bld, srcs[0], srcs[1]);
 
       /* The add_sat and sub_sat instructions need to clamp the result to the
        * range of the original type.
@@ -92,12 +96,17 @@ lower_alu_instr(nir_builder *bld, nir_alu_instr *alu, unsigned bit_size)
          lowered_dst = nir_iclamp(bld, lowered_dst,
                                   nir_imm_intN_t(bld, int_min, bit_size),
                                   nir_imm_intN_t(bld, int_max, bit_size));
-      } else if (op == nir_op_uadd_sat || op == nir_op_usub_sat) {
+      } else if (op == nir_op_uadd_sat) {
          const uint64_t uint_max = u_uintN_max(dst_bit_size);
 
          lowered_dst = nir_umin(bld, lowered_dst,
                                 nir_imm_intN_t(bld, uint_max, bit_size));
+      } else {
+         assert(op == nir_op_uadd_carry);
+         lowered_dst = nir_ushr_imm(bld, lowered_dst, dst_bit_size);
       }
+   } else {
+      lowered_dst = nir_build_alu_src_arr(bld, op, srcs);
    }
 
 
@@ -190,7 +199,7 @@ lower_intrinsic_instr(nir_builder *b, nir_intrinsic_instr *intrin,
 
       if (intrin->intrinsic != nir_intrinsic_vote_feq &&
           intrin->intrinsic != nir_intrinsic_vote_ieq)
-         res = nir_u2u(b, res, old_bit_size);
+         res = nir_u2uN(b, res, old_bit_size);
 
       nir_ssa_def_rewrite_uses(&intrin->dest.ssa, res);
       break;
@@ -212,7 +221,7 @@ lower_phi_instr(nir_builder *b, nir_phi_instr *phi, unsigned bit_size,
    nir_foreach_phi_src(src, phi) {
       b->cursor = nir_after_block_before_jump(src->pred);
       assert(src->src.is_ssa);
-      nir_ssa_def *new_src = nir_u2u(b, src->src.ssa, bit_size);
+      nir_ssa_def *new_src = nir_u2uN(b, src->src.ssa, bit_size);
 
       nir_instr_rewrite_src(&phi->instr, &src->src, nir_src_for_ssa(new_src));
    }
@@ -221,7 +230,7 @@ lower_phi_instr(nir_builder *b, nir_phi_instr *phi, unsigned bit_size,
 
    b->cursor = nir_after_instr(&last_phi->instr);
 
-   nir_ssa_def *new_dest = nir_u2u(b, &phi->dest.ssa, old_bit_size);
+   nir_ssa_def *new_dest = nir_u2uN(b, &phi->dest.ssa, old_bit_size);
    nir_ssa_def_rewrite_uses_after(&phi->dest.ssa, new_dest,
                                   new_dest->parent_instr);
 }
@@ -304,7 +313,7 @@ split_phi(nir_builder *b, nir_phi_instr *phi)
    nir_foreach_phi_src(src, phi) {
       assert(num_components == src->src.ssa->num_components);
 
-      b->cursor = nir_before_src(&src->src, false);
+      b->cursor = nir_before_src(&src->src);
 
       nir_ssa_def *x = nir_unpack_64_2x32_split_x(b, src->src.ssa);
       nir_ssa_def *y = nir_unpack_64_2x32_split_y(b, src->src.ssa);
@@ -329,47 +338,26 @@ split_phi(nir_builder *b, nir_phi_instr *phi)
 }
 
 static bool
-lower_64bit_phi_impl(nir_function_impl *impl)
+lower_64bit_phi_instr(nir_builder *b, nir_instr *instr, UNUSED void *cb_data)
 {
-   nir_builder b;
-   nir_builder_init(&b, impl);
-   bool progress = false;
+   if (instr->type != nir_instr_type_phi)
+      return false;
 
-   nir_foreach_block(block, impl) {
-      nir_foreach_instr_safe(instr, block) {
-         if (instr->type != nir_instr_type_phi)
-            break;
+   nir_phi_instr *phi = nir_instr_as_phi(instr);
+   assert(phi->dest.is_ssa);
 
-         nir_phi_instr *phi = nir_instr_as_phi(instr);
-         assert(phi->dest.is_ssa);
+   if (phi->dest.ssa.bit_size <= 32)
+      return false;
 
-         if (phi->dest.ssa.bit_size <= 32)
-            continue;
-
-         split_phi(&b, phi);
-         progress = true;
-      }
-   }
-
-   if (progress) {
-      nir_metadata_preserve(impl, nir_metadata_block_index |
-                                  nir_metadata_dominance);
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-   }
-
-   return progress;
+   split_phi(b, phi);
+   return true;
 }
 
 bool
 nir_lower_64bit_phis(nir_shader *shader)
 {
-   bool progress = false;
-
-   nir_foreach_function(function, shader) {
-      if (function->impl)
-         progress |= lower_64bit_phi_impl(function->impl);
-   }
-
-   return progress;
+   return nir_shader_instructions_pass(shader, lower_64bit_phi_instr,
+                                       nir_metadata_block_index |
+                                       nir_metadata_dominance,
+                                       NULL);
 }

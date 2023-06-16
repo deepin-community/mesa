@@ -19,10 +19,6 @@
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
- *
- * Authors:
- *    Jason Ekstrand (jason@jlekstrand.net)
- *
  */
 
 #include "nir.h"
@@ -104,6 +100,7 @@ block_check_for_allowed_instrs(nir_block *block, unsigned *count,
             switch (deref->modes) {
             case nir_var_shader_in:
             case nir_var_uniform:
+            case nir_var_image:
                /* Don't try to remove flow control around an indirect load
                 * because that flow control may be trying to avoid invalid
                 * loads.
@@ -120,6 +117,7 @@ block_check_for_allowed_instrs(nir_block *block, unsigned *count,
          }
 
          case nir_intrinsic_load_uniform:
+         case nir_intrinsic_load_preamble:
          case nir_intrinsic_load_helper_invocation:
          case nir_intrinsic_is_helper_invocation:
          case nir_intrinsic_load_front_face:
@@ -127,6 +125,7 @@ block_check_for_allowed_instrs(nir_block *block, unsigned *count,
          case nir_intrinsic_load_layer_id:
          case nir_intrinsic_load_frag_coord:
          case nir_intrinsic_load_sample_pos:
+         case nir_intrinsic_load_sample_pos_or_center:
          case nir_intrinsic_load_sample_id:
          case nir_intrinsic_load_sample_mask_in:
          case nir_intrinsic_load_vertex_id_zero_base:
@@ -222,13 +221,10 @@ block_check_for_allowed_instrs(nir_block *block, unsigned *count,
             if (mov->dest.saturate)
                return false;
 
-            /* It cannot have any if-uses */
-            if (!list_is_empty(&mov->dest.dest.ssa.if_uses))
-               return false;
-
             /* The only uses of this definition must be phis in the successor */
-            nir_foreach_use(use, &mov->dest.dest.ssa) {
-               if (use->parent_instr->type != nir_instr_type_phi ||
+            nir_foreach_use_including_if(use, &mov->dest.dest.ssa) {
+               if (use->is_if ||
+                   use->parent_instr->type != nir_instr_type_phi ||
                    use->parent_instr->block != block->successors[0])
                   return false;
             }
@@ -455,7 +451,7 @@ nir_opt_peephole_select_block(nir_block *block, nir_shader *shader,
 
       nir_phi_instr *phi = nir_instr_as_phi(instr);
       nir_alu_instr *sel = nir_alu_instr_create(shader, nir_op_bcsel);
-      nir_src_copy(&sel->src[0].src, &if_stmt->condition);
+      nir_src_copy(&sel->src[0].src, &if_stmt->condition, &sel->instr);
       /* Splat the condition to all channels */
       memset(sel->src[0].swizzle, 0, sizeof sel->src[0].swizzle);
 
@@ -465,7 +461,7 @@ nir_opt_peephole_select_block(nir_block *block, nir_shader *shader,
          assert(src->src.is_ssa);
 
          unsigned idx = src->pred == then_block ? 1 : 2;
-         nir_src_copy(&sel->src[idx].src, &src->src);
+         nir_src_copy(&sel->src[idx].src, &src->src, &sel->instr);
       }
 
       nir_ssa_dest_init(&sel->instr, &sel->dest.dest,

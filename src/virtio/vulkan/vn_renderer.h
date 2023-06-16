@@ -14,6 +14,9 @@ struct vn_renderer_shmem {
    uint32_t res_id;
    size_t mmap_size; /* for internal use only (i.e., munmap) */
    void *mmap_ptr;
+
+   struct list_head cache_head;
+   int64_t cache_timestamp;
 };
 
 struct vn_renderer_bo {
@@ -39,6 +42,15 @@ struct vn_renderer_sync {
 
 struct vn_renderer_info {
    struct {
+      bool has_primary;
+      int primary_major;
+      int primary_minor;
+      bool has_render;
+      int render_major;
+      int render_minor;
+   } drm;
+
+   struct {
       uint16_t vendor_id;
       uint16_t device_id;
 
@@ -50,17 +62,22 @@ struct vn_renderer_info {
    } pci;
 
    bool has_dma_buf_import;
-   bool has_cache_management;
    bool has_external_sync;
    bool has_implicit_fencing;
+   bool has_guest_vram;
 
-   uint32_t max_sync_queue_count;
+   uint32_t max_timeline_count;
 
    /* hw capset */
    uint32_t wire_format_version;
    uint32_t vk_xml_version;
    uint32_t vk_ext_command_serialization_spec_version;
    uint32_t vk_mesa_venus_protocol_spec_version;
+   uint32_t supports_blob_id_0;
+   /* combined mask for vk_extension_mask1, 2,..., N */
+   uint32_t vk_extension_mask[32];
+   uint32_t allow_vk_wait_syncs;
+   uint32_t supports_multiple_timelines;
 };
 
 struct vn_renderer_submit_batch {
@@ -68,23 +85,18 @@ struct vn_renderer_submit_batch {
    size_t cs_size;
 
    /*
-    * Submit cs to the virtual sync queue identified by sync_queue_index.  The
-    * virtual queue is assumed to be associated with the physical VkQueue
-    * identified by vk_queue_id.  After the execution completes on the
-    * VkQueue, the virtual sync queue is signaled.
+    * Submit cs to the timeline identified by ring_idx. A timeline is
+    * typically associated with a physical VkQueue and bound to the ring_idx
+    * during VkQueue creation. After execution completes on the VkQueue, the
+    * timeline sync point is signaled.
     *
-    * sync_queue_index must be less than max_sync_queue_count.
-    *
-    * vk_queue_id specifies the object id of a VkQueue.
-    *
-    * When sync_queue_cpu is true, it specifies the special CPU sync queue,
-    * and sync_queue_index/vk_queue_id are ignored.  TODO revisit this later
+    * ring_idx 0 is reserved for the context-specific CPU timeline. sync
+    * points on the CPU timeline are signaled immediately after command
+    * processing by the renderer.
     */
-   uint32_t sync_queue_index;
-   bool sync_queue_cpu;
-   vn_object_id vk_queue_id;
+   uint32_t ring_idx;
 
-   /* syncs to update when the virtual sync queue is signaled */
+   /* syncs to update when the timeline is signaled */
    struct vn_renderer_sync *const *syncs;
    /* TODO allow NULL when syncs are all binary? */
    const uint64_t *sync_values;
@@ -118,9 +130,6 @@ struct vn_renderer_wait {
 struct vn_renderer_ops {
    void (*destroy)(struct vn_renderer *renderer,
                    const VkAllocationCallbacks *alloc);
-
-   void (*get_info)(struct vn_renderer *renderer,
-                    struct vn_renderer_info *info);
 
    VkResult (*submit)(struct vn_renderer *renderer,
                       const struct vn_renderer_submit *submit);
@@ -212,6 +221,7 @@ struct vn_renderer_sync_ops {
 };
 
 struct vn_renderer {
+   struct vn_renderer_info info;
    struct vn_renderer_ops ops;
    struct vn_renderer_shmem_ops shmem_ops;
    struct vn_renderer_bo_ops bo_ops;
@@ -249,34 +259,11 @@ vn_renderer_destroy(struct vn_renderer *renderer,
    renderer->ops.destroy(renderer, alloc);
 }
 
-static inline void
-vn_renderer_get_info(struct vn_renderer *renderer,
-                     struct vn_renderer_info *info)
-{
-   renderer->ops.get_info(renderer, info);
-}
-
 static inline VkResult
 vn_renderer_submit(struct vn_renderer *renderer,
                    const struct vn_renderer_submit *submit)
 {
    return renderer->ops.submit(renderer, submit);
-}
-
-static inline VkResult
-vn_renderer_submit_simple(struct vn_renderer *renderer,
-                          const void *cs_data,
-                          size_t cs_size)
-{
-   const struct vn_renderer_submit submit = {
-      .batches =
-         &(const struct vn_renderer_submit_batch){
-            .cs_data = cs_data,
-            .cs_size = cs_size,
-         },
-      .batch_count = 1,
-   };
-   return vn_renderer_submit(renderer, &submit);
 }
 
 static inline VkResult
@@ -289,6 +276,7 @@ vn_renderer_wait(struct vn_renderer *renderer,
 static inline struct vn_renderer_shmem *
 vn_renderer_shmem_create(struct vn_renderer *renderer, size_t size)
 {
+   VN_TRACE_FUNC();
    struct vn_renderer_shmem *shmem =
       renderer->shmem_ops.create(renderer, size);
    if (shmem) {
@@ -463,45 +451,6 @@ vn_renderer_sync_write(struct vn_renderer *renderer,
                        uint64_t val)
 {
    return renderer->sync_ops.write(renderer, sync, val);
-}
-
-static inline VkResult
-vn_renderer_submit_simple_sync(struct vn_renderer *renderer,
-                               const void *cs_data,
-                               size_t cs_size)
-{
-   struct vn_renderer_sync *sync;
-   VkResult result =
-      vn_renderer_sync_create(renderer, 0, VN_RENDERER_SYNC_BINARY, &sync);
-   if (result != VK_SUCCESS)
-      return result;
-
-   const struct vn_renderer_submit submit = {
-      .batches =
-         &(const struct vn_renderer_submit_batch){
-            .cs_data = cs_data,
-            .cs_size = cs_size,
-            .sync_queue_cpu = true,
-            .syncs = &sync,
-            .sync_values = &(const uint64_t){ 1 },
-            .sync_count = 1,
-         },
-      .batch_count = 1,
-   };
-   const struct vn_renderer_wait wait = {
-      .timeout = UINT64_MAX,
-      .syncs = &sync,
-      .sync_values = &(const uint64_t){ 1 },
-      .sync_count = 1,
-   };
-
-   result = vn_renderer_submit(renderer, &submit);
-   if (result == VK_SUCCESS)
-      result = vn_renderer_wait(renderer, &wait);
-
-   vn_renderer_sync_destroy(renderer, sync);
-
-   return result;
 }
 
 #endif /* VN_RENDERER_H */

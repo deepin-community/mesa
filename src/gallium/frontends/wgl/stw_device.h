@@ -35,6 +35,7 @@
 #include "util/u_dynarray.h"
 #include "util/xmlconfig.h"
 #include <GL/gl.h>
+#include "stw_gdishim.h"
 #include "gldrv.h"
 #include "stw_pixelformat.h"
 
@@ -43,8 +44,7 @@ extern "C" {
 #endif
 
 struct pipe_screen;
-struct st_api;
-struct st_manager;
+struct pipe_frontend_screen;
 struct stw_framebuffer;
 
 struct stw_device
@@ -58,8 +58,7 @@ struct stw_device
    /* Cache some PIPE_CAP_* */
    unsigned max_2d_length;
 
-   struct st_api *stapi;
-   struct st_manager *smapi;
+   struct pipe_frontend_screen *fscreen;
 
    LUID AdapterLuid;
 
@@ -91,6 +90,7 @@ struct stw_device
    struct st_config_options st_options;
 
    bool initialized;
+   bool zink;
 };
 
 
@@ -101,6 +101,9 @@ stw_init_screen(HDC hdc);
 
 struct stw_device *
 stw_get_device(void);
+
+char *
+stw_get_config_xml(void);
 
 static inline struct stw_context *
 stw_lookup_context_locked( DHGLRC dhglrc )

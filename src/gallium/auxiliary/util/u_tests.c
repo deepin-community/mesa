@@ -322,7 +322,7 @@ tgsi_vs_window_space_position(struct pipe_context *ctx)
    static const float red[] = {1, 0, 0, 1};
 
    if (!ctx->screen->get_param(ctx->screen,
-                               PIPE_CAP_TGSI_VS_WINDOW_SPACE_POSITION)) {
+                               PIPE_CAP_VS_WINDOW_SPACE_POSITION)) {
       util_report_result(SKIP);
       return;
    }
@@ -396,7 +396,6 @@ null_sampler_view(struct pipe_context *ctx, unsigned tgsi_tex_target)
 
    /* Fragment shader. */
    fs = util_make_fragment_tex_shader(ctx, tgsi_tex_target,
-                                      TGSI_INTERPOLATE_LINEAR,
                                       TGSI_RETURN_TYPE_FLOAT,
                                       TGSI_RETURN_TYPE_FLOAT, false, false);
    cso_set_fragment_shader_handle(cso, fs);
@@ -517,7 +516,7 @@ disabled_fragment_shader(struct pipe_context *ctx)
    util_report_result(qresult.u64 == 2);
 }
 
-#if defined(PIPE_OS_LINUX) && defined(HAVE_LIBDRM)
+#if DETECT_OS_LINUX && defined(HAVE_LIBDRM)
 #include <libsync.h>
 #else
 #define sync_merge(str, fd1, fd2) (-1)
@@ -595,7 +594,7 @@ test_sync_file_fences(struct pipe_context *ctx)
    pass = pass && screen->fence_finish(screen, NULL, final_fence, 0);
 
    /* Cleanup. */
-#ifndef PIPE_OS_WINDOWS
+#if !DETECT_OS_WINDOWS
    if (buf_fd >= 0)
       close(buf_fd);
    if (tex_fd >= 0)

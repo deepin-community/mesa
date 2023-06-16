@@ -26,6 +26,7 @@ files_libv3d = files(
   'v3d_cl.h',
   'v3d_context.c',
   'v3d_context.h',
+  'v3d_disk_cache.c',
   'v3d_fence.c',
   'v3d_formats.c',
   'v3d_job.c',
@@ -93,7 +94,10 @@ libv3d = static_library(
   c_args : [v3d_args],
   cpp_args : [v3d_args],
   gnu_symbol_visibility : 'hidden',
-  dependencies : [dep_v3dv3, dep_libdrm, dep_valgrind, idep_nir_headers],
+  dependencies : [
+    dep_v3dv3, dep_libdrm, dep_valgrind,
+    idep_nir_headers, idep_mesautil,
+  ],
   link_with: [per_version_libs],
 )
 

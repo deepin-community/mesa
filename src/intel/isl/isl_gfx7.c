@@ -113,7 +113,7 @@ isl_gfx7_choose_msaa_layout(const struct isl_device *dev,
       return false;
 
    /* From the Ivybridge PRM, Volume 4 Part 1 p72, SURFACE_STATE, Multisampled
-    * Suface Storage Format:
+    * Surface Storage Format:
     *
     *    +---------------------+----------------------------------------------------------------+
     *    | MSFMT_MSS           | Multsampled surface was/is rendered as a render target         |
@@ -128,7 +128,7 @@ isl_gfx7_choose_msaa_layout(const struct isl_device *dev,
       require_interleaved = true;
 
    /* From the Ivybridge PRM, Volume 4 Part 1 p72, SURFACE_STATE, Multisampled
-    * Suface Storage Format:
+    * Surface Storage Format:
     *
     *    If the surface’s Number of Multisamples is MULTISAMPLECOUNT_8, Width
     *    is >= 8192 (meaning the actual surface width is >= 8193 pixels), this
@@ -138,7 +138,7 @@ isl_gfx7_choose_msaa_layout(const struct isl_device *dev,
       require_array = true;
 
    /* From the Ivybridge PRM, Volume 4 Part 1 p72, SURFACE_STATE, Multisampled
-    * Suface Storage Format:
+    * Surface Storage Format:
     *
     *    If the surface’s Number of Multisamples is MULTISAMPLECOUNT_8,
     *    ((Depth+1) * (Height+1)) is > 4,194,304, OR if the surface’s Number
@@ -150,7 +150,7 @@ isl_gfx7_choose_msaa_layout(const struct isl_device *dev,
       require_interleaved = true;
 
    /* From the Ivybridge PRM, Volume 4 Part 1 p72, SURFACE_STATE, Multisampled
-    * Suface Storage Format:
+    * Surface Storage Format:
     *
     *    This field must be set to MSFMT_DEPTH_STENCIL if Surface Format is
     *    one of the following: I24X8_UNORM, L24X8_UNORM, A24X8_UNORM, or
@@ -237,12 +237,6 @@ isl_gfx6_filter_tiling(const struct isl_device *dev,
       *flags &= ~ISL_TILING_W_BIT;
    }
 
-   /* From the SKL+ PRMs, RENDER_SURFACE_STATE:TileMode,
-    *    If Surface Format is ASTC*, this field must be TILEMODE_YMAJOR.
-    */
-   if (isl_format_get_layout(info->format)->txc == ISL_TXC_ASTC)
-      *flags &= ISL_TILING_Y0_BIT;
-
    /* MCS buffers are always Y-tiled */
    if (isl_format_get_layout(info->format)->txc == ISL_TXC_MCS)
       *flags &= ISL_TILING_Y0_BIT;
@@ -324,7 +318,7 @@ isl_gfx6_filter_tiling(const struct isl_device *dev,
    if (info->width > 16382 && info->samples == 1 &&
        info->usage & ISL_SURF_USAGE_RENDER_TARGET_BIT &&
        (ISL_GFX_VER(dev) == 8 ||
-        (dev->info->is_skylake && dev->info->gt != 4))) {
+        (dev->info->platform == INTEL_PLATFORM_SKL && dev->info->gt != 4))) {
           *flags &= ISL_TILING_LINEAR_BIT;
    }
 }

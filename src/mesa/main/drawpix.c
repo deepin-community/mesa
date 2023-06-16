@@ -22,11 +22,10 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include "glheader.h"
+#include "util/glheader.h"
 #include "draw_validate.h"
 #include "bufferobj.h"
 #include "context.h"
-#include "drawpix.h"
 #include "enums.h"
 #include "feedback.h"
 #include "framebuffer.h"
@@ -38,7 +37,10 @@
 #include "fbobject.h"
 #include "util/u_math.h"
 #include "util/rounding.h"
+#include "api_exec_decl.h"
 
+#include "state_tracker/st_cb_bitmap.h"
+#include "state_tracker/st_cb_drawpixels.h"
 
 /*
  * Execute glDrawPixels
@@ -166,8 +168,8 @@ _mesa_DrawPixels( GLsizei width, GLsizei height,
             }
          }
 
-         ctx->Driver.DrawPixels(ctx, x, y, width, height, format, type,
-                                &ctx->Unpack, pixels);
+         st_DrawPixels(ctx, x, y, width, height, format, type,
+                       &ctx->Unpack, pixels);
       }
    }
    else if (ctx->RenderMode == GL_FEEDBACK) {
@@ -288,8 +290,8 @@ _mesa_CopyPixels( GLint srcx, GLint srcy, GLsizei width, GLsizei height,
       if (width > 0 && height > 0) {
          GLint destx = lroundf(ctx->Current.RasterPos[0]);
          GLint desty = lroundf(ctx->Current.RasterPos[1]);
-         ctx->Driver.CopyPixels( ctx, srcx, srcy, width, height, destx, desty,
-                                 type );
+         st_CopyPixels( ctx, srcx, srcy, width, height, destx, desty,
+                        type );
       }
    }
    else if (ctx->RenderMode == GL_FEEDBACK) {
@@ -314,13 +316,11 @@ end:
 }
 
 
-void GLAPIENTRY
-_mesa_Bitmap( GLsizei width, GLsizei height,
-              GLfloat xorig, GLfloat yorig, GLfloat xmove, GLfloat ymove,
-              const GLubyte *bitmap )
+void
+_mesa_bitmap(struct gl_context *ctx, GLsizei width, GLsizei height,
+             GLfloat xorig, GLfloat yorig, GLfloat xmove, GLfloat ymove,
+             const GLubyte *bitmap, struct pipe_resource *tex)
 {
-   GET_CURRENT_CONTEXT(ctx);
-
    FLUSH_VERTICES(ctx, 0, 0);
 
    if (width < 0 || height < 0) {
@@ -352,7 +352,7 @@ _mesa_Bitmap( GLsizei width, GLsizei height,
          GLint x = util_ifloor(ctx->Current.RasterPos[0] + epsilon - xorig);
          GLint y = util_ifloor(ctx->Current.RasterPos[1] + epsilon - yorig);
 
-         if (ctx->Unpack.BufferObj) {
+         if (!tex && ctx->Unpack.BufferObj) {
             /* unpack from PBO */
             if (!_mesa_validate_pbo_access(2, &ctx->Unpack, width, height,
                                            1, GL_COLOR_INDEX, GL_BITMAP,
@@ -369,7 +369,7 @@ _mesa_Bitmap( GLsizei width, GLsizei height,
             }
          }
 
-         ctx->Driver.Bitmap( ctx, x, y, width, height, &ctx->Unpack, bitmap );
+         st_Bitmap(ctx, x, y, width, height, &ctx->Unpack, bitmap, tex);
       }
    }
    else if (ctx->RenderMode == GL_FEEDBACK) {
@@ -393,4 +393,14 @@ _mesa_Bitmap( GLsizei width, GLsizei height,
    if (MESA_DEBUG_FLAGS & DEBUG_ALWAYS_FLUSH) {
       _mesa_flush(ctx);
    }
+}
+
+void GLAPIENTRY
+_mesa_Bitmap(GLsizei width, GLsizei height,
+             GLfloat xorig, GLfloat yorig, GLfloat xmove, GLfloat ymove,
+             const GLubyte *bitmap)
+{
+   GET_CURRENT_CONTEXT(ctx);
+
+   _mesa_bitmap(ctx, width, height, xorig, yorig, xmove, ymove, bitmap, NULL);
 }

@@ -35,6 +35,7 @@
 #include <stdint.h>
 
 #include "brw_eu_defines.h"
+#include "brw_isa_info.h"
 #include "brw_reg_type.h"
 #include "dev/intel_device_info.h"
 
@@ -93,7 +94,7 @@ brw_inst_##name(const struct intel_device_info *devinfo,      \
       high = hi6;  low = lo6;                                                \
    } else if (devinfo->ver >= 5) {                                           \
       high = hi5;  low = lo5;                                                \
-   } else if (devinfo->is_g4x) {                                             \
+   } else if (devinfo->verx10 >= 45) {                                       \
       high = hi45; low = lo45;                                               \
    } else {                                                                  \
       high = hi4;  low = lo4;                                                \
@@ -299,7 +300,8 @@ F(debug_control,       /* 4+ */ 30,  30,  /* 12+ */ 30, 30)
 F(cmpt_control,        /* 4+ */ 29,  29,  /* 12+ */ 29, 29)
 FC(branch_control,     /* 4+ */ 28,  28,  /* 12+ */ 33, 33, devinfo->ver >= 8)
 FC(acc_wr_control,     /* 4+ */ 28,  28,  /* 12+ */ 33, 33, devinfo->ver >= 6)
-FC(mask_control_ex,    /* 4+ */ 28,  28,  /* 12+ */ -1, -1, devinfo->is_g4x || devinfo->ver == 5)
+FC(mask_control_ex,    /* 4+ */ 28,  28,  /* 12+ */ -1, -1, devinfo->verx10 == 45 ||
+                                                            devinfo->ver == 5)
 F(cond_modifier,       /* 4+ */ 27,  24,  /* 12+ */ 95, 92)
 FC(math_function,      /* 4+ */ 27,  24,  /* 12+ */ 95, 92, devinfo->ver >= 6)
 F(exec_size,           /* 4+ */ 23,  21,  /* 12+ */ 18, 16)
@@ -916,7 +918,7 @@ FF(sampler_msg_type,
    /* 7:   */ MD(16), MD(12),
    /* 8:   */ MD(16), MD(12),
    /* 12:  */ MD12(16), MD12(12))
-FC(sampler_return_format, /* 4+ */ MD(13), MD(12), /* 12+ */ -1, -1, devinfo->ver == 4 && !devinfo->is_g4x)
+FC(sampler_return_format, /* 4+ */ MD(13), MD(12), /* 12+ */ -1, -1, devinfo->verx10 == 40)
 FD(sampler,
    /* 4:   */ MD(11), MD(8),
    /* 4.5: */ MD(11), MD(8),
@@ -1067,11 +1069,16 @@ brw_inst_imm_ud(const struct intel_device_info *devinfo, const brw_inst *insn)
 }
 
 static inline uint64_t
-brw_inst_imm_uq(ASSERTED const struct intel_device_info *devinfo,
+brw_inst_imm_uq(const struct intel_device_info *devinfo,
                 const brw_inst *insn)
 {
-   assert(devinfo->ver >= 8);
-   return brw_inst_bits(insn, 127, 64);
+   if (devinfo->ver >= 12) {
+      return brw_inst_bits(insn, 95, 64) << 32 |
+             brw_inst_bits(insn, 127, 96);
+   } else {
+      assert(devinfo->ver >= 8);
+      return brw_inst_bits(insn, 127, 64);
+   }
 }
 
 static inline float
@@ -1093,8 +1100,7 @@ brw_inst_imm_df(const struct intel_device_info *devinfo, const brw_inst *insn)
       double d;
       uint64_t u;
    } dt;
-   (void) devinfo;
-   dt.u = brw_inst_bits(insn, 127, 64);
+   dt.u = brw_inst_imm_uq(devinfo, insn);
    return dt.d;
 }
 
@@ -1395,7 +1401,7 @@ F(cmpt_control,     /* 4+ */ 29, 29, /* 12+ */ 29, 29) /* Same location as brw_i
 FC(flag_subreg_nr,  /* 4+ */ 28, 28, /* 12+ */ -1, -1, devinfo->ver <= 6)
 F(cond_modifier,    /* 4+ */ 27, 24, /* 12+ */ -1, -1) /* Same location as brw_inst */
 FC(acc_wr_control,  /* 4+ */ 23, 23, /* 12+ */ -1, -1, devinfo->ver >= 6)
-FC(mask_control_ex, /* 4+ */ 23, 23, /* 12+ */ -1, -1, devinfo->is_g4x || devinfo->ver == 5)
+FC(mask_control_ex, /* 4+ */ 23, 23, /* 12+ */ -1, -1, devinfo->verx10 == 45 || devinfo->ver == 5)
 F(subreg_index,     /* 4+ */ 22, 18, /* 12+ */ 39, 35)
 F(datatype_index,   /* 4+ */ 17, 13, /* 12+ */ 34, 30)
 F(control_index,    /* 4+ */ 12,  8, /* 12+ */ 28, 24)
@@ -1442,6 +1448,20 @@ FC(3src_hw_opcode,      /* 4+ */  6,  0, /* 12+ */  6,  0, devinfo->ver >= 8)
 /** @} */
 
 #undef F
+
+static inline void
+brw_inst_set_opcode(const struct brw_isa_info *isa,
+                    struct brw_inst *inst, enum opcode opcode)
+{
+   brw_inst_set_hw_opcode(isa->devinfo, inst, brw_opcode_encode(isa, opcode));
+}
+
+static inline enum opcode
+brw_inst_opcode(const struct brw_isa_info *isa,
+                const struct brw_inst *inst)
+{
+   return brw_opcode_decode(isa, brw_inst_hw_opcode(isa->devinfo, inst));
+}
 
 #ifdef __cplusplus
 }

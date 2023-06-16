@@ -67,7 +67,7 @@ public:
    void set_latency_gfx4();
    void set_latency_gfx7(bool is_haswell);
 
-   const struct intel_device_info *devinfo;
+   const struct brw_isa_info *isa;
    backend_instruction *inst;
    schedule_node **children;
    int *child_latency;
@@ -326,7 +326,6 @@ schedule_node::set_latency_gfx7(bool is_haswell)
 
    case FS_OPCODE_VARYING_PULL_CONSTANT_LOAD_GFX4:
    case FS_OPCODE_UNIFORM_PULL_CONSTANT_LOAD:
-   case FS_OPCODE_UNIFORM_PULL_CONSTANT_LOAD_GFX7:
    case VS_OPCODE_PULL_CONSTANT_LOAD:
       /* testing using varying-index pull constants:
        *
@@ -399,8 +398,13 @@ schedule_node::set_latency_gfx7(bool is_haswell)
          break;
       }
 
+      case GFX6_SFID_DATAPORT_CONSTANT_CACHE:
+         /* See FS_OPCODE_UNIFORM_PULL_CONSTANT_LOAD */
+         latency = 200;
+         break;
+
       case GFX6_SFID_DATAPORT_RENDER_CACHE:
-         switch (brw_fb_desc_msg_type(devinfo, inst->desc)) {
+         switch (brw_fb_desc_msg_type(isa->devinfo, inst->desc)) {
          case GFX7_DATAPORT_RC_TYPED_SURFACE_WRITE:
          case GFX7_DATAPORT_RC_TYPED_SURFACE_READ:
             /* See also SHADER_OPCODE_TYPED_SURFACE_READ */
@@ -528,10 +532,14 @@ schedule_node::set_latency_gfx7(bool is_haswell)
          }
          break;
 
+      case GFX7_SFID_PIXEL_INTERPOLATOR:
+         latency = 50; /* TODO */
+         break;
+
       case GFX12_SFID_UGM:
       case GFX12_SFID_TGM:
       case GFX12_SFID_SLM:
-         switch (lsc_msg_desc_opcode(devinfo, inst->desc)) {
+         switch (lsc_msg_desc_opcode(isa->devinfo, inst->desc)) {
          case LSC_OP_LOAD:
          case LSC_OP_STORE:
          case LSC_OP_LOAD_CMASK:
@@ -572,6 +580,10 @@ schedule_node::set_latency_gfx7(bool is_haswell)
           * We'll assume for the moment that this is pretty quick as it
           * doesn't actually return any data.
           */
+         latency = 200;
+         break;
+
+      case BRW_SFID_URB:
          latency = 200;
          break;
 
@@ -647,6 +659,7 @@ public:
       ralloc_free(this->mem_ctx);
    }
    void add_barrier_deps(schedule_node *n);
+   void add_cross_lane_deps(schedule_node *n);
    void add_dep(schedule_node *before, schedule_node *after, int latency);
    void add_dep(schedule_node *before, schedule_node *after);
 
@@ -957,7 +970,7 @@ schedule_node::schedule_node(backend_instruction *inst,
 {
    const struct intel_device_info *devinfo = sched->bs->devinfo;
 
-   this->devinfo = devinfo;
+   this->isa = &sched->bs->compiler->isa;
    this->inst = inst;
    this->child_array_size = 0;
    this->children = NULL;
@@ -975,7 +988,7 @@ schedule_node::schedule_node(backend_instruction *inst,
    if (!sched->post_reg_alloc)
       this->latency = 1;
    else if (devinfo->ver >= 6)
-      set_latency_gfx7(devinfo->is_haswell);
+      set_latency_gfx7(devinfo->verx10 == 75);
    else
       set_latency_gfx4();
 }
@@ -1094,6 +1107,33 @@ is_scheduling_barrier(const backend_instruction *inst)
           inst->has_side_effects();
 }
 
+static bool
+has_cross_lane_access(const fs_inst *inst)
+{
+   /* FINISHME:
+    *
+    * This function is likely incomplete in terms of identify cross lane
+    * accesses.
+    */
+   if (inst->opcode == SHADER_OPCODE_BROADCAST ||
+       inst->opcode == SHADER_OPCODE_READ_SR_REG ||
+       inst->opcode == SHADER_OPCODE_CLUSTER_BROADCAST ||
+       inst->opcode == SHADER_OPCODE_SHUFFLE ||
+       inst->opcode == FS_OPCODE_LOAD_LIVE_CHANNELS ||
+       inst->opcode == SHADER_OPCODE_FIND_LAST_LIVE_CHANNEL ||
+       inst->opcode == SHADER_OPCODE_FIND_LIVE_CHANNEL)
+      return true;
+
+   for (unsigned s = 0; s < inst->sources; s++) {
+      if (inst->src[s].file == VGRF) {
+         if (inst->src[s].stride == 0)
+            return true;
+      }
+   }
+
+   return false;
+}
+
 /**
  * Sometimes we really want this node to execute after everything that
  * was before it and before everything that followed it.  This adds
@@ -1120,6 +1160,25 @@ instruction_scheduler::add_barrier_deps(schedule_node *n)
          if (is_scheduling_barrier(next->inst))
             break;
          next = (schedule_node *)next->next;
+      }
+   }
+}
+
+/**
+ * Because some instructions like HALT can disable lanes, scheduling prior to
+ * a cross lane access should not be allowed, otherwise we could end up with
+ * later instructions accessing uninitialized data.
+ */
+void
+instruction_scheduler::add_cross_lane_deps(schedule_node *n)
+{
+   schedule_node *prev = (schedule_node *)n->prev;
+
+   if (prev) {
+      while (!prev->is_head_sentinel()) {
+         if (has_cross_lane_access((fs_inst *)prev->inst))
+            add_dep(prev, n, 0);
+         prev = (schedule_node *)prev->prev;
       }
    }
 }
@@ -1160,6 +1219,10 @@ fs_instruction_scheduler::calculate_deps()
 
       if (is_scheduling_barrier(inst))
          add_barrier_deps(n);
+
+      if (inst->opcode == BRW_OPCODE_HALT ||
+          inst->opcode == SHADER_OPCODE_HALT_TARGET)
+          add_cross_lane_deps(n);
 
       /* read-after-write deps. */
       for (int i = 0; i < inst->sources; i++) {
@@ -1727,8 +1790,9 @@ vec4_instruction_scheduler::choose_instruction_to_schedule()
 int
 fs_instruction_scheduler::issue_time(backend_instruction *inst0)
 {
+   const struct brw_isa_info *isa = &v->compiler->isa;
    const fs_inst *inst = static_cast<fs_inst *>(inst0);
-   const unsigned overhead = v->grf_used && has_bank_conflict(v->devinfo, inst) ?
+   const unsigned overhead = v->grf_used && has_bank_conflict(isa, inst) ?
       DIV_ROUND_UP(inst->dst.component_size(inst->exec_size), REG_SIZE) : 0;
    if (is_compressed(inst))
       return 4 + overhead;

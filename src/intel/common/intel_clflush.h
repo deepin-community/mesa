@@ -27,6 +27,7 @@
 #define CACHELINE_SIZE 64
 #define CACHELINE_MASK 63
 
+#ifdef SUPPORT_INTEL_INTEGRATED_GPUS
 static inline void
 intel_clflush_range(void *start, size_t size)
 {
@@ -49,6 +50,9 @@ intel_flush_range(void *start, size_t size)
 static inline void
 intel_invalidate_range(void *start, size_t size)
 {
+   if (size == 0)
+      return;
+
    intel_clflush_range(start, size);
 
    /* Modern Atom CPUs (Baytrail+) have issues with clflush serialization,
@@ -64,5 +68,6 @@ intel_invalidate_range(void *start, size_t size)
    __builtin_ia32_clflush(start + size - 1);
    __builtin_ia32_mfence();
 }
+#endif /* SUPPORT_INTEL_INTEGRATED_GPUS */
 
 #endif

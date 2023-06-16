@@ -82,7 +82,7 @@ libaco_files = files(
   'aco_validate.cpp',
 )
 
-cpp_args_aco = cpp.get_supported_arguments(['-fno-exceptions', '-fno-rtti', '-Wimplicit-fallthrough', '-Wshadow', '-DNOMINMAX'])
+cpp_args_aco = cpp.get_supported_arguments(['-fno-exceptions', '-fno-rtti', '-Wimplicit-fallthrough', '-Wshadow'])
 
 _libaco = static_library(
   'aco',
@@ -96,10 +96,12 @@ _libaco = static_library(
   gnu_symbol_visibility : 'hidden',
   build_by_default : true,
   cpp_args : [cpp_args_aco, cpp_msvc_compat_args],
+  override_options: ['cpp_std=c++17'],
 )
 
 # Also link with aco
 idep_aco = declare_dependency(
   include_directories : include_directories('.'),
   link_with : _libaco,
+  sources : [aco_opcodes_h, aco_builder_h],
 )

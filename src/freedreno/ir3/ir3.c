@@ -67,6 +67,22 @@ ir3_destroy(struct ir3 *shader)
    ralloc_free(shader);
 }
 
+static bool
+is_shared_consts(struct ir3_compiler *compiler,
+                 struct ir3_const_state *const_state,
+                 struct ir3_register *reg)
+{
+   if (const_state->shared_consts_enable && reg->flags & IR3_REG_CONST) {
+      uint32_t min_const_reg = regid(compiler->shared_consts_base_offset, 0);
+      uint32_t max_const_reg =
+         regid(compiler->shared_consts_base_offset +
+               compiler->shared_consts_size, 0);
+      return reg->num >= min_const_reg && min_const_reg < max_const_reg;
+   }
+
+   return false;
+}
+
 static void
 collect_reg_info(struct ir3_instruction *instr, struct ir3_register *reg,
                  struct ir3_info *info)
@@ -78,6 +94,10 @@ collect_reg_info(struct ir3_instruction *instr, struct ir3_register *reg,
       /* nothing to do */
       return;
    }
+
+   /* Shared consts don't need to be included into constlen. */
+   if (is_shared_consts(v->compiler, ir3_const_state(v), reg))
+      return;
 
    if (!(reg->flags & IR3_REG_R)) {
       repeat = 0;
@@ -113,7 +133,13 @@ collect_reg_info(struct ir3_instruction *instr, struct ir3_register *reg,
 bool
 ir3_should_double_threadsize(struct ir3_shader_variant *v, unsigned regs_count)
 {
-   const struct ir3_compiler *compiler = v->shader->compiler;
+   const struct ir3_compiler *compiler = v->compiler;
+
+   /* If the user forced a particular wavesize respect that. */
+   if (v->real_wavesize == IR3_SINGLE_ONLY)
+      return false;
+   if (v->real_wavesize == IR3_DOUBLE_ONLY)
+      return true;
 
    /* We can't support more than compiler->branchstack_size diverging threads
     * in a wave. Thus, doubling the threadsize is only possible if we don't
@@ -125,6 +151,7 @@ ir3_should_double_threadsize(struct ir3_shader_variant *v, unsigned regs_count)
    }
 
    switch (v->type) {
+   case MESA_SHADER_KERNEL:
    case MESA_SHADER_COMPUTE: {
       unsigned threads_per_wg =
          v->local_size[0] * v->local_size[1] * v->local_size[2];
@@ -173,25 +200,8 @@ unsigned
 ir3_get_reg_independent_max_waves(struct ir3_shader_variant *v,
                                   bool double_threadsize)
 {
-   const struct ir3_compiler *compiler = v->shader->compiler;
+   const struct ir3_compiler *compiler = v->compiler;
    unsigned max_waves = compiler->max_waves;
-
-   /* If this is a compute shader, compute the limit based on shared size */
-   if (v->type == MESA_SHADER_COMPUTE) {
-      /* Shared is allocated in chunks of 1k */
-      unsigned shared_per_wg = ALIGN_POT(v->shared_size, 1024);
-      if (shared_per_wg > 0 && !v->local_size_variable) {
-         unsigned wgs_per_core = compiler->local_mem_size / shared_per_wg;
-         unsigned threads_per_wg =
-            v->local_size[0] * v->local_size[1] * v->local_size[2];
-         unsigned waves_per_wg =
-            DIV_ROUND_UP(threads_per_wg, compiler->threadsize_base *
-                                            (double_threadsize ? 2 : 1) *
-                                            compiler->wave_granularity);
-         max_waves = MIN2(max_waves, waves_per_wg * wgs_per_core *
-                                        compiler->wave_granularity);
-      }
-   }
 
    /* Compute the limit based on branchstack */
    if (v->branchstack > 0) {
@@ -199,6 +209,42 @@ ir3_get_reg_independent_max_waves(struct ir3_shader_variant *v,
                                        v->branchstack *
                                        compiler->wave_granularity;
       max_waves = MIN2(max_waves, branchstack_max_waves);
+   }
+
+   /* If this is a compute shader, compute the limit based on shared size */
+   if ((v->type == MESA_SHADER_COMPUTE) ||
+       (v->type == MESA_SHADER_KERNEL)) {
+      unsigned threads_per_wg =
+         v->local_size[0] * v->local_size[1] * v->local_size[2];
+      unsigned waves_per_wg =
+         DIV_ROUND_UP(threads_per_wg, compiler->threadsize_base *
+                                         (double_threadsize ? 2 : 1) *
+                                         compiler->wave_granularity);
+
+      /* Shared is allocated in chunks of 1k */
+      unsigned shared_per_wg = ALIGN_POT(v->shared_size, 1024);
+      if (shared_per_wg > 0 && !v->local_size_variable) {
+         unsigned wgs_per_core = compiler->local_mem_size / shared_per_wg;
+
+         max_waves = MIN2(max_waves, waves_per_wg * wgs_per_core *
+                                        compiler->wave_granularity);
+      }
+
+      /* If we have a compute shader that has a big workgroup, a barrier, and
+       * a branchstack which limits max_waves - this may result in a situation
+       * when we cannot run concurrently all waves of the workgroup, which
+       * would lead to a hang.
+       *
+       * TODO: Could we spill branchstack or is there other way around?
+       * Blob just explodes in such case.
+       */
+      if (v->has_barrier && (max_waves < waves_per_wg)) {
+         mesa_loge(
+            "Compute shader (%s) which has workgroup barrier cannot be used "
+            "because it's impossible to have enough concurrent waves.",
+            v->name);
+         exit(1);
+      }
    }
 
    return max_waves;
@@ -221,7 +267,7 @@ ir3_collect_info(struct ir3_shader_variant *v)
 {
    struct ir3_info *info = &v->info;
    struct ir3 *shader = v->ir;
-   const struct ir3_compiler *compiler = v->shader->compiler;
+   const struct ir3_compiler *compiler = v->compiler;
 
    memset(info, 0, sizeof(*info));
    info->data = v;
@@ -246,8 +292,10 @@ ir3_collect_info(struct ir3_shader_variant *v)
    info->size = MAX2(v->instrlen * compiler->instr_align, instr_count + 4) * 8;
    info->sizedwords = info->size / 4;
 
+   bool in_preamble = false;
+
    foreach_block (block, &shader->block_list) {
-      int sfu_delay = 0;
+      int sfu_delay = 0, mem_delay = 0;
 
       foreach_instr (instr, &block->instr_list) {
 
@@ -273,46 +321,123 @@ ir3_collect_info(struct ir3_shader_variant *v)
                info->ldp_count += components;
          }
 
-         if ((instr->opc == OPC_BARY_F) && (instr->dsts[0]->flags & IR3_REG_EI))
+         if ((instr->opc == OPC_BARY_F || instr->opc == OPC_FLAT_B) &&
+             (instr->dsts[0]->flags & IR3_REG_EI))
             info->last_baryf = info->instrs_count;
 
-         unsigned instrs_count = 1 + instr->repeat + instr->nop;
-         unsigned nops_count = instr->nop;
+         if (instr->opc == OPC_SHPS)
+            in_preamble = true;
 
-         if (instr->opc == OPC_NOP) {
-            nops_count = 1 + instr->repeat;
-            info->instrs_per_cat[0] += nops_count;
-         } else {
-            info->instrs_per_cat[opc_cat(instr->opc)] += 1 + instr->repeat;
-            info->instrs_per_cat[0] += nops_count;
-         }
+         /* Don't count instructions in the preamble for instruction-count type
+          * stats, because their effect should be much smaller.
+          * TODO: we should probably have separate stats for preamble
+          * instructions, but that would blow up the amount of stats...
+          */
+         if (!in_preamble) {
+            unsigned instrs_count = 1 + instr->repeat + instr->nop;
+            unsigned nops_count = instr->nop;
 
-         if (instr->opc == OPC_MOV) {
-            if (instr->cat1.src_type == instr->cat1.dst_type) {
-               info->mov_count += 1 + instr->repeat;
+            if (instr->opc == OPC_NOP) {
+               nops_count = 1 + instr->repeat;
+               info->instrs_per_cat[0] += nops_count;
+            } else if (!is_meta(instr)) {
+               info->instrs_per_cat[opc_cat(instr->opc)] += 1 + instr->repeat;
+               info->instrs_per_cat[0] += nops_count;
+            }
+
+            if (instr->opc == OPC_MOV) {
+               if (instr->cat1.src_type == instr->cat1.dst_type) {
+                  info->mov_count += 1 + instr->repeat;
+               } else {
+                  info->cov_count += 1 + instr->repeat;
+               }
+            }
+
+            info->instrs_count += instrs_count;
+            info->nops_count += nops_count;
+
+            if (instr->flags & IR3_INSTR_SS) {
+               info->ss++;
+               info->sstall += sfu_delay;
+               sfu_delay = 0;
+            }
+
+            if (instr->flags & IR3_INSTR_SY) {
+               info->sy++;
+               info->systall += mem_delay;
+               mem_delay = 0;
+            }
+
+            if (is_ss_producer(instr)) {
+               sfu_delay = soft_ss_delay(instr);
             } else {
-               info->cov_count += 1 + instr->repeat;
+               int n = MIN2(sfu_delay, 1 + instr->repeat + instr->nop);
+               sfu_delay -= n;
+            }
+
+            if (is_sy_producer(instr)) {
+               mem_delay = soft_sy_delay(instr, shader);
+            } else {
+               int n = MIN2(mem_delay, 1 + instr->repeat + instr->nop);
+               mem_delay -= n;
             }
          }
 
-         info->instrs_count += instrs_count;
-         info->nops_count += nops_count;
+         if (instr->opc == OPC_SHPE)
+            in_preamble = false;
+      }
+   }
 
-         if (instr->flags & IR3_INSTR_SS) {
-            info->ss++;
-            info->sstall += sfu_delay;
-            sfu_delay = 0;
-         }
+   /* for vertex shader, the inputs are loaded into registers before the shader
+    * is executed, so max_regs from the shader instructions might not properly
+    * reflect the # of registers actually used, especially in case passthrough
+    * varyings.
+    *
+    * Likewise, for fragment shader, we can have some regs which are passed
+    * input values but never touched by the resulting shader (ie. as result
+    * of dead code elimination or simply because we don't know how to turn
+    * the reg off.
+    */
+   for (unsigned i = 0; i < v->inputs_count; i++) {
+      /* skip frag inputs fetch via bary.f since their reg's are
+       * not written by gpu before shader starts (and in fact the
+       * regid's might not even be valid)
+       */
+      if (v->inputs[i].bary)
+         continue;
 
-         if (instr->flags & IR3_INSTR_SY)
-            info->sy++;
+      /* ignore high regs that are global to all threads in a warp
+       * (they exist by default) (a5xx+)
+       */
+      if (v->inputs[i].regid >= regid(48, 0))
+         continue;
 
-         if (is_sfu(instr)) {
-            sfu_delay = 10;
+      if (v->inputs[i].compmask) {
+         unsigned n = util_last_bit(v->inputs[i].compmask) - 1;
+         int32_t regid = v->inputs[i].regid + n;
+         if (v->inputs[i].half) {
+            if (!v->mergedregs) {
+               v->info.max_half_reg = MAX2(v->info.max_half_reg, regid >> 2);
+            } else {
+               v->info.max_reg = MAX2(v->info.max_reg, regid >> 3);
+            }
          } else {
-            int n = MIN2(sfu_delay, 1 + instr->repeat + instr->nop);
-            sfu_delay -= n;
+            v->info.max_reg = MAX2(v->info.max_reg, regid >> 2);
          }
+      }
+   }
+
+   for (unsigned i = 0; i < v->num_sampler_prefetch; i++) {
+      unsigned n = util_last_bit(v->sampler_prefetch[i].wrmask) - 1;
+      int32_t regid = v->sampler_prefetch[i].dst + n;
+      if (v->sampler_prefetch[i].half_precision) {
+         if (!v->mergedregs) {
+            v->info.max_half_reg = MAX2(v->info.max_half_reg, regid >> 2);
+         } else {
+            v->info.max_reg = MAX2(v->info.max_reg, regid >> 3);
+         }
+      } else {
+         v->info.max_reg = MAX2(v->info.max_reg, regid >> 2);
       }
    }
 
@@ -324,12 +449,16 @@ ir3_collect_info(struct ir3_shader_variant *v)
       (compiler->gen >= 6 ? ((info->max_half_reg + 2) / 2) : 0);
 
    info->double_threadsize = ir3_should_double_threadsize(v, regs_count);
+
+   /* TODO this is different for earlier gens, but earlier gens don't use this */
+   info->subgroup_size = v->info.double_threadsize ? 128 : 64;
+
    unsigned reg_independent_max_waves =
       ir3_get_reg_independent_max_waves(v, info->double_threadsize);
    unsigned reg_dependent_max_waves = ir3_get_reg_dependent_max_waves(
       compiler, regs_count, info->double_threadsize);
    info->max_waves = MIN2(reg_independent_max_waves, reg_dependent_max_waves);
-   assert(info->max_waves <= v->shader->compiler->max_waves);
+   assert(info->max_waves <= v->compiler->max_waves);
 }
 
 static struct ir3_register *
@@ -515,7 +644,7 @@ ir3_src_create(struct ir3_instruction *instr, int num, int flags)
 {
    struct ir3 *shader = instr->block->shader;
 #ifdef DEBUG
-   debug_assert(instr->srcs_count < instr->srcs_max);
+   assert(instr->srcs_count < instr->srcs_max);
 #endif
    struct ir3_register *reg = reg_create(shader, num, flags);
    instr->srcs[instr->srcs_count++] = reg;
@@ -527,7 +656,7 @@ ir3_dst_create(struct ir3_instruction *instr, int num, int flags)
 {
    struct ir3 *shader = instr->block->shader;
 #ifdef DEBUG
-   debug_assert(instr->dsts_count < instr->dsts_max);
+   assert(instr->dsts_count < instr->dsts_max);
 #endif
    struct ir3_register *reg = reg_create(shader, num, flags);
    instr->dsts[instr->dsts_count++] = reg;
@@ -560,21 +689,21 @@ ir3_instr_set_address(struct ir3_instruction *instr,
    if (!instr->address) {
       struct ir3 *ir = instr->block->shader;
 
-      debug_assert(instr->block == addr->block);
+      assert(instr->block == addr->block);
 
       instr->address =
          ir3_src_create(instr, addr->dsts[0]->num, addr->dsts[0]->flags);
       instr->address->def = addr->dsts[0];
-      debug_assert(reg_num(addr->dsts[0]) == REG_A0);
+      assert(reg_num(addr->dsts[0]) == REG_A0);
       unsigned comp = reg_comp(addr->dsts[0]);
       if (comp == 0) {
          array_insert(ir, ir->a0_users, instr);
       } else {
-         debug_assert(comp == 1);
+         assert(comp == 1);
          array_insert(ir, ir->a1_users, instr);
       }
    } else {
-      debug_assert(instr->address->def->instr == addr);
+      assert(instr->address->def->instr == addr);
    }
 }
 
@@ -709,6 +838,9 @@ ir3_set_dst_type(struct ir3_instruction *instr, bool half)
 void
 ir3_fixup_src_type(struct ir3_instruction *instr)
 {
+   if (instr->srcs_count == 0)
+      return;
+
    switch (opc_cat(instr->opc)) {
    case 1: /* move instructions */
       if (instr->srcs[0]->flags & IR3_REG_HALF) {
@@ -844,6 +976,9 @@ ir3_valid_flags(struct ir3_instruction *instr, unsigned n, unsigned flags)
       case OPC_GAT:
          valid_flags = IR3_REG_SHARED;
          break;
+      case OPC_SCAN_MACRO:
+         return flags == 0;
+         break;
       default:
          valid_flags =
             IR3_REG_IMMED | IR3_REG_CONST | IR3_REG_RELATIV | IR3_REG_SHARED;
@@ -857,6 +992,11 @@ ir3_valid_flags(struct ir3_instruction *instr, unsigned n, unsigned flags)
 
       if (flags & ~valid_flags)
          return false;
+
+      /* Allow an immediate src1 for flat.b, since it's ignored */
+      if (instr->opc == OPC_FLAT_B &&
+          n == 1 && flags == IR3_REG_IMMED)
+         return true;
 
       if (flags & (IR3_REG_CONST | IR3_REG_IMMED | IR3_REG_SHARED)) {
          unsigned m = n ^ 1;
@@ -877,12 +1017,29 @@ ir3_valid_flags(struct ir3_instruction *instr, unsigned n, unsigned flags)
       valid_flags =
          ir3_cat3_absneg(instr->opc) | IR3_REG_RELATIV | IR3_REG_SHARED;
 
-      if (instr->opc == OPC_SHLG_B16) {
+      switch (instr->opc) {
+      case OPC_SHRM:
+      case OPC_SHLM:
+      case OPC_SHRG:
+      case OPC_SHLG:
+      case OPC_ANDG: {
          valid_flags |= IR3_REG_IMMED;
-         /* shlg.b16 can be RELATIV+CONST but not CONST: */
+         /* Can be RELATIV+CONST but not CONST: */
          if (flags & IR3_REG_RELATIV)
             valid_flags |= IR3_REG_CONST;
-      } else {
+         break;
+      }
+      case OPC_WMM:
+      case OPC_WMM_ACCU: {
+         valid_flags = IR3_REG_SHARED;
+         if (n == 2)
+            valid_flags = IR3_REG_CONST;
+         break;
+      }
+      case OPC_DP2ACC:
+      case OPC_DP4ACC:
+         break;
+      default:
          valid_flags |= IR3_REG_CONST;
       }
 
@@ -946,16 +1103,23 @@ ir3_valid_flags(struct ir3_instruction *instr, unsigned n, unsigned flags)
          /* disallow immediates in anything but the SSBO slot argument for
           * cat6 instructions:
           */
-         if (is_atomic(instr->opc) && (n != 0))
+         if (is_global_a3xx_atomic(instr->opc) && (n != 0))
             return false;
 
-         if (is_atomic(instr->opc) && !(instr->flags & IR3_INSTR_G))
+         if (is_local_atomic(instr->opc) || is_global_a6xx_atomic(instr->opc) ||
+             is_bindless_atomic(instr->opc))
             return false;
 
          if (instr->opc == OPC_STG && (n == 2))
             return false;
 
          if (instr->opc == OPC_STG_A && (n == 4))
+            return false;
+
+         if (instr->opc == OPC_LDG && (n == 0))
+            return false;
+
+         if (instr->opc == OPC_LDG_A && (n < 2))
             return false;
 
          /* as with atomics, these cat6 instrs can only have an immediate

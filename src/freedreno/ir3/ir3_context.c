@@ -31,18 +31,21 @@
 #include "ir3_shader.h"
 
 struct ir3_context *
-ir3_context_init(struct ir3_compiler *compiler, struct ir3_shader_variant *so)
+ir3_context_init(struct ir3_compiler *compiler, struct ir3_shader *shader,
+                 struct ir3_shader_variant *so)
 {
    struct ir3_context *ctx = rzalloc(NULL, struct ir3_context);
 
-   if (compiler->gen >= 4) {
+   if (compiler->gen == 4) {
       if (so->type == MESA_SHADER_VERTEX) {
          ctx->astc_srgb = so->key.vastc_srgb;
-      } else if (so->type == MESA_SHADER_FRAGMENT) {
+         memcpy(ctx->sampler_swizzles, so->key.vsampler_swizzles, sizeof(ctx->sampler_swizzles));
+      } else if (so->type == MESA_SHADER_FRAGMENT ||
+            so->type == MESA_SHADER_COMPUTE) {
          ctx->astc_srgb = so->key.fastc_srgb;
+         memcpy(ctx->sampler_swizzles, so->key.fsampler_swizzles, sizeof(ctx->sampler_swizzles));
       }
-
-   } else {
+   } else if (compiler->gen == 3) {
       if (so->type == MESA_SHADER_VERTEX) {
          ctx->samples = so->key.vsamples;
       } else if (so->type == MESA_SHADER_FRAGMENT) {
@@ -74,13 +77,14 @@ ir3_context_init(struct ir3_compiler *compiler, struct ir3_shader_variant *so)
     * creating duplicate variants..
     */
 
-   ctx->s = nir_shader_clone(ctx, so->shader->nir);
+   ctx->s = nir_shader_clone(ctx, shader->nir);
    ir3_nir_lower_variant(so, ctx->s);
 
    /* this needs to be the last pass run, so do this here instead of
     * in ir3_optimize_nir():
     */
    bool progress = false;
+   bool needs_late_alg = false;
    NIR_PASS(progress, ctx->s, nir_lower_locals_to_regs);
 
    /* we could need cleanup after lower_locals_to_regs */
@@ -88,6 +92,7 @@ ir3_context_init(struct ir3_compiler *compiler, struct ir3_shader_variant *so)
       progress = false;
       NIR_PASS(progress, ctx->s, nir_opt_algebraic);
       NIR_PASS(progress, ctx->s, nir_opt_constant_folding);
+      needs_late_alg = true;
    }
 
    /* We want to lower nir_op_imul as late as possible, to catch also
@@ -104,6 +109,13 @@ ir3_context_init(struct ir3_compiler *compiler, struct ir3_shader_variant *so)
       NIR_PASS(progress, ctx->s, nir_opt_dead_write_vars);
       NIR_PASS(progress, ctx->s, nir_opt_dce);
       NIR_PASS(progress, ctx->s, nir_opt_constant_folding);
+      needs_late_alg = true;
+   }
+
+   /* nir_opt_algebraic() above would have unfused our ffmas, re-fuse them. */
+   if (needs_late_alg) {
+      NIR_PASS(progress, ctx->s, nir_opt_algebraic_late);
+      NIR_PASS(progress, ctx->s, nir_opt_dce);
    }
 
    /* Enable the texture pre-fetch feature only a4xx onwards.  But
@@ -151,9 +163,9 @@ ir3_context_init(struct ir3_compiler *compiler, struct ir3_shader_variant *so)
       }
    }
 
-   if (shader_debug_enabled(so->type)) {
+   if (shader_debug_enabled(so->type, ctx->s->info.internal)) {
       mesa_logi("NIR (final form) for %s shader %s:", ir3_shader_stage(so),
-                so->shader->nir->info.name);
+                so->name);
       nir_log_shaderi(ctx->s);
    }
 
@@ -238,7 +250,7 @@ ir3_get_src(struct ir3_context *ctx, nir_src *src)
 void
 ir3_put_dst(struct ir3_context *ctx, nir_dest *dst)
 {
-   unsigned bit_size = nir_dest_bit_size(*dst);
+   unsigned bit_size = ir3_bitsize(ctx, nir_dest_bit_size(*dst));
 
    /* add extra mov if dst value is shared reg.. in some cases not all
     * instructions can read from shared regs, in cases where they can
@@ -252,8 +264,7 @@ ir3_put_dst(struct ir3_context *ctx, nir_dest *dst)
       }
    }
 
-   /* Note: 1-bit bools are stored in 32-bit regs */
-   if (bit_size == 16) {
+   if (bit_size <= 16) {
       for (unsigned i = 0; i < ctx->last_dst_n; i++) {
          struct ir3_instruction *dst = ctx->last_dst[i];
          ir3_set_dst_type(dst, true);
@@ -342,7 +353,7 @@ ir3_create_collect(struct ir3_block *block, struct ir3_instruction *const *arr,
          elem = ir3_MOV(block, elem, type);
       }
 
-      debug_assert(dest_flags(elem) == flags);
+      assert(dest_flags(elem) == flags);
       __ssa_src(collect, elem, flags);
    }
 
@@ -366,7 +377,7 @@ ir3_split_dest(struct ir3_block *block, struct ir3_instruction **dst,
    }
 
    if (src->opc == OPC_META_COLLECT) {
-      debug_assert((base + n) <= src->srcs_count);
+      assert((base + n) <= src->srcs_count);
 
       for (int i = 0; i < n; i++) {
          dst[i] = ssa(src->srcs[i + base]);
@@ -513,7 +524,9 @@ ir3_get_predicate(struct ir3_context *ctx, struct ir3_instruction *src)
    struct ir3_instruction *cond;
 
    /* NOTE: only cmps.*.* can write p0.x: */
-   cond = ir3_CMPS_S(b, src, 0, create_immed(b, 0), 0);
+   struct ir3_instruction *zero =
+         create_immed_typed(b, 0, is_half(src) ? TYPE_U16 : TYPE_U32);
+   cond = ir3_CMPS_S(b, src, 0, zero, 0);
    cond->cat2.condition = IR3_COND_NE;
 
    /* condition always goes in predicate register: */
@@ -542,10 +555,7 @@ ir3_declare_array(struct ir3_context *ctx, nir_register *reg)
    arr->length = reg->num_components * MAX2(1, reg->num_array_elems);
    compile_assert(ctx, arr->length > 0);
    arr->r = reg;
-   arr->half = reg->bit_size <= 16;
-   // HACK one-bit bools still end up as 32b:
-   if (reg->bit_size == 1)
-      arr->half = false;
+   arr->half = ir3_bitsize(ctx, reg->bit_size) <= 16;
    list_addtail(&arr->node, &ctx->ir->array_list);
 }
 

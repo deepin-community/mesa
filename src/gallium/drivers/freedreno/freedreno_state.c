@@ -29,6 +29,9 @@
 #include "util/u_helpers.h"
 #include "util/u_memory.h"
 #include "util/u_string.h"
+#include "util/u_upload_mgr.h"
+
+#include "common/freedreno_guardband.h"
 
 #include "freedreno_context.h"
 #include "freedreno_gmem.h"
@@ -103,6 +106,14 @@ fd_set_min_samples(struct pipe_context *pctx, unsigned min_samples) in_dt
    fd_context_dirty(ctx, FD_DIRTY_MIN_SAMPLES);
 }
 
+static void
+upload_user_buffer(struct pipe_context *pctx, struct pipe_constant_buffer *cb)
+{
+   u_upload_data(pctx->stream_uploader, 0, cb->buffer_size, 64,
+                 cb->user_buffer, &cb->buffer_offset, &cb->buffer);
+   cb->user_buffer = NULL;
+}
+
 /* notes from calim on #dri-devel:
  * index==0 will be non-UBO (ie. glUniformXYZ()) all packed together padded
  * out to vec4's
@@ -129,18 +140,17 @@ fd_set_constant_buffer(struct pipe_context *pctx, enum pipe_shader_type shader,
       return;
    }
 
+   if (cb->user_buffer && ctx->screen->gen >= 6)
+      upload_user_buffer(pctx, &so->cb[index]);
+
    so->enabled_mask |= 1 << index;
 
    fd_context_dirty_shader(ctx, shader, FD_DIRTY_SHADER_CONST);
    fd_resource_set_usage(cb->buffer, FD_DIRTY_CONST);
-
-   if (index > 0) {
-      assert(!cb->user_buffer);
-      ctx->dirty |= FD_DIRTY_RESOURCE;
-   }
+   fd_dirty_shader_resource(ctx, cb->buffer, shader, FD_DIRTY_SHADER_CONST, false);
 }
 
-static void
+void
 fd_set_shader_buffers(struct pipe_context *pctx, enum pipe_shader_type shader,
                       unsigned start, unsigned count,
                       const struct pipe_shader_buffer *buffers,
@@ -150,7 +160,6 @@ fd_set_shader_buffers(struct pipe_context *pctx, enum pipe_shader_type shader,
    struct fd_shaderbuf_stateobj *so = &ctx->shaderbuf[shader];
    const unsigned modified_bits = u_bit_consecutive(start, count);
 
-   so->enabled_mask &= ~modified_bits;
    so->writable_mask &= ~modified_bits;
    so->writable_mask |= writable_bitmask << start;
 
@@ -159,20 +168,19 @@ fd_set_shader_buffers(struct pipe_context *pctx, enum pipe_shader_type shader,
       struct pipe_shader_buffer *buf = &so->sb[n];
 
       if (buffers && buffers[i].buffer) {
-         if ((buf->buffer == buffers[i].buffer) &&
-             (buf->buffer_offset == buffers[i].buffer_offset) &&
-             (buf->buffer_size == buffers[i].buffer_size))
-            continue;
-
          buf->buffer_offset = buffers[i].buffer_offset;
          buf->buffer_size = buffers[i].buffer_size;
          pipe_resource_reference(&buf->buffer, buffers[i].buffer);
 
+         bool write = writable_bitmask & BIT(i);
+
          fd_resource_set_usage(buffers[i].buffer, FD_DIRTY_SSBO);
+         fd_dirty_shader_resource(ctx, buffers[i].buffer, shader,
+                                  FD_DIRTY_SHADER_SSBO, write);
 
          so->enabled_mask |= BIT(n);
 
-         if (writable_bitmask & BIT(i)) {
+         if (write) {
             struct fd_resource *rsc = fd_resource(buf->buffer);
             util_range_add(&rsc->b.b, &rsc->valid_buffer_range,
                            buf->buffer_offset,
@@ -180,6 +188,8 @@ fd_set_shader_buffers(struct pipe_context *pctx, enum pipe_shader_type shader,
          }
       } else {
          pipe_resource_reference(&buf->buffer, NULL);
+
+         so->enabled_mask &= ~BIT(n);
       }
    }
 
@@ -212,12 +222,14 @@ fd_set_shader_images(struct pipe_context *pctx, enum pipe_shader_type shader,
          util_copy_image_view(buf, &images[i]);
 
          if (buf->resource) {
+            bool write = buf->access & PIPE_IMAGE_ACCESS_WRITE;
+
             fd_resource_set_usage(buf->resource, FD_DIRTY_IMAGE);
+            fd_dirty_shader_resource(ctx, buf->resource, shader,
+                                     FD_DIRTY_SHADER_IMAGE, write);
             so->enabled_mask |= BIT(n);
 
-            if ((buf->access & PIPE_IMAGE_ACCESS_WRITE) &&
-                (buf->resource->target == PIPE_BUFFER)) {
-
+            if (write && (buf->resource->target == PIPE_BUFFER)) {
                struct fd_resource *rsc = fd_resource(buf->resource);
                util_range_add(&rsc->b.b, &rsc->valid_buffer_range,
                               buf->u.buf.offset,
@@ -275,6 +287,25 @@ fd_set_framebuffer_state(struct pipe_context *pctx,
 
    util_copy_framebuffer_state(cso, framebuffer);
 
+   STATIC_ASSERT((4 * PIPE_MAX_COLOR_BUFS) == (8 * sizeof(ctx->all_mrt_channel_mask)));
+   ctx->all_mrt_channel_mask = 0;
+
+   /* Generate a bitmask of all valid channels for all MRTs.  Blend
+    * state with unwritten channels essentially acts as blend enabled,
+    * which disables LRZ write.  But only if the cbuf *has* the masked
+    * channels, which is not known at the time the blend state is
+    * created.
+    */
+   for (unsigned i = 0; i < framebuffer->nr_cbufs; i++) {
+      if (!framebuffer->cbufs[i])
+         continue;
+
+      enum pipe_format format = framebuffer->cbufs[i]->format;
+      unsigned nr = util_format_get_nr_components(format);
+
+      ctx->all_mrt_channel_mask |= BITFIELD_MASK(nr) << (4 * i);
+   }
+
    cso->samples = util_framebuffer_get_num_samples(cso);
 
    if (ctx->screen->reorder) {
@@ -287,7 +318,6 @@ fd_set_framebuffer_state(struct pipe_context *pctx,
 
       fd_batch_reference(&ctx->batch, NULL);
       fd_context_all_dirty(ctx);
-      ctx->update_active_queries = true;
 
       fd_batch_reference(&old_batch, NULL);
    } else if (ctx->batch) {
@@ -298,10 +328,12 @@ fd_set_framebuffer_state(struct pipe_context *pctx,
 
    fd_context_dirty(ctx, FD_DIRTY_FRAMEBUFFER);
 
-   ctx->disabled_scissor.minx = 0;
-   ctx->disabled_scissor.miny = 0;
-   ctx->disabled_scissor.maxx = cso->width;
-   ctx->disabled_scissor.maxy = cso->height;
+   for (unsigned i = 0; i < PIPE_MAX_VIEWPORTS; i++) {
+      ctx->disabled_scissor[i].minx = 0;
+      ctx->disabled_scissor[i].miny = 0;
+      ctx->disabled_scissor[i].maxx = cso->width - 1;
+      ctx->disabled_scissor[i].maxy = cso->height - 1;
+   }
 
    fd_context_dirty(ctx, FD_DIRTY_SCISSOR);
    update_draw_cost(ctx);
@@ -323,46 +355,99 @@ fd_set_scissor_states(struct pipe_context *pctx, unsigned start_slot,
 {
    struct fd_context *ctx = fd_context(pctx);
 
-   ctx->scissor = *scissor;
+   for (unsigned i = 0; i < num_scissors; i++) {
+      unsigned idx = start_slot + i;
+
+      if ((scissor[i].minx == scissor[i].maxx) ||
+          (scissor[i].miny == scissor[i].maxy)) {
+         ctx->scissor[idx].minx = ctx->scissor[idx].miny = 1;
+         ctx->scissor[idx].maxx = ctx->scissor[idx].maxy = 0;
+      } else {
+         ctx->scissor[idx].minx = scissor[i].minx;
+         ctx->scissor[idx].miny = scissor[i].miny;
+         ctx->scissor[idx].maxx = MAX2(scissor[i].maxx, 1) - 1;
+         ctx->scissor[idx].maxy = MAX2(scissor[i].maxy, 1) - 1;
+      }
+   }
+
    fd_context_dirty(ctx, FD_DIRTY_SCISSOR);
+}
+
+static void
+init_scissor_states(struct pipe_context *pctx)
+   in_dt
+{
+   struct fd_context *ctx = fd_context(pctx);
+
+   for (unsigned idx = 0; idx < ARRAY_SIZE(ctx->scissor); idx++) {
+      ctx->scissor[idx].minx = ctx->scissor[idx].miny = 1;
+      ctx->scissor[idx].maxx = ctx->scissor[idx].maxy = 0;
+   }
 }
 
 static void
 fd_set_viewport_states(struct pipe_context *pctx, unsigned start_slot,
                        unsigned num_viewports,
-                       const struct pipe_viewport_state *viewport) in_dt
+                       const struct pipe_viewport_state *viewports) in_dt
 {
    struct fd_context *ctx = fd_context(pctx);
-   struct pipe_scissor_state *scissor = &ctx->viewport_scissor;
-   float minx, miny, maxx, maxy;
 
-   ctx->viewport = *viewport;
+   for (unsigned i = 0; i < num_viewports; i++) {
+      unsigned idx = start_slot + i;
+      struct pipe_scissor_state *scissor = &ctx->viewport_scissor[idx];
+      const struct pipe_viewport_state *viewport = &viewports[i];
 
-   /* see si_get_scissor_from_viewport(): */
+      ctx->viewport[idx] = *viewport;
 
-   /* Convert (-1, -1) and (1, 1) from clip space into window space. */
-   minx = -viewport->scale[0] + viewport->translate[0];
-   miny = -viewport->scale[1] + viewport->translate[1];
-   maxx = viewport->scale[0] + viewport->translate[0];
-   maxy = viewport->scale[1] + viewport->translate[1];
+      /* see si_get_scissor_from_viewport(): */
 
-   /* Handle inverted viewports. */
-   if (minx > maxx) {
-      swap(minx, maxx);
+      /* Convert (-1, -1) and (1, 1) from clip space into window space. */
+      float minx = -viewport->scale[0] + viewport->translate[0];
+      float miny = -viewport->scale[1] + viewport->translate[1];
+      float maxx = viewport->scale[0] + viewport->translate[0];
+      float maxy = viewport->scale[1] + viewport->translate[1];
+
+      /* Handle inverted viewports. */
+      if (minx > maxx) {
+         SWAP(minx, maxx);
+      }
+      if (miny > maxy) {
+         SWAP(miny, maxy);
+      }
+
+      const float max_dims = ctx->screen->gen >= 4 ? 16384.f : 4096.f;
+
+      /* Clamp, convert to integer and round up the max bounds. */
+      scissor->minx = CLAMP(minx, 0.f, max_dims);
+      scissor->miny = CLAMP(miny, 0.f, max_dims);
+      scissor->maxx = MAX2(CLAMP(ceilf(maxx), 0.f, max_dims), 1) - 1;
+      scissor->maxy = MAX2(CLAMP(ceilf(maxy), 0.f, max_dims), 1) - 1;
    }
-   if (miny > maxy) {
-      swap(miny, maxy);
-   }
-
-   const float max_dims = ctx->screen->gen >= 4 ? 16384.f : 4096.f;
-
-   /* Clamp, convert to integer and round up the max bounds. */
-   scissor->minx = CLAMP(minx, 0.f, max_dims);
-   scissor->miny = CLAMP(miny, 0.f, max_dims);
-   scissor->maxx = CLAMP(ceilf(maxx), 0.f, max_dims);
-   scissor->maxy = CLAMP(ceilf(maxy), 0.f, max_dims);
 
    fd_context_dirty(ctx, FD_DIRTY_VIEWPORT);
+
+   /* Guardband is only used on a6xx so far: */
+   if (!is_a6xx(ctx->screen))
+      return;
+
+   ctx->guardband.x = ~0;
+   ctx->guardband.y = ~0;
+
+   bool is3x = is_a3xx(ctx->screen);
+
+   for (unsigned i = 0; i < PIPE_MAX_VIEWPORTS; i++) {
+      const struct pipe_viewport_state *vp = & ctx->viewport[i];
+
+      /* skip unused viewports: */
+      if (vp->scale[0] == 0)
+         continue;
+
+      unsigned gx = fd_calc_guardband(vp->translate[0], vp->scale[0], is3x);
+      unsigned gy = fd_calc_guardband(vp->translate[1], vp->scale[1], is3x);
+
+      ctx->guardband.x = MIN2(ctx->guardband.x, gx);
+      ctx->guardband.y = MIN2(ctx->guardband.y, gy);
+   }
 }
 
 static void
@@ -382,9 +467,9 @@ fd_set_vertex_buffers(struct pipe_context *pctx, unsigned start_slot,
    if (ctx->screen->gen < 3) {
       for (i = 0; i < count; i++) {
          bool new_enabled = vb && vb[i].buffer.resource;
-         bool old_enabled = so->vb[i].buffer.resource != NULL;
+         bool old_enabled = so->vb[start_slot + i].buffer.resource != NULL;
          uint32_t new_stride = vb ? vb[i].stride : 0;
-         uint32_t old_stride = so->vb[i].stride;
+         uint32_t old_stride = so->vb[start_slot + i].stride;
          if ((new_enabled != old_enabled) || (new_stride != old_stride)) {
             fd_context_dirty(ctx, FD_DIRTY_VTXSTATE);
             break;
@@ -405,6 +490,15 @@ fd_set_vertex_buffers(struct pipe_context *pctx, unsigned start_slot,
    for (unsigned i = 0; i < count; i++) {
       assert(!vb[i].is_user_buffer);
       fd_resource_set_usage(vb[i].buffer.resource, FD_DIRTY_VTXBUF);
+      fd_dirty_resource(ctx, vb[i].buffer.resource, FD_DIRTY_VTXBUF, false);
+
+      /* Robust buffer access: Return undefined data (the start of the buffer)
+       * instead of process termination or a GPU hang in case of overflow.
+       */
+      if (vb[i].buffer.resource &&
+          unlikely(vb[i].buffer_offset >= vb[i].buffer.resource->width0)) {
+         so->vb[start_slot + i].buffer_offset = 0;
+      }
    }
 }
 
@@ -418,10 +512,16 @@ fd_blend_state_bind(struct pipe_context *pctx, void *hwcso) in_dt
                                  : false;
    bool new_is_dual =
       cso ? cso->rt[0].blend_enable && util_blend_state_is_dual(cso, 0) : false;
-   ctx->blend = hwcso;
    fd_context_dirty(ctx, FD_DIRTY_BLEND);
    if (old_is_dual != new_is_dual)
       fd_context_dirty(ctx, FD_DIRTY_BLEND_DUAL);
+
+   bool old_coherent = get_safe(ctx->blend, blend_coherent);
+   bool new_coherent = get_safe(cso, blend_coherent);
+   if (new_coherent != old_coherent) {
+      fd_context_dirty(ctx, FD_DIRTY_BLEND_COHERENT);
+   }
+   ctx->blend = hwcso;
    update_draw_cost(ctx);
 }
 
@@ -443,9 +543,9 @@ fd_rasterizer_state_bind(struct pipe_context *pctx, void *hwcso) in_dt
    fd_context_dirty(ctx, FD_DIRTY_RASTERIZER);
 
    if (ctx->rasterizer && ctx->rasterizer->scissor) {
-      ctx->current_scissor = &ctx->scissor;
+      ctx->current_scissor = ctx->scissor;
    } else {
-      ctx->current_scissor = &ctx->disabled_scissor;
+      ctx->current_scissor = ctx->disabled_scissor;
    }
 
    /* if scissor enable bit changed we need to mark scissor
@@ -563,7 +663,7 @@ fd_set_stream_output_targets(struct pipe_context *pctx, unsigned num_targets,
    struct fd_streamout_stateobj *so = &ctx->streamout;
    unsigned i;
 
-   debug_assert(num_targets <= ARRAY_SIZE(so->targets));
+   assert(num_targets <= ARRAY_SIZE(so->targets));
 
    /* Older targets need sw stats enabled for streamout emulation in VS: */
    if (ctx->screen->gen < 5) {
@@ -579,6 +679,11 @@ fd_set_stream_output_targets(struct pipe_context *pctx, unsigned num_targets,
       boolean reset = (offsets[i] != (unsigned)-1);
 
       so->reset |= (reset << i);
+
+      if (targets[i]) {
+         fd_resource_set_usage(targets[i]->buffer, FD_DIRTY_STREAMOUT);
+         fd_dirty_resource(ctx, targets[i]->buffer, FD_DIRTY_STREAMOUT, true);
+      }
 
       if (!changed && !reset)
          continue;
@@ -608,15 +713,39 @@ fd_bind_compute_state(struct pipe_context *pctx, void *state) in_dt
 {
    struct fd_context *ctx = fd_context(pctx);
    ctx->compute = state;
-   /* NOTE: Don't mark FD_DIRTY_PROG for compute specific state */
-   ctx->dirty_shader[PIPE_SHADER_COMPUTE] |= FD_DIRTY_SHADER_PROG;
+   fd_context_dirty_shader(ctx, PIPE_SHADER_COMPUTE, FD_DIRTY_SHADER_PROG);
 }
 
+/* TODO pipe_context::set_compute_resources() should DIAF and clover
+ * should be updated to use pipe_context::set_constant_buffer() and
+ * pipe_context::set_shader_images().  Until then just directly frob
+ * the UBO/image state to avoid the rest of the driver needing to
+ * know about this bastard api..
+ */
 static void
 fd_set_compute_resources(struct pipe_context *pctx, unsigned start,
                          unsigned count, struct pipe_surface **prscs) in_dt
 {
-   // TODO
+   struct fd_context *ctx = fd_context(pctx);
+   struct fd_constbuf_stateobj *so = &ctx->constbuf[PIPE_SHADER_COMPUTE];
+
+   for (unsigned i = 0; i < count; i++) {
+      const uint32_t index = i + start + 1;   /* UBOs start at index 1 */
+
+      if (!prscs) {
+         util_copy_constant_buffer(&so->cb[index], NULL, false);
+         so->enabled_mask &= ~(1 << index);
+      } else if (prscs[i]->format == PIPE_FORMAT_NONE) {
+         struct pipe_constant_buffer cb = {
+               .buffer = prscs[i]->texture,
+         };
+         util_copy_constant_buffer(&so->cb[index], &cb, false);
+         so->enabled_mask |= (1 << index);
+      } else {
+         // TODO images
+         unreachable("finishme");
+      }
+   }
 }
 
 /* used by clover to bind global objects, returning the bo address
@@ -640,9 +769,11 @@ fd_set_global_binding(struct pipe_context *pctx, unsigned first, unsigned count,
 
          if (so->buf[n]) {
             struct fd_resource *rsc = fd_resource(so->buf[n]);
-            uint64_t iova = fd_bo_get_iova(rsc->bo);
-            // TODO need to scream if iova > 32b or fix gallium API..
-            *handles[i] += iova;
+            uint32_t offset = *handles[i];
+            uint64_t iova = fd_bo_get_iova(rsc->bo) + offset;
+
+            /* Yes, really, despite what the type implies: */
+            memcpy(handles[i], &iova, sizeof(iova));
          }
 
          if (prscs[i])
@@ -703,4 +834,6 @@ fd_state_init(struct pipe_context *pctx)
       pctx->set_compute_resources = fd_set_compute_resources;
       pctx->set_global_binding = fd_set_global_binding;
    }
+
+   init_scissor_states(pctx);
 }

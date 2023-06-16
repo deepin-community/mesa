@@ -31,20 +31,20 @@
   *   Brian Paul
   */
 
-#include "main/glheader.h"
+#include "util/glheader.h"
 #include "main/macros.h"
 #include "main/context.h"
 #include "st_context.h"
 #include "st_cb_bitmap.h"
 #include "st_cb_flush.h"
 #include "st_cb_clear.h"
-#include "st_cb_fbo.h"
 #include "st_context.h"
 #include "st_manager.h"
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
 #include "pipe/p_screen.h"
 #include "util/u_gen_mipmap.h"
+#include "util/perf/cpu_trace.h"
 
 
 void
@@ -52,6 +52,8 @@ st_flush(struct st_context *st,
          struct pipe_fence_handle **fence,
          unsigned flags)
 {
+   MESA_TRACE_FUNC();
+
    /* We want to call this function periodically.
     * Typically, it has nothing to do so it shouldn't be expensive.
     */
@@ -70,6 +72,8 @@ st_finish(struct st_context *st)
 {
    struct pipe_fence_handle *fence = NULL;
 
+   MESA_TRACE_FUNC();
+
    st_flush(st, &fence, PIPE_FLUSH_ASYNC | PIPE_FLUSH_HINT_FINISH);
 
    if (fence) {
@@ -82,11 +86,7 @@ st_finish(struct st_context *st)
 }
 
 
-
-/**
- * Called via ctx->Driver.Flush()
- */
-static void
+void
 st_glFlush(struct gl_context *ctx, unsigned gallium_flush_flags)
 {
    struct st_context *st = st_context(ctx);
@@ -101,11 +101,7 @@ st_glFlush(struct gl_context *ctx, unsigned gallium_flush_flags)
    st_manager_flush_frontbuffer(st);
 }
 
-
-/**
- * Called via ctx->Driver.Finish()
- */
-static void
+void
 st_glFinish(struct gl_context *ctx)
 {
    struct st_context *st = st_context(ctx);
@@ -187,9 +183,6 @@ void
 st_init_flush_functions(struct pipe_screen *screen,
                         struct dd_function_table *functions)
 {
-   functions->Flush = st_glFlush;
-   functions->Finish = st_glFinish;
-
    if (screen->get_param(screen, PIPE_CAP_DEVICE_RESET_STATUS_QUERY))
       functions->GetGraphicsResetStatus = st_get_graphics_reset_status;
 }

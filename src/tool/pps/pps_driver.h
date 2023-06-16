@@ -45,6 +45,9 @@ class Driver
    Driver(const Driver &) = delete;
    Driver &operator=(const Driver &) = delete;
 
+   /// @return Whether dump_perfcnt is preemptible
+   virtual bool is_dump_perfcnt_preemptible() const { return true; }
+
    /// @return The minimum sampling period for the current device
    virtual uint64_t get_min_sampling_period_ns() = 0;
 
@@ -72,8 +75,14 @@ class Driver
 
    /// @brief After dumping performance counters, with this function you can iterate
    /// through the samples collected.
-   /// @return The CPU timestamp associated to current sample, or 0 if there are no more samples
+   /// @return The GPU timestamp associated to current sample, or 0 if there are no more samples
    virtual uint64_t next() = 0;
+
+   /// Clock ID in which the values returned by gpu_timestamp() belong
+   virtual uint32_t gpu_clock_id() const = 0;
+
+   /// Sample a timestamp from the GPU
+   virtual uint64_t gpu_timestamp() const = 0;
 
    DrmDevice drm_device;
 

@@ -27,14 +27,19 @@
 #ifndef FREEDRENO_UTIL_H_
 #define FREEDRENO_UTIL_H_
 
+#include "common/freedreno_common.h"
+
 #include "drm/freedreno_drmif.h"
 #include "drm/freedreno_ringbuffer.h"
 
-#include "pipe/p_format.h"
+#include "util/format/u_formats.h"
 #include "pipe/p_state.h"
 #include "util/compiler.h"
 #include "util/half_float.h"
 #include "util/log.h"
+#ifndef __cplusplus  // TODO fix cpu_trace.h to be c++ friendly
+#include "util/perf/cpu_trace.h"
+#endif
 #include "util/u_debug.h"
 #include "util/u_dynarray.h"
 #include "util/u_math.h"
@@ -73,10 +78,10 @@ enum fd_debug_flag {
    FD_DBG_DDRAW        = BITFIELD_BIT(3),
    FD_DBG_NOSCIS       = BITFIELD_BIT(4),
    FD_DBG_DIRECT       = BITFIELD_BIT(5),
-   FD_DBG_NOBYPASS     = BITFIELD_BIT(6),
+   FD_DBG_GMEM         = BITFIELD_BIT(6),
    FD_DBG_PERF         = BITFIELD_BIT(7),
    FD_DBG_NOBIN        = BITFIELD_BIT(8),
-   FD_DBG_NOGMEM       = BITFIELD_BIT(9),
+   FD_DBG_SYSMEM       = BITFIELD_BIT(9),
    FD_DBG_SERIALC      = BITFIELD_BIT(10),
    FD_DBG_SHADERDB     = BITFIELD_BIT(11),
    FD_DBG_FLUSH        = BITFIELD_BIT(12),
@@ -96,6 +101,7 @@ enum fd_debug_flag {
    FD_DBG_LAYOUT       = BITFIELD_BIT(26),
    FD_DBG_NOFP16       = BITFIELD_BIT(27),
    FD_DBG_NOHW         = BITFIELD_BIT(28),
+   FD_DBG_NOSBIN       = BITFIELD_BIT(29),
 };
 /* clang-format on */
 
@@ -112,7 +118,7 @@ extern bool fd_binning_enabled;
    do {                                                                        \
       if (FD_DBG(MSGS))                                                        \
          mesa_logi("%5d: %s:%d: " fmt, ((pid_t)syscall(SYS_gettid)),           \
-                                        __FUNCTION__, __LINE__,                \
+                                        __func__, __LINE__,                    \
                                         ##__VA_ARGS__);                        \
    } while (0)
 
@@ -120,9 +126,9 @@ extern bool fd_binning_enabled;
    do {                                                                        \
       if (FD_DBG(PERF))                                                        \
          mesa_logw(__VA_ARGS__);                                               \
-      struct pipe_debug_callback *__d = (debug);                               \
+      struct util_debug_callback *__d = (debug);                               \
       if (__d)                                                                 \
-         pipe_debug_message(__d, type, __VA_ARGS__);                           \
+         util_debug_message(__d, type, __VA_ARGS__);                           \
    } while (0)
 
 #define perf_debug_ctx(ctx, ...)                                               \
@@ -165,6 +171,12 @@ struct __perf_time_state {
      }))                                                                       \
        ? os_time_get_nano()                                                    \
        : 0)
+
+#define DEFINE_CAST(parent, child)                                             \
+   static inline struct child *child(struct parent *x)                         \
+   {                                                                           \
+      return (struct child *)x;                                                \
+   }
 
 struct fd_context;
 
@@ -223,9 +235,6 @@ static inline void
 fd_context_access_end(struct fd_context *ctx) release_cap(fd_context_access_cap)
 {
 }
-
-/* for conditionally setting boolean flag(s): */
-#define COND(bool, val) ((bool) ? (val) : 0)
 
 #define CP_REG(reg) ((0x4 << 16) | ((unsigned int)((reg) - (0x2000))))
 
@@ -385,10 +394,11 @@ __OUT_IB5(struct fd_ringbuffer *ring, struct fd_ringbuffer *target)
    }
 }
 
-/* CP_SCRATCH_REG4 is used to hold base address for query results: */
-// XXX annoyingly scratch regs move on a5xx.. and additionally different
-// packet types.. so freedreno_query_hw is going to need a bit of
-// rework..
+/* CP_SCRATCH_REG4 is used to hold base address for query results:
+ * Note the scratch register move on a5xx+ but this is only used
+ * for pre-a5xx hw queries where we cannot allocate the query buf
+ * until the # of tiles is known.
+ */
 #define HW_QUERY_BASE_REG REG_AXXX_CP_SCRATCH_REG4
 
 #ifdef DEBUG
@@ -412,25 +422,6 @@ emit_marker(struct fd_ringbuffer *ring, int scratch_idx)
    }
 }
 
-static inline uint32_t
-pack_rgba(enum pipe_format format, const float *rgba)
-{
-   union util_color uc;
-   util_pack_color(rgba, format, &uc);
-   return uc.ui[0];
-}
-
-/*
- * swap - swap value of @a and @b
- */
-#define swap(a, b)                                                             \
-   do {                                                                        \
-      __typeof(a) __tmp = (a);                                                 \
-      (a) = (b);                                                               \
-      (b) = __tmp;                                                             \
-   } while (0)
-
-#define BIT(bit) (1u << bit)
 
 /*
  * a3xx+ helpers:
@@ -441,10 +432,7 @@ fd_msaa_samples(unsigned samples)
 {
    switch (samples) {
    default:
-      debug_assert(0);
-#if defined(NDEBUG) || defined(DEBUG)
-      FALLTHROUGH;
-#endif
+      unreachable("Unsupported samples");
    case 0:
    case 1:
       return MSAA_ONE;
@@ -456,6 +444,31 @@ fd_msaa_samples(unsigned samples)
       return MSAA_EIGHT;
    }
 }
+
+#define A3XX_MAX_TEXEL_BUFFER_ELEMENTS_UINT (1 << 13)
+
+/* Note that the Vulkan blob on a540 and 640 report a
+ * maxTexelBufferElements of just 65536 (the GLES3.2 and Vulkan
+ * minimum).
+ */
+#define A4XX_MAX_TEXEL_BUFFER_ELEMENTS_UINT (1 << 27)
+
+static inline uint32_t
+fd_clamp_buffer_size(enum pipe_format format, uint32_t size,
+                     unsigned max_texel_buffer_elements)
+{
+   /* The spec says:
+    *    The number of texels in the texel array is then clamped to the value of
+    *    the implementation-dependent limit GL_MAX_TEXTURE_BUFFER_SIZE.
+    *
+    * So compute the number of texels, compare to GL_MAX_TEXTURE_BUFFER_SIZE and update it.
+    */
+   unsigned blocksize = util_format_get_blocksize(format);
+   unsigned elements = MIN2(max_texel_buffer_elements, size / blocksize);
+
+   return elements * blocksize;
+}
+
 
 /*
  * a4xx+ helpers:

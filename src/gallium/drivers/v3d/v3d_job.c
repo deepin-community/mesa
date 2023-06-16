@@ -358,6 +358,8 @@ v3d_get_job(struct v3d_context *v3d,
                 }
         }
 
+       job->double_buffer = V3D_DBG(DOUBLE_BUFFER) && !job->msaa;
+
         memcpy(&job->key, &local_key, sizeof(local_key));
         _mesa_hash_table_insert(v3d->jobs, &job->key, job);
 
@@ -375,13 +377,14 @@ v3d_get_job_for_fbo(struct v3d_context *v3d)
         struct pipe_surface *zsbuf = v3d->framebuffer.zsbuf;
         struct v3d_job *job = v3d_get_job(v3d, nr_cbufs, cbufs, zsbuf, NULL);
 
-        if (v3d->framebuffer.samples >= 1)
+        if (v3d->framebuffer.samples >= 1) {
                 job->msaa = true;
+                job->double_buffer = false;
+        }
 
-        v3d_get_tile_buffer_size(job->msaa, job->nr_cbufs,
-                                 job->cbufs, job->bbuf,
-                                 &job->tile_width,
-                                 &job->tile_height,
+        v3d_get_tile_buffer_size(job->msaa, job->double_buffer,
+                                 job->nr_cbufs, job->cbufs, job->bbuf,
+                                 &job->tile_width, &job->tile_height,
                                  &job->internal_bpp);
 
         /* The dirty flags are tracking what's been updated while v3d->job has
@@ -426,16 +429,16 @@ v3d_get_job_for_fbo(struct v3d_context *v3d)
 static void
 v3d_clif_dump(struct v3d_context *v3d, struct v3d_job *job)
 {
-        if (!(unlikely(V3D_DEBUG & (V3D_DEBUG_CL |
-                                    V3D_DEBUG_CL_NO_BIN |
-                                    V3D_DEBUG_CLIF))))
+        if (!(V3D_DBG(CL) ||
+              V3D_DBG(CL_NO_BIN) ||
+              V3D_DBG(CLIF)))
                 return;
 
         struct clif_dump *clif = clif_dump_init(&v3d->screen->devinfo,
                                                 stderr,
-                                                V3D_DEBUG & (V3D_DEBUG_CL |
-                                                             V3D_DEBUG_CL_NO_BIN),
-                                                V3D_DEBUG & V3D_DEBUG_CL_NO_BIN);
+                                                V3D_DBG(CL) ||
+                                                V3D_DBG(CL_NO_BIN),
+                                                V3D_DBG(CL_NO_BIN));
 
         set_foreach(job->bos, entry) {
                 struct v3d_bo *bo = (void *)entry->key;
@@ -548,7 +551,7 @@ v3d_job_submit(struct v3d_context *v3d, struct v3d_job *job)
 
         v3d_clif_dump(v3d, job);
 
-        if (!(unlikely(V3D_DEBUG & V3D_DEBUG_NORAST))) {
+        if (!V3D_DBG(NORAST)) {
                 int ret;
 
                 ret = v3d_ioctl(v3d->fd, DRM_IOCTL_V3D_SUBMIT_CL, &job->submit);

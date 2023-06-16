@@ -44,16 +44,16 @@
 #ifndef PIPE_STATE_H
 #define PIPE_STATE_H
 
+#include "util/u_memory.h"
+
 #include "p_compiler.h"
 #include "p_defines.h"
-#include "p_format.h"
+#include "util/format/u_formats.h"
 
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-struct gl_buffer_object;
 
 /**
  * Implementation limits
@@ -67,7 +67,7 @@ struct gl_buffer_object;
 #define PIPE_MAX_SHADER_OUTPUTS   80 /* 32 GENERIC + 32 PATCH + 16 others */
 #define PIPE_MAX_SHADER_SAMPLER_VIEWS 128
 #define PIPE_MAX_SHADER_BUFFERS   32
-#define PIPE_MAX_SHADER_IMAGES    32
+#define PIPE_MAX_SHADER_IMAGES    64
 #define PIPE_MAX_TEXTURE_LEVELS   16
 #define PIPE_MAX_SO_BUFFERS        4
 #define PIPE_MAX_SO_OUTPUTS       64
@@ -183,6 +183,14 @@ struct pipe_rasterizer_state
     * This depends on PIPE_CAP_POLYGON_OFFSET_UNITS_UNSCALED.
     */
    unsigned offset_units_unscaled:1;
+
+   /**
+    * Depth values output from fragment shader may be outside 0..1.
+    * These have to be clamped for use with UNORM buffers.
+    * Vulkan can allow this with an extension,
+    * GL could with NV_depth_buffer_float, but GLES doesn't.
+    */
+   unsigned unclamped_fragment_depth_values:1;
 
    /**
     * Enable bits for clipping half-spaces.
@@ -368,6 +376,7 @@ struct pipe_blend_state
    unsigned alpha_to_one:1;
    unsigned max_rt:3;            /* index of max rt, Ie. # of cbufs minus 1 */
    unsigned advanced_blend_func:4;
+   unsigned blend_coherent:1;
    struct pipe_rt_blend_state rt[PIPE_MAX_COLOR_BUFS];
 };
 
@@ -401,6 +410,8 @@ struct pipe_framebuffer_state
    struct pipe_surface *cbufs[PIPE_MAX_COLOR_BUFS];
 
    struct pipe_surface *zsbuf;      /**< Z/stencil buffer */
+
+   struct pipe_resource *resolve;
 };
 
 
@@ -417,7 +428,7 @@ struct pipe_sampler_state
    unsigned mag_img_filter:1;    /**< PIPE_TEX_FILTER_x */
    unsigned compare_mode:1;      /**< PIPE_TEX_COMPARE_x */
    unsigned compare_func:3;      /**< PIPE_FUNC_x */
-   unsigned normalized_coords:1; /**< Are coords normalized to [0,1]? */
+   unsigned unnormalized_coords:1; /**< Are coords normalized to [0,1]? */
    unsigned max_anisotropy:5;
    unsigned seamless_cube_map:1;
    unsigned border_color_is_integer:1;
@@ -426,6 +437,7 @@ struct pipe_sampler_state
    float lod_bias;               /**< LOD/lambda bias */
    float min_lod, max_lod;       /**< LOD clamp range, after bias */
    union pipe_color_union border_color;
+   enum pipe_format border_color_format;      /**< only with PIPE_QUIRK_TEXTURE_BORDER_COLOR_SWIZZLE_FREEDRENO, must be last */
 };
 
 union pipe_surface_desc {
@@ -475,7 +487,8 @@ struct pipe_sampler_view
    /* Put the refcount on its own cache line to prevent "False sharing". */
    EXCLUSIVE_CACHELINE(struct pipe_reference reference);
 
-   enum pipe_format format:15;      /**< typed PIPE_FORMAT_x */
+   enum pipe_format format:14;      /**< typed PIPE_FORMAT_x */
+   bool is_tex2d_from_buf:1;       /**< true if union is tex2d_from_buf */
    enum pipe_texture_target target:5; /**< PIPE_TEXTURE_x */
    unsigned swizzle_r:3;         /**< PIPE_SWIZZLE_x for red component */
    unsigned swizzle_g:3;         /**< PIPE_SWIZZLE_x for green component */
@@ -494,6 +507,12 @@ struct pipe_sampler_view
          unsigned offset;   /**< offset in bytes */
          unsigned size;     /**< size of the readable sub-range in bytes */
       } buf;
+      struct {
+         unsigned offset;  /**< offset in pixels */
+         uint16_t row_stride; /**< size of the image row_stride in pixels */
+         uint16_t width;      /**< width of image provided by application */
+         uint16_t height;     /**< height of image provided by application */
+      } tex2d_from_buf;      /**< used in cl extension cl_khr_image2d_from_buffer */
    } u;
 };
 
@@ -501,6 +520,10 @@ struct pipe_sampler_view
 /**
  * A description of a buffer or texture image that can be bound to a shader
  * stage.
+ *
+ * Note that pipe_image_view::access comes from the frontend API, while
+ * shader_access comes from the shader and may contain additional information
+ * (ie. coherent/volatile may be set on shader_access but not on access)
  */
 struct pipe_image_view
 {
@@ -508,7 +531,6 @@ struct pipe_image_view
    enum pipe_format format;      /**< typed PIPE_FORMAT_x */
    uint16_t access;              /**< PIPE_IMAGE_ACCESS_x */
    uint16_t shader_access;       /**< PIPE_IMAGE_ACCESS_x */
-
    union {
       struct {
          unsigned first_layer:16;     /**< first layer to use for array textures */
@@ -519,6 +541,12 @@ struct pipe_image_view
          unsigned offset;   /**< offset in bytes */
          unsigned size;     /**< size of the accessible sub-range in bytes */
       } buf;
+      struct {
+         unsigned offset;   /**< offset in pixels */
+         uint16_t row_stride;     /**< size of the image row_stride in pixels */
+         uint16_t width;     /**< width of image provided by application */
+         uint16_t height;     /**< height of image provided by application */
+      } tex2d_from_buf;      /**< used in cl extension cl_khr_image2d_from_buffer */
    } u;
 };
 
@@ -568,6 +596,8 @@ struct pipe_resource
     *  nr_samples.
     */
    unsigned nr_storage_samples:8;
+
+   unsigned nr_sparse_levels:8; /**< Mipmap levels support partial resident */
 
    unsigned usage:8;         /**< PIPE_USAGE_x (not a bitmask) */
    unsigned bind;            /**< bitmask of PIPE_BIND_x */
@@ -843,7 +873,8 @@ struct pipe_draw_info
    bool take_index_buffer_ownership:1; /**< callee inherits caller's refcount
          (no need to reference indexbuf, but still needs to unreference it) */
    bool index_bias_varies:1;   /**< true if index_bias varies between draws */
-   uint8_t _pad:2;
+   bool was_line_loop:1; /**< true if pipe_prim_type was LINE_LOOP before translation */
+   uint8_t _pad:1;
 
    unsigned start_instance; /**< first instance id */
    unsigned instance_count; /**< number of instances */
@@ -865,7 +896,6 @@ struct pipe_draw_info
     */
    union {
       struct pipe_resource *resource;  /**< real buffer */
-      struct gl_buffer_object *gl_bo; /**< for the GL frontend, not passed to drivers */
       const void *user;  /**< pointer to a user buffer */
    } index;
 
@@ -891,6 +921,7 @@ struct pipe_blit_info
 
    unsigned mask; /**< bitmask of PIPE_MASK_R/G/B/A/Z/S */
    unsigned filter; /**< PIPE_TEX_FILTER_* */
+   uint8_t dst_sample; /**< if non-zero, set sample_mask to (1 << (dst_sample - 1)) */
    bool sample0_only;
    bool scissor_enable;
    struct pipe_scissor_state scissor;
@@ -903,7 +934,6 @@ struct pipe_blit_info
    bool render_condition_enable; /**< whether the blit should honor the
                                  current render condition */
    bool alpha_blend; /* dst.rgb = src.rgb * src.a + dst.rgb * (1 - src.a) */
-   bool is_dri_blit_image;
 };
 
 /**
@@ -922,7 +952,14 @@ struct pipe_grid_info
     * Will be used to initialize the INPUT resource, and it should point to a
     * buffer of at least pipe_compute_state::req_input_mem bytes.
     */
-   void *input;
+   const void *input;
+
+   /**
+    * Variable shared memory used by this invocation.
+    *
+    * This comes on top of shader declared shared memory.
+    */
+   uint32_t variable_shared_mem;
 
    /**
     * Grid number of dimensions, 1-3, e.g. the work_dim parameter passed to
@@ -993,40 +1030,29 @@ struct pipe_compute_state
 {
    enum pipe_shader_ir ir_type; /**< IR type contained in prog. */
    const void *prog; /**< Compute program to be executed. */
-   unsigned req_local_mem; /**< Required size of the LOCAL resource. */
-   unsigned req_private_mem; /**< Required size of the PRIVATE resource. */
+   unsigned static_shared_mem; /**< equal to info.shared_size, used for shaders passed as TGSI */
    unsigned req_input_mem; /**< Required size of the INPUT resource. */
 };
 
-/**
- * Structure that contains a callback for debug messages from the driver back
- * to the gallium frontend.
- */
-struct pipe_debug_callback
+struct pipe_compute_state_object_info
 {
    /**
-    * When set to \c true, the callback may be called asynchronously from a
-    * driver-created thread.
+    * Max number of threads per block supported for the given cso.
     */
-   bool async;
+   unsigned max_threads;
 
    /**
-    * Callback for the driver to report debug/performance/etc information back
-    * to the gallium frontend.
+    * Which multiple should the block size be of for best performance.
     *
-    * \param data       user-supplied data pointer
-    * \param id         message type identifier, if pointed value is 0, then a
-    *                   new id is assigned
-    * \param type       PIPE_DEBUG_TYPE_*
-    * \param format     printf-style format string
-    * \param args       args for format string
+    * E.g. for 8 a block with n * 8 threads would result in optimal utilization
+    * of the hardware.
     */
-   void (*debug_message)(void *data,
-                         unsigned *id,
-                         enum pipe_debug_type type,
-                         const char *fmt,
-                         va_list args);
-   void *data;
+   unsigned preferred_simd_size;
+
+   /**
+    * How much private memory does this CSO require per thread (a.k.a. NIR scratch memory).
+    */
+   unsigned private_memory;
 };
 
 /**

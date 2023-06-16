@@ -22,7 +22,7 @@
  * USE OR OTHER DEALINGS IN THE SOFTWARE. */
 
 #include "r300_chipset.h"
-#include "radeon/radeon_winsys.h"
+#include "winsys/radeon_winsys.h"
 
 #include "util/u_debug.h"
 #include "util/u_memory.h"
@@ -174,10 +174,6 @@ void r300_parse_chipset(uint32_t pci_id, struct r300_capabilities* caps)
     caps->dxtc_swizzle = caps->is_r400 || caps->is_r500;
     caps->has_us_format = caps->family == CHIP_R520;
     caps->has_tcl = caps->num_vert_fpus > 0;
-
-    if (caps->has_tcl) {
-        caps->has_tcl = debug_get_bool_option("RADEON_NO_TCL", FALSE) ? FALSE : TRUE;
-    }
 
     r300_apply_hyperz_blacklist(caps);
 }

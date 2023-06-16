@@ -30,16 +30,23 @@
 
 
 
-#include "glheader.h"
+#include "util/glheader.h"
 #include "buffers.h"
 #include "context.h"
 #include "enums.h"
 #include "fbobject.h"
+#include "framebuffer.h"
 #include "hash.h"
 #include "mtypes.h"
+#include "state.h"
 #include "util/bitscan.h"
 #include "util/u_math.h"
+#include "api_exec_decl.h"
 
+#include "state_tracker/st_manager.h"
+#include "state_tracker/st_atom.h"
+#include "state_tracker/st_context.h"
+#include "state_tracker/st_util.h"
 
 #define BAD_MASK ~0u
 
@@ -315,10 +322,8 @@ draw_buffer(struct gl_context *ctx, struct gl_framebuffer *fb,
 
    /* Call device driver function only if fb is the bound draw buffer */
    if (fb == ctx->DrawBuffer) {
-      if (ctx->Driver.DrawBuffer)
-         ctx->Driver.DrawBuffer(ctx);
-      if (ctx->Driver.DrawBufferAllocate)
-         ctx->Driver.DrawBufferAllocate(ctx);
+      if (_mesa_is_winsys_fbo(ctx->DrawBuffer))
+         _mesa_draw_buffer_allocate(ctx);
    }
 }
 
@@ -454,7 +459,7 @@ draw_buffers(struct gl_context *ctx, struct gl_framebuffer *fb, GLsizei n,
        *  and the constant must be BACK or NONE."
        * (same restriction applies with GL_EXT_draw_buffers specification)
        */
-      if (ctx->API == API_OPENGLES2 && _mesa_is_winsys_fbo(fb) &&
+      if (_mesa_is_gles2(ctx) && _mesa_is_winsys_fbo(fb) &&
           (n != 1 || (buffers[0] != GL_NONE && buffers[0] != GL_BACK))) {
          _mesa_error(ctx, GL_INVALID_OPERATION, "%s(invalid buffers)", caller);
          return;
@@ -583,7 +588,7 @@ draw_buffers(struct gl_context *ctx, struct gl_framebuffer *fb, GLsizei n,
              * INVALID_OPERATION." (same restriction applies with
              * GL_EXT_draw_buffers specification)
              */
-            if (ctx->API == API_OPENGLES2 && _mesa_is_user_fbo(fb) &&
+            if (_mesa_is_gles2(ctx) && _mesa_is_user_fbo(fb) &&
                 buffers[output] != GL_NONE &&
                 buffers[output] != GL_COLOR_ATTACHMENT0 + output) {
                _mesa_error(ctx, GL_INVALID_OPERATION,
@@ -624,10 +629,8 @@ draw_buffers(struct gl_context *ctx, struct gl_framebuffer *fb, GLsizei n,
     * may not be valid.
     */
    if (fb == ctx->DrawBuffer) {
-      if (ctx->Driver.DrawBuffer)
-         ctx->Driver.DrawBuffer(ctx);
-      if (ctx->Driver.DrawBufferAllocate)
-         ctx->Driver.DrawBufferAllocate(ctx);
+      if (_mesa_is_winsys_fbo(ctx->DrawBuffer))
+         _mesa_draw_buffer_allocate(ctx);
    }
 }
 
@@ -728,7 +731,7 @@ updated_drawbuffers(struct gl_context *ctx, struct gl_framebuffer *fb)
 {
    FLUSH_VERTICES(ctx, _NEW_BUFFERS, GL_COLOR_BUFFER_BIT);
 
-   if (ctx->API == API_OPENGL_COMPAT && !ctx->Extensions.ARB_ES2_compatibility) {
+   if (_mesa_is_desktop_gl_compat(ctx) && !ctx->Extensions.ARB_ES2_compatibility) {
       /* Flag the FBO as requiring validation. */
       if (_mesa_is_user_fbo(fb)) {
 	 fb->_Status = 0;
@@ -936,8 +939,19 @@ read_buffer(struct gl_context *ctx, struct gl_framebuffer *fb,
 
    /* Call the device driver function only if fb is the bound read buffer */
    if (fb == ctx->ReadBuffer) {
-      if (ctx->Driver.ReadBuffer)
-         ctx->Driver.ReadBuffer(ctx, buffer);
+      /* Check if we need to allocate a front color buffer.
+       * Front buffers are often allocated on demand (other color buffers are
+       * always allocated in advance).
+       */
+      if ((fb->_ColorReadBufferIndex == BUFFER_FRONT_LEFT ||
+           fb->_ColorReadBufferIndex == BUFFER_FRONT_RIGHT) &&
+          fb->Attachment[fb->_ColorReadBufferIndex].Type == GL_NONE) {
+         assert(_mesa_is_winsys_fbo(fb));
+         /* add the buffer */
+         st_manager_add_color_renderbuffer(ctx, fb, fb->_ColorReadBufferIndex);
+         _mesa_update_state(ctx);
+         st_validate_state(st_context(ctx), ST_PIPELINE_UPDATE_FB_STATE_MASK);
+      }
    }
 }
 

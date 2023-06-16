@@ -25,6 +25,7 @@
 #include "util/u_draw.h"
 #include "util/u_prim.h"
 #include "util/format/u_format.h"
+#include "util/u_helpers.h"
 #include "util/u_pack_color.h"
 #include "util/u_prim_restart.h"
 #include "util/u_upload_mgr.h"
@@ -37,8 +38,8 @@
 #include "broadcom/common/v3d_util.h"
 #include "broadcom/cle/v3dx_pack.h"
 
-static void
-v3d_start_binning(struct v3d_context *v3d, struct v3d_job *job)
+void
+v3dX(start_binning)(struct v3d_context *v3d, struct v3d_job *job)
 {
         assert(job->needs_flush);
 
@@ -93,6 +94,7 @@ v3d_start_binning(struct v3d_context *v3d, struct v3d_job *job)
         }
 #endif
 
+        assert(!job->msaa || !job->double_buffer);
 #if V3D_VERSION >= 40
         cl_emit(&job->bcl, TILE_BINNING_MODE_CFG, config) {
                 config.width_in_pixels = job->draw_width;
@@ -101,6 +103,7 @@ v3d_start_binning(struct v3d_context *v3d, struct v3d_job *job)
                         MAX2(job->nr_cbufs, 1);
 
                 config.multisample_mode_4x = job->msaa;
+                config.double_buffer_in_non_ms_mode = job->double_buffer;
 
                 config.maximum_bpp_of_all_render_targets = job->internal_bpp;
         }
@@ -127,6 +130,7 @@ v3d_start_binning(struct v3d_context *v3d, struct v3d_job *job)
                         MAX2(job->nr_cbufs, 1);
 
                 config.multisample_mode_4x = job->msaa;
+                config.double_buffer_in_non_ms_mode = job->double_buffer;
 
                 config.maximum_bpp_of_all_render_targets = job->internal_bpp;
         }
@@ -159,7 +163,7 @@ v3d_start_draw(struct v3d_context *v3d)
         job->draw_height = v3d->framebuffer.height;
         job->num_layers = util_framebuffer_get_num_layers(&v3d->framebuffer);
 
-        v3d_start_binning(v3d, job);
+        v3dX(start_binning)(v3d, job);
 }
 
 static void
@@ -390,14 +394,14 @@ v3d_emit_gs_state_record(struct v3d_job *job,
 }
 
 static uint8_t
-v3d_gs_output_primitive(uint32_t prim_type)
+v3d_gs_output_primitive(enum shader_prim prim_type)
 {
     switch (prim_type) {
-    case GL_POINTS:
+    case SHADER_PRIM_POINTS:
         return GEOMETRY_SHADER_POINTS;
-    case GL_LINE_STRIP:
+    case SHADER_PRIM_LINE_STRIP:
         return GEOMETRY_SHADER_LINE_STRIP;
-    case GL_TRIANGLE_STRIP:
+    case SHADER_PRIM_TRIANGLE_STRIP:
         return GEOMETRY_SHADER_TRI_STRIP;
     default:
         unreachable("Unsupported primitive type");
@@ -605,6 +609,7 @@ v3d_emit_gl_shader_state(struct v3d_context *v3d,
                  */
                 shader.fragment_shader_does_z_writes =
                         v3d->prog.fs->prog_data.fs->writes_z;
+
                 /* Set if the EZ test must be disabled (due to shader side
                  * effects and the early_z flag not being present in the
                  * shader).
@@ -734,8 +739,7 @@ v3d_emit_gl_shader_state(struct v3d_context *v3d,
                 if (!rsc)
                         continue;
 
-                const uint32_t size =
-                        cl_packet_length(GL_SHADER_STATE_ATTRIBUTE_RECORD);
+                enum { size = cl_packet_length(GL_SHADER_STATE_ATTRIBUTE_RECORD) };
                 cl_emit_with_prepacked(&job->indirect,
                                        GL_SHADER_STATE_ATTRIBUTE_RECORD,
                                        &vtx->attrs[i * size], attr) {
@@ -847,6 +851,49 @@ v3d_update_primitives_generated_counter(struct v3d_context *v3d,
 static void
 v3d_update_job_ez(struct v3d_context *v3d, struct v3d_job *job)
 {
+        /* If first_ez_state is V3D_EZ_DISABLED it means that we have already
+         * determined that we should disable EZ completely for all draw calls
+         * in this job. This will cause us to disable EZ for the entire job in
+         * the Tile Rendering Mode RCL packet and when we do that we need to
+         * make sure we never emit a draw call in the job with EZ enabled in
+         * the CFG_BITS packet, so ez_state must also be V3D_EZ_DISABLED.
+         */
+        if (job->first_ez_state == V3D_EZ_DISABLED) {
+                assert(job->ez_state == V3D_EZ_DISABLED);
+                return;
+        }
+
+        /* If this is the first time we update EZ state for this job we first
+         * check if there is anything that requires disabling it completely
+         * for the entire job (based on state that is not related to the
+         * current draw call and pipeline state).
+         */
+        if (!job->decided_global_ez_enable) {
+                job->decided_global_ez_enable = true;
+
+                if (!job->zsbuf) {
+                        job->first_ez_state = V3D_EZ_DISABLED;
+                        job->ez_state = V3D_EZ_DISABLED;
+                        return;
+                }
+
+                /* GFXH-1918: the early-Z buffer may load incorrect depth
+                 * values if the frame has odd width or height. Disable early-Z
+                 * in this case.
+                 */
+                bool needs_depth_load = v3d->zsa && job->zsbuf &&
+                        v3d->zsa->base.depth_enabled &&
+                        (PIPE_CLEAR_DEPTH & ~job->clear);
+                if (needs_depth_load &&
+                     ((job->draw_width % 2 != 0) || (job->draw_height % 2 != 0))) {
+                        perf_debug("Loading depth buffer for framebuffer with odd width "
+                                   "or height disables early-Z tests\n");
+                        job->first_ez_state = V3D_EZ_DISABLED;
+                        job->ez_state = V3D_EZ_DISABLED;
+                        return;
+                }
+        }
+
         switch (v3d->zsa->ez_state) {
         case V3D_EZ_UNDECIDED:
                 /* If the Z/S state didn't pick a direction but didn't
@@ -879,37 +926,14 @@ v3d_update_job_ez(struct v3d_context *v3d, struct v3d_job *job)
          * the chosen EZ direction (though we could use
          * ARB_conservative_depth's hints to avoid this)
          */
-        if (v3d->prog.fs->prog_data.fs->writes_z) {
+        if (v3d->prog.fs->prog_data.fs->writes_z &&
+            !v3d->prog.fs->prog_data.fs->writes_z_from_fep) {
                 job->ez_state = V3D_EZ_DISABLED;
         }
 
         if (job->first_ez_state == V3D_EZ_UNDECIDED &&
             (job->ez_state != V3D_EZ_DISABLED || job->draw_calls_queued == 0))
                 job->first_ez_state = job->ez_state;
-}
-
-static uint32_t
-v3d_hw_prim_type(enum pipe_prim_type prim_type)
-{
-        switch (prim_type) {
-        case PIPE_PRIM_POINTS:
-        case PIPE_PRIM_LINES:
-        case PIPE_PRIM_LINE_LOOP:
-        case PIPE_PRIM_LINE_STRIP:
-        case PIPE_PRIM_TRIANGLES:
-        case PIPE_PRIM_TRIANGLE_STRIP:
-        case PIPE_PRIM_TRIANGLE_FAN:
-                return prim_type;
-
-        case PIPE_PRIM_LINES_ADJACENCY:
-        case PIPE_PRIM_LINE_STRIP_ADJACENCY:
-        case PIPE_PRIM_TRIANGLES_ADJACENCY:
-        case PIPE_PRIM_TRIANGLE_STRIP_ADJACENCY:
-                return 8 + (prim_type - PIPE_PRIM_LINES_ADJACENCY);
-
-        default:
-                unreachable("Unsupported primitive type");
-        }
 }
 
 static bool
@@ -959,6 +983,9 @@ v3d_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
         if (!indirect &&
             !info->primitive_restart &&
             !u_trim_pipe_prim(info->mode, (unsigned*)&draws[0].count))
+                return;
+
+        if (!v3d_render_condition_check(v3d))
                 return;
 
         /* Fall back for weird desktop GL primitive restart values. */
@@ -1237,7 +1264,8 @@ v3d_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
          * needs some clamping to the buffer size.
          */
         for (int i = 0; i < v3d->streamout.num_targets; i++)
-                v3d->streamout.offsets[i] += draws[0].count;
+                v3d_stream_output_target(v3d->streamout.targets[i])->offset +=
+                        u_stream_outputs_for_vertices(info->mode, draws[0].count);
 
         if (v3d->zsa && job->zsbuf && v3d->zsa->base.depth_enabled) {
                 struct v3d_resource *rsc = v3d_resource(job->zsbuf->texture);
@@ -1284,7 +1312,7 @@ v3d_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
                 v3d_flush(pctx);
         }
 
-        if (unlikely(V3D_DEBUG & V3D_DEBUG_ALWAYS_FLUSH))
+        if (V3D_DBG(ALWAYS_FLUSH))
                 v3d_flush(pctx);
 }
 
@@ -1446,7 +1474,7 @@ v3d_launch_grid(struct pipe_context *pctx, const struct pipe_grid_info *info)
 
         v3d->last_perfmon = v3d->active_perfmon;
 
-        if (!(unlikely(V3D_DEBUG & V3D_DEBUG_NORAST))) {
+        if (!V3D_DBG(NORAST)) {
                 int ret = v3d_ioctl(screen->fd, DRM_IOCTL_V3D_SUBMIT_CSD,
                                     &submit);
                 static bool warned = false;
@@ -1493,15 +1521,7 @@ v3d_draw_clear(struct v3d_context *v3d,
                const union pipe_color_union *color,
                double depth, unsigned stencil)
 {
-        static const union pipe_color_union dummy_color = {};
-
-        /* The blitter util dereferences the color regardless, even though the
-         * gallium clear API may not pass one in when only Z/S are cleared.
-         */
-        if (!color)
-                color = &dummy_color;
-
-        v3d_blitter_save(v3d);
+        v3d_blitter_save(v3d, false, true);
         util_blitter_clear(v3d->blitter,
                            v3d->framebuffer.width,
                            v3d->framebuffer.height,
@@ -1553,44 +1573,53 @@ v3d_tlb_clear(struct v3d_job *job, unsigned buffers,
                 union util_color uc;
                 uint32_t internal_size = 4 << surf->internal_bpp;
 
-                static union pipe_color_union swapped_color;
+                /*  While hardware supports clamping, this is not applied on
+                 *  the clear values, so we need to do it manually.
+                 *
+                 *  "Clamping is performed on color values immediately as they
+                 *   enter the TLB and after blending. Clamping is not
+                 *   performed on the clear color."
+                 */
+                union pipe_color_union clamped_color =
+                        util_clamp_color(psurf->format, color);
+
                 if (v3d->swap_color_rb & (1 << i)) {
-                        swapped_color.f[0] = color->f[2];
-                        swapped_color.f[1] = color->f[1];
-                        swapped_color.f[2] = color->f[0];
-                        swapped_color.f[3] = color->f[3];
-                        color = &swapped_color;
+                        union pipe_color_union orig_color = clamped_color;
+                        clamped_color.f[0] = orig_color.f[2];
+                        clamped_color.f[1] = orig_color.f[1];
+                        clamped_color.f[2] = orig_color.f[0];
+                        clamped_color.f[3] = orig_color.f[3];
                 }
 
                 switch (surf->internal_type) {
                 case V3D_INTERNAL_TYPE_8:
-                        util_pack_color(color->f, PIPE_FORMAT_R8G8B8A8_UNORM,
+                        util_pack_color(clamped_color.f, PIPE_FORMAT_R8G8B8A8_UNORM,
                                         &uc);
                         memcpy(job->clear_color[i], uc.ui, internal_size);
                         break;
                 case V3D_INTERNAL_TYPE_8I:
                 case V3D_INTERNAL_TYPE_8UI:
-                        job->clear_color[i][0] = ((color->ui[0] & 0xff) |
-                                                  (color->ui[1] & 0xff) << 8 |
-                                                  (color->ui[2] & 0xff) << 16 |
-                                                  (color->ui[3] & 0xff) << 24);
+                        job->clear_color[i][0] = ((clamped_color.ui[0] & 0xff) |
+                                                  (clamped_color.ui[1] & 0xff) << 8 |
+                                                  (clamped_color.ui[2] & 0xff) << 16 |
+                                                  (clamped_color.ui[3] & 0xff) << 24);
                         break;
                 case V3D_INTERNAL_TYPE_16F:
-                        util_pack_color(color->f, PIPE_FORMAT_R16G16B16A16_FLOAT,
+                        util_pack_color(clamped_color.f, PIPE_FORMAT_R16G16B16A16_FLOAT,
                                         &uc);
                         memcpy(job->clear_color[i], uc.ui, internal_size);
                         break;
                 case V3D_INTERNAL_TYPE_16I:
                 case V3D_INTERNAL_TYPE_16UI:
-                        job->clear_color[i][0] = ((color->ui[0] & 0xffff) |
-                                                  color->ui[1] << 16);
-                        job->clear_color[i][1] = ((color->ui[2] & 0xffff) |
-                                                  color->ui[3] << 16);
+                        job->clear_color[i][0] = ((clamped_color.ui[0] & 0xffff) |
+                                                  clamped_color.ui[1] << 16);
+                        job->clear_color[i][1] = ((clamped_color.ui[2] & 0xffff) |
+                                                  clamped_color.ui[3] << 16);
                         break;
                 case V3D_INTERNAL_TYPE_32F:
                 case V3D_INTERNAL_TYPE_32I:
                 case V3D_INTERNAL_TYPE_32UI:
-                        memcpy(job->clear_color[i], color->ui, internal_size);
+                        memcpy(job->clear_color[i], clamped_color.ui, internal_size);
                         break;
                 }
 
@@ -1632,8 +1661,10 @@ v3d_clear(struct pipe_context *pctx, unsigned buffers, const struct pipe_scissor
 
         buffers &= ~v3d_tlb_clear(job, buffers, color, depth, stencil);
 
-        if (buffers)
-                v3d_draw_clear(v3d, buffers, color, depth, stencil);
+        if (!buffers || !v3d_render_condition_check(v3d))
+                return;
+
+        v3d_draw_clear(v3d, buffers, color, depth, stencil);
 }
 
 static void
@@ -1652,12 +1683,6 @@ v3d_clear_depth_stencil(struct pipe_context *pctx, struct pipe_surface *ps,
                         bool render_condition_enabled)
 {
         fprintf(stderr, "unimpl: clear DS\n");
-}
-
-void
-v3dX(start_binning)(struct v3d_context *v3d, struct v3d_job *job)
-{
-        v3d_start_binning(v3d, job);
 }
 
 void

@@ -60,6 +60,7 @@
 #include "util/u_math.h"
 
 #include <xf86drm.h>
+#include "drm-uapi/amdgpu_drm.h"
 #include "drm-uapi/i915_drm.h"
 #include "drm-uapi/v3d_drm.h"
 
@@ -96,6 +97,12 @@ static struct v3d_simulator_state {
         .mutex = _MTX_INITIALIZER_NP,
 };
 
+enum gem_type {
+        GEM_I915,
+        GEM_AMDGPU,
+        GEM_DUMB
+};
+
 /** Per-GEM-fd state for the simulator. */
 struct v3d_simulator_file {
         int fd;
@@ -111,8 +118,8 @@ struct v3d_simulator_file {
         struct mem_block *gmp;
         void *gmp_vaddr;
 
-        /** Actual GEM fd is i915, so we should use their create ioctl. */
-        bool is_i915;
+        /** For specific gpus, use their create ioctl. Otherwise use dumb bo. */
+        enum gem_type gem_type;
 };
 
 /** Wrapper for drm_v3d_bo tracking the simulator-specific state. */
@@ -241,7 +248,9 @@ v3d_create_simulator_bo_for_gem(int fd, int handle, unsigned size)
          * one.
          */
         int ret;
-        if (file->is_i915) {
+        switch (file->gem_type) {
+        case GEM_I915:
+        {
                 struct drm_i915_gem_mmap_gtt map = {
                         .handle = handle,
                 };
@@ -252,13 +261,25 @@ v3d_create_simulator_bo_for_gem(int fd, int handle, unsigned size)
                  */
                 ret = drmIoctl(fd, DRM_IOCTL_I915_GEM_MMAP_GTT, &map);
                 sim_bo->mmap_offset = map.offset;
-        } else {
+                break;
+        }
+        case GEM_AMDGPU:
+        {
+                union drm_amdgpu_gem_mmap map = { 0 };
+                map.in.handle = handle;
+
+                ret = drmIoctl(fd, DRM_IOCTL_AMDGPU_GEM_MMAP, &map);
+                sim_bo->mmap_offset = map.out.addr_ptr;
+                break;
+        }
+        default:
+        {
                 struct drm_mode_map_dumb map = {
                         .handle = handle,
                 };
-
                 ret = drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &map);
                 sim_bo->mmap_offset = map.offset;
+        }
         }
         if (ret) {
                 fprintf(stderr, "Failed to get MMAP offset: %d\n", ret);
@@ -428,6 +449,32 @@ v3d_simulator_perfmon_switch(int fd, uint32_t perfid)
 }
 
 static int
+v3d_simulator_signal_syncobjs(int fd, struct drm_v3d_multi_sync *ms)
+{
+        struct drm_v3d_sem *out_syncs = (void *)(uintptr_t)ms->out_syncs;
+        int n_syncobjs = ms->out_sync_count;
+        uint32_t syncobjs[n_syncobjs];
+
+        for (int i = 0; i < n_syncobjs; i++)
+                syncobjs[i] = out_syncs[i].handle;
+        return drmSyncobjSignal(fd, (uint32_t *) &syncobjs, n_syncobjs);
+}
+
+static int
+v3d_simulator_process_post_deps(int fd, struct drm_v3d_extension *ext)
+{
+        int ret = 0;
+        while (ext && ext->id != DRM_V3D_EXT_ID_MULTI_SYNC)
+                ext = (void *)(uintptr_t) ext->next;
+
+        if (ext) {
+                struct drm_v3d_multi_sync *ms = (struct drm_v3d_multi_sync *) ext;
+                ret = v3d_simulator_signal_syncobjs(fd, ms);
+        }
+        return ret;
+}
+
+static int
 v3d_simulator_submit_cl_ioctl(int fd, struct drm_v3d_submit_cl *submit)
 {
         struct v3d_simulator_file *file = v3d_get_simulator_file_for_fd(fd);
@@ -459,7 +506,12 @@ v3d_simulator_submit_cl_ioctl(int fd, struct drm_v3d_submit_cl *submit)
         if (ret)
                 return ret;
 
-        return 0;
+        if (submit->flags & DRM_V3D_SUBMIT_EXTENSION) {
+                struct drm_v3d_extension *ext = (void *)(uintptr_t)submit->extensions;
+                ret = v3d_simulator_process_post_deps(fd, ext);
+        }
+
+        return ret;
 }
 
 /**
@@ -488,14 +540,30 @@ v3d_simulator_create_bo_ioctl(int fd, struct drm_v3d_create_bo *args)
          * native ioctl in case we're on a render node.
          */
         int ret;
-        if (file->is_i915) {
+        switch (file->gem_type) {
+        case GEM_I915:
+        {
                 struct drm_i915_gem_create create = {
                         .size = args->size,
                 };
+
                 ret = drmIoctl(fd, DRM_IOCTL_I915_GEM_CREATE, &create);
 
                 args->handle = create.handle;
-        } else {
+                break;
+        }
+        case GEM_AMDGPU:
+        {
+                union drm_amdgpu_gem_create create = { 0 };
+                create.in.bo_size = args->size;
+
+                ret = drmIoctl(fd, DRM_IOCTL_AMDGPU_GEM_CREATE, &create);
+
+                args->handle = create.out.handle;
+                break;
+        }
+        default:
+        {
                 struct drm_mode_create_dumb create = {
                         .width = 128,
                         .bpp = 8,
@@ -507,7 +575,7 @@ v3d_simulator_create_bo_ioctl(int fd, struct drm_v3d_create_bo *args)
 
                 args->handle = create.handle;
         }
-
+        }
         if (ret == 0) {
                 struct v3d_simulator_bo *sim_bo =
                         v3d_create_simulator_bo_for_gem(fd, args->handle,
@@ -590,6 +658,14 @@ v3d_simulator_submit_tfu_ioctl(int fd, struct drm_v3d_submit_tfu *args)
 
         v3d_simulator_copy_out_handle(file, args->bo_handles[0]);
 
+        if (ret)
+                return ret;
+
+        if (args->flags & DRM_V3D_SUBMIT_EXTENSION) {
+                struct drm_v3d_extension *ext = (void *)(uintptr_t)args->extensions;
+                ret = v3d_simulator_process_post_deps(fd, ext);
+        }
+
         return ret;
 }
 
@@ -613,6 +689,14 @@ v3d_simulator_submit_csd_ioctl(int fd, struct drm_v3d_submit_csd *args)
 
         for (int i = 0; i < args->bo_handle_count; i++)
                 v3d_simulator_copy_out_handle(file, bo_handles[i]);
+
+        if (ret < 0)
+                return ret;
+
+        if (args->flags & DRM_V3D_SUBMIT_EXTENSION) {
+                struct drm_v3d_extension *ext = (void *)(uintptr_t)args->extensions;
+                ret = v3d_simulator_process_post_deps(fd, ext);
+        }
 
         return ret;
 }
@@ -747,6 +831,16 @@ v3d_simulator_get_mem_size(void)
    return sim_state.mem_size;
 }
 
+uint32_t
+v3d_simulator_get_mem_free(void)
+{
+   uint32_t total_free = 0;
+   struct mem_block *p;
+   for (p = sim_state.heap->next_free; p != sim_state.heap; p = p->next_free)
+      total_free += p->size;
+   return total_free;
+}
+
 static void
 v3d_simulator_init_global()
 {
@@ -800,7 +894,11 @@ v3d_simulator_init(int fd)
 
         drmVersionPtr version = drmGetVersion(fd);
         if (version && strncmp(version->name, "i915", version->name_len) == 0)
-                sim_file->is_i915 = true;
+                sim_file->gem_type = GEM_I915;
+        else if (version && strncmp(version->name, "amdgpu", version->name_len) == 0)
+                sim_file->gem_type = GEM_AMDGPU;
+        else
+                sim_file->gem_type = GEM_DUMB;
         drmFreeVersion(version);
 
         sim_file->bo_map =

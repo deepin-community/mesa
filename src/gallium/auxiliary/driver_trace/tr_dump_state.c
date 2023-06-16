@@ -34,6 +34,7 @@
 #include "tr_dump.h"
 #include "tr_dump_defines.h"
 #include "tr_dump_state.h"
+#include "tr_util.h"
 
 
 void trace_dump_resource_template(const struct pipe_resource *templat)
@@ -48,7 +49,10 @@ void trace_dump_resource_template(const struct pipe_resource *templat)
 
    trace_dump_struct_begin("pipe_resource");
 
-   trace_dump_member(int, templat, target);
+   trace_dump_member_begin("target");
+   trace_dump_enum(tr_util_pipe_texture_target_name(templat->target));
+   trace_dump_member_end();
+
    trace_dump_member(format, templat, format);
 
    trace_dump_member_begin("width");
@@ -132,7 +136,10 @@ void trace_dump_rasterizer_state(const struct pipe_rasterizer_state *state)
    trace_dump_member(bool, state, point_quad_rasterization);
    trace_dump_member(bool, state, point_size_per_vertex);
    trace_dump_member(bool, state, multisample);
+   trace_dump_member(bool, state, no_ms_sample_mask_out);
+   trace_dump_member(bool, state, force_persample_interp);
    trace_dump_member(bool, state, line_smooth);
+   trace_dump_member(bool, state, line_rectangular);
    trace_dump_member(bool, state, line_stipple_enable);
    trace_dump_member(bool, state, line_last_pixel);
 
@@ -143,6 +150,7 @@ void trace_dump_rasterizer_state(const struct pipe_rasterizer_state *state)
 
    trace_dump_member(bool, state, rasterizer_discard);
 
+   trace_dump_member(bool, state, depth_clamp);
    trace_dump_member(bool, state, depth_clip_near);
    trace_dump_member(bool, state, depth_clip_far);
 
@@ -270,11 +278,21 @@ void trace_dump_shader_state(const struct pipe_shader_state *state)
 
    trace_dump_struct_begin("pipe_shader_state");
 
+   trace_dump_member(uint, state, type);
+
    trace_dump_member_begin("tokens");
    if (state->tokens) {
       static char str[64 * 1024];
       tgsi_dump_str(state->tokens, 0, str, sizeof(str));
       trace_dump_string(str);
+   } else {
+      trace_dump_null();
+   }
+   trace_dump_member_end();
+
+   trace_dump_member_begin("ir");
+   if (state->type == PIPE_SHADER_IR_NIR) {
+      trace_dump_nir(state->ir.nir);
    } else {
       trace_dump_null();
    }
@@ -331,8 +349,7 @@ void trace_dump_compute_state(const struct pipe_compute_state *state)
    }
    trace_dump_member_end();
 
-   trace_dump_member(uint, state, req_local_mem);
-   trace_dump_member(uint, state, req_private_mem);
+   trace_dump_member(uint, state, static_shared_mem);
    trace_dump_member(uint, state, req_input_mem);
 
    trace_dump_struct_end();
@@ -388,13 +405,13 @@ static void trace_dump_rt_blend_state(const struct pipe_rt_blend_state *state)
 
    trace_dump_member(uint, state, blend_enable);
 
-   trace_dump_member(uint, state, rgb_func);
-   trace_dump_member(uint, state, rgb_src_factor);
-   trace_dump_member(uint, state, rgb_dst_factor);
+   trace_dump_member_enum(state, rgb_func, tr_util_pipe_blend_func_name(state->rgb_func));
+   trace_dump_member_enum(state, rgb_src_factor, tr_util_pipe_blendfactor_name(state->rgb_src_factor));
+   trace_dump_member_enum(state, rgb_dst_factor, tr_util_pipe_blendfactor_name(state->rgb_dst_factor));
 
-   trace_dump_member(uint, state, alpha_func);
-   trace_dump_member(uint, state, alpha_src_factor);
-   trace_dump_member(uint, state, alpha_dst_factor);
+   trace_dump_member_enum(state, alpha_func, tr_util_pipe_blend_func_name(state->alpha_func));
+   trace_dump_member_enum(state, alpha_src_factor, tr_util_pipe_blendfactor_name(state->alpha_src_factor));
+   trace_dump_member_enum(state, alpha_dst_factor, tr_util_pipe_blendfactor_name(state->alpha_dst_factor));
 
    trace_dump_member(uint, state, colormask);
 
@@ -417,7 +434,7 @@ void trace_dump_blend_state(const struct pipe_blend_state *state)
 
    trace_dump_member(bool, state, independent_blend_enable);
    trace_dump_member(bool, state, logicop_enable);
-   trace_dump_member(uint, state, logicop_func);
+   trace_dump_member_enum(state, logicop_func, tr_util_pipe_logicop_name(state->logicop_func));
    trace_dump_member(bool, state, dither);
    trace_dump_member(bool, state, alpha_to_coverage);
    trace_dump_member(bool, state, alpha_to_coverage_dither);
@@ -526,20 +543,20 @@ void trace_dump_sampler_state(const struct pipe_sampler_state *state)
    trace_dump_member(uint, state, mag_img_filter);
    trace_dump_member(uint, state, compare_mode);
    trace_dump_member(uint, state, compare_func);
-   trace_dump_member(bool, state, normalized_coords);
+   trace_dump_member(bool, state, unnormalized_coords);
    trace_dump_member(uint, state, max_anisotropy);
    trace_dump_member(bool, state, seamless_cube_map);
    trace_dump_member(float, state, lod_bias);
    trace_dump_member(float, state, min_lod);
    trace_dump_member(float, state, max_lod);
    trace_dump_member_array(float, state, border_color.f);
+   trace_dump_member(format, state, border_color_format);
 
    trace_dump_struct_end();
 }
 
 
-void trace_dump_sampler_view_template(const struct pipe_sampler_view *state,
-                                      enum pipe_texture_target target)
+void trace_dump_sampler_view_template(const struct pipe_sampler_view *state)
 {
    if (!trace_dumping_enabled_locked())
       return;
@@ -552,11 +569,16 @@ void trace_dump_sampler_view_template(const struct pipe_sampler_view *state,
    trace_dump_struct_begin("pipe_sampler_view");
 
    trace_dump_member(format, state, format);
+
+   trace_dump_member_begin("target");
+   trace_dump_enum(tr_util_pipe_texture_target_name(state->target));
+   trace_dump_member_end();
+
    trace_dump_member(ptr, state, texture);
 
    trace_dump_member_begin("u");
    trace_dump_struct_begin(""); /* anonymous */
-   if (target == PIPE_BUFFER) {
+   if (state->target == PIPE_BUFFER) {
       trace_dump_member_begin("buf");
       trace_dump_struct_begin(""); /* anonymous */
       trace_dump_member(uint, &state->u.buf, offset);
@@ -608,6 +630,10 @@ void trace_dump_surface_template(const struct pipe_surface *state,
    trace_dump_member(ptr, state, texture);
    trace_dump_member(uint, state, width);
    trace_dump_member(uint, state, height);
+
+   trace_dump_member_begin("target");
+   trace_dump_enum(tr_util_pipe_texture_target_name(target));
+   trace_dump_member_end();
 
    trace_dump_member_begin("u");
    trace_dump_struct_begin(""); /* anonymous */
@@ -758,7 +784,7 @@ void trace_dump_image_view(const struct pipe_image_view *state)
 
    trace_dump_struct_begin("pipe_image_view");
    trace_dump_member(ptr, state, resource);
-   trace_dump_member(uint, state, format);
+   trace_dump_member(format, state, format);
    trace_dump_member(uint, state, access);
 
    trace_dump_member_begin("u");
@@ -936,7 +962,7 @@ void trace_dump_blit_info(const struct pipe_blit_info *info)
 }
 
 void
-trace_dump_query_result(unsigned query_type,
+trace_dump_query_result(unsigned query_type, unsigned index,
                         const union pipe_query_result *result)
 {
    if (!trace_dumping_enabled_locked())
@@ -994,6 +1020,46 @@ trace_dump_query_result(unsigned query_type,
       trace_dump_struct_end();
       break;
 
+   case PIPE_QUERY_PIPELINE_STATISTICS_SINGLE:
+      trace_dump_struct_begin("pipe_query_data_pipeline_statistics");
+      switch (index) {
+      case PIPE_STAT_QUERY_IA_VERTICES:
+         trace_dump_member(uint, &result->pipeline_statistics, ia_vertices);
+         break;
+      case PIPE_STAT_QUERY_IA_PRIMITIVES:
+         trace_dump_member(uint, &result->pipeline_statistics, ia_primitives);
+         break;
+      case PIPE_STAT_QUERY_VS_INVOCATIONS:
+         trace_dump_member(uint, &result->pipeline_statistics, vs_invocations);
+         break;
+      case PIPE_STAT_QUERY_GS_INVOCATIONS:
+         trace_dump_member(uint, &result->pipeline_statistics, gs_invocations);
+         break;
+      case PIPE_STAT_QUERY_GS_PRIMITIVES:
+         trace_dump_member(uint, &result->pipeline_statistics, gs_primitives);
+         break;
+      case PIPE_STAT_QUERY_C_INVOCATIONS:
+         trace_dump_member(uint, &result->pipeline_statistics, c_invocations);
+         break;
+      case PIPE_STAT_QUERY_C_PRIMITIVES:
+         trace_dump_member(uint, &result->pipeline_statistics, c_primitives);
+         break;
+      case PIPE_STAT_QUERY_PS_INVOCATIONS:
+         trace_dump_member(uint, &result->pipeline_statistics, ps_invocations);
+         break;
+      case PIPE_STAT_QUERY_HS_INVOCATIONS:
+         trace_dump_member(uint, &result->pipeline_statistics, hs_invocations);
+         break;
+      case PIPE_STAT_QUERY_DS_INVOCATIONS:
+         trace_dump_member(uint, &result->pipeline_statistics, ds_invocations);
+         break;
+      case PIPE_STAT_QUERY_CS_INVOCATIONS:
+         trace_dump_member(uint, &result->pipeline_statistics, cs_invocations);
+         break;
+      }
+      trace_dump_struct_end();
+      break;
+
    default:
       assert(query_type >= PIPE_QUERY_DRIVER_SPECIFIC);
       trace_dump_uint(result->u64);
@@ -1015,6 +1081,7 @@ void trace_dump_grid_info(const struct pipe_grid_info *state)
 
    trace_dump_member(uint, state, pc);
    trace_dump_member(ptr, state, input);
+   trace_dump_member(uint, state, variable_shared_mem);
 
    trace_dump_member_begin("block");
    trace_dump_array(uint, state->block, ARRAY_SIZE(state->block));

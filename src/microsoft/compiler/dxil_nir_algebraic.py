@@ -93,18 +93,12 @@ remove_unsupported_casts(no_16bit_conv, 16, 0xffff, 65535.0, -32768.0, 32767.0)
 
 lower_x2b = [
   (('b2b32', 'a'), ('b2i32', 'a')),
-  (('b2b1', 'a'), ('i2b1', 'a')),
-  (('i2b1', 'a'), ('ine', a, 0)),
-  (('f2b1', 'a'), ('fneu', a, 0)),
+  (('b2b1', 'a'), ('ine', ('b2i32', a), 0)),
 ]
 
 no_16bit_conv += [
   (('f2f32', ('u2u16', 'a@32')), ('unpack_half_2x16_split_x', 'a')),
   (('u2u32', ('f2f16_rtz', 'a@32')), ('pack_half_2x16_split', 'a', 0)),
-]
-
-lower_inot = [
-    (('inot', a), ('ixor', a, -1)),
 ]
 
 def main():
@@ -126,8 +120,6 @@ def run():
                                       no_16bit_conv).render())
     print(nir_algebraic.AlgebraicPass("dxil_nir_lower_x2b",
                                       lower_x2b).render())
-    print(nir_algebraic.AlgebraicPass("dxil_nir_lower_inot",
-                                      lower_inot).render())
 
 if __name__ == '__main__':
     main()

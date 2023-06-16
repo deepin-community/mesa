@@ -137,7 +137,7 @@ fd_hw_destroy_query(struct fd_context *ctx, struct fd_query *q)
 static void
 fd_hw_begin_query(struct fd_context *ctx, struct fd_query *q) assert_dt
 {
-   struct fd_batch *batch = fd_context_batch_locked(ctx);
+   struct fd_batch *batch = fd_context_batch(ctx);
    struct fd_hw_query *hq = fd_hw_query(q);
 
    DBG("%p", q);
@@ -152,14 +152,13 @@ fd_hw_begin_query(struct fd_context *ctx, struct fd_query *q) assert_dt
    assert(list_is_empty(&hq->list));
    list_addtail(&hq->list, &ctx->hw_active_queries);
 
-   fd_batch_unlock_submit(batch);
    fd_batch_reference(&batch, NULL);
 }
 
 static void
 fd_hw_end_query(struct fd_context *ctx, struct fd_query *q) assert_dt
 {
-   struct fd_batch *batch = fd_context_batch_locked(ctx);
+   struct fd_batch *batch = fd_context_batch(ctx);
    struct fd_hw_query *hq = fd_hw_query(q);
 
    DBG("%p", q);
@@ -170,7 +169,6 @@ fd_hw_end_query(struct fd_context *ctx, struct fd_query *q) assert_dt
    /* remove from active list: */
    list_delinit(&hq->list);
 
-   fd_batch_unlock_submit(batch);
    fd_batch_reference(&batch, NULL);
 }
 
@@ -245,8 +243,6 @@ fd_hw_get_query_result(struct fd_context *ctx, struct fd_query *q, bool wait,
          p->accumulate_result(ctx, sampptr(period->start, i, ptr),
                               sampptr(period->end, i, ptr), result);
       }
-
-      fd_bo_cpu_fini(rsc->bo);
    }
 
    return true;
@@ -294,7 +290,7 @@ fd_hw_sample_init(struct fd_batch *batch, uint32_t size)
    struct fd_hw_sample *samp = slab_alloc_st(&batch->ctx->sample_pool);
    pipe_reference_init(&samp->reference, 1);
    samp->size = size;
-   debug_assert(util_is_power_of_two_or_zero(size));
+   assert(util_is_power_of_two_or_zero(size));
    batch->next_sample_offset = align(batch->next_sample_offset, size);
    samp->offset = batch->next_sample_offset;
    /* NOTE: slab_alloc_st() does not zero out the buffer: */
@@ -377,7 +373,7 @@ fd_hw_query_update_batch(struct fd_batch *batch, bool disable_all)
 {
    struct fd_context *ctx = batch->ctx;
 
-   if (disable_all || ctx->update_active_queries) {
+   if (disable_all || (ctx->dirty & FD_DIRTY_QUERY)) {
       struct fd_hw_query *hq;
       LIST_FOR_EACH_ENTRY (hq, &batch->ctx->hw_active_queries, list) {
          bool was_active = query_active_in_batch(batch, hq);

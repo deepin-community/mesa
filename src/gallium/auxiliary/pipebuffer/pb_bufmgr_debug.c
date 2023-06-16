@@ -35,7 +35,7 @@
 
 #include "pipe/p_compiler.h"
 #include "util/u_debug.h"
-#include "os/os_thread.h"
+#include "util/u_thread.h"
 #include "util/u_math.h"
 #include "util/u_memory.h"
 #include "util/list.h"
@@ -210,8 +210,8 @@ pb_debug_buffer_check(struct pb_debug_buffer *buf)
       if(underflow || overflow)
          debug_backtrace_dump(buf->create_backtrace, PB_DEBUG_CREATE_BACKTRACE);
 
-      debug_assert(!underflow);
-      debug_assert(!overflow);
+      assert(!underflow);
+      assert(!overflow);
 
       /* re-fill if not aborted */
       if(underflow)
@@ -307,7 +307,7 @@ pb_debug_buffer_validate(struct pb_buffer *_buf,
 
    mtx_lock(&buf->mutex);
    if(buf->map_count) {
-      debug_printf("%s: attempting to validate a mapped buffer\n", __FUNCTION__);
+      debug_printf("%s: attempting to validate a mapped buffer\n", __func__);
       debug_printf("last map backtrace is\n");
       debug_backtrace_dump(buf->map_backtrace, PB_DEBUG_MAP_BACKTRACE);
    }
@@ -348,7 +348,7 @@ pb_debug_manager_dump_locked(struct pb_debug_manager *mgr)
    curr = mgr->list.next;
    next = curr->next;
    while(curr != &mgr->list) {
-      buf = LIST_ENTRY(struct pb_debug_buffer, curr, head);
+      buf = list_entry(curr, struct pb_debug_buffer, head);
 
       debug_printf("buffer = %p\n", (void *) buf);
       debug_printf("    .size = 0x%"PRIx64"\n", buf->base.size);
@@ -390,7 +390,7 @@ pb_debug_manager_create_buffer(struct pb_manager *_mgr,
       FREE(buf);
 #if 0
       mtx_lock(&mgr->mutex);
-      debug_printf("%s: failed to create buffer\n", __FUNCTION__);
+      debug_printf("%s: failed to create buffer\n", __func__);
       if(!list_is_empty(&mgr->list))
          pb_debug_manager_dump_locked(mgr);
       mtx_unlock(&mgr->mutex);
@@ -445,7 +445,7 @@ pb_debug_manager_destroy(struct pb_manager *_mgr)
    
    mtx_lock(&mgr->mutex);
    if(!list_is_empty(&mgr->list)) {
-      debug_printf("%s: unfreed buffers\n", __FUNCTION__);
+      debug_printf("%s: unfreed buffers\n", __func__);
       pb_debug_manager_dump_locked(mgr);
    }
    mtx_unlock(&mgr->mutex);

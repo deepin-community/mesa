@@ -25,7 +25,7 @@
  */
 
 #include "pipe/p_state.h"
-#include "util/debug.h"
+#include "util/u_debug.h"
 #include "util/format/u_format.h"
 #include "util/hash_table.h"
 #include "util/u_dump.h"
@@ -300,6 +300,8 @@ gmem_stateobj_init(struct fd_screen *screen, struct gmem_key *key)
    gmem->width = key->width;
    gmem->height = key->height;
 
+   gmem->tile = rzalloc_array(gmem, struct fd_tile, gmem->nbins_x * gmem->nbins_y);
+
    if (BIN_DEBUG) {
       dump_gmem_state(gmem);
       dump_gmem_key(key);
@@ -332,8 +334,8 @@ gmem_stateobj_init(struct fd_screen *screen, struct gmem_key *key)
    }
 
 #ifdef DEBUG
-   tpp_x = env_var_as_unsigned("TPP_X", tpp_x);
-   tpp_y = env_var_as_unsigned("TPP_Y", tpp_x);
+   tpp_x = debug_get_num_option("TPP_X", tpp_x);
+   tpp_y = debug_get_num_option("TPP_Y", tpp_x);
 #endif
 
    gmem->maxpw = tpp_x;
@@ -396,8 +398,6 @@ gmem_stateobj_init(struct fd_screen *screen, struct gmem_key *key)
          struct fd_tile *tile = &gmem->tile[t];
          uint32_t p;
 
-         assert(t < ARRAY_SIZE(gmem->tile));
-
          /* pipe number: */
          p = ((i / tpp_y) * div_round_up(gmem->nbins_x, tpp_x)) + (j / tpp_x);
          assert(p < gmem->num_vsc_pipes);
@@ -425,6 +425,19 @@ gmem_stateobj_init(struct fd_screen *screen, struct gmem_key *key)
       }
 
       yoff += bh;
+   }
+
+   /* Swap the order of alternating rows to form an 'S' pattern, to improve
+    * cache access patterns (ie. adjacent bins are likely to access adjacent
+    * portions of textures)
+    */
+   if (!FD_DBG(NOSBIN)) {
+      for (i = 0; i < gmem->nbins_y; i+=2) {
+         unsigned col0 = gmem->nbins_x * i;
+         for (j = 0; j < gmem->nbins_x/2; j++) {
+            SWAP(gmem->tile[col0 + j], gmem->tile[col0 + gmem->nbins_x - j - 1]);
+         }
+      }
    }
 
    if (BIN_DEBUG) {
@@ -470,6 +483,25 @@ gmem_key_init(struct fd_batch *batch, bool assume_zs, bool no_scis_opt)
       key->zsbuf_cpp[0] = rsc->layout.cpp;
       if (rsc->stencil)
          key->zsbuf_cpp[1] = rsc->stencil->layout.cpp;
+
+      /* If we clear z or s but not both, and we are using z24s8 (ie.
+       * !separate_stencil) then we need to restore the other, even if
+       * batch_draw_tracking_for_dirty_bits() never saw a draw with
+       * depth or stencil enabled.
+       *
+       * This only applies to the fast-clear path, clears done with
+       * u_blitter will show up as a normal draw with depth and/or
+       * stencil enabled.
+       */
+      unsigned zsclear = batch->fast_cleared & (FD_BUFFER_DEPTH | FD_BUFFER_STENCIL);
+      if (zsclear) {
+         const struct util_format_description *desc =
+               util_format_description(pfb->zsbuf->format);
+         if (util_format_has_depth(desc) && !(zsclear & FD_BUFFER_DEPTH))
+            batch->restore |= FD_BUFFER_DEPTH;
+         if (util_format_has_stencil(desc) && !(zsclear & FD_BUFFER_STENCIL))
+            batch->restore |= FD_BUFFER_STENCIL;
+      }
    } else {
       /* we might have a zsbuf, but it isn't used */
       batch->restore &= ~(FD_BUFFER_DEPTH | FD_BUFFER_STENCIL);
@@ -500,15 +532,15 @@ gmem_key_init(struct fd_batch *batch, bool assume_zs, bool no_scis_opt)
       if (FD_DBG(NOSCIS)) {
          scissor->minx = 0;
          scissor->miny = 0;
-         scissor->maxx = pfb->width;
-         scissor->maxy = pfb->height;
+         scissor->maxx = pfb->width - 1;
+         scissor->maxy = pfb->height - 1;
       }
 
       /* round down to multiple of alignment: */
       key->minx = scissor->minx & ~(screen->info->gmem_align_w - 1);
       key->miny = scissor->miny & ~(screen->info->gmem_align_h - 1);
-      key->width = scissor->maxx - key->minx;
-      key->height = scissor->maxy - key->miny;
+      key->width = scissor->maxx + 1 - key->minx;
+      key->height = scissor->maxy + 1 - key->miny;
    }
 
    if (is_a20x(screen) && batch->cleared) {
@@ -517,7 +549,7 @@ gmem_key_init(struct fd_batch *batch, bool assume_zs, bool no_scis_opt)
        */
       key->gmem_page_align = 8;
    } else if (is_a6xx(screen)) {
-      key->gmem_page_align = (screen->info->tile_align_w == 96) ? 3 : 1;
+      key->gmem_page_align = screen->info->num_ccu;
    } else {
       // TODO re-check this across gens.. maybe it should only
       // be a single page in some cases:
@@ -655,14 +687,24 @@ render_sysmem(struct fd_batch *batch) assert_dt
 static void
 flush_ring(struct fd_batch *batch)
 {
-   if (FD_DBG(NOHW))
-      return;
-
-   fd_submit_flush(batch->submit, batch->in_fence_fd,
-                   batch->fence ? &batch->fence->submit_fence : NULL);
-
+   bool use_fence_fd = false;
    if (batch->fence)
-      fd_fence_set_batch(batch->fence, NULL);
+      use_fence_fd = batch->fence->use_fence_fd;
+
+   struct fd_fence *fence;
+
+   if (FD_DBG(NOHW)) {
+      /* construct a dummy fence: */
+      fence = fd_fence_new(batch->ctx->pipe, use_fence_fd);
+   } else {
+      fence = fd_submit_flush(batch->submit, batch->in_fence_fd, use_fence_fd);
+   }
+
+   if (batch->fence) {
+      fd_pipe_fence_set_submit_fence(batch->fence, fence);
+   } else {
+      fd_fence_del(fence);
+   }
 }
 
 void
@@ -673,6 +715,12 @@ fd_gmem_render_tiles(struct fd_batch *batch)
    bool sysmem = false;
 
    ctx->submit_count++;
+
+   /* Sometimes we need to flush a batch just to get a fence, with no
+    * clears or draws.. in this case promote to nondraw:
+    */
+   if (!(batch->fast_cleared || batch->num_draws))
+      sysmem = true;
 
    if (!batch->nondraw) {
 #if HAVE_PERFETTO
@@ -688,7 +736,7 @@ fd_gmem_render_tiles(struct fd_batch *batch)
    }
 
    if (ctx->emit_sysmem_prep && !batch->nondraw) {
-      if (fd_autotune_use_bypass(&ctx->autotune, batch) && !FD_DBG(NOBYPASS)) {
+      if (fd_autotune_use_bypass(&ctx->autotune, batch) && !FD_DBG(GMEM)) {
          sysmem = true;
       }
 
@@ -698,7 +746,7 @@ fd_gmem_render_tiles(struct fd_batch *batch)
       }
    }
 
-   if (FD_DBG(NOGMEM))
+   if (FD_DBG(SYSMEM))
       sysmem = true;
 
    /* Layered rendering always needs bypass. */
@@ -709,12 +757,14 @@ fd_gmem_render_tiles(struct fd_batch *batch)
       if (psurf->u.tex.first_layer < psurf->u.tex.last_layer)
          sysmem = true;
    }
+   if (pfb->zsbuf && pfb->zsbuf->u.tex.first_layer < pfb->zsbuf->u.tex.last_layer)
+      sysmem = true;
 
    /* Tessellation doesn't seem to support tiled rendering so fall back to
     * bypass.
     */
    if (batch->tessellation) {
-      debug_assert(ctx->emit_sysmem_prep);
+      assert(ctx->emit_sysmem_prep);
       sysmem = true;
    }
 

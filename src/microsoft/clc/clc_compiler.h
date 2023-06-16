@@ -25,6 +25,7 @@
 #define CLC_COMPILER_H
 
 #include "clc/clc.h"
+#include "dxil_versions.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -57,7 +58,7 @@ struct clc_dxil_metadata {
          } globconstptr;
          struct {
             unsigned sharedmem_offset;
-	 } localptr;
+         } localptr;
       };
    } *args;
    unsigned kernel_inputs_cbv_id;
@@ -122,6 +123,9 @@ struct clc_runtime_kernel_conf {
    unsigned lower_bit_size;
    unsigned support_global_work_id_offsets;
    unsigned support_workgroup_id_offsets;
+
+   enum dxil_shader_model max_shader_model;
+   enum dxil_validator_version validator_version;
 };
 
 struct clc_libclc_dxil_options {
@@ -166,7 +170,7 @@ struct clc_work_properties_data {
    unsigned group_id_offset_z;
 };
 
-uint64_t clc_compiler_get_version();
+uint64_t clc_compiler_get_version(void);
 
 #ifdef __cplusplus
 }

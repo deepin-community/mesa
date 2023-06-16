@@ -26,6 +26,8 @@
 
 #include "sha1/sha1.h"
 #include "mesa-sha1.h"
+#include <string.h>
+#include <inttypes.h>
 
 void
 _mesa_sha1_compute(const void *data, size_t size, unsigned char result[20])
@@ -63,4 +65,35 @@ _mesa_sha1_hex_to_sha1(unsigned char *buf, const char *hex)
       tmp[2] = '\0';
       buf[i] = strtol(tmp, NULL, 16);
    }
+}
+
+static void
+sha1_to_uint32(const uint8_t sha1[SHA1_DIGEST_LENGTH],
+               uint32_t out[SHA1_DIGEST_LENGTH32])
+{
+   memset(out, 0, SHA1_DIGEST_LENGTH);
+
+   for (unsigned i = 0; i < SHA1_DIGEST_LENGTH; i++)
+      out[i / 4] |= (uint32_t)sha1[i] << ((i % 4) * 8);
+}
+
+void
+_mesa_sha1_print(FILE *f, const uint8_t sha1[SHA1_DIGEST_LENGTH])
+{
+   uint32_t u32[SHA1_DIGEST_LENGTH];
+   sha1_to_uint32(sha1, u32);
+
+   for (unsigned i = 0; i < SHA1_DIGEST_LENGTH32; i++) {
+      fprintf(f, i ? ", 0x%08" PRIx32 : "0x%08" PRIx32, u32[i]);
+   }
+}
+
+bool
+_mesa_printed_sha1_equal(const uint8_t sha1[SHA1_DIGEST_LENGTH],
+                         const uint32_t printed_sha1[SHA1_DIGEST_LENGTH32])
+{
+   uint32_t u32[SHA1_DIGEST_LENGTH32];
+   sha1_to_uint32(sha1, u32);
+
+   return memcmp(u32, printed_sha1, sizeof(u32)) == 0;
 }

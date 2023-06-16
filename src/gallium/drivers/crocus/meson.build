@@ -38,6 +38,9 @@ files_libcrocus = files(
   'crocus_genx_macros.h',
   'crocus_genx_protos.h',
   'crocus_monitor.c',
+  'crocus_perf.c',
+  'crocus_perf.h',
+  'crocus_performance_query.c',
   'crocus_pipe.h',
   'crocus_pipe_control.c',
   'crocus_program.c',
@@ -57,11 +60,11 @@ foreach v : ['40', '45', '50', '60', '70', '75', '80']
     ['crocus_blorp.c', 'crocus_query.c', 'crocus_state.c', 'crocus_blt.c', gen_xml_pack],
     include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux, inc_intel],
     c_args : [
-      no_override_init_args, c_sse2_args,
+      no_override_init_args, sse2_args,
       '-DGFX_VERx10=@0@'.format(v),
     ],
     gnu_symbol_visibility : 'hidden',
-    dependencies : [dep_libdrm, dep_valgrind, idep_genxml, idep_nir_headers],
+    dependencies : [dep_libdrm, dep_valgrind, idep_genxml, idep_nir_headers, idep_intel_dev],
   )
 endforeach
 
@@ -74,12 +77,12 @@ libcrocus = static_library(
     # these should not be necessary, but main/macros.h...
     inc_mesa, inc_mapi
   ],
-  c_args : [c_sse2_args],
-  cpp_args : [c_sse2_args],
+  c_args : [sse2_args],
+  cpp_args : [sse2_args],
   gnu_symbol_visibility : 'hidden',
-  dependencies : [dep_libdrm, dep_valgrind, idep_genxml, idep_libintel_common, idep_nir_headers],
+  dependencies : [dep_libdrm, dep_valgrind, idep_genxml, idep_libintel_common, idep_nir_headers, idep_intel_dev],
   link_with : [
-    crocus_per_hw_ver_libs, libintel_compiler, libintel_dev, libisl,
+    crocus_per_hw_ver_libs, libintel_compiler, libisl,
     libblorp, libintel_perf
   ],
 )

@@ -22,80 +22,47 @@
 # dependency tracking.
 vk_extensions_depend_files = [
 ]
+vk_entrypoints_depend_files = [
+  files('vk_extensions.py'),
+  vk_extensions_depend_files,
+]
 vk_extensions_gen_depend_files = [
   files('vk_extensions.py'),
   vk_extensions_depend_files,
 ]
 vk_dispatch_table_gen_depend_files = [
-  files('vk_extensions.py'),
-  vk_extensions_depend_files,
+  files('vk_entrypoints.py'),
+  vk_entrypoints_depend_files,
+]
+vk_dispatch_trampolines_gen_depend_files = [
+  files('vk_entrypoints.py'),
+  vk_entrypoints_depend_files,
 ]
 vk_entrypoints_gen_depend_files = [
-  files('vk_dispatch_table_gen.py'),
-  vk_dispatch_table_gen_depend_files,
+  files('vk_entrypoints.py'),
+  vk_entrypoints_depend_files,
 ]
 vk_cmd_queue_gen_depend_files = [
-  files('vk_dispatch_table_gen.py'),
-  vk_dispatch_table_gen_depend_files,
-]
-vk_commands_gen_depend_files = [
-  files('vk_dispatch_table_gen.py'),
-  vk_dispatch_table_gen_depend_files,
+  files('vk_entrypoints.py'),
+  vk_entrypoints_depend_files,
 ]
 vk_physical_device_features_gen_depend_files = [
+  files('vk_extensions.py'),
 ]
 
 vk_entrypoints_gen = files('vk_entrypoints_gen.py')
 vk_extensions_gen = files('vk_extensions_gen.py')
 vk_icd_gen = files('vk_icd_gen.py')
-vk_commands_gen = files('vk_commands_gen.py')
+vk_cmd_queue_gen = files('vk_cmd_queue_gen.py')
+vk_dispatch_trampolines_gen = files('vk_dispatch_trampolines_gen.py')
+vk_physical_device_features_gen = files('vk_physical_device_features.py')
 
 files_vulkan_util = files(
   'vk_alloc.c',
   'vk_alloc.h',
-  'vk_cmd_copy.c',
-  'vk_command_buffer.c',
-  'vk_command_buffer.h',
-  'vk_debug_report.c',
-  'vk_debug_report.h',
-  'vk_debug_utils.c',
-  'vk_debug_utils.h',
-  'vk_deferred_operation.c',
-  'vk_deferred_operation.h',
-  'vk_descriptors.c',
-  'vk_descriptors.h',
-  'vk_device.c',
-  'vk_device.h',
   'vk_format.c',
-  'vk_image.c',
-  'vk_image.h',
-  'vk_instance.c',
-  'vk_instance.h',
-  'vk_log.c',
-  'vk_log.h',
-  'vk_object.c',
-  'vk_object.h',
-  'vk_physical_device.c',
-  'vk_physical_device.h',
-  'vk_queue.c',
-  'vk_queue.h',
-  'vk_render_pass.c',
-  'vk_shader_module.c',
-  'vk_shader_module.h',
-  'vk_synchronization2.c',
   'vk_util.c',
   'vk_util.h',
-)
-
-vk_common_entrypoints = custom_target(
-  'vk_common_entrypoints',
-  input : [vk_entrypoints_gen, vk_api_xml],
-  output : ['vk_common_entrypoints.h', 'vk_common_entrypoints.c'],
-  command : [
-    prog_python, '@INPUT0@', '--xml', '@INPUT1@', '--proto', '--weak',
-    '--out-h', '@OUTPUT0@', '--out-c', '@OUTPUT1@', '--prefix', 'vk_common',
-  ],
-  depend_files : vk_entrypoints_gen_depend_files,
 )
 
 vk_dispatch_table = custom_target(
@@ -119,6 +86,16 @@ vk_enum_to_str = custom_target(
   ],
 )
 
+vk_struct_type_cast = custom_target(
+  'vk_struct_type_cast',
+  input : ['vk_struct_type_cast_gen.py', vk_api_xml],
+  output : ['vk_struct_type_cast.h'],
+  command : [
+    prog_python, '@INPUT0@', '--xml', '@INPUT1@',
+    '--outdir', meson.current_build_dir()
+  ],
+)
+
 vk_extensions = custom_target(
   'vk_extensions',
   input : ['vk_extensions_gen.py', vk_api_xml],
@@ -130,59 +107,24 @@ vk_extensions = custom_target(
   depend_files : vk_extensions_gen_depend_files,
 )
 
-vk_cmd_queue = custom_target(
-  'vk_cmd_queue',
-  input : ['vk_cmd_queue_gen.py', vk_api_xml],
-  output : ['vk_cmd_queue.c', 'vk_cmd_queue.h'],
-  command : [
-    prog_python, '@INPUT0@', '--xml', '@INPUT1@',
-    '--out-c', '@OUTPUT0@', '--out-h', '@OUTPUT1@'
-  ],
-  depend_files : vk_cmd_queue_gen_depend_files,
-)
-
-vk_physical_device_features = custom_target(
-  'vk_physical_device_features',
-  input : ['vk_physical_device_features.py', vk_api_xml],
-  output : ['vk_physical_device_features.c'],
-  command : [
-    prog_python, '@INPUT0@', '--xml', '@INPUT1@',
-    '--out-c', '@OUTPUT0@'
-  ],
-  depend_files : vk_physical_device_features_gen_depend_files,
-)
-
 libvulkan_util = static_library(
   'vulkan_util',
-  [files_vulkan_util, vk_common_entrypoints, vk_dispatch_table,
-   vk_enum_to_str, vk_extensions, vk_cmd_queue, vk_physical_device_features],
+  [files_vulkan_util, vk_dispatch_table, vk_enum_to_str,
+   vk_struct_type_cast, vk_extensions],
   include_directories : [inc_include, inc_src, inc_gallium],
   dependencies : [vulkan_wsi_deps, idep_mesautil, idep_nir_headers],
-  # For glsl_type_singleton
-  link_with : libcompiler,
-  c_args : [vulkan_wsi_args],
+  c_args : [c_msvc_compat_args],
   gnu_symbol_visibility : 'hidden',
   build_by_default : false,
 )
 
 idep_vulkan_util_headers = declare_dependency(
-  sources : [vk_dispatch_table[1], vk_enum_to_str[1], vk_extensions[1]],
+  sources : [vk_dispatch_table[1], vk_enum_to_str[1],
+             vk_struct_type_cast[0], vk_extensions[1]],
   include_directories : include_directories('.')
 )
 
-# This is likely a bug in the Meson VS backend, as MSVC with ninja works fine.
-# See this discussion here:
-# https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/10506
-if get_option('backend').startswith('vs')
-  idep_vulkan_util = declare_dependency(
-    link_with : libvulkan_util,
-    dependencies : idep_vulkan_util_headers
-  )
-else
-  idep_vulkan_util = declare_dependency(
-    # Instruct users of this library to link with --whole-archive.  Otherwise,
-    # our weak function overloads may not resolve properly.
-    link_whole : libvulkan_util,
-    dependencies : idep_vulkan_util_headers
-  )
-endif
+idep_vulkan_util = declare_dependency(
+  link_with : libvulkan_util,
+  dependencies : idep_vulkan_util_headers
+)

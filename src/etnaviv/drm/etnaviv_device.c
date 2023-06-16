@@ -30,6 +30,9 @@
 #include "etnaviv_priv.h"
 #include "etnaviv_drmif.h"
 
+/* Declare symbol in case we don't link with etnaviv's gallium driver */
+int etna_mesa_debug __attribute__((weak)) = 0;
+
 struct etna_device *etna_device_new(int fd)
 {
 	struct etna_device *dev;
@@ -69,6 +72,7 @@ out:
 	if (!ret && req.value != ~0ULL) {
 		const uint64_t _4GB = 1ull << 32;
 
+		list_inithead(&dev->zombie_list);
 		util_vma_heap_init(&dev->address_space, req.value, _4GB - req.value);
 		dev->use_softpin = 1;
 	}
@@ -102,8 +106,10 @@ static void etna_device_del_impl(struct etna_device *dev)
 {
 	etna_bo_cache_cleanup(&dev->bo_cache, 0);
 
-	if (dev->use_softpin)
+	if (dev->use_softpin) {
+		etna_bo_kill_zombies(dev);
 		util_vma_heap_finish(&dev->address_space);
+	}
 
 	_mesa_hash_table_destroy(dev->handle_table, NULL);
 	_mesa_hash_table_destroy(dev->name_table, NULL);
@@ -116,7 +122,7 @@ static void etna_device_del_impl(struct etna_device *dev)
 
 void etna_device_del_locked(struct etna_device *dev)
 {
-	simple_mtx_assert_locked(&etna_drm_table_lock);
+	simple_mtx_assert_locked(&etna_device_lock);
 
 	if (!p_atomic_dec_zero(&dev->refcnt))
 		return;
@@ -129,9 +135,9 @@ void etna_device_del(struct etna_device *dev)
 	if (!p_atomic_dec_zero(&dev->refcnt))
 		return;
 
-	simple_mtx_lock(&etna_drm_table_lock);
+	simple_mtx_lock(&etna_device_lock);
 	etna_device_del_impl(dev);
-	simple_mtx_unlock(&etna_drm_table_lock);
+	simple_mtx_unlock(&etna_device_lock);
 }
 
 int etna_device_fd(struct etna_device *dev)

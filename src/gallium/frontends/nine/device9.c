@@ -44,7 +44,7 @@
 
 #include "pipe/p_screen.h"
 #include "pipe/p_context.h"
-#include "pipe/p_config.h"
+#include "util/detect.h"
 #include "util/macros.h"
 #include "util/u_math.h"
 #include "util/u_inlines.h"
@@ -59,7 +59,7 @@
 
 #define DBG_CHANNEL DBG_DEVICE
 
-#if defined(PIPE_CC_GCC) && (defined(PIPE_ARCH_X86) || defined(PIPE_ARCH_X86_64))
+#if DETECT_CC_GCC && (DETECT_ARCH_X86 || DETECT_ARCH_X86_64)
 
 static void nine_setup_fpu()
 {
@@ -241,7 +241,7 @@ NineDevice9_ctor( struct NineDevice9 *This,
 
     if (This->may_swvp &&
         (This->screen->get_shader_param(This->screen, PIPE_SHADER_VERTEX,
-                                        PIPE_SHADER_CAP_MAX_CONST_BUFFER_SIZE)
+                                        PIPE_SHADER_CAP_MAX_CONST_BUFFER0_SIZE)
                                      < (NINE_MAX_CONST_F_SWVP/2) * sizeof(float[4]) ||
          This->screen->get_shader_param(This->screen, PIPE_SHADER_VERTEX,
                                         PIPE_SHADER_CAP_MAX_CONST_BUFFERS) < 5)) {
@@ -269,7 +269,7 @@ NineDevice9_ctor( struct NineDevice9 *This,
     if (!This->cso_sw) { return E_OUTOFMEMORY; }
 
     /* Create first, it messes up our state. */
-    This->hud = hud_create(This->context.cso, NULL, NULL); /* NULL result is fine */
+    This->hud = hud_create(This->context.cso, NULL, NULL, NULL); /* NULL result is fine */
 
     This->allocator = nine_allocator_create(This, pCTX->memfd_virtualsizelimit);
 
@@ -445,7 +445,7 @@ NineDevice9_ctor( struct NineDevice9 *This,
         /* vs 3.0: >= 256 float constants, but for cards with exactly 256 slots,
          * we have to take in some more slots for int and bool*/
         max_const_vs = _min(pScreen->get_shader_param(pScreen, PIPE_SHADER_VERTEX,
-                                PIPE_SHADER_CAP_MAX_CONST_BUFFER_SIZE) /
+                                PIPE_SHADER_CAP_MAX_CONST_BUFFER0_SIZE) /
                                 sizeof(float[4]),
                             NINE_MAX_CONST_ALL);
         /* ps 3.0: 224 float constants. All cards supported support at least
@@ -547,7 +547,7 @@ NineDevice9_ctor( struct NineDevice9 *This,
         samp.mag_img_filter = PIPE_TEX_FILTER_NEAREST;
         samp.compare_mode = PIPE_TEX_COMPARE_NONE;
         samp.compare_func = PIPE_FUNC_LEQUAL;
-        samp.normalized_coords = 1;
+        samp.unnormalized_coords = 0;
         samp.seamless_cube_map = 0;
         This->dummy_sampler_state = samp;
     }
@@ -556,7 +556,7 @@ NineDevice9_ctor( struct NineDevice9 *This,
 
     This->driver_caps.user_sw_vbufs = This->screen_sw->get_param(This->screen_sw, PIPE_CAP_USER_VERTEX_BUFFERS);
     This->vertex_uploader = This->csmt_active ? This->pipe_secondary->stream_uploader : This->context.pipe->stream_uploader;
-    This->driver_caps.window_space_position_support = GET_PCAP(TGSI_VS_WINDOW_SPACE_POSITION);
+    This->driver_caps.window_space_position_support = GET_PCAP(VS_WINDOW_SPACE_POSITION);
     This->driver_caps.vs_integer = pScreen->get_shader_param(pScreen, PIPE_SHADER_VERTEX, PIPE_SHADER_CAP_INTEGERS);
     This->driver_caps.ps_integer = pScreen->get_shader_param(pScreen, PIPE_SHADER_FRAGMENT, PIPE_SHADER_CAP_INTEGERS);
     This->driver_caps.offset_units_unscaled = GET_PCAP(POLYGON_OFFSET_UNITS_UNSCALED);
@@ -2983,7 +2983,9 @@ NineTrackSystemmemDynamic( struct NineBuffer9 *This, unsigned start, unsigned wi
 {
     struct pipe_box box;
 
-    u_box_1d(start, width, &box);
+    if (start >= This->size)
+        return; /* outside bounds, nothing to do */
+    u_box_1d(start, MIN2(width, This->size-start), &box);
     u_box_union_1d(&This->managed.required_valid_region,
                    &This->managed.required_valid_region,
                    &box);

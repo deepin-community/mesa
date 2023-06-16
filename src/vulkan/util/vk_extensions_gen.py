@@ -24,13 +24,13 @@ COPYRIGHT = """\
  */
 """
 
-import xml.etree.ElementTree as et
+import argparse
 
 from mako.template import Template
 
 # Mesa-local imports must be declared in meson variable
 # '{file_without_suffix}_depend_files'.
-from vk_extensions import *
+from vk_extensions import get_all_exts_from_xml, init_exts_from_xml
 
 _TEMPLATE_H = Template(COPYRIGHT + """
 
@@ -39,41 +39,35 @@ _TEMPLATE_H = Template(COPYRIGHT + """
 
 #include <stdbool.h>
 
-%for include in includes:
-#include "${include}"
-%endfor
-
 %if driver == 'vk':
-#define VK_INSTANCE_EXTENSION_COUNT ${len(instance_extensions)}
 
-extern const VkExtensionProperties vk_instance_extensions[];
+<%def name="extension_table(type, extensions)">
+#define VK_${type.upper()}_EXTENSION_COUNT ${len(extensions)}
 
-struct vk_instance_extension_table {
+extern const VkExtensionProperties vk_${type}_extensions[];
+
+struct vk_${type}_extension_table {
    union {
-      bool extensions[VK_INSTANCE_EXTENSION_COUNT];
+      bool extensions[VK_${type.upper()}_EXTENSION_COUNT];
       struct {
-%for ext in instance_extensions:
+%for ext in extensions:
          bool ${ext.name[3:]};
 %endfor
       };
-   };
-};
 
-
-#define VK_DEVICE_EXTENSION_COUNT ${len(device_extensions)}
-
-extern const VkExtensionProperties vk_device_extensions[];
-
-struct vk_device_extension_table {
-   union {
-      bool extensions[VK_DEVICE_EXTENSION_COUNT];
+      /* Workaround for "error: too many initializers for vk_${type}_extension_table" */
       struct {
-%for ext in device_extensions:
-        bool ${ext.name[3:]};
+%for ext in extensions:
+         bool ${ext.name[3:]};
 %endfor
-      };
+      } table;
    };
 };
+</%def>
+
+${extension_table('instance', instance_extensions)}
+${extension_table('device', device_extensions)}
+
 %else:
 #include "vk_extensions.h"
 %endif
@@ -97,9 +91,8 @@ ${driver}_physical_device_get_supported_extensions(const struct ${driver}_physic
 """)
 
 _TEMPLATE_C = Template(COPYRIGHT + """
-%if driver == 'vk':
-#include "vk_object.h"
-%else:
+#include "vulkan/vulkan_core.h"
+%if driver != 'vk':
 #include "${driver}_private.h"
 %endif
 
@@ -125,7 +118,7 @@ const struct vk_instance_extension_table vk_android_allowed_instance_extensions 
 %endfor
 };
 
-extern const struct vk_device_extension_table vk_android_allowed_device_extensions = {
+const struct vk_device_extension_table vk_android_allowed_device_extensions = {
 %for ext in device_extensions:
    .${ext.name[3:]} = ${ext.c_android_condition()},
 %endfor
@@ -208,13 +201,13 @@ ${driver}_physical_device_get_supported_extensions(const struct ${driver}_physic
 """)
 
 def gen_extensions(driver, xml_files, api_versions, max_api_version,
-                   extensions, out_c, out_h, includes = []):
+                   extensions, out_c, out_h):
     platform_defines = []
     for filename in xml_files:
         init_exts_from_xml(filename, extensions, platform_defines)
 
     for ext in extensions:
-        assert ext.type == 'instance' or ext.type == 'device'
+        assert ext.type in {'instance', 'device'}
 
     template_env = {
         'driver': driver,
@@ -223,7 +216,6 @@ def gen_extensions(driver, xml_files, api_versions, max_api_version,
         'instance_extensions': [e for e in extensions if e.type == 'instance'],
         'device_extensions': [e for e in extensions if e.type == 'device'],
         'platform_defines': platform_defines,
-        'includes': includes,
     }
 
     if out_h:
@@ -235,7 +227,7 @@ def gen_extensions(driver, xml_files, api_versions, max_api_version,
             f.write(_TEMPLATE_C.render(**template_env))
 
 
-if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--out-c', help='Output C file.')
     parser.add_argument('--out-h', help='Output H file.')
@@ -251,4 +243,7 @@ if __name__ == '__main__':
         extensions += get_all_exts_from_xml(filename)
 
     gen_extensions('vk', args.xml_files, None, None,
-                   extensions, args.out_c, args.out_h, [])
+                   extensions, args.out_c, args.out_h)
+
+if __name__ == '__main__':
+    main()

@@ -27,7 +27,7 @@
 
 #include <stdio.h>
 #include "main/context.h"
-#include "main/glheader.h"
+#include "util/glheader.h"
 #include "main/enums.h"
 #include "main/mesa_private.h"
 #include "main/dispatch.h"
@@ -46,28 +46,28 @@ typedef void (*attr_func)(struct gl_context *ctx, GLint index, const GLfloat *);
 static void
 VertexAttrib1fvNV(struct gl_context *ctx, GLint index, const GLfloat *v)
 {
-   CALL_VertexAttrib1fvNV(ctx->Exec, (index, v));
+   CALL_VertexAttrib1fvNV(ctx->Dispatch.Exec, (index, v));
 }
 
 
 static void
 VertexAttrib2fvNV(struct gl_context *ctx, GLint index, const GLfloat *v)
 {
-   CALL_VertexAttrib2fvNV(ctx->Exec, (index, v));
+   CALL_VertexAttrib2fvNV(ctx->Dispatch.Exec, (index, v));
 }
 
 
 static void
 VertexAttrib3fvNV(struct gl_context *ctx, GLint index, const GLfloat *v)
 {
-   CALL_VertexAttrib3fvNV(ctx->Exec, (index, v));
+   CALL_VertexAttrib3fvNV(ctx->Dispatch.Exec, (index, v));
 }
 
 
 static void
 VertexAttrib4fvNV(struct gl_context *ctx, GLint index, const GLfloat *v)
 {
-   CALL_VertexAttrib4fvNV(ctx->Exec, (index, v));
+   CALL_VertexAttrib4fvNV(ctx->Dispatch.Exec, (index, v));
 }
 
 
@@ -112,7 +112,7 @@ loopback_prim(struct gl_context *ctx,
              stride);
 
    if (prim->begin) {
-      CALL_Begin(ctx->Exec, (prim->mode));
+      CALL_Begin(ctx->Dispatch.Exec, (prim->mode));
    }
    else {
       start += wrap_count;
@@ -128,7 +128,7 @@ loopback_prim(struct gl_context *ctx,
    }
 
    if (prim->end) {
-      CALL_End(ctx->Exec, ());
+      CALL_End(ctx->Dispatch.Exec, ());
    }
 }
 
@@ -139,7 +139,7 @@ append_attr(GLuint *nr, struct loopback_attr la[], int i, int shift,
 {
    la[*nr].index = shift + i;
    la[*nr].offset = vao->VertexAttrib[i].RelativeOffset;
-   la[*nr].func = vert_attrfunc[vao->VertexAttrib[i].Format.Size - 1];
+   la[*nr].func = vert_attrfunc[vao->VertexAttrib[i].Format.User.Size - 1];
    (*nr)++;
 }
 
@@ -155,14 +155,14 @@ _vbo_loopback_vertex_list(struct gl_context *ctx,
    /* All Legacy, NV, ARB and Material attributes are routed through
     * the NV attributes entrypoints:
     */
-   const struct gl_vertex_array_object *vao = node->VAO[VP_MODE_FF];
+   const struct gl_vertex_array_object *vao = node->cold->VAO[VP_MODE_FF];
    GLbitfield mask = vao->Enabled & VERT_BIT_MAT_ALL;
    while (mask) {
       const int i = u_bit_scan(&mask);
       append_attr(&nr, la, i, VBO_MATERIAL_SHIFT, vao);
    }
 
-   vao = node->VAO[VP_MODE_SHADER];
+   vao = node->cold->VAO[VP_MODE_SHADER];
    mask = vao->Enabled & ~(VERT_BIT_POS | VERT_BIT_GENERIC0);
    while (mask) {
       const int i = u_bit_scan(&mask);
