@@ -1,3 +1,9 @@
+mesa (23.1.2-1deepin1) unstable; urgency=medium
+
+  * add zx support .
+
+ -- LiChengGang <lichenggang@uniontech.com>  Fri, 16 Jun 2023 16:47:02 +0800
+
 mesa (23.1.2-1) unstable; urgency=medium
 
   * New upstream release.
