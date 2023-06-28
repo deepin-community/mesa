@@ -29,9 +29,11 @@
 #include <string.h>
 
 #include "util/u_dynarray.h"
+#include "util/perf/u_trace.h"
 
-#include "drm-uapi/i915_drm.h"
 #include "common/intel_decoder.h"
+#include "ds/intel_driver_ds.h"
+#include "ds/intel_tracepoints.h"
 
 #include "iris_fence.h"
 #include "iris_fine_fence.h"
@@ -54,12 +56,24 @@ struct iris_context;
 enum iris_batch_name {
    IRIS_BATCH_RENDER,
    IRIS_BATCH_COMPUTE,
+   IRIS_BATCH_BLITTER,
+};
+
+/* Same definition as drm_i915_gem_exec_fence so drm_i915_gem_execbuffer2
+ * can directly use exec_fences without extra memory allocation
+ */
+struct iris_batch_fence {
+   uint32_t handle;
+
+#define IRIS_BATCH_FENCE_WAIT (1 << 0)
+#define IRIS_BATCH_FENCE_SIGNAL (1 << 1)
+   uint32_t flags;
 };
 
 struct iris_batch {
    struct iris_context *ice;
    struct iris_screen *screen;
-   struct pipe_debug_callback *dbg;
+   struct util_debug_callback *dbg;
    struct pipe_device_reset_callback *reset;
 
    /** What batch is this? (e.g. IRIS_BATCH_RENDER/COMPUTE) */
@@ -76,10 +90,11 @@ struct iris_batch {
    /** Total size of all chained batches (in bytes). */
    unsigned total_chained_batch_size;
 
-   /** Last Surface State Base Address set in this hardware context. */
-   uint64_t last_surface_base_address;
+   /** Last binder address set in this hardware context. */
+   uint64_t last_binder_address;
 
-   uint32_t hw_ctx_id;
+   uint32_t ctx_id;
+   uint32_t exec_flags;
 
    /** A list of all BOs referenced by this batch */
    struct iris_bo **exec_bos;
@@ -94,6 +109,10 @@ struct iris_batch {
     */
    bool noop_enabled;
 
+   /** Whether the first utrace point has been recorded.
+    */
+   bool begin_trace_recorded;
+
    /**
     * A list of iris_syncobjs associated with this batch.
     *
@@ -103,7 +122,7 @@ struct iris_batch {
     */
    struct util_dynarray syncobjs;
 
-   /** A list of drm_i915_exec_fences to have execbuf signal or wait on */
+   /** A list of iris_batch_fences to have execbuf signal or wait on */
    struct util_dynarray exec_fences;
 
    /** The amount of aperture space (in bytes) used by all exec_bos */
@@ -126,15 +145,14 @@ struct iris_batch {
 
    /** List of other batches which we might need to flush to use a BO */
    struct iris_batch *other_batches[IRIS_BATCH_COUNT - 1];
+   unsigned num_other_batches;
 
-   struct {
-      /**
-       * Set of struct brw_bo * that have been rendered to within this
-       * batchbuffer and would need flushing before being used from another
-       * cache domain that isn't coherent with it (i.e. the sampler).
-       */
-      struct hash_table *render;
-   } cache;
+   /**
+    * Table containing struct iris_bo * that have been accessed within this
+    * batchbuffer and would need flushing before being used with a different
+    * aux mode.
+    */
+   struct hash_table *bo_aux_modes;
 
    struct intel_batch_decode_ctx decoder;
    struct hash_table_u64 *state_sizes;
@@ -150,6 +168,13 @@ struct iris_batch {
     * accessed from another cache domain j.
     */
    uint64_t coherent_seqnos[NUM_IRIS_DOMAINS][NUM_IRIS_DOMAINS];
+
+   /**
+    * A vector representing the cache coherency status of the L3.  For each
+    * cache domain i, l3_coherent_seqnos[i] denotes the seqno of the most
+    * recent flush of that domain which is visible to L3 clients.
+    */
+   uint64_t l3_coherent_seqnos[NUM_IRIS_DOMAINS];
 
    /**
     * Sequence number used to track the completion of any subsequent memory
@@ -174,14 +199,20 @@ struct iris_batch {
 
    uint32_t last_aux_map_state;
    struct iris_measure_batch *measure;
+
+   /** Where tracepoints are recorded */
+   struct u_trace trace;
+
+   /** Batch wrapper structure for perfetto */
+   struct intel_ds_queue ds;
 };
 
-void iris_init_batch(struct iris_context *ice,
-                     enum iris_batch_name name,
-                     int priority);
+void iris_init_batches(struct iris_context *ice);
 void iris_chain_to_new_batch(struct iris_batch *batch);
-void iris_batch_free(struct iris_batch *batch);
+void iris_destroy_batches(struct iris_context *ice);
 void iris_batch_maybe_flush(struct iris_batch *batch, unsigned estimate);
+
+void iris_batch_maybe_begin_frame(struct iris_batch *batch);
 
 void _iris_batch_flush(struct iris_batch *batch, const char *file, int line);
 #define iris_batch_flush(batch) _iris_batch_flush((batch), __FILE__, __LINE__)
@@ -189,8 +220,6 @@ void _iris_batch_flush(struct iris_batch *batch, const char *file, int line);
 bool iris_batch_references(struct iris_batch *batch, struct iris_bo *bo);
 
 bool iris_batch_prepare_noop(struct iris_batch *batch, bool noop_enable);
-
-#define RELOC_WRITE EXEC_OBJECT_WRITE
 
 void iris_use_pinned_bo(struct iris_batch *batch, struct iris_bo *bo,
                         bool writable, enum iris_domain access);
@@ -229,6 +258,11 @@ iris_require_command_space(struct iris_batch *batch, unsigned size)
 static inline void *
 iris_get_command_space(struct iris_batch *batch, unsigned bytes)
 {
+   if (!batch->begin_trace_recorded) {
+      batch->begin_trace_recorded = true;
+      iris_batch_maybe_begin_frame(batch);
+      trace_intel_begin_batch(&batch->trace);
+   }
    iris_require_command_space(batch, bytes);
    void *map = batch->map_next;
    batch->map_next += bytes;
@@ -332,7 +366,12 @@ static inline void
 iris_batch_mark_flush_sync(struct iris_batch *batch,
                            enum iris_domain access)
 {
-   batch->coherent_seqnos[access][access] = batch->next_seqno - 1;
+   const struct intel_device_info *devinfo = batch->screen->devinfo;
+
+   if (iris_domain_is_l3_coherent(devinfo, access))
+      batch->l3_coherent_seqnos[access] = batch->next_seqno - 1;
+   else
+      batch->coherent_seqnos[access][access] = batch->next_seqno - 1;
 }
 
 /**
@@ -344,8 +383,38 @@ static inline void
 iris_batch_mark_invalidate_sync(struct iris_batch *batch,
                                 enum iris_domain access)
 {
-   for (unsigned i = 0; i < NUM_IRIS_DOMAINS; i++)
-      batch->coherent_seqnos[access][i] = batch->coherent_seqnos[i][i];
+   const struct intel_device_info *devinfo = batch->screen->devinfo;
+
+   for (unsigned i = 0; i < NUM_IRIS_DOMAINS; i++) {
+      if (i == access)
+         continue;
+
+      if (iris_domain_is_l3_coherent(devinfo, access)) {
+         if (iris_domain_is_read_only(access)) {
+            /* Invalidating a L3-coherent read-only domain "access" also
+             * triggers an invalidation of any matching L3 cachelines as well.
+             *
+             * If domain 'i' is L3-coherent, it sees the latest data in L3,
+             * otherwise it sees the latest globally-observable data.
+             */
+            batch->coherent_seqnos[access][i] =
+               iris_domain_is_l3_coherent(devinfo, i) ?
+               batch->l3_coherent_seqnos[i] : batch->coherent_seqnos[i][i];
+         } else {
+            /* Invalidating L3-coherent write domains does not trigger
+             * an invalidation of any matching L3 cachelines, however.
+             *
+             * It sees the latest data from domain i visible to L3 clients.
+             */
+            batch->coherent_seqnos[access][i] = batch->l3_coherent_seqnos[i];
+         }
+      } else {
+         /* "access" isn't L3-coherent, so invalidating it means it sees the
+          * most recent globally-observable data from domain i.
+          */
+         batch->coherent_seqnos[access][i] = batch->coherent_seqnos[i][i];
+      }
+   }
 }
 
 /**
@@ -356,9 +425,26 @@ iris_batch_mark_invalidate_sync(struct iris_batch *batch,
 static inline void
 iris_batch_mark_reset_sync(struct iris_batch *batch)
 {
-   for (unsigned i = 0; i < NUM_IRIS_DOMAINS; i++)
+   for (unsigned i = 0; i < NUM_IRIS_DOMAINS; i++) {
+      batch->l3_coherent_seqnos[i] = batch->next_seqno - 1;
       for (unsigned j = 0; j < NUM_IRIS_DOMAINS; j++)
          batch->coherent_seqnos[i][j] = batch->next_seqno - 1;
+   }
 }
+
+const char *
+iris_batch_name_to_string(enum iris_batch_name name);
+
+#define iris_foreach_batch(ice, batch)                \
+   for (struct iris_batch *batch = &ice->batches[0];  \
+        batch <= &ice->batches[((struct iris_screen *)ice->ctx.screen)->devinfo->ver >= 12 ? IRIS_BATCH_BLITTER : IRIS_BATCH_COMPUTE]; \
+        ++batch)
+
+void iris_batch_update_syncobjs(struct iris_batch *batch);
+unsigned iris_batch_num_fences(struct iris_batch *batch);
+
+void iris_dump_fence_list(struct iris_batch *batch);
+void iris_dump_bo_list(struct iris_batch *batch);
+void iris_batch_decode_batch(struct iris_batch *batch);
 
 #endif

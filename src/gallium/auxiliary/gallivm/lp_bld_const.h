@@ -98,6 +98,8 @@ LLVMValueRef
 lp_build_const_int_vec(struct gallivm_state *gallivm,
                        struct lp_type type, long long val);
 
+LLVMValueRef
+lp_build_const_channel_vec(struct gallivm_state *gallivm, struct lp_type type);
 
 LLVMValueRef
 lp_build_const_aos(struct gallivm_state *gallivm, struct lp_type type, 
@@ -175,5 +177,11 @@ lp_build_const_func_pointer(struct gallivm_state *gallivm,
                             unsigned num_args,
                             const char *name);
 
+
+LLVMValueRef
+lp_build_const_func_pointer_from_type(struct gallivm_state *gallivm,
+                            const void *ptr,
+                            LLVMTypeRef function_type,
+                            const char *name);
 
 #endif /* !LP_BLD_CONST_H */

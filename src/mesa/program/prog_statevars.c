@@ -31,12 +31,11 @@
 
 #include <stdio.h>
 #include <stddef.h>
-#include "main/glheader.h"
+#include "util/glheader.h"
 #include "main/context.h"
 #include "main/blend.h"
 
 #include "main/macros.h"
-#include "main/mtypes.h"
 #include "main/fbobject.h"
 #include "prog_statevars.h"
 #include "prog_parameter.h"
@@ -780,6 +779,13 @@ fetch_state(struct gl_context *ctx, const gl_state_index16 state[],
          COPY_4V(value, ctx->Transform._ClipUserPlane[plane]);
       }
       return;
+
+   case STATE_ATOMIC_COUNTER_OFFSET:
+      {
+         const GLuint counter = (GLuint) state[1];
+         val[0].i = ctx->AtomicBufferBindings[counter].Offset % ctx->Const.ShaderStorageBufferOffsetAlignment;
+      }
+      return;
    }
 }
 
@@ -912,6 +918,10 @@ _mesa_program_state_flags(const gl_state_index16 state[STATE_LENGTH])
 
    case STATE_CLIP_INTERNAL:
       return _NEW_TRANSFORM | _NEW_PROJECTION;
+
+   /* Needs to return any nonzero value to trigger constant updating */
+   case STATE_ATOMIC_COUNTER_OFFSET:
+      return _NEW_PROGRAM_CONSTANTS;
 
    case STATE_TCS_PATCH_VERTICES_IN:
    case STATE_TES_PATCH_VERTICES_IN:
@@ -1193,6 +1203,9 @@ append_token(char *dst, gl_state_index k)
    case STATE_CLIP_INTERNAL:
       append(dst, "clipInternal");
       break;
+   case STATE_ATOMIC_COUNTER_OFFSET:
+      append(dst, "counterOffset");
+      break;
    default:
       /* probably STATE_INTERNAL_DRIVER+i (driver private state) */
       append(dst, "driverState");
@@ -1318,6 +1331,7 @@ _mesa_program_state_string(const gl_state_index16 state[STATE_LENGTH])
    case STATE_LIGHT_POSITION_NORMALIZED:
    case STATE_LIGHT_HALF_VECTOR:
    case STATE_CLIP_INTERNAL:
+   case STATE_ATOMIC_COUNTER_OFFSET:
       append_index(str, state[1], false);
       break;
    case STATE_POINT_SIZE:
@@ -1334,6 +1348,7 @@ _mesa_program_state_string(const gl_state_index16 state[STATE_LENGTH])
    case STATE_PT_BIAS:
    case STATE_FB_SIZE:
    case STATE_FB_WPOS_Y_TRANSFORM:
+   case STATE_FB_PNTC_Y_TRANSFORM:
    case STATE_TCS_PATCH_VERTICES_IN:
    case STATE_TES_PATCH_VERTICES_IN:
    case STATE_ADVANCED_BLENDING_MODE:
@@ -1343,7 +1358,7 @@ _mesa_program_state_string(const gl_state_index16 state[STATE_LENGTH])
       append(str, "not_state");
       break;
    default:
-      _mesa_problem(NULL, "Invalid state in _mesa_program_state_string");
+      _mesa_problem(NULL, "Invalid state in _mesa_program_state_string: %d", state[0]);
       break;
    }
 

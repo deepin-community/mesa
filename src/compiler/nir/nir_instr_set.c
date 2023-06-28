@@ -168,6 +168,7 @@ hash_deref(uint32_t hash, const nir_deref_instr *instr)
    case nir_deref_type_array:
    case nir_deref_type_ptr_as_array:
       hash = hash_src(hash, &instr->arr.index);
+      hash = HASH(hash, instr->arr.in_bounds);
       break;
 
    case nir_deref_type_cast:
@@ -211,7 +212,7 @@ cmp_phi_src(const void *data1, const void *data2)
 {
    nir_phi_src *src1 = *(nir_phi_src **)data1;
    nir_phi_src *src2 = *(nir_phi_src **)data2;
-   return src1->pred - src2->pred;
+   return src1->pred > src2->pred ? 1 : (src1->pred == src2->pred ? 0 : -1);
 }
 
 static uint32_t
@@ -432,7 +433,7 @@ nir_alu_srcs_negative_equal(const nir_alu_instr *alu1,
              nir_alu_instr_channel_used(alu2, src2, i));
    }
 
-   if (nir_op_infos[alu1->op].input_types[src1] == nir_type_float) {
+   if (nir_alu_type_get_base_type(nir_op_infos[alu1->op].input_types[src1]) == nir_type_float) {
       assert(nir_op_infos[alu1->op].input_types[src1] ==
              nir_op_infos[alu2->op].input_types[src2]);
    } else {
@@ -623,6 +624,8 @@ nir_instrs_equal(const nir_instr *instr1, const nir_instr *instr2)
       case nir_deref_type_ptr_as_array:
          if (!nir_srcs_equal(deref1->arr.index, deref2->arr.index))
             return false;
+         if (deref1->arr.in_bounds != deref2->arr.in_bounds)
+            return false;
          break;
 
       case nir_deref_type_cast:
@@ -702,6 +705,14 @@ nir_instrs_equal(const nir_instr *instr1, const nir_instr *instr2)
       nir_phi_instr *phi2 = nir_instr_as_phi(instr2);
 
       if (phi1->instr.block != phi2->instr.block)
+         return false;
+
+      /* In case of phis with no sources, the dest needs to be checked
+       * to ensure that phis with incompatible dests won't get merged
+       * during CSE. */
+      if (phi1->dest.ssa.num_components != phi2->dest.ssa.num_components)
+         return false;
+      if (phi1->dest.ssa.bit_size != phi2->dest.ssa.bit_size)
          return false;
 
       nir_foreach_phi_src(src1, phi1) {

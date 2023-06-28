@@ -106,6 +106,7 @@ i915_get_name(struct pipe_screen *screen)
 }
 
 static const nir_shader_compiler_options i915_compiler_options = {
+   .fdot_replicates = true,
    .fuse_ffma32 = true,
    .lower_bitops = true, /* required for !CAP_INTEGERS nir_to_tgsi */
    .lower_extract_byte = true,
@@ -115,13 +116,19 @@ static const nir_shader_compiler_options i915_compiler_options = {
    .lower_flrp32 = true,
    .lower_fmod = true,
    .lower_rotate = true,
+   .lower_sincos = true,
    .lower_uniforms_to_ubo = true,
    .lower_vector_cmp = true,
    .use_interpolated_input_intrinsics = true,
-   .force_indirect_unrolling = ~0,
+   .force_indirect_unrolling = nir_var_all,
+   .force_indirect_unrolling_sampler = true,
+   .max_unroll_iterations = 32,
+   .no_integers = true,
+   .has_fused_comp_and_csel = true,
 };
 
 static const struct nir_shader_compiler_options gallivm_nir_options = {
+   .fdot_replicates = true,
    .lower_bitops = true, /* required for !CAP_INTEGERS nir_to_tgsi */
    .lower_scmp = true,
    .lower_flrp32 = true,
@@ -136,6 +143,7 @@ static const struct nir_shader_compiler_options gallivm_nir_options = {
    .lower_fmod = true,
    .lower_hadd = true,
    .lower_uadd_sat = true,
+   .lower_usub_sat = true,
    .lower_iadd_sat = true,
    .lower_ldexp = true,
    .lower_pack_snorm_2x16 = true,
@@ -158,7 +166,7 @@ static const struct nir_shader_compiler_options gallivm_nir_options = {
    .lower_ifind_msb = true,
    .max_unroll_iterations = 32,
    .use_interpolated_input_intrinsics = true,
-   .lower_cs_local_index_from_id = true,
+   .lower_cs_local_index_to_id = true,
    .lower_uniforms_to_ubo = true,
    .lower_vector_cmp = true,
    .lower_device_index_to_zero = true,
@@ -195,12 +203,13 @@ i915_optimize_nir(struct nir_shader *s)
       NIR_PASS(progress, s, nir_opt_dead_cf);
       NIR_PASS(progress, s, nir_opt_cse);
       NIR_PASS(progress, s, nir_opt_find_array_copies);
-      NIR_PASS(progress, s, nir_opt_if, true);
+      NIR_PASS(progress, s, nir_opt_if, nir_opt_if_aggressive_last_continue | nir_opt_if_optimize_phi_true_false);
       NIR_PASS(progress, s, nir_opt_peephole_select, ~0 /* flatten all IFs. */,
                true, true);
       NIR_PASS(progress, s, nir_opt_algebraic);
       NIR_PASS(progress, s, nir_opt_constant_folding);
-      NIR_PASS(progress, s, nir_opt_shrink_vectors, true);
+      NIR_PASS(progress, s, nir_opt_shrink_stores, true);
+      NIR_PASS(progress, s, nir_opt_shrink_vectors);
       NIR_PASS(progress, s, nir_opt_trivial_continues);
       NIR_PASS(progress, s, nir_opt_undef);
       NIR_PASS(progress, s, nir_opt_loop_unroll);
@@ -332,14 +341,14 @@ i915_get_shader_param(struct pipe_screen *screen, enum pipe_shader_type shader,
          return 10;
       case PIPE_SHADER_CAP_MAX_OUTPUTS:
          return 1;
-      case PIPE_SHADER_CAP_MAX_CONST_BUFFER_SIZE:
+      case PIPE_SHADER_CAP_MAX_CONST_BUFFER0_SIZE:
          return 32 * sizeof(float[4]);
       case PIPE_SHADER_CAP_MAX_CONST_BUFFERS:
          return 1;
       case PIPE_SHADER_CAP_MAX_TEMPS:
          /* 16 inter-phase temps, 3 intra-phase temps.  i915c reported 16. too. */
          return 16;
-      case PIPE_SHADER_CAP_TGSI_CONT_SUPPORTED:
+      case PIPE_SHADER_CAP_CONT_SUPPORTED:
       case PIPE_SHADER_CAP_TGSI_SQRT_SUPPORTED:
          return 0;
       case PIPE_SHADER_CAP_INDIRECT_INPUT_ADDR:
@@ -355,23 +364,16 @@ i915_get_shader_param(struct pipe_screen *screen, enum pipe_shader_type shader,
       case PIPE_SHADER_CAP_MAX_TEXTURE_SAMPLERS:
       case PIPE_SHADER_CAP_MAX_SAMPLER_VIEWS:
          return I915_TEX_UNITS;
-      case PIPE_SHADER_CAP_TGSI_DROUND_SUPPORTED:
-      case PIPE_SHADER_CAP_TGSI_DFRACEXP_DLDEXP_SUPPORTED:
-      case PIPE_SHADER_CAP_TGSI_LDEXP_SUPPORTED:
-      case PIPE_SHADER_CAP_TGSI_FMA_SUPPORTED:
+      case PIPE_SHADER_CAP_DROUND_SUPPORTED:
       case PIPE_SHADER_CAP_TGSI_ANY_INOUT_DECL_RANGE:
       case PIPE_SHADER_CAP_MAX_SHADER_BUFFERS:
       case PIPE_SHADER_CAP_MAX_SHADER_IMAGES:
-      case PIPE_SHADER_CAP_LOWER_IF_THRESHOLD:
-      case PIPE_SHADER_CAP_TGSI_SKIP_MERGE_REGISTERS:
       case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTERS:
       case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTER_BUFFERS:
          return 0;
 
-      case PIPE_SHADER_CAP_MAX_UNROLL_ITERATIONS_HINT:
-         return 32;
       default:
-         debug_printf("%s: Unknown cap %u.\n", __FUNCTION__, cap);
+         debug_printf("%s: Unknown cap %u.\n", __func__, cap);
          return 0;
       }
       break;
@@ -390,26 +392,24 @@ i915_get_param(struct pipe_screen *screen, enum pipe_cap cap)
    case PIPE_CAP_ANISOTROPIC_FILTER:
    case PIPE_CAP_NPOT_TEXTURES:
    case PIPE_CAP_MIXED_FRAMEBUFFER_SIZES:
-   case PIPE_CAP_POINT_SPRITE:
    case PIPE_CAP_PRIMITIVE_RESTART: /* draw module */
    case PIPE_CAP_PRIMITIVE_RESTART_FIXED_INDEX:
    case PIPE_CAP_VERTEX_ELEMENT_INSTANCE_DIVISOR:
    case PIPE_CAP_BLEND_EQUATION_SEPARATE:
-   case PIPE_CAP_TGSI_INSTANCEID:
+   case PIPE_CAP_VS_INSTANCEID:
    case PIPE_CAP_VERTEX_COLOR_CLAMPED:
    case PIPE_CAP_USER_VERTEX_BUFFERS:
    case PIPE_CAP_MIXED_COLOR_DEPTH_BITS:
    case PIPE_CAP_TGSI_TEXCOORD:
       return 1;
 
-   case PIPE_CAP_PREFER_BLIT_BASED_TEXTURE_TRANSFER:
+   case PIPE_CAP_TEXTURE_TRANSFER_MODES:
    case PIPE_CAP_PCI_GROUP:
    case PIPE_CAP_PCI_BUS:
    case PIPE_CAP_PCI_DEVICE:
    case PIPE_CAP_PCI_FUNCTION:
       return 0;
 
-   case PIPE_CAP_GLSL_OPTIMIZE_CONSERVATIVELY:
    case PIPE_CAP_ALLOW_MAPPED_BUFFERS_DURING_EXECUTION:
       return 0;
 
@@ -422,7 +422,7 @@ i915_get_param(struct pipe_screen *screen, enum pipe_cap cap)
    case PIPE_CAP_MAX_GS_INVOCATIONS:
       return 32;
 
-   case PIPE_CAP_MAX_SHADER_BUFFER_SIZE:
+   case PIPE_CAP_MAX_SHADER_BUFFER_SIZE_UINT:
       return 1 << 27;
 
    case PIPE_CAP_MAX_VIEWPORTS:
@@ -437,10 +437,6 @@ i915_get_param(struct pipe_screen *screen, enum pipe_cap cap)
 
    case PIPE_CAP_CONSTANT_BUFFER_OFFSET_ALIGNMENT:
       return 16;
-
-   /* Features we can lie about (boolean caps). */
-   case PIPE_CAP_OCCLUSION_QUERY:
-      return is->debug.lie ? 1 : 0;
 
    /* Texturing. */
    case PIPE_CAP_MAX_TEXTURE_2D_SIZE:
@@ -458,8 +454,8 @@ i915_get_param(struct pipe_screen *screen, enum pipe_cap cap)
       return 2048;
 
    /* Fragment coordinate conventions. */
-   case PIPE_CAP_TGSI_FS_COORD_ORIGIN_UPPER_LEFT:
-   case PIPE_CAP_TGSI_FS_COORD_PIXEL_CENTER_HALF_INTEGER:
+   case PIPE_CAP_FS_COORD_ORIGIN_UPPER_LEFT:
+   case PIPE_CAP_FS_COORD_PIXEL_CENTER_HALF_INTEGER:
       return 1;
    case PIPE_CAP_ENDIANNESS:
       return PIPE_ENDIAN_LITTLE;
@@ -501,14 +497,24 @@ static float
 i915_get_paramf(struct pipe_screen *screen, enum pipe_capf cap)
 {
    switch (cap) {
+   case PIPE_CAPF_MIN_LINE_WIDTH:
+   case PIPE_CAPF_MIN_LINE_WIDTH_AA:
+   case PIPE_CAPF_MIN_POINT_SIZE:
+   case PIPE_CAPF_MIN_POINT_SIZE_AA:
+      return 1;
+
+   case PIPE_CAPF_POINT_SIZE_GRANULARITY:
+   case PIPE_CAPF_LINE_WIDTH_GRANULARITY:
+      return 0.1;
+
    case PIPE_CAPF_MAX_LINE_WIDTH:
       FALLTHROUGH;
    case PIPE_CAPF_MAX_LINE_WIDTH_AA:
       return 7.5;
 
-   case PIPE_CAPF_MAX_POINT_WIDTH:
+   case PIPE_CAPF_MAX_POINT_SIZE:
       FALLTHROUGH;
-   case PIPE_CAPF_MAX_POINT_WIDTH_AA:
+   case PIPE_CAPF_MAX_POINT_SIZE_AA:
       return 255.0;
 
    case PIPE_CAPF_MAX_TEXTURE_ANISOTROPY:
@@ -525,7 +531,7 @@ i915_get_paramf(struct pipe_screen *screen, enum pipe_capf cap)
       return 0.0f;
 
    default:
-      debug_printf("%s: Unknown cap %u.\n", __FUNCTION__, cap);
+      debug_printf("%s: Unknown cap %u.\n", __func__, cap);
       return 0;
    }
 }
@@ -621,22 +627,6 @@ i915_fence_finish(struct pipe_screen *screen, struct pipe_context *ctx,
  */
 
 static void
-i915_flush_frontbuffer(struct pipe_screen *screen, struct pipe_context *pipe,
-                       struct pipe_resource *resource, unsigned level,
-                       unsigned layer, void *winsys_drawable_handle,
-                       struct pipe_box *sub_box)
-{
-   /* XXX: Dummy right now. */
-   (void)screen;
-   (void)pipe;
-   (void)resource;
-   (void)level;
-   (void)layer;
-   (void)winsys_drawable_handle;
-   (void)sub_box;
-}
-
-static void
 i915_destroy_screen(struct pipe_screen *screen)
 {
    struct i915_screen *is = i915_screen(screen);
@@ -645,6 +635,14 @@ i915_destroy_screen(struct pipe_screen *screen)
       is->iws->destroy(is->iws);
 
    FREE(is);
+}
+
+static int
+i915_screen_get_fd(struct pipe_screen *screen)
+{
+   struct i915_screen *is = i915_screen(screen);
+
+   return is->iws->get_fd(is->iws);
 }
 
 /**
@@ -677,7 +675,7 @@ i915_screen_create(struct i915_winsys *iws)
 
    default:
       debug_printf("%s: unknown pci id 0x%x, cannot create screen\n",
-                   __FUNCTION__, iws->pci_id);
+                   __func__, iws->pci_id);
       FREE(is);
       return NULL;
    }
@@ -685,11 +683,11 @@ i915_screen_create(struct i915_winsys *iws)
    is->iws = iws;
 
    is->base.destroy = i915_destroy_screen;
-   is->base.flush_frontbuffer = i915_flush_frontbuffer;
 
    is->base.get_name = i915_get_name;
    is->base.get_vendor = i915_get_vendor;
    is->base.get_device_vendor = i915_get_device_vendor;
+   is->base.get_screen_fd = i915_screen_get_fd;
    is->base.get_param = i915_get_param;
    is->base.get_shader_param = i915_get_shader_param;
    is->base.get_paramf = i915_get_paramf;

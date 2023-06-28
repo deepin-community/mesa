@@ -531,7 +531,7 @@ _mesa_set_search_or_add_pre_hashed(struct set *set, uint32_t hash,
 {
    assert(set->key_hash_function == NULL ||
           hash == set->key_hash_function(key));
-   return set_search_or_add(set, hash, key, NULL);
+   return set_search_or_add(set, hash, key, found);
 }
 
 /**
@@ -597,33 +597,6 @@ _mesa_set_next_entry(const struct set *ht, struct set_entry *entry)
 
    for (; entry != ht->table + ht->size; entry++) {
       if (entry_is_present(entry)) {
-         return entry;
-      }
-   }
-
-   return NULL;
-}
-
-struct set_entry *
-_mesa_set_random_entry(struct set *ht,
-                       int (*predicate)(struct set_entry *entry))
-{
-   struct set_entry *entry;
-   uint32_t i = rand() % ht->size;
-
-   if (ht->entries == 0)
-      return NULL;
-
-   for (entry = ht->table + i; entry != ht->table + ht->size; entry++) {
-      if (entry_is_present(entry) &&
-          (!predicate || predicate(entry))) {
-         return entry;
-      }
-   }
-
-   for (entry = ht->table; entry != ht->table + i; entry++) {
-      if (entry_is_present(entry) &&
-          (!predicate || predicate(entry))) {
          return entry;
       }
    }

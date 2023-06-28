@@ -40,7 +40,7 @@ caselists = [
     "/deqp/mustpass/gles2-khr-master.txt",
     "/deqp/mustpass/gles3-khr-master.txt",
     "/deqp/mustpass/gles31-khr-master.txt",
-    "/deqp/mustpass/gl33-master.txt",
+    "/deqp/mustpass/gl45-master.txt",
 ]
 skips = ["install/freedreno-a630-premerge-skips.txt"]
 deqp_args = [
@@ -63,7 +63,7 @@ deqp_args = [
 fraction = 5
 prefix = "gmem-"
 [deqp.env]
-FD_MESA_DEBUG = "nobypass"
+FD_MESA_DEBUG = "gmem"
 
 
 # force-bypass testing
@@ -81,7 +81,7 @@ flakes = ["install/freedreno-a630-bypass-flakes.txt"]
 fraction = 5
 prefix = "bypass-"
 [deqp.env]
-FD_MESA_DEBUG = "nogmem"
+FD_MESA_DEBUG = "sysmem"
 
 
 # noubo testing

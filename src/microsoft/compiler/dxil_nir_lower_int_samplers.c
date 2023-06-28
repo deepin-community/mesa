@@ -25,9 +25,16 @@
 #include "nir_builder.h"
 #include "nir_builtin_builder.h"
 
+typedef struct {
+   unsigned n_texture_states;
+   dxil_wrap_sampler_state* wrap_states;
+   dxil_texture_swizzle_state* tex_swizzles;
+   float max_bias;
+} sampler_states;
+
 static bool
 lower_sample_to_txf_for_integer_tex_filter(const nir_instr *instr,
-                                           UNUSED const void *_options)
+                                           const void *_options)
 {
    if (instr->type != nir_instr_type_tex)
       return false;
@@ -81,7 +88,7 @@ dx_get_texture_lod(nir_builder *b, nir_tex_instr *tex)
    nir_ssa_def *ssa_src = nir_channels(b, tex->src[coord_index].src.ssa,
                                        (1 << coord_components) - 1);
    nir_src src = nir_src_for_ssa(ssa_src);
-   nir_src_copy(&tql->src[0].src, &src);
+   nir_src_copy(&tql->src[0].src, &src, &tql->instr);
    tql->src[0].src_type = nir_tex_src_coord;
 
    unsigned idx = 1;
@@ -92,7 +99,7 @@ dx_get_texture_lod(nir_builder *b, nir_tex_instr *tex)
           tex->src[i].src_type == nir_tex_src_sampler_offset ||
           tex->src[i].src_type == nir_tex_src_texture_handle ||
           tex->src[i].src_type == nir_tex_src_sampler_handle) {
-         nir_src_copy(&tql->src[idx].src, &tex->src[i].src);
+         nir_src_copy(&tql->src[idx].src, &tex->src[i].src, &tql->instr);
          tql->src[idx].src_type = tex->src[i].src_type;
          idx++;
       }
@@ -214,10 +221,9 @@ wrap_coords(nir_builder *b, nir_ssa_def *coords, enum pipe_tex_wrap wrap,
 }
 
 static nir_ssa_def *
-load_bordercolor(nir_builder *b, nir_tex_instr *tex, dxil_wrap_sampler_state *active_state,
+load_bordercolor(nir_builder *b, nir_tex_instr *tex, const dxil_wrap_sampler_state *active_state,
                  const dxil_texture_swizzle_state *tex_swizzle)
 {
-   nir_const_value const_value[4] = {{0}};
    int ndest_comp = nir_dest_num_components(tex->dest);
 
    unsigned swizzle[4] = {
@@ -227,19 +233,25 @@ load_bordercolor(nir_builder *b, nir_tex_instr *tex, dxil_wrap_sampler_state *ac
       tex_swizzle->swizzle_a
    };
 
+   /* Avoid any possible float conversion issues */
+   uint32_t border_color[4];
+   memcpy(border_color, active_state->border_color, sizeof(border_color));
+   STATIC_ASSERT(sizeof(border_color) == sizeof(active_state->border_color));
+
+   nir_const_value const_value[4];
    for (int i = 0; i < ndest_comp; ++i) {
       switch (swizzle[i]) {
       case PIPE_SWIZZLE_0:
-         const_value[i].f32 = 0;
+         const_value[i] = nir_const_value_for_uint(0, 32);
          break;
       case PIPE_SWIZZLE_1:
-         const_value[i].i32 = 1;
+         const_value[i] = nir_const_value_for_uint(1, 32);
          break;
       case PIPE_SWIZZLE_X:
       case PIPE_SWIZZLE_Y:
       case PIPE_SWIZZLE_Z:
       case PIPE_SWIZZLE_W:
-         const_value[i].f32 = active_state->border_color[swizzle[i]];
+         const_value[i] = nir_const_value_for_uint(border_color[swizzle[i]], 32);
          break;
       default:
          unreachable("Unexpected swizzle value");
@@ -278,7 +290,7 @@ create_txf_from_tex(nir_builder *b, nir_tex_instr *tex)
       if (tex->src[i].src_type == nir_tex_src_texture_deref ||
           tex->src[i].src_type == nir_tex_src_texture_offset ||
           tex->src[i].src_type == nir_tex_src_texture_handle) {
-         nir_src_copy(&txf->src[idx].src, &tex->src[i].src);
+         nir_src_copy(&txf->src[idx].src, &tex->src[i].src, &txf->instr);
          txf->src[idx].src_type = tex->src[i].src_type;
          idx++;
       }
@@ -321,7 +333,7 @@ load_texel(nir_builder *b, nir_tex_instr *tex, wrap_lower_param_t *params)
 }
 
 typedef struct {
-   dxil_wrap_sampler_state *aws;
+   const dxil_wrap_sampler_state *aws;
    float max_bias;
    nir_ssa_def *size;
    int ncoord_comp;
@@ -405,12 +417,6 @@ evalute_active_lod(nir_builder *b, nir_tex_instr *tex, lod_params *params)
    return nir_imin(b, lod, nir_imm_int(b, params->aws->last_level));
 }
 
-typedef struct {
-   dxil_wrap_sampler_state *wrap_states;
-   dxil_texture_swizzle_state *tex_swizzles;
-   float max_bias;
-} sampler_states;
-
 
 static nir_ssa_def *
 lower_sample_to_txf_for_integer_tex_impl(nir_builder *b, nir_instr *instr,
@@ -420,7 +426,19 @@ lower_sample_to_txf_for_integer_tex_impl(nir_builder *b, nir_instr *instr,
    wrap_lower_param_t params = {0};
 
    nir_tex_instr *tex = nir_instr_as_tex(instr);
-   dxil_wrap_sampler_state *active_wrap_state = &states->wrap_states[tex->sampler_index];
+
+   const static dxil_wrap_sampler_state default_wrap_state = {
+      { 0, 0, 0, 1 },
+      0,
+      FLT_MIN, FLT_MAX,
+      0,
+      { 0, 0, 0 },
+      1,
+      0,
+      0,
+      0
+   };
+   const dxil_wrap_sampler_state *active_wrap_state = tex->sampler_index < states->n_texture_states ? &states->wrap_states[tex->sampler_index] : &default_wrap_state;
 
    b->cursor = nir_before_instr(instr);
 
@@ -522,7 +540,7 @@ lower_sample_to_txf_for_integer_tex_impl(nir_builder *b, nir_instr *instr,
    };
 
    nir_if *border_if = nir_push_if(b, use_border_color);
-   const dxil_texture_swizzle_state *swizzle = states->tex_swizzles ?
+   const dxil_texture_swizzle_state *swizzle = (states->tex_swizzles && tex->sampler_index < states->n_texture_states) ?
                                                  &states->tex_swizzles[tex->sampler_index]:
                                                  &one2one;
 
@@ -541,11 +559,12 @@ lower_sample_to_txf_for_integer_tex_impl(nir_builder *b, nir_instr *instr,
  */
 bool
 dxil_lower_sample_to_txf_for_integer_tex(nir_shader *s,
+                                         unsigned n_texture_states,
                                          dxil_wrap_sampler_state *wrap_states,
                                          dxil_texture_swizzle_state *tex_swizzles,
                                          float max_bias)
 {
-   sampler_states states = {wrap_states, tex_swizzles, max_bias};
+   sampler_states states = { n_texture_states, wrap_states, tex_swizzles, max_bias};
 
    bool result =
          nir_shader_lower_instructions(s,

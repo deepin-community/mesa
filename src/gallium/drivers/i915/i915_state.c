@@ -318,7 +318,7 @@ i915_create_sampler_state(struct pipe_context *pipe,
                      (translate_wrap_mode(wt) << SS3_TCY_ADDR_MODE_SHIFT) |
                      (translate_wrap_mode(wr) << SS3_TCZ_ADDR_MODE_SHIFT));
 
-   if (sampler->normalized_coords)
+   if (!sampler->unnormalized_coords)
       cso->state[1] |= SS3_NORMALIZED_COORDS;
 
    {
@@ -548,9 +548,10 @@ i915_create_fs_state(struct pipe_context *pipe,
    if (templ->type == PIPE_SHADER_IR_NIR) {
       nir_shader *s = templ->ir.nir;
 
-      NIR_PASS_V(s, i915_nir_lower_sincos);
-
-      ifs->state.tokens = nir_to_tgsi(s, pipe->screen);
+      static const struct nir_to_tgsi_options ntt_options = {
+         .lower_fabs = true,
+      };
+      ifs->state.tokens = nir_to_tgsi_options(s, pipe->screen, &ntt_options);
    } else {
       assert(templ->type == PIPE_SHADER_IR_TGSI);
       /* we need to keep a local copy of the tokens */
@@ -814,12 +815,8 @@ i915_set_framebuffer_state(struct pipe_context *pipe,
 {
    struct i915_context *i915 = i915_context(pipe);
 
-   i915->framebuffer.width = fb->width;
-   i915->framebuffer.height = fb->height;
-   i915->framebuffer.nr_cbufs = fb->nr_cbufs;
+   util_copy_framebuffer_state(&i915->framebuffer, fb);
    if (fb->nr_cbufs) {
-      pipe_surface_reference(&i915->framebuffer.cbufs[0], fb->cbufs[0]);
-
       struct i915_surface *surf = i915_surface(i915->framebuffer.cbufs[0]);
       if (i915->current.fixup_swizzle != surf->oc_swizzle) {
          i915->current.fixup_swizzle = surf->oc_swizzle;
@@ -827,10 +824,7 @@ i915_set_framebuffer_state(struct pipe_context *pipe,
                 sizeof(surf->color_swizzle));
          i915->dirty |= I915_NEW_COLOR_SWIZZLE;
       }
-   } else {
-      pipe_surface_reference(&i915->framebuffer.cbufs[0], NULL);
-   }
-   pipe_surface_reference(&i915->framebuffer.zsbuf, fb->zsbuf);
+   } 
    if (fb->zsbuf)
       draw_set_zs_format(i915->draw, fb->zsbuf->format);
 

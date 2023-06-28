@@ -72,9 +72,7 @@ struct tgsi_shader_info
    ubyte num_stream_output_components[4];
 
    ubyte input_array_first[PIPE_MAX_SHADER_INPUTS];
-   ubyte input_array_last[PIPE_MAX_SHADER_INPUTS];
    ubyte output_array_first[PIPE_MAX_SHADER_OUTPUTS];
-   ubyte output_array_last[PIPE_MAX_SHADER_OUTPUTS];
    unsigned array_max[TGSI_FILE_COUNT];  /**< highest index array per register file */
 
    uint immediate_count; /**< number of immediates declared */
@@ -164,6 +162,7 @@ struct tgsi_shader_info
    bool uses_bindless_image_store;
    bool uses_bindless_image_atomic;
 
+   unsigned hw_atomic_declared; /**< bitmask of declared atomic_counter */
    /**
     * Bitmask indicating which register files are accessed with
     * indirect addressing.  The bits are (1 << TGSI_FILE_x), etc.

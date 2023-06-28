@@ -218,7 +218,7 @@ nir_atan(nir_builder *b, nir_ssa_def *y_over_x)
 
    /* range-reduction fixup */
    tmp = nir_ffma(b,
-                  nir_b2f(b, nir_flt(b, one, abs_y_over_x), bit_size),
+                  nir_b2fN(b, nir_flt(b, one, abs_y_over_x), bit_size),
                   nir_ffma_imm12(b, tmp, -2.0f, M_PI_2),
                   tmp);
 
@@ -315,7 +315,7 @@ nir_atan2(nir_builder *b, nir_ssa_def *y, nir_ssa_def *x)
     * coordinate system.
     */
    nir_ssa_def *arc =
-      nir_ffma_imm1(b, nir_b2f(b, flip, bit_size), M_PI_2, nir_atan(b, tan));
+      nir_ffma_imm1(b, nir_b2fN(b, flip, bit_size), M_PI_2, nir_atan(b, tan));
 
    /* Rather convoluted calculation of the sign of the result.  When x < 0 we
     * cannot use fsign because we need to be able to distinguish between
@@ -366,7 +366,7 @@ nir_get_texture_size(nir_builder *b, nir_tex_instr *tex)
           tex->src[i].src_type == nir_tex_src_sampler_offset ||
           tex->src[i].src_type == nir_tex_src_texture_handle ||
           tex->src[i].src_type == nir_tex_src_sampler_handle) {
-         nir_src_copy(&txs->src[idx].src, &tex->src[i].src);
+         nir_src_copy(&txs->src[idx].src, &tex->src[i].src, &txs->instr);
          txs->src[idx].src_type = tex->src[i].src_type;
          idx++;
       }
@@ -421,7 +421,7 @@ nir_get_texture_lod(nir_builder *b, nir_tex_instr *tex)
           tex->src[i].src_type == nir_tex_src_sampler_offset ||
           tex->src[i].src_type == nir_tex_src_texture_handle ||
           tex->src[i].src_type == nir_tex_src_sampler_handle) {
-         nir_src_copy(&tql->src[idx].src, &tex->src[i].src);
+         nir_src_copy(&tql->src[idx].src, &tex->src[i].src, &tql->instr);
          tql->src[idx].src_type = tex->src[i].src_type;
          idx++;
       }

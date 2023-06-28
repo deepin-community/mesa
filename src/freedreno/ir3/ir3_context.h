@@ -36,7 +36,7 @@
 
 #define DBG(fmt, ...)                                                          \
    do {                                                                        \
-      mesa_logd("%s:%d: " fmt, __FUNCTION__, __LINE__, ##__VA_ARGS__);         \
+      mesa_logd("%s:%d: " fmt, __func__, __LINE__, ##__VA_ARGS__);             \
    } while (0)
 
 /**
@@ -95,7 +95,6 @@ struct ir3_context {
    struct ir3_instruction *gs_header;
 
    /* For tessellation shaders: */
-   struct ir3_instruction *patch_vertices_in;
    struct ir3_instruction *tcs_header;
    struct ir3_instruction *tess_coord;
    struct ir3_instruction *rel_patch_id;
@@ -153,6 +152,9 @@ struct ir3_context {
    /* on a4xx, bitmask of samplers which need astc+srgb workaround: */
    unsigned astc_srgb;
 
+   /* on a4xx, per-sampler per-component swizzles, for tg4: */
+   uint16_t sampler_swizzles[16];
+
    unsigned samples; /* bitmask of x,y sample shifts */
 
    unsigned max_texture_index;
@@ -188,12 +190,15 @@ struct ir3_context_funcs {
                                           struct ir3_instruction **dst);
    void (*emit_intrinsic_store_global_ir3)(struct ir3_context *ctx,
                                            nir_intrinsic_instr *intr);
+   struct ir3_instruction *(*emit_intrinsic_atomic_global)(
+      struct ir3_context *ctx, nir_intrinsic_instr *intr);
 };
 
 extern const struct ir3_context_funcs ir3_a4xx_funcs;
 extern const struct ir3_context_funcs ir3_a6xx_funcs;
 
 struct ir3_context *ir3_context_init(struct ir3_compiler *compiler,
+                                     struct ir3_shader *shader,
                                      struct ir3_shader_variant *so);
 void ir3_context_free(struct ir3_context *ctx);
 
@@ -273,6 +278,18 @@ static inline type_t
 utype_dst(nir_dest dst)
 {
    return utype_for_size(nir_dest_bit_size(dst));
+}
+
+/**
+ * Convert nir bitsize to ir3 bitsize, handling the special case of 1b bools
+ * which can be 16b or 32b depending on gen.
+ */
+static inline unsigned
+ir3_bitsize(struct ir3_context *ctx, unsigned nir_bitsize)
+{
+   if (nir_bitsize == 1)
+      return type_size(ctx->compiler->bool_type);
+   return nir_bitsize;
 }
 
 #endif /* IR3_CONTEXT_H_ */

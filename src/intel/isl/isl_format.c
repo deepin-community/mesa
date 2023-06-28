@@ -27,7 +27,7 @@
 #include "isl_priv.h"
 #include "dev/intel_device_info.h"
 
-#include "main/macros.h" /* Needed for MAX3 and MAX2 for format_rgb9e5 */
+#include "util/macros.h" /* Needed for MAX3 and MAX2 for format_rgb9e5 */
 #include "util/format_srgb.h"
 #include "util/format_rgb9e5.h"
 #include "util/format_r11g11b10f.h"
@@ -48,14 +48,15 @@ struct surface_format_info {
    uint8_t color_processing;
    uint8_t typed_write;
    uint8_t typed_read;
+   uint8_t typed_atomics;
    uint8_t ccs_e;
 };
 
 /* This macro allows us to write the table almost as it appears in the PRM,
  * while restructuring it to turn it into the C code we want.
  */
-#define SF(sampl, filt, shad, ck, rt, ab, vb, so, color, tw, tr, ccs_e, sf) \
-   [ISL_FORMAT_##sf] = { true, sampl, filt, shad, ck, rt, ab, vb, so, color, tw, tr, ccs_e},
+#define SF(sampl, filt, shad, ck, rt, ab, vb, so, color, tw, tr, ccs_e, ta, sf) \
+   [ISL_FORMAT_##sf] = { true, sampl, filt, shad, ck, rt, ab, vb, so, color, tw, tr, ta, ccs_e},
 
 #define Y 0
 #define x 255
@@ -87,6 +88,7 @@ struct surface_format_info {
  * TR    - Typed Read
  * ccs_e - Lossless Compression Support (gfx9+ only)
  * sf    - Surface Format
+ * TA    - Typed Atomics
  *
  * See page 88 of the Sandybridge PRM VOL4_Part1 PDF.
  *
@@ -99,278 +101,278 @@ struct surface_format_info {
  * - Render Target Surface Types [SKL+]
  */
 static const struct surface_format_info format_info[] = {
-/*    smpl filt  shad  CK   RT   AB   VB   SO color TW   TR  ccs_e */
-   SF(  Y,  50,   x,   x,   Y,   Y,   Y,   Y,   x,  70,  90,  90,   R32G32B32A32_FLOAT)
-   SF(  Y,   x,   x,   x,   Y,   x,   Y,   Y,   x,  70,  90,  90,   R32G32B32A32_SINT)
-   SF(  Y,   x,   x,   x,   Y,   x,   Y,   Y,   x,  70,  90,  90,   R32G32B32A32_UINT)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R32G32B32A32_UNORM)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R32G32B32A32_SNORM)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R64G64_FLOAT)
-   SF(  Y,  50,   x,   x, 100, 100,   x,   x,   x,   x,   x, 100,   R32G32B32X32_FLOAT)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R32G32B32A32_SSCALED)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R32G32B32A32_USCALED)
-   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,   R32G32B32A32_SFIXED)
-   SF(  x,   x,   x,   x,   x,   x,  80,   x,   x,   x,   x,   x,   R64G64_PASSTHRU)
-   SF(  Y,  50,   x,   x,   x,   x,   Y,   Y,   x,   x,   x,   x,   R32G32B32_FLOAT)
-   SF(  Y,   x,   x,   x,   x,   x,   Y,   Y,   x,   x,   x,   x,   R32G32B32_SINT)
-   SF(  Y,   x,   x,   x,   x,   x,   Y,   Y,   x,   x,   x,   x,   R32G32B32_UINT)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R32G32B32_UNORM)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R32G32B32_SNORM)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R32G32B32_SSCALED)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R32G32B32_USCALED)
-   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,   R32G32B32_SFIXED)
-   SF(  Y,   Y,   x,   x,   Y,  45,   Y,   x,  60,  70, 110,  90,   R16G16B16A16_UNORM)
-   SF(  Y,   Y,   x,   x,   Y,  60,   Y,   x,   x,  70, 110,  90,   R16G16B16A16_SNORM)
-   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  90,  90,   R16G16B16A16_SINT)
-   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  75,  90,   R16G16B16A16_UINT)
-   SF(  Y,   Y,   x,   x,   Y,   Y,   Y,   x,   x,  70,  90,  90,   R16G16B16A16_FLOAT)
-   SF(  Y,  50,   x,   x,   Y,   Y,   Y,   Y,   x,  70,  90,  90,   R32G32_FLOAT)
-   SF(  Y,  70,   x,   x,   Y,   Y,   Y,   Y,   x,   x,   x,   x,   R32G32_FLOAT_LD)
-   SF(  Y,   x,   x,   x,   Y,   x,   Y,   Y,   x,  70,  90,  90,   R32G32_SINT)
-   SF(  Y,   x,   x,   x,   Y,   x,   Y,   Y,   x,  70,  90,  90,   R32G32_UINT)
-   SF(  Y,  50,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   R32_FLOAT_X8X24_TYPELESS)
-   SF(  Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   X32_TYPELESS_G8X24_UINT)
-   SF(  Y,  50,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   L32A32_FLOAT)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R32G32_UNORM)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R32G32_SNORM)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R64_FLOAT)
-   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   R16G16B16X16_UNORM)
-   SF(  Y,   Y,   x,   x,  90,  90,   x,   x,   x,   x,   x,  90,   R16G16B16X16_FLOAT)
-   SF(  Y,  50,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   A32X32_FLOAT)
-   SF(  Y,  50,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   L32X32_FLOAT)
-   SF(  Y,  50,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   I32X32_FLOAT)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R16G16B16A16_SSCALED)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R16G16B16A16_USCALED)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R32G32_SSCALED)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R32G32_USCALED)
-   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,   R32G32_SFIXED)
-   SF(  x,   x,   x,   x,   x,   x,  80,   x,   x,   x,   x,   x,   R64_PASSTHRU)
-   SF(  Y,   Y,   x,   Y,   Y,   Y,   Y,   x,  60,  70,   x,  90,   B8G8R8A8_UNORM)
-   SF(  Y,   Y,   x,   x,   Y,   Y,   x,   x,   x,   x,   x, 100,   B8G8R8A8_UNORM_SRGB)
-/*    smpl filt  shad  CK   RT   AB   VB   SO color TW   TR  ccs_e */
-   SF(  Y,   Y,   x,   x,   Y,   Y,   Y,   x,  60,  70,   x, 100,   R10G10B10A2_UNORM)
-   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,  60,   x,   x, 120,   R10G10B10A2_UNORM_SRGB)
-   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,   x, 100,   R10G10B10A2_UINT)
-   SF(  Y,   Y,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R10G10B10_SNORM_A2_UNORM)
-   SF(  Y,   Y,   x,   x,   Y,   Y,   Y,   x,  60,  70, 110,  90,   R8G8B8A8_UNORM)
-   SF(  Y,   Y,   x,   x,   Y,   Y,   x,   x,  60,   x,   x, 100,   R8G8B8A8_UNORM_SRGB)
-   SF(  Y,   Y,   x,   x,   Y,  60,   Y,   x,   x,  70, 110,  90,   R8G8B8A8_SNORM)
-   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  90,  90,   R8G8B8A8_SINT)
-   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  75,  90,   R8G8B8A8_UINT)
-   SF(  Y,   Y,   x,   x,   Y,  45,   Y,   x,   x,  70, 110,  90,   R16G16_UNORM)
-   SF(  Y,   Y,   x,   x,   Y,  60,   Y,   x,   x,  70, 110,  90,   R16G16_SNORM)
-   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  90,  90,   R16G16_SINT)
-   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  75,  90,   R16G16_UINT)
-   SF(  Y,   Y,   x,   x,   Y,   Y,   Y,   x,   x,  70,  90,  90,   R16G16_FLOAT)
-   SF(  Y,   Y,   x,   x,   Y,   Y,  75,   x,  60,  70,   x, 100,   B10G10R10A2_UNORM)
-   SF(  Y,   Y,   x,   x,   Y,   Y,   x,   x,  60,   x,   x, 100,   B10G10R10A2_UNORM_SRGB)
-   SF(  Y,   Y,   x,   x,   Y,   Y,   Y,   x,   x,  70,   x, 100,   R11G11B10_FLOAT)
-   SF(120, 120,   x,   x, 120, 120,   x,   x,   x,   x,   x, 120,   R10G10B10_FLOAT_A2_UNORM)
-   SF(  Y,   x,   x,   x,   Y,   x,   Y,   Y,   x,  70,  70,  90,   R32_SINT)
-   SF(  Y,   x,   x,   x,   Y,   x,   Y,   Y,   x,  70,  70,  90,   R32_UINT)
-   SF(  Y,  50,   Y,   x,   Y,   Y,   Y,   Y,   x,  70,  70,  90,   R32_FLOAT)
-   SF(  Y,  50,   Y,   x,   x,   x,   x,   x,   x,   x,   x, 120,   R24_UNORM_X8_TYPELESS)
-   SF(  Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   X24_TYPELESS_G8_UINT)
-   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   L16A16_UNORM)
-   SF(  Y,  50,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   I24X8_UNORM)
-   SF(  Y,  50,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   L24X8_UNORM)
-   SF(  Y,  50,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   A24X8_UNORM)
-   SF(  Y,  50,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   I32_FLOAT)
-   SF(  Y,  50,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   L32_FLOAT)
-   SF(  Y,  50,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   A32_FLOAT)
-   SF(  Y,   Y,   x,   Y,  80,  80,   x,   x,  60,   x,   x,  90,   B8G8R8X8_UNORM)
-   SF(  Y,   Y,   x,   x,  80,  80,   x,   x,   x,   x,   x, 100,   B8G8R8X8_UNORM_SRGB)
-   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   R8G8B8X8_UNORM)
-   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   R8G8B8X8_UNORM_SRGB)
-   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   R9G9B9E5_SHAREDEXP)
-   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   B10G10R10X2_UNORM)
-   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   L16A16_FLOAT)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R32_UNORM)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R32_SNORM)
-/*    smpl filt  shad  CK   RT   AB   VB   SO color TW   TR  ccs_e */
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R10G10B10X2_USCALED)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R8G8B8A8_SSCALED)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R8G8B8A8_USCALED)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R16G16_SSCALED)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R16G16_USCALED)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R32_SSCALED)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R32_USCALED)
-   SF(  Y,   Y,   x,   Y,   Y,   Y,   x,   x,   x,  70,   x, 120,   B5G6R5_UNORM)
-   SF(  Y,   Y,   x,   x,   Y,   Y,   x,   x,   x,   x,   x, 120,   B5G6R5_UNORM_SRGB)
-   SF(  Y,   Y,   x,   Y,   Y,   Y,   x,   x,   x,  70,   x, 120,   B5G5R5A1_UNORM)
-   SF(  Y,   Y,   x,   x,   Y,   Y,   x,   x,   x,   x,   x, 120,   B5G5R5A1_UNORM_SRGB)
-   SF(  Y,   Y,   x,   Y,   Y,   Y,   x,   x,   x,  70,   x, 120,   B4G4R4A4_UNORM)
-   SF(  Y,   Y,   x,   x,   Y,   Y,   x,   x,   x,   x,   x, 120,   B4G4R4A4_UNORM_SRGB)
-   SF(  Y,   Y,   x,   x,   Y,   Y,   Y,   x,   x,  70, 110, 120,   R8G8_UNORM)
-   SF(  Y,   Y,   x,   Y,   Y,  60,   Y,   x,   x,  70, 110, 120,   R8G8_SNORM)
-   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  90, 120,   R8G8_SINT)
-   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  75, 120,   R8G8_UINT)
-   SF(  Y,   Y,   Y,   x,   Y,  45,   Y,   x,  70,  70, 110, 120,   R16_UNORM)
-   SF(  Y,   Y,   x,   x,   Y,  60,   Y,   x,   x,  70, 110, 120,   R16_SNORM)
-   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  90, 120,   R16_SINT)
-   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  75, 120,   R16_UINT)
-   SF(  Y,   Y,   x,   x,   Y,   Y,   Y,   x,   x,  70,  90, 120,   R16_FLOAT)
-   SF( 50,  50,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   A8P8_UNORM_PALETTE0)
-   SF( 50,  50,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   A8P8_UNORM_PALETTE1)
-   SF(  Y,   Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   I16_UNORM)
-   SF(  Y,   Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   L16_UNORM)
-   SF(  Y,   Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   A16_UNORM)
-   SF(  Y,   Y,   x,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   L8A8_UNORM)
-   SF(  Y,   Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   I16_FLOAT)
-   SF(  Y,   Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   L16_FLOAT)
-   SF(  Y,   Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   A16_FLOAT)
-   SF( 45,  45,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   L8A8_UNORM_SRGB)
-   SF(  Y,   Y,   x,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   R5G5_SNORM_B6_UNORM)
-   SF(  x,   x,   x,   x,   Y,   Y,   x,   x,   x,  70,   x, 120,   B5G5R5X1_UNORM)
-   SF(  x,   x,   x,   x,   Y,   Y,   x,   x,   x,   x,   x, 120,   B5G5R5X1_UNORM_SRGB)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R8G8_SSCALED)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R8G8_USCALED)
-/*    smpl filt  shad  CK   RT   AB   VB   SO color TW   TR  ccs_e */
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R16_SSCALED)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R16_USCALED)
-   SF( 50,  50,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   P8A8_UNORM_PALETTE0)
-   SF( 50,  50,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   P8A8_UNORM_PALETTE1)
-   SF(120, 120,   x,   x, 120, 120,   x,   x,   x,   x,   x, 120,   A1B5G5R5_UNORM)
+/*    smpl filt  shad  CK   RT   AB   VB   SO color TW   TR  ccs_e  TA */
+   SF(  Y,  50,   x,   x,   Y,   Y,   Y,   Y,   x,  70,  90,  90,    x,  R32G32B32A32_FLOAT)
+   SF(  Y,   x,   x,   x,   Y,   x,   Y,   Y,   x,  70,  90,  90,    x,  R32G32B32A32_SINT)
+   SF(  Y,   x,   x,   x,   Y,   x,   Y,   Y,   x,  70,  90,  90,    x,  R32G32B32A32_UINT)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R32G32B32A32_UNORM)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R32G32B32A32_SNORM)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R64G64_FLOAT)
+   SF(  Y,  50,   x,   x, 110, 110,   x,   x,   x,   x,   x, 110,    x,  R32G32B32X32_FLOAT)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R32G32B32A32_SSCALED)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R32G32B32A32_USCALED)
+   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,    x,  R32G32B32A32_SFIXED)
+   SF(  x,   x,   x,   x,   x,   x,  80,   x,   x,   x,   x,   x,    x,  R64G64_PASSTHRU)
+   SF(  Y,  50,   x,   x,   x,   x,   Y,   Y,   x,   x,   x,   x,    x,  R32G32B32_FLOAT)
+   SF(  Y,   x,   x,   x,   x,   x,   Y,   Y,   x,   x,   x,   x,    x,  R32G32B32_SINT)
+   SF(  Y,   x,   x,   x,   x,   x,   Y,   Y,   x,   x,   x,   x,    x,  R32G32B32_UINT)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R32G32B32_UNORM)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R32G32B32_SNORM)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R32G32B32_SSCALED)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R32G32B32_USCALED)
+   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,    x,  R32G32B32_SFIXED)
+   SF(  Y,   Y,   x,   x,   Y,  45,   Y,   x,  60,  70, 110,  90,    x,  R16G16B16A16_UNORM)
+   SF(  Y,   Y,   x,   x,   Y,  60,   Y,   x,   x,  70, 110,  90,    x,  R16G16B16A16_SNORM)
+   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  90,  90,    x,  R16G16B16A16_SINT)
+   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  75,  90,    x,  R16G16B16A16_UINT)
+   SF(  Y,   Y,   x,   x,   Y,   Y,   Y,   x,   x,  70,  90,  90,    x,  R16G16B16A16_FLOAT)
+   SF(  Y,  50,   x,   x,   Y,   Y,   Y,   Y,   x,  70,  90,  90,    x,  R32G32_FLOAT)
+   SF(  Y,  70,   x,   x,   Y,   Y,   Y,   Y,   x,   x,   x,   x,    x,  R32G32_FLOAT_LD)
+   SF(  Y,   x,   x,   x,   Y,   x,   Y,   Y,   x,  70,  90,  90,    x,  R32G32_SINT)
+   SF(  Y,   x,   x,   x,   Y,   x,   Y,   Y,   x,  70,  90,  90,    x,  R32G32_UINT)
+   SF(  Y,  50,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  R32_FLOAT_X8X24_TYPELESS)
+   SF(  Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  X32_TYPELESS_G8X24_UINT)
+   SF(  Y,  50,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  L32A32_FLOAT)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R32G32_UNORM)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R32G32_SNORM)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   90,  R64_FLOAT)
+   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  R16G16B16X16_UNORM)
+   SF(  Y,   Y,   x,   x,  90,  90,   x,   x,   x,   x,   x,  90,    x,  R16G16B16X16_FLOAT)
+   SF(  Y,  50,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  A32X32_FLOAT)
+   SF(  Y,  50,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  L32X32_FLOAT)
+   SF(  Y,  50,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  I32X32_FLOAT)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R16G16B16A16_SSCALED)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R16G16B16A16_USCALED)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R32G32_SSCALED)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R32G32_USCALED)
+   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,    x,  R32G32_SFIXED)
+   SF(  x,   x,   x,   x,   x,   x,  80,   x,   x,   x,   x,   x,   90,  R64_PASSTHRU)
+   SF(  Y,   Y,   x,   Y,   Y,   Y,   Y,   x,  60,  70, 125,  90,    x,  B8G8R8A8_UNORM)
+   SF(  Y,   Y,   x,   x,   Y,   Y,   x,   x,   x,   x,   x, 110,    x,  B8G8R8A8_UNORM_SRGB)
+/*    smpl filt  shad  CK   RT   AB   VB   SO color TW   TR  ccs_e  TA */
+   SF(  Y,   Y,   x,   x,   Y,   Y,   Y,   x,  60,  70, 125, 110,    x,  R10G10B10A2_UNORM)
+   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,  60,   x,   x, 120,    x,  R10G10B10A2_UNORM_SRGB)
+   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70, 125, 110,    x,  R10G10B10A2_UINT)
+   SF(  Y,   Y,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R10G10B10_SNORM_A2_UNORM)
+   SF(  Y,   Y,   x,   x,   Y,   Y,   Y,   x,  60,  70, 110,  90,    x,  R8G8B8A8_UNORM)
+   SF(  Y,   Y,   x,   x,   Y,   Y,   x,   x,  60,   x,   x, 110,    x,  R8G8B8A8_UNORM_SRGB)
+   SF(  Y,   Y,   x,   x,   Y,  60,   Y,   x,   x,  70, 110,  90,    x,  R8G8B8A8_SNORM)
+   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  90,  90,    x,  R8G8B8A8_SINT)
+   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  75,  90,    x,  R8G8B8A8_UINT)
+   SF(  Y,   Y,   x,   x,   Y,  45,   Y,   x,   x,  70, 110,  90,    x,  R16G16_UNORM)
+   SF(  Y,   Y,   x,   x,   Y,  60,   Y,   x,   x,  70, 110,  90,    x,  R16G16_SNORM)
+   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  90,  90,    x,  R16G16_SINT)
+   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  75,  90,    x,  R16G16_UINT)
+   SF(  Y,   Y,   x,   x,   Y,   Y,   Y,   x,   x,  70,  90,  90,    x,  R16G16_FLOAT)
+   SF(  Y,   Y,   x,   x,   Y,   Y,  75,   x,  60,  70, 125, 110,    x,  B10G10R10A2_UNORM)
+   SF(  Y,   Y,   x,   x,   Y,   Y,   x,   x,  60,   x,   x, 110,    x,  B10G10R10A2_UNORM_SRGB)
+   SF(  Y,   Y,   x,   x,   Y,   Y,   Y,   x,   x,  70, 125, 110,    x,  R11G11B10_FLOAT)
+   SF(120, 120,   x,   x, 120, 120,   x,   x,   x, 125, 125, 120,    x,  R10G10B10_FLOAT_A2_UNORM)
+   SF(  Y,   x,   x,   x,   Y,   x,   Y,   Y,   x,  70,  70,  90,   70,  R32_SINT)
+   SF(  Y,   x,   x,   x,   Y,   x,   Y,   Y,   x,  70,  70,  90,   70,  R32_UINT)
+   SF(  Y,  50,   Y,   x,   Y,   Y,   Y,   Y,   x,  70,  70,  90,  110,  R32_FLOAT)
+   SF(  Y,  50,   Y,   x,   x,   x,   x,   x,   x,   x,   x, 120,    x,  R24_UNORM_X8_TYPELESS)
+   SF(  Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  X24_TYPELESS_G8_UINT)
+   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  L16A16_UNORM)
+   SF(  Y,  50,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  I24X8_UNORM)
+   SF(  Y,  50,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  L24X8_UNORM)
+   SF(  Y,  50,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  A24X8_UNORM)
+   SF(  Y,  50,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  I32_FLOAT)
+   SF(  Y,  50,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  L32_FLOAT)
+   SF(  Y,  50,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  A32_FLOAT)
+   SF(  Y,   Y,   x,   Y,  80,  80,   x,   x,  60,   x,   x,  90,    x,  B8G8R8X8_UNORM)
+   SF(  Y,   Y,   x,   x,  80,  80,   x,   x,   x,   x,   x, 110,    x,  B8G8R8X8_UNORM_SRGB)
+   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  R8G8B8X8_UNORM)
+   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  R8G8B8X8_UNORM_SRGB)
+   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  R9G9B9E5_SHAREDEXP)
+   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  B10G10R10X2_UNORM)
+   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  L16A16_FLOAT)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R32_UNORM)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R32_SNORM)
+/*    smpl filt  shad  CK   RT   AB   VB   SO color TW   TR  ccs_e  TA */
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R10G10B10X2_USCALED)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R8G8B8A8_SSCALED)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R8G8B8A8_USCALED)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R16G16_SSCALED)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R16G16_USCALED)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R32_SSCALED)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R32_USCALED)
+   SF(  Y,   Y,   x,   Y,   Y,   Y,   x,   x,   x,  70,   x, 120,    x,  B5G6R5_UNORM)
+   SF(  Y,   Y,   x,   x,   Y,   Y,   x,   x,   x,   x,   x, 120,    x,  B5G6R5_UNORM_SRGB)
+   SF(  Y,   Y,   x,   Y,   Y,   Y,   x,   x,   x,  70,   x, 120,    x,  B5G5R5A1_UNORM)
+   SF(  Y,   Y,   x,   x,   Y,   Y,   x,   x,   x,   x,   x, 120,    x,  B5G5R5A1_UNORM_SRGB)
+   SF(  Y,   Y,   x,   Y,   Y,   Y,   x,   x,   x,  70,   x, 120,    x,  B4G4R4A4_UNORM)
+   SF(  Y,   Y,   x,   x,   Y,   Y,   x,   x,   x,   x,   x, 120,    x,  B4G4R4A4_UNORM_SRGB)
+   SF(  Y,   Y,   x,   x,   Y,   Y,   Y,   x,   x,  70, 110, 120,    x,  R8G8_UNORM)
+   SF(  Y,   Y,   x,   Y,   Y,  60,   Y,   x,   x,  70, 110, 120,    x,  R8G8_SNORM)
+   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  90, 120,    x,  R8G8_SINT)
+   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  75, 120,    x,  R8G8_UINT)
+   SF(  Y,   Y,   Y,   x,   Y,  45,   Y,   x,  70,  70, 110, 120,    x,  R16_UNORM)
+   SF(  Y,   Y,   x,   x,   Y,  60,   Y,   x,   x,  70, 110, 120,    x,  R16_SNORM)
+   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  90, 120,  120,  R16_SINT)
+   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  75, 120,  120,  R16_UINT)
+   SF(  Y,   Y,   x,   x,   Y,   Y,   Y,   x,   x,  70,  90, 120,  120,  R16_FLOAT)
+   SF( 50,  50,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  A8P8_UNORM_PALETTE0)
+   SF( 50,  50,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  A8P8_UNORM_PALETTE1)
+   SF(  Y,   Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  I16_UNORM)
+   SF(  Y,   Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  L16_UNORM)
+   SF(  Y,   Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  A16_UNORM)
+   SF(  Y,   Y,   x,   Y,   x,   x,   x,   x,   x,   x,   x,   x,    x,  L8A8_UNORM)
+   SF(  Y,   Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  I16_FLOAT)
+   SF(  Y,   Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  L16_FLOAT)
+   SF(  Y,   Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  A16_FLOAT)
+   SF( 45,  45,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  L8A8_UNORM_SRGB)
+   SF(  Y,   Y,   x,   Y,   x,   x,   x,   x,   x,   x,   x,   x,    x,  R5G5_SNORM_B6_UNORM)
+   SF(  x,   x,   x,   x,   Y,   Y,   x,   x,   x,  70,   x, 120,    x,  B5G5R5X1_UNORM)
+   SF(  x,   x,   x,   x,   Y,   Y,   x,   x,   x,   x,   x, 120,    x,  B5G5R5X1_UNORM_SRGB)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R8G8_SSCALED)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R8G8_USCALED)
+/*    smpl filt  shad  CK   RT   AB   VB   SO color TW   TR  ccs_e  TA */
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R16_SSCALED)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R16_USCALED)
+   SF( 50,  50,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  P8A8_UNORM_PALETTE0)
+   SF( 50,  50,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  P8A8_UNORM_PALETTE1)
+   SF(120, 120,   x,   x, 120, 120,   x,   x,   x,   x,   x, 120,    x,  A1B5G5R5_UNORM)
    /* According to the PRM, A4B4G4R4_UNORM isn't supported until Sky Lake
     * but empirical testing indicates that at least sampling works just fine
     * on Broadwell.
     */
-   SF( 80,  80,   x,   x,  90, 120,   x,   x,   x,   x,   x, 120,   A4B4G4R4_UNORM)
-   SF( 90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   L8A8_UINT)
-   SF( 90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   L8A8_SINT)
-   SF(  Y,   Y,   x,  45,   Y,   Y,   Y,   x,   x,  70, 110, 120,   R8_UNORM)
-   SF(  Y,   Y,   x,   x,   Y,  60,   Y,   x,   x,  70, 110, 120,   R8_SNORM)
-   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  90, 120,   R8_SINT)
-   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  75, 120,   R8_UINT)
-   SF(  Y,   Y,   x,   Y,   Y,   Y,   x,   x,   x,  70, 110, 120,   A8_UNORM)
-   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   I8_UNORM)
-   SF(  Y,   Y,   x,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   L8_UNORM)
-   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   P4A4_UNORM_PALETTE0)
-   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   A4P4_UNORM_PALETTE0)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R8_SSCALED)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R8_USCALED)
-   SF( 45,  45,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   P8_UNORM_PALETTE0)
-   SF( 45,  45,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   L8_UNORM_SRGB)
-   SF( 45,  45,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   P8_UNORM_PALETTE1)
-   SF( 45,  45,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   P4A4_UNORM_PALETTE1)
-   SF( 45,  45,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   A4P4_UNORM_PALETTE1)
-   SF(  x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   Y8_UNORM)
-   SF( 90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   L8_UINT)
-   SF( 90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   L8_SINT)
-   SF( 90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   I8_UINT)
-   SF( 90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   I8_SINT)
-   SF( 45,  45,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   DXT1_RGB_SRGB)
-   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   R1_UNORM)
-   SF(  Y,   Y,   x,   Y,   Y,   x,   x,   x,  60,   x,   x,   x,   YCRCB_NORMAL)
-   SF(  Y,   Y,   x,   Y,   Y,   x,   x,   x,  60,   x,   x,   x,   YCRCB_SWAPUVY)
-   SF( 45,  45,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   P2_UNORM_PALETTE0)
-   SF( 45,  45,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   P2_UNORM_PALETTE1)
-   SF(  Y,   Y,   x,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   BC1_UNORM)
-   SF(  Y,   Y,   x,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   BC2_UNORM)
-   SF(  Y,   Y,   x,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   BC3_UNORM)
-   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   BC4_UNORM)
-   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   BC5_UNORM)
-   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   BC1_UNORM_SRGB)
-   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   BC2_UNORM_SRGB)
-   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   BC3_UNORM_SRGB)
-   SF(  Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   MONO8)
-   SF(  Y,   Y,   x,   x,   Y,   x,   x,   x,  60,   x,   x,   x,   YCRCB_SWAPUV)
-   SF(  Y,   Y,   x,   x,   Y,   x,   x,   x,  60,   x,   x,   x,   YCRCB_SWAPY)
-   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   DXT1_RGB)
-/*    smpl filt  shad  CK   RT   AB   VB   SO color TW   TR  ccs_e */
-   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   FXT1)
-   SF( 75,  75,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R8G8B8_UNORM)
-   SF( 75,  75,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R8G8B8_SNORM)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R8G8B8_SSCALED)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R8G8B8_USCALED)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R64G64B64A64_FLOAT)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R64G64B64_FLOAT)
-   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   BC4_SNORM)
-   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   BC5_SNORM)
-   SF( 50,  50,   x,   x,   x,   x,  60,   x,   x,   x,   x,   x,   R16G16B16_FLOAT)
-   SF( 75,  75,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R16G16B16_UNORM)
-   SF( 75,  75,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R16G16B16_SNORM)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R16G16B16_SSCALED)
-   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,   R16G16B16_USCALED)
-   SF( 70,  70,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   BC6H_SF16)
-   SF( 70,  70,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   BC7_UNORM)
-   SF( 70,  70,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   BC7_UNORM_SRGB)
-   SF( 70,  70,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   BC6H_UF16)
-   SF(  x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   PLANAR_420_8)
+   SF( 80,  80,   x,   x,  90, 120,   x,   x,   x,   x,   x, 120,    x,  A4B4G4R4_UNORM)
+   SF( 90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  L8A8_UINT)
+   SF( 90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  L8A8_SINT)
+   SF(  Y,   Y,   x,  45,   Y,   Y,   Y,   x,   x,  70, 110, 120,    x,  R8_UNORM)
+   SF(  Y,   Y,   x,   x,   Y,  60,   Y,   x,   x,  70, 110, 120,    x,  R8_SNORM)
+   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  90, 120,    x,  R8_SINT)
+   SF(  Y,   x,   x,   x,   Y,   x,   Y,   x,   x,  70,  75, 120,    x,  R8_UINT)
+   SF(  Y,   Y,   x,   Y,   Y,   Y,   x,   x,   x,  70, 110, 120,    x,  A8_UNORM)
+   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  I8_UNORM)
+   SF(  Y,   Y,   x,   Y,   x,   x,   x,   x,   x,   x,   x,   x,    x,  L8_UNORM)
+   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  P4A4_UNORM_PALETTE0)
+   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  A4P4_UNORM_PALETTE0)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R8_SSCALED)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R8_USCALED)
+   SF( 45,  45,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  P8_UNORM_PALETTE0)
+   SF( 45,  45,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  L8_UNORM_SRGB)
+   SF( 45,  45,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  P8_UNORM_PALETTE1)
+   SF( 45,  45,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  P4A4_UNORM_PALETTE1)
+   SF( 45,  45,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  A4P4_UNORM_PALETTE1)
+   SF(  x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  Y8_UNORM)
+   SF( 90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  L8_UINT)
+   SF( 90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  L8_SINT)
+   SF( 90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  I8_UINT)
+   SF( 90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  I8_SINT)
+   SF( 45,  45,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  DXT1_RGB_SRGB)
+   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  R1_UNORM)
+   SF(  Y,   Y,   x,   Y,   Y,   x,   x,   x,  60,   x,   x, 120,    x,  YCRCB_NORMAL)
+   SF(  Y,   Y,   x,   Y,   Y,   x,   x,   x,  60,   x,   x,   x,    x,  YCRCB_SWAPUVY)
+   SF( 45,  45,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  P2_UNORM_PALETTE0)
+   SF( 45,  45,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  P2_UNORM_PALETTE1)
+   SF(  Y,   Y,   x,   Y,   x,   x,   x,   x,   x,   x,   x,   x,    x,  BC1_UNORM)
+   SF(  Y,   Y,   x,   Y,   x,   x,   x,   x,   x,   x,   x,   x,    x,  BC2_UNORM)
+   SF(  Y,   Y,   x,   Y,   x,   x,   x,   x,   x,   x,   x,   x,    x,  BC3_UNORM)
+   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  BC4_UNORM)
+   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  BC5_UNORM)
+   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  BC1_UNORM_SRGB)
+   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  BC2_UNORM_SRGB)
+   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  BC3_UNORM_SRGB)
+   SF(  Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  MONO8)
+   SF(  Y,   Y,   x,   x,   Y,   x,   x,   x,  60,   x,   x,   x,    x,  YCRCB_SWAPUV)
+   SF(  Y,   Y,   x,   x,   Y,   x,   x,   x,  60,   x,   x, 120,    x,  YCRCB_SWAPY)
+   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  DXT1_RGB)
+/*    smpl filt  shad  CK   RT   AB   VB   SO color TW   TR  ccs_e  TA */
+   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  FXT1)
+   SF( 75,  75,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R8G8B8_UNORM)
+   SF( 75,  75,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R8G8B8_SNORM)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R8G8B8_SSCALED)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R8G8B8_USCALED)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R64G64B64A64_FLOAT)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R64G64B64_FLOAT)
+   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  BC4_SNORM)
+   SF(  Y,   Y,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  BC5_SNORM)
+   SF( 50,  50,   x,   x,   x,   x,  60,   x,   x,   x,   x,   x,    x,  R16G16B16_FLOAT)
+   SF( 75,  75,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R16G16B16_UNORM)
+   SF( 75,  75,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R16G16B16_SNORM)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R16G16B16_SSCALED)
+   SF(  x,   x,   x,   x,   x,   x,   Y,   x,   x,   x,   x,   x,    x,  R16G16B16_USCALED)
+   SF( 70,  70,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  BC6H_SF16)
+   SF( 70,  70,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  BC7_UNORM)
+   SF( 70,  70,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  BC7_UNORM_SRGB)
+   SF( 70,  70,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  BC6H_UF16)
+   SF(  x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  PLANAR_420_8)
    /* The format enum for R8G8B8_UNORM_SRGB first shows up in the HSW PRM but
     * empirical testing indicates that it doesn't actually sRGB decode and
     * acts identical to R8G8B8_UNORM.  It does work on gfx8+.
     */
-   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   R8G8B8_UNORM_SRGB)
-   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ETC1_RGB8)
-   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ETC2_RGB8)
-   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   EAC_R11)
-   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   EAC_RG11)
-   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   EAC_SIGNED_R11)
-   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   EAC_SIGNED_RG11)
-   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ETC2_SRGB8)
-   SF( 90,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,   R16G16B16_UINT)
-   SF( 90,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,   R16G16B16_SINT)
-   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,   R32_SFIXED)
-   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,   R10G10B10A2_SNORM)
-   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,   R10G10B10A2_USCALED)
-   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,   R10G10B10A2_SSCALED)
-   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,   R10G10B10A2_SINT)
-   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,   B10G10R10A2_SNORM)
-   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,   B10G10R10A2_USCALED)
-   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,   B10G10R10A2_SSCALED)
-   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,   B10G10R10A2_UINT)
-   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,   B10G10R10A2_SINT)
-   SF(  x,   x,   x,   x,   x,   x,  80,   x,   x,   x,   x,   x,   R64G64B64A64_PASSTHRU)
-   SF(  x,   x,   x,   x,   x,   x,  80,   x,   x,   x,   x,   x,   R64G64B64_PASSTHRU)
-   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ETC2_RGB8_PTA)
-   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ETC2_SRGB8_PTA)
-   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ETC2_EAC_RGBA8)
-   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ETC2_EAC_SRGB8_A8)
-   SF( 90,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,   R8G8B8_UINT)
-   SF( 90,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,   R8G8B8_SINT)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_4X4_FLT16)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_5X4_FLT16)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_5X5_FLT16)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_6X5_FLT16)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_6X6_FLT16)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_8X5_FLT16)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_8X6_FLT16)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_8X8_FLT16)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_10X5_FLT16)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_10X6_FLT16)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_10X8_FLT16)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_10X10_FLT16)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_12X10_FLT16)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_12X12_FLT16)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_4X4_U8SRGB)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_5X4_U8SRGB)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_5X5_U8SRGB)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_6X5_U8SRGB)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_6X6_U8SRGB)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_8X5_U8SRGB)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_8X6_U8SRGB)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_8X8_U8SRGB)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_10X5_U8SRGB)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_10X6_U8SRGB)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_10X8_U8SRGB)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_10X10_U8SRGB)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_12X10_U8SRGB)
-   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_LDR_2D_12X12_U8SRGB)
-   SF(100, 100,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_HDR_2D_4X4_FLT16)
-   SF(100, 100,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_HDR_2D_5X4_FLT16)
-   SF(100, 100,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_HDR_2D_5X5_FLT16)
-   SF(100, 100,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_HDR_2D_6X5_FLT16)
-   SF(100, 100,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_HDR_2D_6X6_FLT16)
-   SF(100, 100,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_HDR_2D_8X5_FLT16)
-   SF(100, 100,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_HDR_2D_8X6_FLT16)
-   SF(100, 100,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_HDR_2D_8X8_FLT16)
-   SF(100, 100,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_HDR_2D_10X5_FLT16)
-   SF(100, 100,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_HDR_2D_10X6_FLT16)
-   SF(100, 100,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_HDR_2D_10X8_FLT16)
-   SF(100, 100,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_HDR_2D_10X10_FLT16)
-   SF(100, 100,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_HDR_2D_12X10_FLT16)
-   SF(100, 100,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,   ASTC_HDR_2D_12X12_FLT16)
+   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  R8G8B8_UNORM_SRGB)
+   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ETC1_RGB8)
+   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ETC2_RGB8)
+   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  EAC_R11)
+   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  EAC_RG11)
+   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  EAC_SIGNED_R11)
+   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  EAC_SIGNED_RG11)
+   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ETC2_SRGB8)
+   SF( 90,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,    x,  R16G16B16_UINT)
+   SF( 90,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,    x,  R16G16B16_SINT)
+   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,    x,  R32_SFIXED)
+   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,    x,  R10G10B10A2_SNORM)
+   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,    x,  R10G10B10A2_USCALED)
+   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,    x,  R10G10B10A2_SSCALED)
+   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,    x,  R10G10B10A2_SINT)
+   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,    x,  B10G10R10A2_SNORM)
+   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,    x,  B10G10R10A2_USCALED)
+   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,    x,  B10G10R10A2_SSCALED)
+   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,    x,  B10G10R10A2_UINT)
+   SF(  x,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,    x,  B10G10R10A2_SINT)
+   SF(  x,   x,   x,   x,   x,   x,  80,   x,   x,   x,   x,   x,    x,  R64G64B64A64_PASSTHRU)
+   SF(  x,   x,   x,   x,   x,   x,  80,   x,   x,   x,   x,   x,    x,  R64G64B64_PASSTHRU)
+   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ETC2_RGB8_PTA)
+   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ETC2_SRGB8_PTA)
+   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ETC2_EAC_RGBA8)
+   SF( 80,  80,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ETC2_EAC_SRGB8_A8)
+   SF( 90,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,    x,  R8G8B8_UINT)
+   SF( 90,   x,   x,   x,   x,   x,  75,   x,   x,   x,   x,   x,    x,  R8G8B8_SINT)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_4X4_FLT16)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_5X4_FLT16)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_5X5_FLT16)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_6X5_FLT16)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_6X6_FLT16)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_8X5_FLT16)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_8X6_FLT16)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_8X8_FLT16)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_10X5_FLT16)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_10X6_FLT16)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_10X8_FLT16)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_10X10_FLT16)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_12X10_FLT16)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_12X12_FLT16)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_4X4_U8SRGB)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_5X4_U8SRGB)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_5X5_U8SRGB)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_6X5_U8SRGB)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_6X6_U8SRGB)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_8X5_U8SRGB)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_8X6_U8SRGB)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_8X8_U8SRGB)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_10X5_U8SRGB)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_10X6_U8SRGB)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_10X8_U8SRGB)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_10X10_U8SRGB)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_12X10_U8SRGB)
+   SF( 90,  90,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_LDR_2D_12X12_U8SRGB)
+   SF(110, 110,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_HDR_2D_4X4_FLT16)
+   SF(110, 110,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_HDR_2D_5X4_FLT16)
+   SF(110, 110,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_HDR_2D_5X5_FLT16)
+   SF(110, 110,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_HDR_2D_6X5_FLT16)
+   SF(110, 110,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_HDR_2D_6X6_FLT16)
+   SF(110, 110,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_HDR_2D_8X5_FLT16)
+   SF(110, 110,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_HDR_2D_8X6_FLT16)
+   SF(110, 110,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_HDR_2D_8X8_FLT16)
+   SF(110, 110,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_HDR_2D_10X5_FLT16)
+   SF(110, 110,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_HDR_2D_10X6_FLT16)
+   SF(110, 110,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_HDR_2D_10X8_FLT16)
+   SF(110, 110,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_HDR_2D_10X10_FLT16)
+   SF(110, 110,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_HDR_2D_12X10_FLT16)
+   SF(110, 110,   x,   x,   x,   x,   x,   x,   x,   x,   x,   x,    x,  ASTC_HDR_2D_12X12_FLT16)
 };
 #undef x
 #undef Y
@@ -603,6 +605,14 @@ isl_format_for_pipe_format(enum pipe_format pf)
       [PIPE_FORMAT_R8G8_R8B8_UNORM]         = ISL_FORMAT_YCRCB_NORMAL,
       [PIPE_FORMAT_G8R8_B8R8_UNORM]         = ISL_FORMAT_YCRCB_SWAPY,
 
+      /* We map these formats to help configure media compression. */
+      [PIPE_FORMAT_YUYV]                    = ISL_FORMAT_YCRCB_NORMAL,
+      [PIPE_FORMAT_UYVY]                    = ISL_FORMAT_YCRCB_SWAPY,
+      [PIPE_FORMAT_NV12]                    = ISL_FORMAT_PLANAR_420_8,
+      [PIPE_FORMAT_P010]                    = ISL_FORMAT_PLANAR_420_10,
+      [PIPE_FORMAT_P012]                    = ISL_FORMAT_PLANAR_420_12,
+      [PIPE_FORMAT_P016]                    = ISL_FORMAT_PLANAR_420_16,
+
       [PIPE_FORMAT_R8G8B8X8_SRGB]           = ISL_FORMAT_R8G8B8X8_UNORM_SRGB,
       [PIPE_FORMAT_B10G10R10X2_UNORM]       = ISL_FORMAT_B10G10R10X2_UNORM,
       [PIPE_FORMAT_R16G16B16X16_UNORM]      = ISL_FORMAT_R16G16B16X16_UNORM,
@@ -713,14 +723,14 @@ isl_format_supports_sampling(const struct intel_device_info *devinfo,
    if (!format_info_exists(format))
       return false;
 
-   if (devinfo->is_baytrail) {
+   if (devinfo->platform == INTEL_PLATFORM_BYT) {
       const struct isl_format_layout *fmtl = isl_format_get_layout(format);
       /* Support for ETC1 and ETC2 exists on Bay Trail even though big-core
        * GPUs didn't get it until Broadwell.
        */
       if (fmtl->txc == ISL_TXC_ETC1 || fmtl->txc == ISL_TXC_ETC2)
          return true;
-   } else if (devinfo->is_cherryview) {
+   } else if (devinfo->platform == INTEL_PLATFORM_CHV) {
       /* Support for ASTC LDR theoretically exists on Cherry View even though
        * big-core GPUs didn't get it until Skylake.  However, it's fairly
        * badly broken and requires some nasty workarounds which no Mesa driver
@@ -774,7 +784,7 @@ isl_format_supports_vertex_fetch(const struct intel_device_info *devinfo,
    /* For vertex fetch, Bay Trail supports the same set of formats as Haswell
     * but is a superset of Ivy Bridge.
     */
-   if (devinfo->is_baytrail)
+   if (devinfo->platform == INTEL_PLATFORM_BYT)
       return 75 >= format_info[format].input_vb;
 
    return devinfo->verx10 >= format_info[format].input_vb;
@@ -793,6 +803,18 @@ isl_format_supports_typed_writes(const struct intel_device_info *devinfo,
    return devinfo->verx10 >= format_info[format].typed_write;
 }
 
+/**
+ * Returns true if the given format can support typed atomics.
+ */
+bool
+isl_format_supports_typed_atomics(const struct intel_device_info *devinfo,
+                                  enum isl_format format)
+{
+   if (!format_info_exists(format))
+      return false;
+
+   return devinfo->verx10 >= format_info[format].typed_atomics;
+}
 
 /**
  * Returns true if the given format can support typed reads with format
@@ -835,6 +857,12 @@ isl_format_supports_ccs_d(const struct intel_device_info *devinfo,
 
    const struct isl_format_layout *fmtl = isl_format_get_layout(format);
 
+   /* From the Ivy Bridge PRM, Vol2 Part1 11.7 "MCS Buffer for Render
+    * Target(s)", beneath the "Fast Color Clear" bullet (p326):
+    *
+    *     - MCS buffer for non-MSRT is supported only for RT formats 32bpp,
+    *       64bpp, and 128bpp.
+    */
    return fmtl->bpb == 32 || fmtl->bpb == 64 || fmtl->bpb == 128;
 }
 
@@ -848,8 +876,12 @@ bool
 isl_format_supports_ccs_e(const struct intel_device_info *devinfo,
                           enum isl_format format)
 {
+   /* Wa_14017353530: Disable compression on MTL until B0 */
+   if (intel_device_info_is_mtl(devinfo) && devinfo->revision < 4)
+      return false;
+
    /* Wa_22011186057: Disable compression on ADL-P A0 */
-   if (devinfo->is_alderlake && devinfo->gt == 2 && devinfo->revision == 0)
+   if (devinfo->platform == INTEL_PLATFORM_ADL && devinfo->gt == 2 && devinfo->revision == 0)
       return false;
 
    if (!format_info_exists(format))
@@ -857,11 +889,12 @@ isl_format_supports_ccs_e(const struct intel_device_info *devinfo,
 
    /* For simplicity, only report that a format supports CCS_E if blorp can
     * perform bit-for-bit copies with an image of that format while compressed.
-    * Unfortunately, R11G11B10_FLOAT is in a compression class of its own and
-    * there is no way to copy to/from it which doesn't potentially loose data
-    * if one of the bit patterns being copied isn't valid finite floats.
+    * Unfortunately, R11G11B10_FLOAT is in a compression class of its own, and
+    * on ICL, there is no way to copy to/from it which doesn't potentially
+    * loose data if one of the bit patterns being copied isn't valid finite
+    * floats.
     */
-   if (format == ISL_FORMAT_R11G11B10_FLOAT)
+   if (devinfo->ver == 11 && format == ISL_FORMAT_R11G11B10_FLOAT)
       return false;
 
    return devinfo->verx10 >= format_info[format].ccs_e;
@@ -894,6 +927,21 @@ isl_format_supports_multisampling(const struct intel_device_info *devinfo,
        * is multisampled.  See also isl_surf_get_hiz_surf().
        */
       return devinfo->ver <= 8;
+   } else if (devinfo->ver == 7 && isl_format_has_sint_channel(format)) {
+      /* From the Ivy Bridge PRM, Vol4 Part1 p73 ("Number of Multisamples"):
+       *
+       *   This field must be set to MULTISAMPLECOUNT_1 for SINT MSRTs when
+       *   all RT channels are not written
+       *
+       * From the Ivy Bridge PRM, Vol4 Part1 p77 ("MCS Enable"):
+       *
+       *   This field must be set to 0 for all SINT MSRTs when all RT channels
+       *   are not written
+       *
+       * Disable multisampling support now as we don't handle the case when
+       * one of the render target channels is disabled.
+       */
+      return false;
    } else if (devinfo->ver < 7 && isl_format_get_layout(format)->bpb > 64) {
       return false;
    } else if (isl_format_is_compressed(format)) {
@@ -903,6 +951,30 @@ isl_format_supports_multisampling(const struct intel_device_info *devinfo,
    } else {
       return true;
    }
+}
+
+/**
+ * Returns true if the two formats are component size compatible meaning that
+ * each component from one format has the same number of bits as the other
+ * format.
+ *
+ * This is useful to check whether an image used with 2 different formats can
+ * be fast cleared with a non 0 clear color.
+ */
+bool
+isl_formats_have_same_bits_per_channel(enum isl_format format1,
+                                       enum isl_format format2)
+{
+   const struct isl_format_layout *fmtl1 = isl_format_get_layout(format1);
+   const struct isl_format_layout *fmtl2 = isl_format_get_layout(format2);
+
+   return fmtl1->channels.r.bits == fmtl2->channels.r.bits &&
+          fmtl1->channels.g.bits == fmtl2->channels.g.bits &&
+          fmtl1->channels.b.bits == fmtl2->channels.b.bits &&
+          fmtl1->channels.a.bits == fmtl2->channels.a.bits &&
+          fmtl1->channels.l.bits == fmtl2->channels.l.bits &&
+          fmtl1->channels.i.bits == fmtl2->channels.i.bits &&
+          fmtl1->channels.p.bits == fmtl2->channels.p.bits;
 }
 
 /**
@@ -924,25 +996,17 @@ isl_formats_are_ccs_e_compatible(const struct intel_device_info *devinfo,
        !isl_format_supports_ccs_e(devinfo, format2))
       return false;
 
-   /* Gfx12 added CCS_E support for A8_UNORM, A8_UNORM and R8_UNORM share the
-    * same aux map format encoding so they are definitely compatible.
+   /* On TGL+, drivers may specify a compression format independently from the
+    * surface format. So, even if the surface format changes, hardware is
+    * still able to determine how to access the CCS.
     */
-   if (format1 == ISL_FORMAT_A8_UNORM)
-      format1 = ISL_FORMAT_R8_UNORM;
-
-   if (format2 == ISL_FORMAT_A8_UNORM)
-      format2 = ISL_FORMAT_R8_UNORM;
-
-   const struct isl_format_layout *fmtl1 = isl_format_get_layout(format1);
-   const struct isl_format_layout *fmtl2 = isl_format_get_layout(format2);
+   if (devinfo->ver >= 12)
+      return true;
 
    /* The compression used by CCS is not dependent on the actual data encoding
     * of the format but only depends on the bit-layout of the channels.
     */
-   return fmtl1->channels.r.bits == fmtl2->channels.r.bits &&
-          fmtl1->channels.g.bits == fmtl2->channels.g.bits &&
-          fmtl1->channels.b.bits == fmtl2->channels.b.bits &&
-          fmtl1->channels.a.bits == fmtl2->channels.a.bits;
+   return isl_formats_have_same_bits_per_channel(format1, format2);
 }
 
 static bool
@@ -1231,18 +1295,6 @@ isl_color_value_pack(const union isl_color_value *value,
    assert(fmtl->channels.p.bits == 0);
 }
 
-/** Extend an N-bit signed integer to 32 bits */
-static inline int32_t
-sign_extend(int32_t x, unsigned bits)
-{
-   if (bits < 32) {
-      unsigned shift = 32 - bits;
-      return (x << shift) >> shift;
-   } else {
-      return x;
-   }
-}
-
 static inline void
 unpack_channel(union isl_color_value *value,
                unsigned start, unsigned count,
@@ -1280,7 +1332,7 @@ unpack_channel(union isl_color_value *value,
       }
       break;
    case ISL_SNORM:
-      unpacked.f32 = _mesa_snorm_to_float(sign_extend(packed, layout->bits),
+      unpacked.f32 = _mesa_snorm_to_float(util_sign_extend(packed, layout->bits),
                                           layout->bits);
       break;
    case ISL_SFLOAT:
@@ -1295,7 +1347,7 @@ unpack_channel(union isl_color_value *value,
       unpacked.u32 = packed;
       break;
    case ISL_SINT:
-      unpacked.u32 = sign_extend(packed, layout->bits);
+      unpacked.u32 = util_sign_extend(packed, layout->bits);
       break;
 
    default:
@@ -1307,7 +1359,7 @@ unpack_channel(union isl_color_value *value,
 }
 
 /**
- * Take unpack an isl_color_value from the actual bits as specified by
+ * Unpack an isl_color_value from the actual bits as specified by
  * the isl_format.  This function is very slow for a format conversion
  * function but should be fine for a single pixel worth of data.
  */

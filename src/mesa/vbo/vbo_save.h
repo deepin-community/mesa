@@ -34,6 +34,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 #ifndef VBO_SAVE_H
 #define VBO_SAVE_H
 
+#include "mesa/main/dlist.h"
 #include "vbo.h"
 #include "vbo_attrib.h"
 
@@ -53,30 +54,33 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
  * compiled using the fallback opcode mechanism provided by dlist.c.
  */
 struct vbo_save_vertex_list {
+   union gl_dlist_node header;
+
    /* Data used in vbo_save_playback_vertex_list */
-   struct gl_vertex_array_object *VAO[VP_MODE_MAX];
+   unsigned num_draws;
+   uint8_t *modes;
+   union {
+      struct pipe_draw_start_count_bias *start_counts;
+      struct pipe_draw_start_count_bias start_count;
+   };
+   uint8_t mode;
+   bool draw_begins;
 
+   int16_t private_refcount[VP_MODE_MAX];
+   struct gl_context *ctx;
+   struct pipe_vertex_state *state[VP_MODE_MAX];
+   GLbitfield enabled_attribs[VP_MODE_MAX];
+
+   /* Cold: used during construction or to handle edge-cases.
+    * It's not part of the structure because we want display list nodes
+    * to be tightly packed to get cache hits. Without this, performance would
+    * decrease by an order of magnitude with 10k display lists.
+    */
    struct {
-      struct pipe_draw_info info;
-      unsigned char *mode;
-      union {
-         struct pipe_draw_start_count_bias *start_counts;
-         struct pipe_draw_start_count_bias start_count;
-      };
-      unsigned num_draws;
-
-      struct {
-         struct gl_context *ctx;
-         struct pipe_vertex_state *state[VP_MODE_MAX];
-         int private_refcount[VP_MODE_MAX];
-         GLbitfield enabled_attribs[VP_MODE_MAX];
-         struct pipe_draw_vertex_state_info info;
-      } gallium;
-   } merged;
-
-   /* Cold: used during construction or to handle egde-cases */
-   struct {
+      struct gl_vertex_array_object *VAO[VP_MODE_MAX];
       struct _mesa_index_buffer ib;
+
+      struct pipe_draw_info info;
 
       /* Copy of the final vertex from node->vertex_store->bufferobj.
        * Keep this in regular (non-VBO) memory to avoid repeated
@@ -90,6 +94,7 @@ struct vbo_save_vertex_list {
       struct _mesa_prim *prims;
       GLuint prim_count;
       GLuint min_index, max_index;
+      GLuint bo_bytes_used;
    } *cold;
 };
 
@@ -100,14 +105,18 @@ struct vbo_save_vertex_list {
 static inline GLsizei
 _vbo_save_get_stride(const struct vbo_save_vertex_list *node)
 {
-   return node->VAO[0]->BufferBinding[0].Stride;
+   return node->cold->VAO[0]->BufferBinding[0].Stride;
 }
 
 /* Default size for the buffer holding the vertices and the indices.
  * A bigger buffer helps reducing the number of draw calls but may
  * waste memory.
+ * 1MB was picked because a lower value reduces viewperf snx tests
+ * performance but larger values cause high VRAM usage (because
+ * larger buffers will be shared by more display lists which reduces
+ * the likelyhood of freeing the buffer).
  */
-#define VBO_SAVE_BUFFER_SIZE (20*1024*1024)
+#define VBO_SAVE_BUFFER_SIZE (1024 * 1024)
 #define VBO_SAVE_PRIM_MODE_MASK 0x3f
 
 struct vbo_save_vertex_store {

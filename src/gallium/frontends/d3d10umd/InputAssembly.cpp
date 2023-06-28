@@ -32,9 +32,6 @@
 
 
 #include <stdio.h>
-#if defined(_MSC_VER) && !defined(snprintf)
-#define snprintf _snprintf
-#endif
 
 #include "InputAssembly.h"
 #include "State.h"
@@ -312,7 +309,7 @@ CreateElementLayout(
 
    /* XXX: What do we do when there's a gap? */
    if (max_elements != num_elements) {
-      DebugPrintf("%s: gap\n", __FUNCTION__);
+      DebugPrintf("%s: gap\n", __func__);
    }
 
    pElementLayout->handle =

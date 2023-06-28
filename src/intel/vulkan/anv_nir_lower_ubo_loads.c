@@ -47,7 +47,7 @@ lower_ubo_load_instr(nir_builder *b, nir_instr *instr, UNUSED void *_data)
    unsigned byte_size = bit_size / 8;
 
    nir_ssa_def *val;
-   if (nir_src_is_const(load->src[1])) {
+   if (!nir_src_is_divergent(load->src[0]) && nir_src_is_const(load->src[1])) {
       uint32_t offset = nir_src_as_uint(load->src[1]);
 
       /* Things should be component-aligned. */
@@ -119,7 +119,6 @@ bool
 anv_nir_lower_ubo_loads(nir_shader *shader)
 {
    return nir_shader_instructions_pass(shader, lower_ubo_load_instr,
-                                       nir_metadata_block_index |
-                                       nir_metadata_dominance,
+                                       nir_metadata_none,
                                        NULL);
 }

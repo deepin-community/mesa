@@ -28,7 +28,7 @@
  * \author Brian Paul
  */
 
-#include "main/glheader.h"
+#include "util/glheader.h"
 #include "main/macros.h"
 #include "main/errors.h"
 #include "util/u_memory.h"
@@ -180,7 +180,7 @@ _mesa_free_parameter_list(struct gl_program_parameter_list *paramList)
    }
    free(paramList->Parameters);
    align_free(paramList->ParameterValues);
-   free(paramList);
+   FREE(paramList);
 }
 
 
@@ -204,8 +204,10 @@ _mesa_reserve_parameter_storage(struct gl_program_parameter_list *paramList,
    if (paramList->DisallowRealloc &&
        (oldNum + reserve_params > paramList->Size ||
         needSizeValues > paramList->SizeValues)) {
-      _mesa_problem(NULL, "Parameter storage reallocation disallowed. This "
-              "is a Mesa bug. Increase the reservation size in the code.");
+      _mesa_problem(NULL, "Parameter storage reallocation disallowed.\n"
+                          "This is a Mesa bug.\n"
+                          "Increase the reservation size in the code (wanted bytes %u, have %u || wanted values %u have %u).",
+                          oldNum + reserve_params, paramList->Size, needSizeValues, paramList->SizeValues);
       abort();
    }
 

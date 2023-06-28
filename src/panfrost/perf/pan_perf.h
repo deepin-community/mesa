@@ -31,7 +31,7 @@ extern "C" {
 #endif
 
 #define PAN_PERF_MAX_CATEGORIES 4
-#define PAN_PERF_MAX_COUNTERS 64
+#define PAN_PERF_MAX_COUNTERS   64
 
 struct panfrost_device;
 struct panfrost_perf_category;
@@ -60,10 +60,9 @@ struct panfrost_perf_counter {
    const char *desc;
    const char *symbol_name;
    enum panfrost_perf_counter_units units;
-   // Offset of this counter's value within the counters memory block
+   // Offset of this counter's value within the category
    uint32_t offset;
-
-   const struct panfrost_perf_category *category;
+   unsigned category_index;
 };
 
 struct panfrost_perf_category {
@@ -71,9 +70,14 @@ struct panfrost_perf_category {
 
    struct panfrost_perf_counter counters[PAN_PERF_MAX_COUNTERS];
    uint32_t n_counters;
+
+   /* Offset of this category within the counters memory block */
+   unsigned offset;
 };
 
 struct panfrost_perf_config {
+   const char *name;
+
    struct panfrost_perf_category categories[PAN_PERF_MAX_CATEGORIES];
    uint32_t n_categories;
 };
@@ -81,28 +85,27 @@ struct panfrost_perf_config {
 struct panfrost_perf {
    struct panfrost_device *dev;
 
-   const struct panfrost_perf_config* cfg;
+   const struct panfrost_perf_config *cfg;
 
    // Memory where to dump counter values
    uint32_t *counter_values;
    uint32_t n_counter_values;
+
+   /* Offsets of categories */
+   unsigned category_offset[PAN_PERF_MAX_CATEGORIES];
 };
 
-uint32_t
-panfrost_perf_counter_read(const struct panfrost_perf_counter *counter,
-            const struct panfrost_perf *perf);
+uint32_t panfrost_perf_counter_read(const struct panfrost_perf_counter *counter,
+                                    const struct panfrost_perf *perf);
 
-void
-panfrost_perf_init(struct panfrost_perf *perf, struct panfrost_device *dev);
+void panfrost_perf_init(struct panfrost_perf *perf,
+                        struct panfrost_device *dev);
 
-int
-panfrost_perf_enable(struct panfrost_perf *perf);
+int panfrost_perf_enable(struct panfrost_perf *perf);
 
-int
-panfrost_perf_disable(struct panfrost_perf *perf);
+int panfrost_perf_disable(struct panfrost_perf *perf);
 
-int
-panfrost_perf_dump(struct panfrost_perf *perf);
+int panfrost_perf_dump(struct panfrost_perf *perf);
 
 #if defined(__cplusplus)
 } // extern "C"

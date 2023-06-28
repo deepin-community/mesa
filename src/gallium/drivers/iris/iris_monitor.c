@@ -42,8 +42,8 @@ int
 iris_get_monitor_info(struct pipe_screen *pscreen, unsigned index,
                       struct pipe_driver_query_info *info)
 {
-   const struct iris_screen *screen = (struct iris_screen *)pscreen;
-   const struct intel_perf_config *perf_cfg = screen->perf_cfg;
+   struct iris_screen *screen = (struct iris_screen *)pscreen;
+   struct intel_perf_config *perf_cfg = screen->perf_cfg;
    assert(perf_cfg);
    if (!perf_cfg)
       return 0;
@@ -54,10 +54,16 @@ iris_get_monitor_info(struct pipe_screen *pscreen, unsigned index,
    }
 
    struct intel_perf_query_counter_info *counter_info = &perf_cfg->counter_infos[index];
+   struct intel_perf_query_info *query_info =
+      &perf_cfg->queries[intel_perf_query_counter_info_first_query(counter_info)];
    struct intel_perf_query_counter *counter = counter_info->counter;
+   struct intel_perf_query_result results;
+
+   intel_perf_query_result_clear(&results);
 
    info->group_id = counter_info->location.group_idx;
-   info->name = counter->name;
+   info->name = INTEL_DEBUG(DEBUG_PERF_SYMBOL_NAMES) ?
+      counter->symbol_name : counter->name;
    info->query_type = PIPE_QUERY_DRIVER_SPECIFIC + index;
 
    if (counter->type == INTEL_PERF_COUNTER_TYPE_THROUGHPUT)
@@ -66,19 +72,27 @@ iris_get_monitor_info(struct pipe_screen *pscreen, unsigned index,
       info->result_type = PIPE_DRIVER_QUERY_RESULT_TYPE_CUMULATIVE;
    switch (counter->data_type) {
    case INTEL_PERF_COUNTER_DATA_TYPE_BOOL32:
-   case INTEL_PERF_COUNTER_DATA_TYPE_UINT32:
+   case INTEL_PERF_COUNTER_DATA_TYPE_UINT32: {
       info->type = PIPE_DRIVER_QUERY_TYPE_UINT;
-      assert(counter->raw_max <= UINT32_MAX);
-      info->max_value.u32 = (uint32_t)counter->raw_max;
+      uint64_t val =
+         counter->oa_counter_max_uint64 ?
+         counter->oa_counter_max_uint64(perf_cfg, query_info, &results) : 0;
+      assert(val <= UINT32_MAX);
+      info->max_value.u32 = (uint32_t)val;
       break;
+   }
    case INTEL_PERF_COUNTER_DATA_TYPE_UINT64:
       info->type = PIPE_DRIVER_QUERY_TYPE_UINT64;
-      info->max_value.u64 = counter->raw_max;
+      info->max_value.u64 =
+         counter->oa_counter_max_uint64 ?
+         counter->oa_counter_max_uint64(perf_cfg, query_info, &results) : 0;
       break;
    case INTEL_PERF_COUNTER_DATA_TYPE_FLOAT:
    case INTEL_PERF_COUNTER_DATA_TYPE_DOUBLE:
       info->type = PIPE_DRIVER_QUERY_TYPE_FLOAT;
-      info->max_value.f = counter->raw_max;
+      info->max_value.f =
+         counter->oa_counter_max_float ?
+         counter->oa_counter_max_float(perf_cfg, query_info, &results) : 0.0f;
       break;
    default:
       assert(false);
@@ -101,7 +115,7 @@ iris_monitor_init_metrics(struct iris_screen *screen)
 
    iris_perf_init_vtbl(perf_cfg);
 
-   intel_perf_init_metrics(perf_cfg, &screen->devinfo, screen->fd,
+   intel_perf_init_metrics(perf_cfg, screen->devinfo, screen->fd,
                            true /* pipeline stats*/,
                            true /* register snapshots */);
 
@@ -156,8 +170,8 @@ iris_init_monitor_ctx(struct iris_context *ice)
                          ice,
                          ice,
                          screen->bufmgr,
-                         &screen->devinfo,
-                         ice->batches[IRIS_BATCH_RENDER].hw_ctx_id,
+                         screen->devinfo,
+                         ice->batches[IRIS_BATCH_RENDER].ctx_id,
                          screen->fd);
 }
 

@@ -101,7 +101,7 @@ fd5_emit_const_ptrs(struct fd_ringbuffer *ring, gl_shader_stage type,
    uint32_t anum = align(num, 2);
    uint32_t i;
 
-   debug_assert((regid % 4) == 0);
+   assert((regid % 4) == 0);
 
    OUT_PKT7(ring, CP_LOAD_STATE4, 3 + (2 * anum));
    OUT_RING(ring, CP_LOAD_STATE4_0_DST_OFF(regid / 4) |
@@ -198,19 +198,7 @@ setup_border_colors(struct fd_texture_stateobj *tex,
 
       bc = &sampler->border_color;
 
-      /*
-       * XXX HACK ALERT XXX
-       *
-       * The border colors need to be swizzled in a particular
-       * format-dependent order. Even though samplers don't know about
-       * formats, we can assume that with a GL state tracker, there's a
-       * 1:1 correspondence between sampler and texture. Take advantage
-       * of that knowledge.
-       */
-      if ((i >= tex->num_textures) || !tex->textures[i])
-         continue;
-
-      enum pipe_format format = tex->textures[i]->format;
+      enum pipe_format format = sampler->border_color_format;
       const struct util_format_description *desc =
          util_format_description(format);
 
@@ -268,7 +256,7 @@ setup_border_colors(struct fd_texture_stateobj *tex,
                   clamped = CLAMP(bc->ui[j], 0, 65535);
                break;
             default:
-               assert(!"Unexpected bit size");
+               unreachable("Unexpected bit size");
             case 32:
                clamped = 0;
                break;
@@ -292,7 +280,7 @@ setup_border_colors(struct fd_texture_stateobj *tex,
             else if (c < 3)
                e->rgb565 |= (int)(f_u * 0x1f) << (c ? 11 : 0);
             if (c == 3)
-               e->rgb5a1 |= (f_u > 0.5) ? 0x8000 : 0;
+               e->rgb5a1 |= (f_u > 0.5f) ? 0x8000 : 0;
             else
                e->rgb5a1 |= (int)(f_u * 0x1f) << (c * 5);
             if (c == 3)
@@ -487,16 +475,8 @@ fd5_emit_vertex_bufs(struct fd_ringbuffer *ring, struct fd5_emit *emit)
          enum a5xx_vtx_fmt fmt = fd5_pipe2vtx(pfmt);
          bool isint = util_format_is_pure_integer(pfmt);
          uint32_t off = vb->buffer_offset + elem->src_offset;
-         uint32_t size = fd_bo_size(rsc->bo) - off;
-         debug_assert(fmt != VFMT5_NONE);
-
-#ifdef DEBUG
-         /* see
-          * dEQP-GLES31.stress.vertex_attribute_binding.buffer_bounds.bind_vertex_buffer_offset_near_wrap_10
-          */
-         if (off > fd_bo_size(rsc->bo))
-            continue;
-#endif
+         uint32_t size = vb->buffer.resource->width0 - off;
+         assert(fmt != VFMT5_NONE);
 
          OUT_PKT4(ring, REG_A5XX_VFD_FETCH(j), 4);
          OUT_RELOC(ring, rsc->bo, off, 0, 0);
@@ -627,15 +607,15 @@ fd5_emit_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
       OUT_PKT4(ring, REG_A5XX_GRAS_SC_SCREEN_SCISSOR_TL_0, 2);
       OUT_RING(ring, A5XX_GRAS_SC_SCREEN_SCISSOR_TL_0_X(scissor->minx) |
                         A5XX_GRAS_SC_SCREEN_SCISSOR_TL_0_Y(scissor->miny));
-      OUT_RING(ring, A5XX_GRAS_SC_SCREEN_SCISSOR_TL_0_X(scissor->maxx - 1) |
-                        A5XX_GRAS_SC_SCREEN_SCISSOR_TL_0_Y(scissor->maxy - 1));
+      OUT_RING(ring, A5XX_GRAS_SC_SCREEN_SCISSOR_TL_0_X(scissor->maxx) |
+                        A5XX_GRAS_SC_SCREEN_SCISSOR_TL_0_Y(scissor->maxy));
 
       OUT_PKT4(ring, REG_A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0, 2);
       OUT_RING(ring, A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_X(scissor->minx) |
                         A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_Y(scissor->miny));
       OUT_RING(ring,
-               A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_X(scissor->maxx - 1) |
-                  A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_Y(scissor->maxy - 1));
+               A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_X(scissor->maxx) |
+                  A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_Y(scissor->maxy));
 
       ctx->batch->max_scissor.minx =
          MIN2(ctx->batch->max_scissor.minx, scissor->minx);
@@ -648,17 +628,20 @@ fd5_emit_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
    }
 
    if (dirty & FD_DIRTY_VIEWPORT) {
+      struct pipe_viewport_state *vp = & ctx->viewport[0];
+
       fd_wfi(ctx->batch, ring);
+
       OUT_PKT4(ring, REG_A5XX_GRAS_CL_VPORT_XOFFSET_0, 6);
-      OUT_RING(ring, A5XX_GRAS_CL_VPORT_XOFFSET_0(ctx->viewport.translate[0]));
-      OUT_RING(ring, A5XX_GRAS_CL_VPORT_XSCALE_0(ctx->viewport.scale[0]));
-      OUT_RING(ring, A5XX_GRAS_CL_VPORT_YOFFSET_0(ctx->viewport.translate[1]));
-      OUT_RING(ring, A5XX_GRAS_CL_VPORT_YSCALE_0(ctx->viewport.scale[1]));
-      OUT_RING(ring, A5XX_GRAS_CL_VPORT_ZOFFSET_0(ctx->viewport.translate[2]));
-      OUT_RING(ring, A5XX_GRAS_CL_VPORT_ZSCALE_0(ctx->viewport.scale[2]));
+      OUT_RING(ring, A5XX_GRAS_CL_VPORT_XOFFSET_0(vp->translate[0]));
+      OUT_RING(ring, A5XX_GRAS_CL_VPORT_XSCALE_0(vp->scale[0]));
+      OUT_RING(ring, A5XX_GRAS_CL_VPORT_YOFFSET_0(vp->translate[1]));
+      OUT_RING(ring, A5XX_GRAS_CL_VPORT_YSCALE_0(vp->scale[1]));
+      OUT_RING(ring, A5XX_GRAS_CL_VPORT_ZOFFSET_0(vp->translate[2]));
+      OUT_RING(ring, A5XX_GRAS_CL_VPORT_ZSCALE_0(vp->scale[2]));
    }
 
-   if (dirty & (FD_DIRTY_PROG | FD_DIRTY_RASTERIZER_CLIP_PLANE_ENABLE))
+   if (dirty & FD_DIRTY_PROG)
       fd5_program_emit(ctx, ring, emit);
 
    if (dirty & FD_DIRTY_RASTERIZER) {
@@ -731,7 +714,7 @@ fd5_emit_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
    if (!emit->binning_pass)
       ir3_emit_fs_consts(fp, ring, ctx);
 
-   struct ir3_stream_output_info *info = &vp->shader->stream_output;
+   const struct ir3_stream_output_info *info = &vp->stream_output;
    if (info->num_outputs) {
       struct fd_streamout_stateobj *so = &ctx->streamout;
 
@@ -835,20 +818,20 @@ fd5_emit_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
 
       OUT_PKT4(ring, REG_A5XX_RB_BLEND_RED, 8);
       OUT_RING(ring, A5XX_RB_BLEND_RED_FLOAT(bcolor->color[0]) |
-                        A5XX_RB_BLEND_RED_UINT(bcolor->color[0] * 0xff) |
-                        A5XX_RB_BLEND_RED_SINT(bcolor->color[0] * 0x7f));
+                        A5XX_RB_BLEND_RED_UINT(CLAMP(bcolor->color[0], 0.f, 1.f) * 0xff) |
+                        A5XX_RB_BLEND_RED_SINT(CLAMP(bcolor->color[0], -1.f, 1.f) * 0x7f));
       OUT_RING(ring, A5XX_RB_BLEND_RED_F32(bcolor->color[0]));
       OUT_RING(ring, A5XX_RB_BLEND_GREEN_FLOAT(bcolor->color[1]) |
-                        A5XX_RB_BLEND_GREEN_UINT(bcolor->color[1] * 0xff) |
-                        A5XX_RB_BLEND_GREEN_SINT(bcolor->color[1] * 0x7f));
+                        A5XX_RB_BLEND_GREEN_UINT(CLAMP(bcolor->color[1], 0.f, 1.f) * 0xff) |
+                        A5XX_RB_BLEND_GREEN_SINT(CLAMP(bcolor->color[1], -1.f, 1.f) * 0x7f));
       OUT_RING(ring, A5XX_RB_BLEND_RED_F32(bcolor->color[1]));
       OUT_RING(ring, A5XX_RB_BLEND_BLUE_FLOAT(bcolor->color[2]) |
-                        A5XX_RB_BLEND_BLUE_UINT(bcolor->color[2] * 0xff) |
-                        A5XX_RB_BLEND_BLUE_SINT(bcolor->color[2] * 0x7f));
+                        A5XX_RB_BLEND_BLUE_UINT(CLAMP(bcolor->color[2], 0.f, 1.f) * 0xff) |
+                        A5XX_RB_BLEND_BLUE_SINT(CLAMP(bcolor->color[2], -1.f, 1.f) * 0x7f));
       OUT_RING(ring, A5XX_RB_BLEND_BLUE_F32(bcolor->color[2]));
       OUT_RING(ring, A5XX_RB_BLEND_ALPHA_FLOAT(bcolor->color[3]) |
-                        A5XX_RB_BLEND_ALPHA_UINT(bcolor->color[3] * 0xff) |
-                        A5XX_RB_BLEND_ALPHA_SINT(bcolor->color[3] * 0x7f));
+                        A5XX_RB_BLEND_ALPHA_UINT(CLAMP(bcolor->color[3], 0.f, 1.f) * 0xff) |
+                        A5XX_RB_BLEND_ALPHA_SINT(CLAMP(bcolor->color[3], -1.f, 1.f) * 0x7f));
       OUT_RING(ring, A5XX_RB_BLEND_ALPHA_F32(bcolor->color[3]));
    }
 
@@ -959,9 +942,9 @@ fd5_emit_restore(struct fd_batch *batch, struct fd_ringbuffer *ring)
    OUT_RING(ring, 0x00000012);
 
    OUT_PKT4(ring, REG_A5XX_GRAS_SU_POINT_MINMAX, 2);
-   OUT_RING(ring, A5XX_GRAS_SU_POINT_MINMAX_MIN(1.0) |
-                     A5XX_GRAS_SU_POINT_MINMAX_MAX(4092.0));
-   OUT_RING(ring, A5XX_GRAS_SU_POINT_SIZE(0.5));
+   OUT_RING(ring, A5XX_GRAS_SU_POINT_MINMAX_MIN(1.0f) |
+                     A5XX_GRAS_SU_POINT_MINMAX_MAX(4092.0f));
+   OUT_RING(ring, A5XX_GRAS_SU_POINT_SIZE(0.5f));
 
    OUT_PKT4(ring, REG_A5XX_GRAS_SU_CONSERVATIVE_RAS_CNTL, 1);
    OUT_RING(ring, 0x00000000); /* GRAS_SU_CONSERVATIVE_RAS_CNTL */

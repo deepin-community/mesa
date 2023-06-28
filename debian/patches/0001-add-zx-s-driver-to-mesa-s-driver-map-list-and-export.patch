@@ -16,15 +16,13 @@ diff --git a/include/pci_ids/zx_pci_ids.h b/include/pci_ids/zx_pci_ids.h
 new file mode 100644
 index 00000000000..ca02a64ad45
 --- /dev/null
-+++ b/include/pci_ids/zx_pci_ids.h
++++ mesa-23.1.2/include/pci_ids/zx_pci_ids.h
 @@ -0,0 +1,2 @@
 +CHIPSET(0x3A03, Exc)
 +CHIPSET(0x3A04, Exc)
-diff --git a/src/loader/loader.c b/src/loader/loader.c
-index 58727155075..044ea85a21f 100644
---- a/src/loader/loader.c
-+++ b/src/loader/loader.c
-@@ -67,6 +67,8 @@
+--- mesa-23.1.2.orig/src/loader/loader.c
++++ mesa-23.1.2/src/loader/loader.c
+@@ -70,6 +70,8 @@
  #define PATH_MAX 4096
  #endif
  
@@ -33,8 +31,8 @@ index 58727155075..044ea85a21f 100644
  static void default_logger(int level, const char *fmt, ...)
  {
     if (level <= _LOADER_WARNING) {
-@@ -429,6 +431,18 @@ loader_get_device_name_for_fd(int fd)
-    return result;
+@@ -80,6 +82,18 @@ static void default_logger(int level, co
+    }
  }
  
 +void zx_print_driver_map_list(void)
@@ -49,14 +47,12 @@ index 58727155075..044ea85a21f 100644
 +   }
 +}
 +
- static char *
- loader_get_pci_driver(int fd)
- {
-diff --git a/src/loader/pci_id_driver_map.h b/src/loader/pci_id_driver_map.h
-index d75b2cc3dbc..b41101fbc29 100644
---- a/src/loader/pci_id_driver_map.h
-+++ b/src/loader/pci_id_driver_map.h
-@@ -68,6 +68,12 @@ static const int vmwgfx_chip_ids[] = {
+ static loader_logger *log_ = default_logger;
+ 
+ int
+--- mesa-23.1.2.orig/src/loader/pci_id_driver_map.h
++++ mesa-23.1.2/src/loader/pci_id_driver_map.h
+@@ -44,6 +44,12 @@ static const int vmwgfx_chip_ids[] = {
  #undef CHIPSET
  };
  
@@ -66,10 +62,10 @@ index d75b2cc3dbc..b41101fbc29 100644
 +#undef CHIPSET
 +};
 +
- bool is_nouveau_vieux(int fd);
- bool is_kernel_i915(int fd);
+ bool iris_predicate(int fd);
  
-@@ -92,6 +98,7 @@ static const struct {
+ static const struct {
+@@ -62,6 +68,7 @@ static const struct {
     { 0x10de, "nouveau", NULL, -1, },
     { 0x1af4, "virtio_gpu", virtio_gpu_chip_ids, ARRAY_SIZE(virtio_gpu_chip_ids) },
     { 0x15ad, "vmwgfx", vmwgfx_chip_ids, ARRAY_SIZE(vmwgfx_chip_ids) },
@@ -77,6 +73,4 @@ index d75b2cc3dbc..b41101fbc29 100644
  };
  
  #endif /* _PCI_ID_DRIVER_MAP_H_ */
--- 
-2.20.1
 

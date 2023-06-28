@@ -42,7 +42,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "c99_compat.h"
 #include "util/compiler.h"
 #include "util/macros.h"
 #include "util/format/u_format.h"
@@ -71,7 +70,7 @@ struct brw_image_param;
 #endif
 
 #ifndef ISL_DEV_IS_G4X
-#define ISL_DEV_IS_G4X(__dev) ((__dev)->info->is_g4x)
+#define ISL_DEV_IS_G4X(__dev) ((__dev)->info->platform == INTEL_PLATFORM_G4X)
 #endif
 
 #ifndef ISL_DEV_IS_HASWELL
@@ -81,11 +80,11 @@ struct brw_image_param;
  * You can define this as a compile-time constant in the CFLAGS. For example,
  * `gcc -DISL_GFX_VER(dev)=9 ...`.
  */
-#define ISL_DEV_IS_HASWELL(__dev) ((__dev)->info->is_haswell)
+#define ISL_DEV_IS_HASWELL(__dev) ((__dev)->info->platform == INTEL_PLATFORM_HSW)
 #endif
 
 #ifndef ISL_DEV_IS_BAYTRAIL
-#define ISL_DEV_IS_BAYTRAIL(__dev) ((__dev)->info->is_baytrail)
+#define ISL_DEV_IS_BAYTRAIL(__dev) ((__dev)->info->platform == INTEL_PLATFORM_BYT)
 #endif
 
 #ifndef ISL_DEV_USE_SEPARATE_STENCIL
@@ -385,6 +384,7 @@ enum isl_format {
 
    /* Formats for auxiliary surfaces */
    ISL_FORMAT_HIZ,
+   ISL_FORMAT_GFX125_HIZ,
    ISL_FORMAT_MCS_2X,
    ISL_FORMAT_MCS_4X,
    ISL_FORMAT_MCS_8X,
@@ -1114,6 +1114,8 @@ typedef uint64_t isl_surf_usage_flags_t;
 #define ISL_SURF_USAGE_INDEX_BUFFER_BIT        (1u << 12)
 #define ISL_SURF_USAGE_CONSTANT_BUFFER_BIT     (1u << 13)
 #define ISL_SURF_USAGE_STAGING_BIT             (1u << 14)
+#define ISL_SURF_USAGE_CPB_BIT                 (1u << 15)
+#define ISL_SURF_USAGE_PROTECTED_BIT           (1u << 16)
 /** @} */
 
 /**
@@ -1160,7 +1162,7 @@ typedef uint32_t isl_sample_count_mask_t;
  */
 enum isl_msaa_layout {
    /**
-    * @brief Suface is single-sampled.
+    * @brief Surface is single-sampled.
     */
    ISL_MSAA_LAYOUT_NONE,
 
@@ -1229,6 +1231,12 @@ typedef enum {
   ISL_MEMCPY_INVALID,
 } isl_memcpy_type;
 
+struct isl_surf_fill_state_info;
+struct isl_buffer_fill_state_info;
+struct isl_depth_stencil_hiz_emit_info;
+struct isl_null_fill_state_info;
+struct isl_cpb_emit_info;
+
 struct isl_device {
    const struct intel_device_info *info;
    bool use_separate_stencil;
@@ -1268,11 +1276,39 @@ struct isl_device {
       uint8_t hiz_offset;
    } ds;
 
+   /**
+    * Describes the layout of the coarse pixel control commands as emitted by
+    * isl_emit_cpb_control.
+    */
+   struct {
+      uint8_t size;
+      uint8_t offset;
+   } cpb;
+
    struct {
       uint32_t internal;
       uint32_t external;
       uint32_t l1_hdc_l3_llc;
+      uint32_t blitter_src;
+      uint32_t blitter_dst;
+      /* Protected is an additional bit on top of the existing entry index. */
+      uint32_t protected_mask;
    } mocs;
+
+   void (*surf_fill_state_s)(const struct isl_device *dev, void *state,
+                             const struct isl_surf_fill_state_info *restrict info);
+
+   void (*buffer_fill_state_s)(const struct isl_device *dev, void *state,
+                               const struct isl_buffer_fill_state_info *restrict info);
+
+   void (*emit_depth_stencil_hiz_s)(const struct isl_device *dev, void *batch,
+                                    const struct isl_depth_stencil_hiz_emit_info *restrict info);
+
+   void (*null_fill_state_s)(const struct isl_device *dev, void *state,
+                             const struct isl_null_fill_state_info *restrict info);
+
+   void (*emit_cpb_control_s)(const struct isl_device *dev, void *batch,
+                              const struct isl_cpb_emit_info *restrict info);
 };
 
 struct isl_extent2d {
@@ -1377,7 +1413,7 @@ struct isl_tile_info {
    /**
     * The physical size of the tile in bytes and rows of bytes
     *
-    * This field determines how the tiles of a surface are physically layed
+    * This field determines how the tiles of a surface are physically laid
     * out in memory.  The logical and physical tile extent are frequently the
     * same but this is not always the case.  For instance, a W-tile (which is
     * always used with ISL_FORMAT_R8) has a logical size of 64el x 64el but
@@ -1596,6 +1632,14 @@ struct isl_view {
     */
    uint32_t array_len;
 
+   /**
+    * Minimum LOD
+    *
+    * Similar to sampler minimum LOD, the computed LOD is clamped to be at
+    * least min_lod_clamp.
+    */
+   float min_lod_clamp;
+
    struct isl_swizzle swizzle;
 };
 
@@ -1622,11 +1666,18 @@ struct isl_surf_fill_state_info {
    uint32_t mocs;
 
    /**
-    * The auxilary surface or NULL if no auxilary surface is to be used.
+    * The auxiliary surface or NULL if no auxiliary surface is to be used.
     */
    const struct isl_surf *aux_surf;
    enum isl_aux_usage aux_usage;
    uint64_t aux_address;
+
+   /**
+    * The format to use for decoding media compression.
+    *
+    * Used together with the surface format.
+    */
+   enum isl_format mc_format;
 
    /**
     * The clear color for this surface
@@ -1656,6 +1707,13 @@ struct isl_surf_fill_state_info {
 
    /* Intra-tile offset */
    uint16_t x_offset_sa, y_offset_sa;
+
+   /**
+    * Robust image access enabled
+    *
+    * This is used to turn off a performance workaround.
+    */
+   bool robust_image_access;
 };
 
 struct isl_buffer_fill_state_info {
@@ -1760,14 +1818,35 @@ struct isl_null_fill_state_info {
    uint32_t minimum_array_element;
 };
 
+struct isl_cpb_emit_info {
+   /**
+    * The coarse pixel shading control surface.
+    */
+   const struct isl_surf *surf;
+
+   /**
+    * The view into the control surface.
+    */
+   const struct isl_view *view;
+
+   /**
+    * The address of the control surface in GPU memory.
+    */
+   uint64_t address;
+
+   /**
+    * The Memory Object Control state for the surface.
+    */
+   uint32_t mocs;
+};
+
 extern const struct isl_format_layout isl_format_layouts[];
 extern const char isl_format_names[];
 extern const uint16_t isl_format_name_offsets[];
 
 void
 isl_device_init(struct isl_device *dev,
-                const struct intel_device_info *info,
-                bool has_bit6_swizzling);
+                const struct intel_device_info *info);
 
 isl_sample_count_mask_t ATTRIBUTE_CONST
 isl_device_get_sample_counts(struct isl_device *dev);
@@ -1793,6 +1872,12 @@ isl_format_get_name(enum isl_format fmt)
    return isl_format_names + isl_format_name_offsets[fmt];
 }
 
+static inline const char * ATTRIBUTE_CONST
+isl_format_get_short_name(enum isl_format fmt)
+{
+   return isl_format_get_name(fmt) + 11 /* ISL_FORMAT_ */;
+}
+
 enum isl_format isl_format_for_pipe_format(enum pipe_format pf);
 
 bool isl_format_supports_rendering(const struct intel_device_info *devinfo,
@@ -1815,12 +1900,17 @@ bool isl_format_supports_ccs_e(const struct intel_device_info *devinfo,
                                enum isl_format format);
 bool isl_format_supports_multisampling(const struct intel_device_info *devinfo,
                                        enum isl_format format);
+bool isl_format_supports_typed_atomics(const struct intel_device_info *devinfo,
+                                       enum isl_format fmt);
 
 bool isl_formats_are_ccs_e_compatible(const struct intel_device_info *devinfo,
                                       enum isl_format format1,
                                       enum isl_format format2);
 uint8_t isl_format_get_aux_map_encoding(enum isl_format format);
 uint8_t isl_get_render_compression_format(enum isl_format format);
+
+bool isl_formats_have_same_bits_per_channel(enum isl_format format1,
+                                            enum isl_format format2);
 
 bool isl_format_has_unorm_channel(enum isl_format fmt) ATTRIBUTE_CONST;
 bool isl_format_has_snorm_channel(enum isl_format fmt) ATTRIBUTE_CONST;
@@ -1902,6 +1992,14 @@ isl_format_is_mcs(enum isl_format fmt)
 }
 
 static inline bool
+isl_format_is_hiz(enum isl_format fmt)
+{
+   const struct isl_format_layout *fmtl = isl_format_get_layout(fmt);
+
+   return fmtl->txc == ISL_TXC_HIZ;
+}
+
+static inline bool
 isl_format_is_planar(enum isl_format fmt)
 {
    return fmt == ISL_FORMAT_PLANAR_420_8 ||
@@ -1965,6 +2063,11 @@ enum isl_format isl_format_rgb_to_rgbx(enum isl_format rgb) ATTRIBUTE_CONST;
 enum isl_format isl_format_rgbx_to_rgba(enum isl_format rgb) ATTRIBUTE_CONST;
 
 union isl_color_value
+isl_color_value_swizzle(union isl_color_value src,
+                        struct isl_swizzle swizzle,
+                        bool is_float);
+
+union isl_color_value
 isl_color_value_swizzle_inv(union isl_color_value src,
                             struct isl_swizzle swizzle);
 
@@ -1975,7 +2078,8 @@ void isl_color_value_unpack(union isl_color_value *value,
                             enum isl_format format,
                             const uint32_t *data_in);
 
-bool isl_is_storage_image_format(enum isl_format fmt);
+bool isl_is_storage_image_format(const struct intel_device_info *devinfo,
+                                 enum isl_format fmt);
 
 enum isl_format
 isl_lower_storage_image_format(const struct intel_device_info *devinfo,
@@ -2018,7 +2122,7 @@ isl_tiling_is_std_y(enum isl_tiling tiling)
 uint32_t
 isl_tiling_to_i915_tiling(enum isl_tiling tiling);
 
-enum isl_tiling 
+enum isl_tiling
 isl_tiling_from_i915_tiling(uint32_t tiling);
 
 /**
@@ -2220,6 +2324,12 @@ isl_surf_usage_is_depth_or_stencil(isl_surf_usage_flags_t usage)
 }
 
 static inline bool
+isl_surf_usage_is_cpb(isl_surf_usage_flags_t usage)
+{
+   return usage & ISL_SURF_USAGE_CPB_BIT;
+}
+
+static inline bool
 isl_surf_info_is_z16(const struct isl_surf_init_info *info)
 {
    return (info->usage & ISL_SURF_USAGE_DEPTH_BIT) &&
@@ -2283,6 +2393,22 @@ isl_swizzle_is_identity(struct isl_swizzle swizzle)
           swizzle.g == ISL_CHANNEL_SELECT_GREEN &&
           swizzle.b == ISL_CHANNEL_SELECT_BLUE &&
           swizzle.a == ISL_CHANNEL_SELECT_ALPHA;
+}
+
+static inline bool
+isl_swizzle_is_identity_for_format(enum isl_format format,
+                                   struct isl_swizzle swizzle)
+{
+   const struct isl_format_layout *layout = isl_format_get_layout(format);
+
+#define channel_id_or_zero(name, ID)                 \
+   (swizzle.name == ISL_CHANNEL_SELECT_##ID ||       \
+    layout->channels.name.bits == 0)
+   return channel_id_or_zero(r, RED) &&
+          channel_id_or_zero(g, GREEN) &&
+          channel_id_or_zero(b, BLUE) &&
+          channel_id_or_zero(a, ALPHA);
+#undef channel_id_or_zero
 }
 
 bool
@@ -2375,36 +2501,35 @@ isl_surf_get_ccs_surf(const struct isl_device *dev,
                       uint32_t row_pitch_B);
 
 #define isl_surf_fill_state(dev, state, ...) \
-   isl_surf_fill_state_s((dev), (state), \
+   (dev)->surf_fill_state_s(dev, state, \
                          &(struct isl_surf_fill_state_info) {  __VA_ARGS__ });
 
-void
-isl_surf_fill_state_s(const struct isl_device *dev, void *state,
-                      const struct isl_surf_fill_state_info *restrict info);
+#define isl_surf_fill_state_s(dev, state, info) \
+   (dev)->surf_fill_state_s(dev, state, info)
 
 #define isl_buffer_fill_state(dev, state, ...) \
-   isl_buffer_fill_state_s((dev), (state), \
-                           &(struct isl_buffer_fill_state_info) {  __VA_ARGS__ });
+   (dev)->buffer_fill_state_s(dev, state, \
+                              &(struct isl_buffer_fill_state_info) {  __VA_ARGS__ });
 
-void
-isl_buffer_fill_state_s(const struct isl_device *dev, void *state,
-                        const struct isl_buffer_fill_state_info *restrict info);
-
-void
-isl_null_fill_state_s(const struct isl_device *dev, void *state,
-                      const struct isl_null_fill_state_info *restrict info);
+#define isl_buffer_fill_state_s(dev, state, info) \
+   (dev)->buffer_fill_state_s(dev, state, info);
 
 #define isl_null_fill_state(dev, state, ...) \
-   isl_null_fill_state_s((dev), (state), \
-                           &(struct isl_null_fill_state_info) {  __VA_ARGS__ });
+   (dev)->null_fill_state_s(dev, state, \
+                            &(struct isl_null_fill_state_info) {  __VA_ARGS__ });
+
+#define isl_null_fill_state_s(dev, state, info) \
+   (dev)->null_fill_state_s(dev, state, info);
 
 #define isl_emit_depth_stencil_hiz(dev, batch, ...) \
-   isl_emit_depth_stencil_hiz_s((dev), (batch), \
-                                &(struct isl_depth_stencil_hiz_emit_info) {  __VA_ARGS__ })
+   (dev)->emit_depth_stencil_hiz_s(dev, batch, \
+                                   &(struct isl_depth_stencil_hiz_emit_info) {  __VA_ARGS__ })
 
-void
-isl_emit_depth_stencil_hiz_s(const struct isl_device *dev, void *batch,
-                             const struct isl_depth_stencil_hiz_emit_info *restrict info);
+#define isl_emit_depth_stencil_hiz_s(dev, batch, info) \
+   (dev)->emit_depth_stencil_hiz_s(dev, batch, info)
+
+#define isl_emit_cpb_control_s(dev, batch, info) \
+   (dev)->emit_cpb_control_s(dev, batch, info)
 
 void
 isl_surf_fill_image_param(const struct isl_device *dev,
@@ -2867,6 +2992,10 @@ isl_get_tile_masks(enum isl_tiling tiling, uint32_t cpp,
    *mask_x = tile_w_bytes / cpp - 1;
    *mask_y = tile_h - 1;
 }
+
+const char *
+isl_aux_op_to_name(enum isl_aux_op op);
+
 #ifdef __cplusplus
 }
 #endif

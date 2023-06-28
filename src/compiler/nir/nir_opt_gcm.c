@@ -19,10 +19,6 @@
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
- *
- * Authors:
- *    Jason Ekstrand (jason@jlekstrand.net)
- *
  */
 
 #include "nir.h"
@@ -48,6 +44,9 @@
 struct gcm_block_info {
    /* Number of loops this block is inside */
    unsigned loop_depth;
+
+   /* Number of ifs this block is inside */
+   unsigned if_depth;
 
    unsigned loop_instr_count;
 
@@ -114,6 +113,7 @@ get_loop_instr_count(struct exec_list *cf_list)
       }
       case nir_cf_node_loop: {
          nir_loop *loop = nir_cf_node_as_loop(node);
+         assert(!nir_loop_has_continue_construct(loop));
          loop_instr_count += get_loop_instr_count(&loop->body);
          break;
       }
@@ -128,13 +128,14 @@ get_loop_instr_count(struct exec_list *cf_list)
 /* Recursively walks the CFG and builds the block_info structure */
 static void
 gcm_build_block_info(struct exec_list *cf_list, struct gcm_state *state,
-                     nir_loop *loop, unsigned loop_depth,
+                     nir_loop *loop, unsigned loop_depth, unsigned if_depth,
                      unsigned loop_instr_count)
 {
    foreach_list_typed(nir_cf_node, node, node, cf_list) {
       switch (node->type) {
       case nir_cf_node_block: {
          nir_block *block = nir_cf_node_as_block(node);
+         state->blocks[block->index].if_depth = if_depth;
          state->blocks[block->index].loop_depth = loop_depth;
          state->blocks[block->index].loop_instr_count = loop_instr_count;
          state->blocks[block->index].loop = loop;
@@ -142,13 +143,16 @@ gcm_build_block_info(struct exec_list *cf_list, struct gcm_state *state,
       }
       case nir_cf_node_if: {
          nir_if *if_stmt = nir_cf_node_as_if(node);
-         gcm_build_block_info(&if_stmt->then_list, state, loop, loop_depth, ~0u);
-         gcm_build_block_info(&if_stmt->else_list, state, loop, loop_depth, ~0u);
+         gcm_build_block_info(&if_stmt->then_list, state, loop, loop_depth,
+                              if_depth + 1, ~0u);
+         gcm_build_block_info(&if_stmt->else_list, state, loop, loop_depth,
+                              if_depth + 1, ~0u);
          break;
       }
       case nir_cf_node_loop: {
          nir_loop *loop = nir_cf_node_as_loop(node);
-         gcm_build_block_info(&loop->body, state, loop, loop_depth + 1,
+         assert(!nir_loop_has_continue_construct(loop));
+         gcm_build_block_info(&loop->body, state, loop, loop_depth + 1, if_depth,
                               get_loop_instr_count(&loop->body));
          break;
       }
@@ -223,14 +227,14 @@ is_src_scalarizable(nir_src *src)
 }
 
 static bool
-is_binding_dynamically_uniform(nir_src src)
+is_binding_uniform(nir_src src)
 {
    nir_binding binding = nir_chase_binding(src);
    if (!binding.success)
       return false;
 
    for (unsigned i = 0; i < binding.num_indices; i++) {
-      if (!nir_src_is_dynamically_uniform(binding.indices[i]))
+      if (!nir_src_is_always_uniform(binding.indices[i]))
          return false;
    }
 
@@ -265,10 +269,10 @@ pin_intrinsic(nir_intrinsic_instr *intrin)
           intrin->intrinsic == nir_intrinsic_deref_buffer_array_length) &&
          nir_deref_mode_may_be(nir_src_as_deref(intrin->src[0]),
                                nir_var_mem_ubo | nir_var_mem_ssbo)))) {
-      if (!is_binding_dynamically_uniform(intrin->src[0]))
+      if (!is_binding_uniform(intrin->src[0]))
          instr->pass_flags = GCM_INSTR_PINNED;
    } else if (intrin->intrinsic == nir_intrinsic_load_push_constant) {
-      if (!nir_src_is_dynamically_uniform(intrin->src[0]))
+      if (!nir_src_is_always_uniform(intrin->src[0]))
          instr->pass_flags = GCM_INSTR_PINNED;
    } else if (intrin->intrinsic == nir_intrinsic_load_deref &&
               nir_deref_mode_is(nir_src_as_deref(intrin->src[0]),
@@ -277,7 +281,7 @@ pin_intrinsic(nir_intrinsic_instr *intrin)
       while (deref->deref_type != nir_deref_type_var) {
          if ((deref->deref_type == nir_deref_type_array ||
               deref->deref_type == nir_deref_type_ptr_as_array) &&
-             !nir_src_is_dynamically_uniform(deref->arr.index)) {
+             !nir_src_is_always_uniform(deref->arr.index)) {
             instr->pass_flags = GCM_INSTR_PINNED;
             return;
          }
@@ -342,21 +346,21 @@ gcm_pin_instructions(nir_function_impl *impl, struct gcm_state *state)
                nir_tex_src *src = &tex->src[i];
                switch (src->src_type) {
                case nir_tex_src_texture_deref:
-                  if (!tex->texture_non_uniform && !is_binding_dynamically_uniform(src->src))
+                  if (!tex->texture_non_uniform && !is_binding_uniform(src->src))
                      instr->pass_flags = GCM_INSTR_PINNED;
                   break;
                case nir_tex_src_sampler_deref:
-                  if (!tex->sampler_non_uniform && !is_binding_dynamically_uniform(src->src))
+                  if (!tex->sampler_non_uniform && !is_binding_uniform(src->src))
                      instr->pass_flags = GCM_INSTR_PINNED;
                   break;
                case nir_tex_src_texture_offset:
                case nir_tex_src_texture_handle:
-                  if (!tex->texture_non_uniform && !nir_src_is_dynamically_uniform(src->src))
+                  if (!tex->texture_non_uniform && !nir_src_is_always_uniform(src->src))
                      instr->pass_flags = GCM_INSTR_PINNED;
                   break;
                case nir_tex_src_sampler_offset:
                case nir_tex_src_sampler_handle:
-                  if (!tex->sampler_non_uniform && !nir_src_is_dynamically_uniform(src->src))
+                  if (!tex->sampler_non_uniform && !nir_src_is_always_uniform(src->src))
                      instr->pass_flags = GCM_INSTR_PINNED;
                   break;
                default:
@@ -373,6 +377,10 @@ gcm_pin_instructions(nir_function_impl *impl, struct gcm_state *state)
 
          case nir_instr_type_intrinsic:
             pin_intrinsic(nir_instr_as_intrinsic(instr));
+            break;
+
+         case nir_instr_type_call:
+            instr->pass_flags = GCM_INSTR_PINNED;
             break;
 
          case nir_instr_type_jump:
@@ -493,6 +501,7 @@ set_block_for_loop_instr(struct gcm_state *state, nir_instr *instr,
    if (loop == NULL)
       return true;
 
+   assert(!nir_loop_has_continue_construct(loop));
    if (nir_block_dominates(instr->block, block))
       return true;
 
@@ -528,20 +537,72 @@ set_block_for_loop_instr(struct gcm_state *state, nir_instr *instr,
    return false;
 }
 
+static bool
+set_block_to_if_block(struct gcm_state *state,  nir_instr *instr,
+                      nir_block *block)
+{
+   if (instr->type == nir_instr_type_load_const)
+      return true;
+
+   /* TODO: Figure out some more heuristics to allow more to be moved into
+    * if-statements.
+    */
+
+   return false;
+}
+
 static nir_block *
 gcm_choose_block_for_instr(nir_instr *instr, nir_block *early_block,
                            nir_block *late_block, struct gcm_state *state)
 {
    assert(nir_block_dominates(early_block, late_block));
 
+   bool block_set = false;
+
+   /* First see if we can push the instruction down into an if-statements block */
    nir_block *best = late_block;
    for (nir_block *block = late_block; block != NULL; block = block->imm_dom) {
+      if (state->blocks[block->index].loop_depth >
+          state->blocks[instr->block->index].loop_depth)
+         continue;
+
+      if (state->blocks[block->index].if_depth >=
+          state->blocks[best->index].if_depth &&
+          set_block_to_if_block(state, instr, block)) {
+            /* If we are pushing the instruction into an if we want it to be
+             * in the earliest block not the latest to avoid creating register
+             * pressure issues. So we don't break unless we come across the
+             * block the instruction was originally in.
+             */
+            best = block;
+            block_set = true;
+            if (block == instr->block)
+               break;
+      } else if (block == instr->block) {
+         /* If we couldn't push the instruction later just put is back where it
+          * was previously.
+          */
+         if (!block_set)
+            best = block;
+         break;
+      }
+
+      if (block == early_block)
+         break;
+   }
+
+   /* Now see if we can evict the instruction from a loop */
+   for (nir_block *block = late_block; block != NULL; block = block->imm_dom) {
       if (state->blocks[block->index].loop_depth <
-          state->blocks[best->index].loop_depth &&
-          set_block_for_loop_instr(state, instr, block))
-         best = block;
-      else if (block == instr->block)
-         best = block;
+          state->blocks[best->index].loop_depth) {
+         if (set_block_for_loop_instr(state, instr, block)) {
+            best = block;
+         } else if (block == instr->block) {
+            if (!block_set)
+               best = block;
+            break;
+         }
+      }
 
       if (block == early_block)
          break;
@@ -729,13 +790,25 @@ gcm_place_instr(nir_instr *instr, struct gcm_state *state)
    block_info->last_instr = instr;
 }
 
+/**
+ * Are instructions a and b both contained in the same if/else block?
+ */
+static bool
+weak_gvn(const nir_instr *a, const nir_instr *b)
+{
+   const struct nir_cf_node *ap = a->block->cf_node.parent;
+   const struct nir_cf_node *bp = b->block->cf_node.parent;
+   return ap && ap == bp && ap->type == nir_cf_node_if;
+}
+
 static bool
 opt_gcm_impl(nir_shader *shader, nir_function_impl *impl, bool value_number)
 {
    nir_metadata_require(impl, nir_metadata_block_index |
                               nir_metadata_dominance);
    nir_metadata_require(impl, nir_metadata_loop_analysis,
-                        shader->options->force_indirect_unrolling);
+                        shader->options->force_indirect_unrolling,
+                        shader->options->force_indirect_unrolling_sampler);
 
    /* A previous pass may have left pass_flags dirty, so clear it all out. */
    nir_foreach_block(block, impl)
@@ -750,24 +823,33 @@ opt_gcm_impl(nir_shader *shader, nir_function_impl *impl, bool value_number)
    exec_list_make_empty(&state.instrs);
    state.blocks = rzalloc_array(NULL, struct gcm_block_info, impl->num_blocks);
 
-   gcm_build_block_info(&impl->body, &state, NULL, 0, ~0u);
+   gcm_build_block_info(&impl->body, &state, NULL, 0, 0, ~0u);
 
    gcm_pin_instructions(impl, &state);
 
    state.instr_infos =
       rzalloc_array(NULL, struct gcm_instr_info, state.num_instrs);
 
-   if (value_number) {
-      struct set *gvn_set = nir_instr_set_create(NULL);
-      foreach_list_typed_safe(nir_instr, instr, node, &state.instrs) {
-         if (instr->pass_flags & GCM_INSTR_PINNED)
-            continue;
+   /* Perform (at least some) Global Value Numbering (GVN).
+    *
+    * We perform full GVN when `value_number' is true.  This can be too
+    * aggressive, moving values far away and extending their live ranges,
+    * so we don't always want to do it.
+    *
+    * Otherwise, we perform 'weaker' GVN: if identical ALU instructions appear
+    * on both sides of the same if/else block, we allow them to be moved.
+    * This cleans up a lot of mess without being -too- aggressive.
+    */
+   struct set *gvn_set = nir_instr_set_create(NULL);
+   foreach_list_typed_safe(nir_instr, instr, node, &state.instrs) {
+      if (instr->pass_flags & GCM_INSTR_PINNED)
+         continue;
 
-         if (nir_instr_set_add_or_rewrite(gvn_set, instr, NULL))
-            state.progress = true;
-      }
-      nir_instr_set_destroy(gvn_set);
+      if (nir_instr_set_add_or_rewrite(gvn_set, instr,
+                                       value_number ? NULL : weak_gvn))
+         state.progress = true;
    }
+   nir_instr_set_destroy(gvn_set);
 
    foreach_list_typed(nir_instr, instr, node, &state.instrs)
       gcm_schedule_early_instr(instr, &state);

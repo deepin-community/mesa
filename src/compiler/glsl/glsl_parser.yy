@@ -32,7 +32,6 @@
 #include "ast.h"
 #include "glsl_parser_extras.h"
 #include "compiler/glsl_types.h"
-#include "main/context.h"
 #include "util/u_string.h"
 #include "util/format/u_format.h"
 
@@ -1439,10 +1438,10 @@ layout_qualifier_id:
                                 "valid in fragment shaders");
             }
 
-	    if (state->INTEL_conservative_rasterization_enable) {
-	       $$.flags.q.inner_coverage = 1;
-	    } else {
-	       _mesa_glsl_error(& @1, state,
+            if (state->INTEL_conservative_rasterization_enable) {
+               $$.flags.q.inner_coverage = 1;
+            } else {
+               _mesa_glsl_error(& @1, state,
                                 "inner_coverage layout qualifier present, "
                                 "but the INTEL_conservative_rasterization extension "
                                 "is not enabled.");
@@ -1457,7 +1456,7 @@ layout_qualifier_id:
             }
 
             if (state->ARB_post_depth_coverage_enable ||
-		state->INTEL_conservative_rasterization_enable) {
+                state->INTEL_conservative_rasterization_enable) {
                $$.flags.q.post_depth_coverage = 1;
             } else {
                _mesa_glsl_error(& @1, state,
@@ -3106,5 +3105,7 @@ layout_defaults:
       if (!state->out_qualifier->push_to_global(& @1, state)) {
          YYERROR;
       }
+
+      (void)yynerrs;
    }
    ;

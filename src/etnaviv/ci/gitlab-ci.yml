@@ -1,21 +1,24 @@
 .etnaviv-armhf-test:
   extends:
-    - .baremetal-test
-    - .use-debian/arm_test
+    - .baremetal-test-armhf
     - .etnaviv-rules
   script:
     - ./install/bare-metal/fastboot.sh
   variables:
     BM_CMDLINE: "ip=dhcp console=ttymxc0,115200n8 root=/dev/nfs rw nfsrootdebug init=/init $BM_KERNELARGS"
     BM_KERNEL: /baremetal-files/zImage
-    BM_ROOTFS: /rootfs-armhf
-    ETNA_MESA_DEBUG: nir
     FLAKES_CHANNEL: "#etnaviv-ci"
-    MINIO_ARTIFACT_NAME: mesa-armhf
-  needs:
-    - debian/arm_test
-    - job: debian-arm64
-      artifacts: false
+
+.etnaviv-arm64-test:
+  extends:
+    - .baremetal-test-arm64
+    - .etnaviv-rules
+  script:
+    - ./install/bare-metal/fastboot.sh
+  variables:
+    BM_CMDLINE: "ip=dhcp console=ttymxc0,115200n8 root=/dev/nfs rw nfsrootdebug init=/init $BM_KERNELARGS"
+    BM_KERNEL: /baremetal-files/Image
+    FLAKES_CHANNEL: "#etnaviv-ci"
 
 .etnaviv-armhf-gc2000:
   extends:
@@ -27,10 +30,38 @@
   tags:
     - etnaviv-gc2000
 
+.etnaviv-arm64-gc7000:
+  extends:
+    - .etnaviv-arm64-test
+  variables:
+    BM_DTB: /baremetal-files/imx8mq-nitrogen.dtb
+    DEQP_EXPECTED_RENDERER: GC7000
+    GPU_VERSION: "etnaviv-gc7000"
+  tags:
+    - austriancoder-etnaviv-imx8mq-nitrogen
+
 gc2000_gles2:
   extends:
     - .etnaviv-armhf-gc2000
-    - .test-manual-mr
+    - .etnaviv-manual-rules
+  variables:
+    HWCI_TEST_SCRIPT: "/install/deqp-runner.sh"
+    DEQP_VER: gles2
+
+gc2000_piglit:
+  extends:
+    - .piglit-test
+    - .etnaviv-armhf-gc2000
+    - .etnaviv-manual-rules
+  variables:
+    PIGLIT_PLATFORM: gbm
+    PIGLIT_PROFILES: gpu
+    TEST_PHASE_TIMEOUT: 40
+
+gc7000_gles2:
+  extends:
+    - .etnaviv-arm64-gc7000
+    - .etnaviv-manual-rules
   variables:
     HWCI_TEST_SCRIPT: "/install/deqp-runner.sh"
     DEQP_VER: gles2

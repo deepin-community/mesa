@@ -88,7 +88,7 @@ static void
 emit_stream_out(struct fd_ringbuffer *ring, const struct ir3_shader_variant *v,
                 struct ir3_shader_linkage *l)
 {
-   const struct ir3_stream_output_info *strmout = &v->shader->stream_output;
+   const struct ir3_stream_output_info *strmout = &v->stream_output;
    unsigned ncomp[PIPE_MAX_SO_BUFFERS] = {0};
    unsigned prog[align(l->max_loc, 2) / 2];
 
@@ -105,10 +105,10 @@ emit_stream_out(struct fd_ringbuffer *ring, const struct ir3_shader_variant *v,
        * a bit less ideal here..
        */
       for (idx = 0; idx < l->cnt; idx++)
-         if (l->var[idx].regid == v->outputs[k].regid)
+         if (l->var[idx].slot == v->outputs[k].slot)
             break;
 
-      debug_assert(idx < l->cnt);
+      assert(idx < l->cnt);
 
       for (unsigned j = 0; j < out->num_components; j++) {
          unsigned c = j + out->start_component;
@@ -249,12 +249,18 @@ fd5_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
 
    setup_stages(emit, s);
 
-   bool do_streamout = (s[VS].v->shader->stream_output.num_outputs > 0);
+   bool do_streamout = (s[VS].v->stream_output.num_outputs > 0);
    uint8_t clip_mask = s[VS].v->clip_mask,
            cull_mask = s[VS].v->cull_mask;
    uint8_t clip_cull_mask = clip_mask | cull_mask;
 
-   clip_mask &= ctx->rasterizer->clip_plane_enable;
+   /* Unlike a6xx, we don't factor the rasterizer's clip enables in here.  It's
+    * already handled by the frontend by storing 0.0 to the clipdist in the
+    * shader variant (using either nir_lower_clip_disable for clip distances
+    * from the source shader, or nir_lower_clip_vs for user clip planes).
+    * Masking the disabled clipdists off causes GPU hangs in tests like
+    * spec@glsl-1.20@execution@clipping@vs-clip-vertex-enables.
+    */
 
    fssz = (s[FS].i->double_threadsize) ? FOUR_QUADS : TWO_QUADS;
 
@@ -381,7 +387,14 @@ fd5_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
       ring,
       A5XX_SP_VS_CTRL_REG0_HALFREGFOOTPRINT(s[VS].i->max_half_reg + 1) |
          A5XX_SP_VS_CTRL_REG0_FULLREGFOOTPRINT(s[VS].i->max_reg + 1) |
-         0x6 | /* XXX seems to be always set? */
+         COND(s[VS].instrlen != 0, A5XX_SP_VS_CTRL_REG0_BUFFER) |
+         /* XXX: 0x2 is only unset in
+          * dEQP-GLES3.functional.ubo.single_nested_struct_array.single_buffer.packed_instance_array_vertex
+          * on a collection of blob traces.  That shader is 1091 instrs, 0
+          * half, 3 full, 108 constlen.  Other >1091 instr non-VS shaders don't
+          * unset it, so that's not the trick.
+          */
+         0x2 |
          A5XX_SP_VS_CTRL_REG0_BRANCHSTACK(ir3_shader_branchstack_hw(s[VS].v)) |
          COND(s[VS].v->need_pixlod, A5XX_SP_VS_CTRL_REG0_PIXLODENABLE));
 
@@ -411,11 +424,11 @@ fd5_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
 
    /* a5xx appends pos/psize to end of the linkage map: */
    if (VALIDREG(pos_regid))
-      ir3_link_add(&l, pos_regid, 0xf, l.max_loc);
+      ir3_link_add(&l, VARYING_SLOT_POS, pos_regid, 0xf, l.max_loc);
 
    if (VALIDREG(psize_regid)) {
       psize_loc = l.max_loc;
-      ir3_link_add(&l, psize_regid, 0x1, l.max_loc);
+      ir3_link_add(&l, VARYING_SLOT_PSIZ, psize_regid, 0x1, l.max_loc);
    }
 
    /* Handle the case where clip/cull distances aren't read by the FS. Make
@@ -425,13 +438,15 @@ fd5_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
    if (clip0_loc == 0xff && VALIDREG(clip0_regid) &&
        (clip_cull_mask & 0xf) != 0) {
       clip0_loc = l.max_loc;
-      ir3_link_add(&l, clip0_regid, clip_cull_mask & 0xf, l.max_loc);
+      ir3_link_add(&l, VARYING_SLOT_CLIP_DIST0, clip0_regid,
+                   clip_cull_mask & 0xf, l.max_loc);
    }
 
    if (clip1_loc == 0xff && VALIDREG(clip1_regid) &&
        (clip_cull_mask >> 4) != 0) {
       clip1_loc = l.max_loc;
-      ir3_link_add(&l, clip1_regid, clip_cull_mask >> 4, l.max_loc);
+      ir3_link_add(&l, VARYING_SLOT_CLIP_DIST1, clip1_regid,
+                   clip_cull_mask >> 4, l.max_loc);
    }
 
    /* If we have stream-out, we use the full shader for binning
@@ -509,7 +524,7 @@ fd5_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
    OUT_RING(ring, A5XX_HLSQ_CONTROL_2_REG_FACEREGID(face_regid) |
                      A5XX_HLSQ_CONTROL_2_REG_SAMPLEID(samp_id_regid) |
                      A5XX_HLSQ_CONTROL_2_REG_SAMPLEMASK(samp_mask_regid) |
-                     A5XX_HLSQ_CONTROL_2_REG_SIZE(ij_regid[IJ_PERSP_SIZE]));
+                     A5XX_HLSQ_CONTROL_2_REG_CENTERRHW(ij_regid[IJ_PERSP_CENTER_RHW]));
    OUT_RING(
       ring,
       A5XX_HLSQ_CONTROL_3_REG_IJ_PERSP_PIXEL(ij_regid[IJ_PERSP_PIXEL]) |
@@ -529,7 +544,8 @@ fd5_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
    OUT_RING(
       ring,
       COND(s[FS].v->total_in > 0, A5XX_SP_FS_CTRL_REG0_VARYING) |
-         0x40006 | /* XXX set pretty much everywhere */
+         0x40002 | /* XXX set pretty much everywhere */
+         COND(s[FS].instrlen != 0, A5XX_SP_FS_CTRL_REG0_BUFFER) |
          A5XX_SP_FS_CTRL_REG0_THREADSIZE(fssz) |
          A5XX_SP_FS_CTRL_REG0_HALFREGFOOTPRINT(s[FS].i->max_half_reg + 1) |
          A5XX_SP_FS_CTRL_REG0_FULLREGFOOTPRINT(s[FS].i->max_reg + 1) |

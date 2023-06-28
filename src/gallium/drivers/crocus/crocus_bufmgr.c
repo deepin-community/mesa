@@ -55,8 +55,7 @@
 #include "dev/intel_debug.h"
 #include "common/intel_gem.h"
 #include "dev/intel_device_info.h"
-#include "main/macros.h"
-#include "util/debug.h"
+#include "util/u_debug.h"
 #include "util/macros.h"
 #include "util/hash_table.h"
 #include "util/list.h"
@@ -100,7 +99,9 @@ get_time(void)
 #define VG_DEFINED(ptr, size) VG(VALGRIND_MAKE_MEM_DEFINED(ptr, size))
 #define VG_NOACCESS(ptr, size) VG(VALGRIND_MAKE_MEM_NOACCESS(ptr, size))
 
+#ifndef PAGE_SIZE
 #define PAGE_SIZE 4096
+#endif
 
 #define WARN_ONCE(cond, fmt...) do {                            \
    if (unlikely(cond)) {                                        \
@@ -165,7 +166,7 @@ struct crocus_bufmgr {
    bool bo_reuse:1;
 };
 
-static simple_mtx_t global_bufmgr_list_mutex = _SIMPLE_MTX_INITIALIZER_NP;
+static simple_mtx_t global_bufmgr_list_mutex = SIMPLE_MTX_INITIALIZER;
 static struct list_head global_bufmgr_list = {
    .next = &global_bufmgr_list,
    .prev = &global_bufmgr_list,
@@ -429,6 +430,9 @@ bo_alloc_internal(struct crocus_bufmgr *bufmgr,
    bo->cache_coherent = bufmgr->has_llc;
    bo->index = -1;
    bo->kflags = 0;
+
+   if (flags & BO_ALLOC_SCANOUT)
+      bo->scanout = 1;
 
    if ((flags & BO_ALLOC_COHERENT) && !bo->cache_coherent) {
       struct drm_i915_gem_caching arg = {
@@ -738,7 +742,7 @@ __crocus_bo_unreference(struct crocus_bo *bo)
 }
 
 static void
-bo_wait_with_stall_warning(struct pipe_debug_callback *dbg,
+bo_wait_with_stall_warning(struct util_debug_callback *dbg,
                            struct crocus_bo *bo,
                            const char *action)
 {
@@ -775,7 +779,7 @@ print_flags(unsigned flags)
 }
 
 static void *
-crocus_bo_gem_mmap_legacy(struct pipe_debug_callback *dbg,
+crocus_bo_gem_mmap_legacy(struct util_debug_callback *dbg,
                           struct crocus_bo *bo, bool wc)
 {
    struct crocus_bufmgr *bufmgr = bo->bufmgr;
@@ -798,7 +802,7 @@ crocus_bo_gem_mmap_legacy(struct pipe_debug_callback *dbg,
 }
 
 static void *
-crocus_bo_gem_mmap_offset(struct pipe_debug_callback *dbg, struct crocus_bo *bo,
+crocus_bo_gem_mmap_offset(struct util_debug_callback *dbg, struct crocus_bo *bo,
                           bool wc)
 {
    struct crocus_bufmgr *bufmgr = bo->bufmgr;
@@ -829,7 +833,7 @@ crocus_bo_gem_mmap_offset(struct pipe_debug_callback *dbg, struct crocus_bo *bo,
 }
 
 static void *
-crocus_bo_gem_mmap(struct pipe_debug_callback *dbg, struct crocus_bo *bo, bool wc)
+crocus_bo_gem_mmap(struct util_debug_callback *dbg, struct crocus_bo *bo, bool wc)
 {
    struct crocus_bufmgr *bufmgr = bo->bufmgr;
 
@@ -840,7 +844,7 @@ crocus_bo_gem_mmap(struct pipe_debug_callback *dbg, struct crocus_bo *bo, bool w
 }
 
 static void *
-crocus_bo_map_cpu(struct pipe_debug_callback *dbg,
+crocus_bo_map_cpu(struct util_debug_callback *dbg,
                   struct crocus_bo *bo, unsigned flags)
 {
    /* We disallow CPU maps for writing to non-coherent buffers, as the
@@ -898,7 +902,7 @@ crocus_bo_map_cpu(struct pipe_debug_callback *dbg,
 }
 
 static void *
-crocus_bo_map_wc(struct pipe_debug_callback *dbg,
+crocus_bo_map_wc(struct util_debug_callback *dbg,
                  struct crocus_bo *bo, unsigned flags)
 {
    if (!bo->map_wc) {
@@ -951,7 +955,7 @@ crocus_bo_map_wc(struct pipe_debug_callback *dbg,
  * tracking is handled on the buffer exchange instead.
  */
 static void *
-crocus_bo_map_gtt(struct pipe_debug_callback *dbg,
+crocus_bo_map_gtt(struct util_debug_callback *dbg,
                   struct crocus_bo *bo, unsigned flags)
 {
    struct crocus_bufmgr *bufmgr = bo->bufmgr;
@@ -1011,6 +1015,9 @@ crocus_bo_map_gtt(struct pipe_debug_callback *dbg,
 static bool
 can_map_cpu(struct crocus_bo *bo, unsigned flags)
 {
+   if (bo->scanout)
+      return false;
+
    if (bo->cache_coherent)
       return true;
 
@@ -1043,7 +1050,7 @@ can_map_cpu(struct crocus_bo *bo, unsigned flags)
 }
 
 void *
-crocus_bo_map(struct pipe_debug_callback *dbg,
+crocus_bo_map(struct util_debug_callback *dbg,
               struct crocus_bo *bo, unsigned flags)
 {
    if (bo->tiling_mode != I915_TILING_NONE && !(flags & MAP_RAW))
@@ -1365,7 +1372,7 @@ crocus_bo_export_dmabuf(struct crocus_bo *bo, int *prime_fd)
    crocus_bo_make_external(bo);
 
    if (drmPrimeHandleToFD(bufmgr->fd, bo->gem_handle,
-                          DRM_CLOEXEC, prime_fd) != 0)
+                          DRM_CLOEXEC | DRM_RDWR, prime_fd) != 0)
       return -errno;
 
    return 0;
@@ -1512,10 +1519,9 @@ init_cache_buckets(struct crocus_bufmgr *bufmgr)
 uint32_t
 crocus_create_hw_context(struct crocus_bufmgr *bufmgr)
 {
-   struct drm_i915_gem_context_create create = { };
-   int ret = intel_ioctl(bufmgr->fd, DRM_IOCTL_I915_GEM_CONTEXT_CREATE, &create);
-   if (ret != 0) {
-      DBG("DRM_IOCTL_I915_GEM_CONTEXT_CREATE failed: %s\n", strerror(errno));
+   uint32_t ctx_id;
+   if (!intel_gem_create_context(bufmgr->fd, &ctx_id)) {
+      DBG("intel_gem_create_context failed: %s\n", strerror(errno));
       return 0;
    }
 
@@ -1534,25 +1540,19 @@ crocus_create_hw_context(struct crocus_bufmgr *bufmgr)
     * context is lost, and we will do the recovery ourselves.  Ideally,
     * we'll have two lost batches instead of a continual stream of hangs.
     */
-   struct drm_i915_gem_context_param p = {
-      .ctx_id = create.ctx_id,
-      .param = I915_CONTEXT_PARAM_RECOVERABLE,
-      .value = false,
-   };
-   drmIoctl(bufmgr->fd, DRM_IOCTL_I915_GEM_CONTEXT_SETPARAM, &p);
+   intel_gem_set_context_param(bufmgr->fd, ctx_id,
+                               I915_CONTEXT_PARAM_RECOVERABLE, false);
 
-   return create.ctx_id;
+   return ctx_id;
 }
 
 static int
 crocus_hw_context_get_priority(struct crocus_bufmgr *bufmgr, uint32_t ctx_id)
 {
-   struct drm_i915_gem_context_param p = {
-      .ctx_id = ctx_id,
-      .param = I915_CONTEXT_PARAM_PRIORITY,
-   };
-   drmIoctl(bufmgr->fd, DRM_IOCTL_I915_GEM_CONTEXT_GETPARAM, &p);
-   return p.value; /* on error, return 0 i.e. default priority */
+   uint64_t priority = 0;
+   intel_gem_get_context_param(bufmgr->fd, ctx_id,
+                               I915_CONTEXT_PARAM_PRIORITY, &priority);
+   return priority; /* on error, return 0 i.e. default priority */
 }
 
 int
@@ -1560,15 +1560,9 @@ crocus_hw_context_set_priority(struct crocus_bufmgr *bufmgr,
                                uint32_t ctx_id,
                                int priority)
 {
-   struct drm_i915_gem_context_param p = {
-      .ctx_id = ctx_id,
-      .param = I915_CONTEXT_PARAM_PRIORITY,
-      .value = priority,
-   };
-   int err;
-
-   err = 0;
-   if (intel_ioctl(bufmgr->fd, DRM_IOCTL_I915_GEM_CONTEXT_SETPARAM, &p))
+   int err = 0;
+   if (!intel_gem_set_context_param(bufmgr->fd, ctx_id,
+                                    I915_CONTEXT_PARAM_PRIORITY, priority))
       err = -errno;
 
    return err;
@@ -1590,35 +1584,11 @@ crocus_clone_hw_context(struct crocus_bufmgr *bufmgr, uint32_t ctx_id)
 void
 crocus_destroy_hw_context(struct crocus_bufmgr *bufmgr, uint32_t ctx_id)
 {
-   struct drm_i915_gem_context_destroy d = { .ctx_id = ctx_id };
-
    if (ctx_id != 0 &&
-       intel_ioctl(bufmgr->fd, DRM_IOCTL_I915_GEM_CONTEXT_DESTROY, &d) != 0) {
+       !intel_gem_destroy_context(bufmgr->fd, ctx_id)) {
       fprintf(stderr, "DRM_IOCTL_I915_GEM_CONTEXT_DESTROY failed: %s\n",
               strerror(errno));
    }
-}
-
-int
-crocus_reg_read(struct crocus_bufmgr *bufmgr, uint32_t offset, uint64_t *result)
-{
-   struct drm_i915_reg_read reg_read = { .offset = offset };
-   int ret = intel_ioctl(bufmgr->fd, DRM_IOCTL_I915_REG_READ, &reg_read);
-
-   *result = reg_read.val;
-   return ret;
-}
-
-static int
-gem_param(int fd, int name)
-{
-   int v = -1; /* No param uses (yet) the sign bit, reserve it for errors */
-
-   struct drm_i915_getparam gp = { .param = name, .value = &v };
-   if (intel_ioctl(fd, DRM_IOCTL_I915_GETPARAM, &gp))
-      return -1;
-
-   return v;
 }
 
 /**
@@ -1654,7 +1624,7 @@ crocus_bufmgr_create(struct intel_device_info *devinfo, int fd, bool bo_reuse)
    bufmgr->has_llc = devinfo->has_llc;
    bufmgr->has_tiling_uapi = devinfo->has_tiling_uapi;
    bufmgr->bo_reuse = bo_reuse;
-   bufmgr->has_mmap_offset = gem_param(fd, I915_PARAM_MMAP_GTT_VERSION) >= 4;
+   bufmgr->has_mmap_offset = devinfo->has_mmap_offset;
 
    init_cache_buckets(bufmgr);
 

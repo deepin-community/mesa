@@ -22,6 +22,8 @@ inc_compiler = include_directories('.')
 inc_glsl = include_directories('glsl')
 inc_spirv = include_directories('spirv')
 
+float64_glsl_file = files('glsl/float64.glsl')
+
 files_libcompiler = files(
   'builtin_type_macros.h',
   'glsl_types.cpp',
@@ -71,34 +73,29 @@ spirv2nir = executable(
 
 if with_tests
   test(
-    'avail_vis',
+    'spirv_tests',
     executable(
-      'avail_vis',
-      files('spirv/tests/avail_vis.cpp'),
+      'spirv_tests',
+      files(
+        'spirv/tests/helpers.h',
+        'spirv/tests/avail_vis.cpp',
+        'spirv/tests/volatile.cpp',
+        'spirv/tests/control_flow_tests.cpp',
+      ),
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
       include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux],
       dependencies : [dep_thread, idep_gtest, idep_nir, idep_mesautil],
     ),
     suite : ['compiler', 'spirv'],
-  )
-
-  test(
-    'volatile',
-    executable(
-      'volatile',
-      files('spirv/tests/volatile.cpp'),
-      c_args : [c_msvc_compat_args, no_override_init_args],
-      gnu_symbol_visibility : 'hidden',
-      include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux],
-      dependencies : [dep_thread, idep_gtest, idep_nir, idep_mesautil],
-    ),
-    suite : ['compiler', 'spirv'],
+    protocol : 'gtest',
   )
 endif
 
 if with_clc
   subdir('clc')
 endif
-subdir('glsl')
+if with_gallium
+  subdir('glsl')
+endif
 subdir('isaspec')

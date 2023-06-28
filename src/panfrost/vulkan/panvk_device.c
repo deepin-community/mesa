@@ -28,38 +28,39 @@
 
 #include "panvk_private.h"
 
-#include "panfrost-quirks.h"
 #include "pan_bo.h"
 #include "pan_encoder.h"
 #include "pan_util.h"
+#include "vk_cmd_enqueue_entrypoints.h"
+#include "vk_common_entrypoints.h"
 
 #include <fcntl.h>
 #include <libsync.h>
 #include <stdbool.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <sys/sysinfo.h>
 #include <unistd.h>
 #include <xf86drm.h>
+#include <sys/mman.h>
+#include <sys/sysinfo.h>
 
 #include "drm-uapi/panfrost_drm.h"
 
-#include "util/debug.h"
 #include "util/disk_cache.h"
 #include "util/strtod.h"
+#include "util/u_debug.h"
+#include "vk_drm_syncobj.h"
 #include "vk_format.h"
 #include "vk_util.h"
 
 #ifdef VK_USE_PLATFORM_WAYLAND_KHR
-#include <wayland-client.h>
 #include "wayland-drm-client-protocol.h"
+#include <wayland-client.h>
 #endif
 
 #include "panvk_cs.h"
 
 VkResult
-_panvk_device_set_lost(struct panvk_device *device,
-                       const char *file, int line,
+_panvk_device_set_lost(struct panvk_device *device, const char *file, int line,
                        const char *msg, ...)
 {
    /* Set the flag indicating that waits should return in finite time even
@@ -74,7 +75,7 @@ _panvk_device_set_lost(struct panvk_device *device,
    vfprintf(stderr, msg, ap);
    va_end(ap);
 
-   if (env_var_as_boolean("PANVK_ABORT_ON_DEVICE_LOSS", false))
+   if (debug_get_bool_option("PANVK_ABORT_ON_DEVICE_LOSS", false))
       abort();
 
    return VK_ERROR_DEVICE_LOST;
@@ -92,8 +93,8 @@ panvk_device_get_cache_uuid(uint16_t family, void *uuid)
 
    memset(uuid, 0, VK_UUID_SIZE);
    memcpy(uuid, &mesa_timestamp, 4);
-   memcpy((char *) uuid + 4, &f, 2);
-   snprintf((char *) uuid + 6, VK_UUID_SIZE - 10, "pan");
+   memcpy((char *)uuid + 4, &f, 2);
+   snprintf((char *)uuid + 6, VK_UUID_SIZE - 10, "pan");
    return 0;
 }
 
@@ -111,29 +112,29 @@ panvk_get_device_uuid(void *uuid)
 }
 
 static const struct debug_control panvk_debug_options[] = {
-   { "startup", PANVK_DEBUG_STARTUP },
-   { "nir", PANVK_DEBUG_NIR },
-   { "trace", PANVK_DEBUG_TRACE },
-   { "sync", PANVK_DEBUG_SYNC },
-   { "afbc", PANVK_DEBUG_AFBC },
-   { "linear", PANVK_DEBUG_LINEAR },
-   { NULL, 0 }
-};
+   {"startup", PANVK_DEBUG_STARTUP}, {"nir", PANVK_DEBUG_NIR},
+   {"trace", PANVK_DEBUG_TRACE},     {"sync", PANVK_DEBUG_SYNC},
+   {"afbc", PANVK_DEBUG_AFBC},       {"linear", PANVK_DEBUG_LINEAR},
+   {"dump", PANVK_DEBUG_DUMP},       {NULL, 0}};
 
 #if defined(VK_USE_PLATFORM_WAYLAND_KHR)
 #define PANVK_USE_WSI_PLATFORM
 #endif
 
-#define PANVK_API_VERSION VK_MAKE_VERSION(1, 1, VK_HEADER_VERSION)
+#define PANVK_API_VERSION VK_MAKE_VERSION(1, 0, VK_HEADER_VERSION)
 
 VkResult
 panvk_EnumerateInstanceVersion(uint32_t *pApiVersion)
 {
-    *pApiVersion = PANVK_API_VERSION;
-    return VK_SUCCESS;
+   *pApiVersion = PANVK_API_VERSION;
+   return VK_SUCCESS;
 }
 
 static const struct vk_instance_extension_table panvk_instance_extensions = {
+   .KHR_get_physical_device_properties2 = true,
+   .EXT_debug_report = true,
+   .EXT_debug_utils = true,
+
 #ifdef PANVK_USE_WSI_PLATFORM
    .KHR_surface = true,
 #endif
@@ -146,61 +147,24 @@ static void
 panvk_get_device_extensions(const struct panvk_physical_device *device,
                             struct vk_device_extension_table *ext)
 {
-   *ext = (struct vk_device_extension_table) {
+   *ext = (struct vk_device_extension_table){
+      .KHR_copy_commands2 = true,
+      .KHR_storage_buffer_storage_class = true,
+      .KHR_descriptor_update_template = true,
 #ifdef PANVK_USE_WSI_PLATFORM
       .KHR_swapchain = true,
 #endif
+      .KHR_synchronization2 = true,
+      .KHR_variable_pointers = true,
       .EXT_custom_border_color = true,
+      .EXT_index_type_uint8 = true,
+      .EXT_vertex_attribute_divisor = true,
    };
 }
 
-VkResult
-panvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
-                     const VkAllocationCallbacks *pAllocator,
-                     VkInstance *pInstance)
-{
-   struct panvk_instance *instance;
-   VkResult result;
-
-   assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO);
-
-   pAllocator = pAllocator ? : vk_default_allocator();
-   instance = vk_zalloc(pAllocator, sizeof(*instance), 8,
-                        VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
-   if (!instance)
-      return vk_error(NULL, VK_ERROR_OUT_OF_HOST_MEMORY);
-
-   struct vk_instance_dispatch_table dispatch_table;
-
-   vk_instance_dispatch_table_from_entrypoints(&dispatch_table,
-                                               &panvk_instance_entrypoints,
-                                               true);
-   vk_instance_dispatch_table_from_entrypoints(&dispatch_table,
-                                               &wsi_instance_entrypoints,
-                                               false);
-   result = vk_instance_init(&instance->vk,
-                             &panvk_instance_extensions,
-                             &dispatch_table,
-                             pCreateInfo,
-                             pAllocator);
-   if (result != VK_SUCCESS) {
-      vk_free(pAllocator, instance);
-      return vk_error(NULL, result);
-   }
-
-   instance->physical_device_count = -1;
-   instance->debug_flags = parse_debug_string(getenv("PANVK_DEBUG"),
-                                              panvk_debug_options);
-
-   if (instance->debug_flags & PANVK_DEBUG_STARTUP)
-      panvk_logi("Created an instance");
-
-   VG(VALGRIND_CREATE_MEMPOOL(instance, 0, false));
-
-   *pInstance = panvk_instance_to_handle(instance);
-
-   return VK_SUCCESS;
-}
+VkResult panvk_physical_device_try_create(struct vk_instance *vk_instance,
+                                          struct _drmDevice *drm_device,
+                                          struct vk_physical_device **out);
 
 static void
 panvk_physical_device_finish(struct panvk_physical_device *device)
@@ -215,6 +179,59 @@ panvk_physical_device_finish(struct panvk_physical_device *device)
    vk_physical_device_finish(&device->vk);
 }
 
+static void
+panvk_destroy_physical_device(struct vk_physical_device *device)
+{
+   panvk_physical_device_finish((struct panvk_physical_device *)device);
+   vk_free(&device->instance->alloc, device);
+}
+
+VkResult
+panvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
+                     const VkAllocationCallbacks *pAllocator,
+                     VkInstance *pInstance)
+{
+   struct panvk_instance *instance;
+   VkResult result;
+
+   assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO);
+
+   pAllocator = pAllocator ?: vk_default_allocator();
+   instance = vk_zalloc(pAllocator, sizeof(*instance), 8,
+                        VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
+   if (!instance)
+      return vk_error(NULL, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+   struct vk_instance_dispatch_table dispatch_table;
+
+   vk_instance_dispatch_table_from_entrypoints(
+      &dispatch_table, &panvk_instance_entrypoints, true);
+   vk_instance_dispatch_table_from_entrypoints(
+      &dispatch_table, &wsi_instance_entrypoints, false);
+   result = vk_instance_init(&instance->vk, &panvk_instance_extensions,
+                             &dispatch_table, pCreateInfo, pAllocator);
+   if (result != VK_SUCCESS) {
+      vk_free(pAllocator, instance);
+      return vk_error(NULL, result);
+   }
+
+   instance->vk.physical_devices.try_create_for_drm =
+      panvk_physical_device_try_create;
+   instance->vk.physical_devices.destroy = panvk_destroy_physical_device;
+
+   instance->debug_flags =
+      parse_debug_string(getenv("PANVK_DEBUG"), panvk_debug_options);
+
+   if (instance->debug_flags & PANVK_DEBUG_STARTUP)
+      panvk_logi("Created an instance");
+
+   VG(VALGRIND_CREATE_MEMPOOL(instance, 0, false));
+
+   *pInstance = panvk_instance_to_handle(instance);
+
+   return VK_SUCCESS;
+}
+
 void
 panvk_DestroyInstance(VkInstance _instance,
                       const VkAllocationCallbacks *pAllocator)
@@ -223,10 +240,6 @@ panvk_DestroyInstance(VkInstance _instance,
 
    if (!instance)
       return;
-
-   for (int i = 0; i < instance->physical_device_count; ++i) {
-      panvk_physical_device_finish(instance->physical_devices + i);
-   }
 
    vk_instance_finish(&instance->vk);
    vk_free(&instance->vk.alloc, instance);
@@ -244,9 +257,10 @@ panvk_physical_device_init(struct panvk_physical_device *device,
    int master_fd = -1;
 
    if (!getenv("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER")) {
-      return vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                       "WARNING: panvk is not a conformant vulkan implementation, "
-                       "pass PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1 if you know what you're doing.");
+      return vk_errorf(
+         instance, VK_ERROR_INCOMPATIBLE_DRIVER,
+         "WARNING: panvk is not a conformant vulkan implementation, "
+         "pass PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1 if you know what you're doing.");
    }
 
    fd = open(path, O_RDWR | O_CLOEXEC);
@@ -267,7 +281,8 @@ panvk_physical_device_init(struct panvk_physical_device *device,
       drmFreeVersion(version);
       close(fd);
       return vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                       "device %s does not use the panfrost kernel driver", path);
+                       "device %s does not use the panfrost kernel driver",
+                       path);
    }
 
    drmFreeVersion(version);
@@ -279,16 +294,13 @@ panvk_physical_device_init(struct panvk_physical_device *device,
    panvk_get_device_extensions(device, &supported_extensions);
 
    struct vk_physical_device_dispatch_table dispatch_table;
-   vk_physical_device_dispatch_table_from_entrypoints(&dispatch_table,
-                                                      &panvk_physical_device_entrypoints,
-                                                      true);
-   vk_physical_device_dispatch_table_from_entrypoints(&dispatch_table,
-                                                      &wsi_physical_device_entrypoints,
-                                                      false);
+   vk_physical_device_dispatch_table_from_entrypoints(
+      &dispatch_table, &panvk_physical_device_entrypoints, true);
+   vk_physical_device_dispatch_table_from_entrypoints(
+      &dispatch_table, &wsi_physical_device_entrypoints, false);
 
    result = vk_physical_device_init(&device->vk, &instance->vk,
-                                    &supported_extensions,
-                                    &dispatch_table);
+                                    &supported_extensions, &dispatch_table);
 
    if (result != VK_SUCCESS) {
       vk_error(instance, result);
@@ -314,17 +326,16 @@ panvk_physical_device_init(struct panvk_physical_device *device,
    panfrost_open_device(NULL, fd, &device->pdev);
    fd = -1;
 
-   if (device->pdev.quirks & MIDGARD_SFBD) {
+   if (device->pdev.arch <= 5) {
       result = vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                         "%s not supported",
-                         panfrost_model_name(device->pdev.gpu_id));
+                         "%s not supported", device->pdev.model->name);
       goto fail;
    }
 
    panvk_arch_dispatch(device->pdev.arch, meta_init, device);
 
    memset(device->name, 0, sizeof(device->name));
-   sprintf(device->name, "%s", panfrost_model_name(device->pdev.gpu_id));
+   sprintf(device->name, "%s", device->pdev.model->name);
 
    if (panvk_device_get_cache_uuid(device->pdev.gpu_id, device->cache_uuid)) {
       result = vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
@@ -332,11 +343,21 @@ panvk_physical_device_init(struct panvk_physical_device *device,
       goto fail_close_device;
    }
 
-   fprintf(stderr, "WARNING: panvk is not a conformant vulkan implementation, "
-                   "testing use only.\n");
+   vk_warn_non_conformant_implementation("panvk");
 
    panvk_get_driver_uuid(&device->device_uuid);
    panvk_get_device_uuid(&device->device_uuid);
+
+   device->drm_syncobj_type = vk_drm_syncobj_get_type(device->pdev.fd);
+   /* We don't support timelines in the uAPI yet and we don't want it getting
+    * suddenly turned on by vk_drm_syncobj_get_type() without us adding panvk
+    * code for it first.
+    */
+   device->drm_syncobj_type.features &= ~VK_SYNC_FEATURE_TIMELINE;
+
+   device->sync_types[0] = &device->drm_syncobj_type;
+   device->sync_types[1] = NULL;
+   device->vk.supported_sync_types = device->sync_types;
 
    result = panvk_wsi_init(device);
    if (result != VK_SUCCESS) {
@@ -356,94 +377,31 @@ fail:
    return result;
 }
 
-static VkResult
-panvk_enumerate_devices(struct panvk_instance *instance)
-{
-   /* TODO: Check for more devices ? */
-   drmDevicePtr devices[8];
-   VkResult result = VK_ERROR_INCOMPATIBLE_DRIVER;
-   int max_devices;
-
-   instance->physical_device_count = 0;
-
-   max_devices = drmGetDevices2(0, devices, ARRAY_SIZE(devices));
-
-   if (instance->debug_flags & PANVK_DEBUG_STARTUP)
-      panvk_logi("Found %d drm nodes", max_devices);
-
-   if (max_devices < 1)
-      return vk_error(instance, VK_ERROR_INCOMPATIBLE_DRIVER);
-
-   for (unsigned i = 0; i < (unsigned) max_devices; i++) {
-      if ((devices[i]->available_nodes & (1 << DRM_NODE_RENDER)) &&
-          devices[i]->bustype == DRM_BUS_PLATFORM) {
-
-         result = panvk_physical_device_init(instance->physical_devices +
-                                           instance->physical_device_count,
-                                           instance, devices[i]);
-         if (result == VK_SUCCESS)
-            ++instance->physical_device_count;
-         else if (result != VK_ERROR_INCOMPATIBLE_DRIVER)
-            break;
-      }
-   }
-   drmFreeDevices(devices, max_devices);
-
-   return result;
-}
-
 VkResult
-panvk_EnumeratePhysicalDevices(VkInstance _instance,
-                               uint32_t *pPhysicalDeviceCount,
-                               VkPhysicalDevice *pPhysicalDevices)
+panvk_physical_device_try_create(struct vk_instance *vk_instance,
+                                 struct _drmDevice *drm_device,
+                                 struct vk_physical_device **out)
 {
-   VK_FROM_HANDLE(panvk_instance, instance, _instance);
-   VK_OUTARRAY_MAKE(out, pPhysicalDevices, pPhysicalDeviceCount);
+   struct panvk_instance *instance =
+      container_of(vk_instance, struct panvk_instance, vk);
 
-   VkResult result;
+   if (!(drm_device->available_nodes & (1 << DRM_NODE_RENDER)) ||
+       drm_device->bustype != DRM_BUS_PLATFORM)
+      return VK_ERROR_INCOMPATIBLE_DRIVER;
 
-   if (instance->physical_device_count < 0) {
-      result = panvk_enumerate_devices(instance);
-      if (result != VK_SUCCESS && result != VK_ERROR_INCOMPATIBLE_DRIVER)
-         return result;
+   struct panvk_physical_device *device =
+      vk_zalloc(&instance->vk.alloc, sizeof(*device), 8,
+                VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
+   if (!device)
+      return vk_error(instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+   VkResult result = panvk_physical_device_init(device, instance, drm_device);
+   if (result != VK_SUCCESS) {
+      vk_free(&instance->vk.alloc, device);
+      return result;
    }
 
-   for (uint32_t i = 0; i < instance->physical_device_count; ++i) {
-      vk_outarray_append(&out, p)
-      {
-         *p = panvk_physical_device_to_handle(instance->physical_devices + i);
-      }
-   }
-
-   return vk_outarray_status(&out);
-}
-
-VkResult
-panvk_EnumeratePhysicalDeviceGroups(VkInstance _instance,
-                                    uint32_t *pPhysicalDeviceGroupCount,
-                                    VkPhysicalDeviceGroupProperties *pPhysicalDeviceGroupProperties)
-{
-   VK_FROM_HANDLE(panvk_instance, instance, _instance);
-   VK_OUTARRAY_MAKE(out, pPhysicalDeviceGroupProperties,
-                    pPhysicalDeviceGroupCount);
-   VkResult result;
-
-   if (instance->physical_device_count < 0) {
-      result = panvk_enumerate_devices(instance);
-      if (result != VK_SUCCESS && result != VK_ERROR_INCOMPATIBLE_DRIVER)
-         return result;
-   }
-
-   for (uint32_t i = 0; i < instance->physical_device_count; ++i) {
-      vk_outarray_append(&out, p)
-      {
-         p->physicalDeviceCount = 1;
-         p->physicalDevices[0] =
-            panvk_physical_device_to_handle(instance->physical_devices + i);
-         p->subsetAllocation = false;
-      }
-   }
-
+   *out = &device->vk;
    return VK_SUCCESS;
 }
 
@@ -451,203 +409,12 @@ void
 panvk_GetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice,
                                  VkPhysicalDeviceFeatures2 *pFeatures)
 {
-   vk_foreach_struct(ext, pFeatures->pNext)
-   {
-      switch (ext->sType) {
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES: {
-         VkPhysicalDeviceVulkan11Features *features = (void *) ext;
-         features->storageBuffer16BitAccess            = false;
-         features->uniformAndStorageBuffer16BitAccess  = false;
-         features->storagePushConstant16               = false;
-         features->storageInputOutput16                = false;
-         features->multiview                           = false;
-         features->multiviewGeometryShader             = false;
-         features->multiviewTessellationShader         = false;
-         features->variablePointersStorageBuffer       = true;
-         features->variablePointers                    = true;
-         features->protectedMemory                     = false;
-         features->samplerYcbcrConversion              = false;
-         features->shaderDrawParameters                = false;
-         break;
-      }
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES: {
-         VkPhysicalDeviceVulkan12Features *features = (void *) ext;
-         features->samplerMirrorClampToEdge            = false;
-         features->drawIndirectCount                   = false;
-         features->storageBuffer8BitAccess             = false;
-         features->uniformAndStorageBuffer8BitAccess   = false;
-         features->storagePushConstant8                = false;
-         features->shaderBufferInt64Atomics            = false;
-         features->shaderSharedInt64Atomics            = false;
-         features->shaderFloat16                       = false;
-         features->shaderInt8                          = false;
-
-         features->descriptorIndexing                                 = false;
-         features->shaderInputAttachmentArrayDynamicIndexing          = false;
-         features->shaderUniformTexelBufferArrayDynamicIndexing       = false;
-         features->shaderStorageTexelBufferArrayDynamicIndexing       = false;
-         features->shaderUniformBufferArrayNonUniformIndexing         = false;
-         features->shaderSampledImageArrayNonUniformIndexing          = false;
-         features->shaderStorageBufferArrayNonUniformIndexing         = false;
-         features->shaderStorageImageArrayNonUniformIndexing          = false;
-         features->shaderInputAttachmentArrayNonUniformIndexing       = false;
-         features->shaderUniformTexelBufferArrayNonUniformIndexing    = false;
-         features->shaderStorageTexelBufferArrayNonUniformIndexing    = false;
-         features->descriptorBindingUniformBufferUpdateAfterBind      = false;
-         features->descriptorBindingSampledImageUpdateAfterBind       = false;
-         features->descriptorBindingStorageImageUpdateAfterBind       = false;
-         features->descriptorBindingStorageBufferUpdateAfterBind      = false;
-         features->descriptorBindingUniformTexelBufferUpdateAfterBind = false;
-         features->descriptorBindingStorageTexelBufferUpdateAfterBind = false;
-         features->descriptorBindingUpdateUnusedWhilePending          = false;
-         features->descriptorBindingPartiallyBound                    = false;
-         features->descriptorBindingVariableDescriptorCount           = false;
-         features->runtimeDescriptorArray                             = false;
-
-         features->samplerFilterMinmax                 = false;
-         features->scalarBlockLayout                   = false;
-         features->imagelessFramebuffer                = false;
-         features->uniformBufferStandardLayout         = false;
-         features->shaderSubgroupExtendedTypes         = false;
-         features->separateDepthStencilLayouts         = false;
-         features->hostQueryReset                      = false;
-         features->timelineSemaphore                   = false;
-         features->bufferDeviceAddress                 = false;
-         features->bufferDeviceAddressCaptureReplay    = false;
-         features->bufferDeviceAddressMultiDevice      = false;
-         features->vulkanMemoryModel                   = false;
-         features->vulkanMemoryModelDeviceScope        = false;
-         features->vulkanMemoryModelAvailabilityVisibilityChains = false;
-         features->shaderOutputViewportIndex           = false;
-         features->shaderOutputLayer                   = false;
-         features->subgroupBroadcastDynamicId          = false;
-         break;
-      }
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VARIABLE_POINTERS_FEATURES: {
-         VkPhysicalDeviceVariablePointersFeatures *features = (void *) ext;
-         features->variablePointersStorageBuffer = true;
-         features->variablePointers = true;
-         break;
-      }
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES: {
-         VkPhysicalDeviceMultiviewFeatures *features =
-            (VkPhysicalDeviceMultiviewFeatures *) ext;
-         features->multiview = false;
-         features->multiviewGeometryShader = false;
-         features->multiviewTessellationShader = false;
-         break;
-      }
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES: {
-         VkPhysicalDeviceShaderDrawParametersFeatures *features =
-            (VkPhysicalDeviceShaderDrawParametersFeatures *) ext;
-         features->shaderDrawParameters = false;
-         break;
-      }
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES: {
-         VkPhysicalDeviceProtectedMemoryFeatures *features =
-            (VkPhysicalDeviceProtectedMemoryFeatures *) ext;
-         features->protectedMemory = false;
-         break;
-      }
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES: {
-         VkPhysicalDevice16BitStorageFeatures *features =
-            (VkPhysicalDevice16BitStorageFeatures *) ext;
-         features->storageBuffer16BitAccess = false;
-         features->uniformAndStorageBuffer16BitAccess = false;
-         features->storagePushConstant16 = false;
-         features->storageInputOutput16 = false;
-         break;
-      }
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES: {
-         VkPhysicalDeviceSamplerYcbcrConversionFeatures *features =
-            (VkPhysicalDeviceSamplerYcbcrConversionFeatures *) ext;
-         features->samplerYcbcrConversion = false;
-         break;
-      }
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT: {
-         VkPhysicalDeviceDescriptorIndexingFeaturesEXT *features =
-            (VkPhysicalDeviceDescriptorIndexingFeaturesEXT *) ext;
-         features->shaderInputAttachmentArrayDynamicIndexing = false;
-         features->shaderUniformTexelBufferArrayDynamicIndexing = false;
-         features->shaderStorageTexelBufferArrayDynamicIndexing = false;
-         features->shaderUniformBufferArrayNonUniformIndexing = false;
-         features->shaderSampledImageArrayNonUniformIndexing = false;
-         features->shaderStorageBufferArrayNonUniformIndexing = false;
-         features->shaderStorageImageArrayNonUniformIndexing = false;
-         features->shaderInputAttachmentArrayNonUniformIndexing = false;
-         features->shaderUniformTexelBufferArrayNonUniformIndexing = false;
-         features->shaderStorageTexelBufferArrayNonUniformIndexing = false;
-         features->descriptorBindingUniformBufferUpdateAfterBind = false;
-         features->descriptorBindingSampledImageUpdateAfterBind = false;
-         features->descriptorBindingStorageImageUpdateAfterBind = false;
-         features->descriptorBindingStorageBufferUpdateAfterBind = false;
-         features->descriptorBindingUniformTexelBufferUpdateAfterBind = false;
-         features->descriptorBindingStorageTexelBufferUpdateAfterBind = false;
-         features->descriptorBindingUpdateUnusedWhilePending = false;
-         features->descriptorBindingPartiallyBound = false;
-         features->descriptorBindingVariableDescriptorCount = false;
-         features->runtimeDescriptorArray = false;
-         break;
-      }
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT: {
-         VkPhysicalDeviceConditionalRenderingFeaturesEXT *features =
-            (VkPhysicalDeviceConditionalRenderingFeaturesEXT *) ext;
-         features->conditionalRendering = false;
-         features->inheritedConditionalRendering = false;
-         break;
-      }
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT: {
-         VkPhysicalDeviceTransformFeedbackFeaturesEXT *features =
-            (VkPhysicalDeviceTransformFeedbackFeaturesEXT *) ext;
-         features->transformFeedback = false;
-         features->geometryStreams = false;
-         break;
-      }
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_EXT: {
-         VkPhysicalDeviceIndexTypeUint8FeaturesEXT *features =
-            (VkPhysicalDeviceIndexTypeUint8FeaturesEXT *)ext;
-         features->indexTypeUint8 = true;
-         break;
-      }
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT: {
-         VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT *features =
-            (VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT *)ext;
-         features->vertexAttributeInstanceRateDivisor = true;
-         features->vertexAttributeInstanceRateZeroDivisor = true;
-         break;
-      }
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIVATE_DATA_FEATURES_EXT: {
-         VkPhysicalDevicePrivateDataFeaturesEXT *features =
-            (VkPhysicalDevicePrivateDataFeaturesEXT *)ext;
-         features->privateData = true;
-         break;
-      }
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT: {
-         VkPhysicalDeviceDepthClipEnableFeaturesEXT *features =
-            (VkPhysicalDeviceDepthClipEnableFeaturesEXT *)ext;
-         features->depthClipEnable = true;
-         break;
-      }
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_4444_FORMATS_FEATURES_EXT: {
-         VkPhysicalDevice4444FormatsFeaturesEXT *features = (void *)ext;
-         features->formatA4R4G4B4 = true;
-         features->formatA4B4G4R4 = true;
-         break;
-      }
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT: {
-         VkPhysicalDeviceCustomBorderColorFeaturesEXT *features = (void *) ext;
-         features->customBorderColors = true;
-         features->customBorderColorWithoutFormat = true;
-         break;
-      }
-      default:
-         break;
-      }
-   }
-
-   pFeatures->features = (VkPhysicalDeviceFeatures) {
+   struct vk_features features = {
+      /* Vulkan 1.0 */
+      .robustBufferAccess = true,
       .fullDrawIndexUint32 = true,
       .independentBlend = true,
+      .logicOp = true,
       .wideLines = true,
       .largePoints = true,
       .textureCompressionETC2 = true,
@@ -656,7 +423,109 @@ panvk_GetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice,
       .shaderSampledImageArrayDynamicIndexing = true,
       .shaderStorageBufferArrayDynamicIndexing = true,
       .shaderStorageImageArrayDynamicIndexing = true,
+
+      /* Vulkan 1.1 */
+      .storageBuffer16BitAccess = false,
+      .uniformAndStorageBuffer16BitAccess = false,
+      .storagePushConstant16 = false,
+      .storageInputOutput16 = false,
+      .multiview = false,
+      .multiviewGeometryShader = false,
+      .multiviewTessellationShader = false,
+      .variablePointersStorageBuffer = true,
+      .variablePointers = true,
+      .protectedMemory = false,
+      .samplerYcbcrConversion = false,
+      .shaderDrawParameters = false,
+
+      /* Vulkan 1.2 */
+      .samplerMirrorClampToEdge = false,
+      .drawIndirectCount = false,
+      .storageBuffer8BitAccess = false,
+      .uniformAndStorageBuffer8BitAccess = false,
+      .storagePushConstant8 = false,
+      .shaderBufferInt64Atomics = false,
+      .shaderSharedInt64Atomics = false,
+      .shaderFloat16 = false,
+      .shaderInt8 = false,
+
+      .descriptorIndexing = false,
+      .shaderInputAttachmentArrayDynamicIndexing = false,
+      .shaderUniformTexelBufferArrayDynamicIndexing = false,
+      .shaderStorageTexelBufferArrayDynamicIndexing = false,
+      .shaderUniformBufferArrayNonUniformIndexing = false,
+      .shaderSampledImageArrayNonUniformIndexing = false,
+      .shaderStorageBufferArrayNonUniformIndexing = false,
+      .shaderStorageImageArrayNonUniformIndexing = false,
+      .shaderInputAttachmentArrayNonUniformIndexing = false,
+      .shaderUniformTexelBufferArrayNonUniformIndexing = false,
+      .shaderStorageTexelBufferArrayNonUniformIndexing = false,
+      .descriptorBindingUniformBufferUpdateAfterBind = false,
+      .descriptorBindingSampledImageUpdateAfterBind = false,
+      .descriptorBindingStorageImageUpdateAfterBind = false,
+      .descriptorBindingStorageBufferUpdateAfterBind = false,
+      .descriptorBindingUniformTexelBufferUpdateAfterBind = false,
+      .descriptorBindingStorageTexelBufferUpdateAfterBind = false,
+      .descriptorBindingUpdateUnusedWhilePending = false,
+      .descriptorBindingPartiallyBound = false,
+      .descriptorBindingVariableDescriptorCount = false,
+      .runtimeDescriptorArray = false,
+
+      .samplerFilterMinmax = false,
+      .scalarBlockLayout = false,
+      .imagelessFramebuffer = false,
+      .uniformBufferStandardLayout = false,
+      .shaderSubgroupExtendedTypes = false,
+      .separateDepthStencilLayouts = false,
+      .hostQueryReset = false,
+      .timelineSemaphore = false,
+      .bufferDeviceAddress = false,
+      .bufferDeviceAddressCaptureReplay = false,
+      .bufferDeviceAddressMultiDevice = false,
+      .vulkanMemoryModel = false,
+      .vulkanMemoryModelDeviceScope = false,
+      .vulkanMemoryModelAvailabilityVisibilityChains = false,
+      .shaderOutputViewportIndex = false,
+      .shaderOutputLayer = false,
+      .subgroupBroadcastDynamicId = false,
+
+      /* Vulkan 1.3 */
+      .robustImageAccess = false,
+      .inlineUniformBlock = false,
+      .descriptorBindingInlineUniformBlockUpdateAfterBind = false,
+      .pipelineCreationCacheControl = false,
+      .privateData = true,
+      .shaderDemoteToHelperInvocation = false,
+      .shaderTerminateInvocation = false,
+      .subgroupSizeControl = false,
+      .computeFullSubgroups = false,
+      .synchronization2 = true,
+      .textureCompressionASTC_HDR = false,
+      .shaderZeroInitializeWorkgroupMemory = false,
+      .dynamicRendering = false,
+      .shaderIntegerDotProduct = false,
+      .maintenance4 = false,
+
+      /* VK_EXT_index_type_uint8 */
+      .indexTypeUint8 = true,
+
+      /* VK_EXT_vertex_attribute_divisor */
+      .vertexAttributeInstanceRateDivisor = true,
+      .vertexAttributeInstanceRateZeroDivisor = true,
+
+      /* VK_EXT_depth_clip_enable */
+      .depthClipEnable = true,
+
+      /* VK_EXT_4444_formats */
+      .formatA4R4G4B4 = true,
+      .formatA4B4G4R4 = true,
+
+      /* VK_EXT_custom_border_color */
+      .customBorderColors = true,
+      .customBorderColorWithoutFormat = true,
    };
+
+   vk_get_physical_device_features(pFeatures, &features);
 }
 
 void
@@ -664,47 +533,6 @@ panvk_GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
                                    VkPhysicalDeviceProperties2 *pProperties)
 {
    VK_FROM_HANDLE(panvk_physical_device, pdevice, physicalDevice);
-
-   vk_foreach_struct(ext, pProperties->pNext)
-   {
-      switch (ext->sType) {
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR: {
-         VkPhysicalDevicePushDescriptorPropertiesKHR *properties = (VkPhysicalDevicePushDescriptorPropertiesKHR *)ext;
-         properties->maxPushDescriptors = MAX_PUSH_DESCRIPTORS;
-         break;
-      }
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES: {
-         VkPhysicalDeviceIDProperties *properties = (VkPhysicalDeviceIDProperties *)ext;
-         memcpy(properties->driverUUID, pdevice->driver_uuid, VK_UUID_SIZE);
-         memcpy(properties->deviceUUID, pdevice->device_uuid, VK_UUID_SIZE);
-         properties->deviceLUIDValid = false;
-         break;
-      }
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES: {
-         VkPhysicalDeviceMultiviewProperties *properties = (VkPhysicalDeviceMultiviewProperties *)ext;
-         properties->maxMultiviewViewCount = 0;
-         properties->maxMultiviewInstanceIndex = 0;
-         break;
-      }
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_POINT_CLIPPING_PROPERTIES: {
-         VkPhysicalDevicePointClippingProperties *properties = (VkPhysicalDevicePointClippingProperties *)ext;
-         properties->pointClippingBehavior =
-            VK_POINT_CLIPPING_BEHAVIOR_ALL_CLIP_PLANES;
-         break;
-      }
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES: {
-         VkPhysicalDeviceMaintenance3Properties *properties = (VkPhysicalDeviceMaintenance3Properties *)ext;
-         /* Make sure everything is addressable by a signed 32-bit int, and
-          * our largest descriptors are 96 bytes. */
-         properties->maxPerSetDescriptors = (1ull << 31) / 96;
-         /* Our buffer size fields allow only this much */
-         properties->maxMemoryAllocationSize = 0xFFFFFFFFull;
-         break;
-      }
-      default:
-         break;
-      }
-   }
 
    VkSampleCountFlags sample_counts =
       VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
@@ -722,7 +550,7 @@ panvk_GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
        32 /* sampler, largest when combined with image */ +
        64 /* sampled image */ + 64 /* storage image */);
 
-   VkPhysicalDeviceLimits limits = {
+   const VkPhysicalDeviceLimits limits = {
       .maxImageDimension1D = (1 << 14),
       .maxImageDimension2D = (1 << 14),
       .maxImageDimension3D = (1 << 11),
@@ -773,11 +601,12 @@ panvk_GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
       .maxFragmentInputComponents = 128,
       .maxFragmentOutputAttachments = 8,
       .maxFragmentDualSrcAttachments = 1,
-      .maxFragmentCombinedOutputResources = 8,
+      .maxFragmentCombinedOutputResources =
+         MAX_RTS + max_descriptor_set_size * 2,
       .maxComputeSharedMemorySize = 32768,
-      .maxComputeWorkGroupCount = { 65535, 65535, 65535 },
+      .maxComputeWorkGroupCount = {65535, 65535, 65535},
       .maxComputeWorkGroupInvocations = 2048,
-      .maxComputeWorkGroupSize = { 2048, 2048, 2048 },
+      .maxComputeWorkGroupSize = {2048, 2048, 2048},
       .subPixelPrecisionBits = 4 /* FIXME */,
       .subTexelPrecisionBits = 4 /* FIXME */,
       .mipmapPrecisionBits = 4 /* FIXME */,
@@ -786,12 +615,12 @@ panvk_GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
       .maxSamplerLodBias = 16,
       .maxSamplerAnisotropy = 16,
       .maxViewports = MAX_VIEWPORTS,
-      .maxViewportDimensions = { (1 << 14), (1 << 14) },
-      .viewportBoundsRange = { INT16_MIN, INT16_MAX },
+      .maxViewportDimensions = {(1 << 14), (1 << 14)},
+      .viewportBoundsRange = {INT16_MIN, INT16_MAX},
       .viewportSubPixelBits = 8,
       .minMemoryMapAlignment = 4096, /* A page */
-      .minTexelBufferOffsetAlignment = 1,
-      .minUniformBufferOffsetAlignment = 4,
+      .minTexelBufferOffsetAlignment = 64,
+      .minUniformBufferOffsetAlignment = 16,
       .minStorageBufferOffsetAlignment = 4,
       .minTexelOffset = -32,
       .maxTexelOffset = 31,
@@ -820,9 +649,9 @@ panvk_GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
       .maxCullDistances = 8,
       .maxCombinedClipAndCullDistances = 8,
       .discreteQueuePriorities = 1,
-      .pointSizeRange = { 0.125, 255.875 },
-      .lineWidthRange = { 0.0, 7.9921875 },
-      .pointSizeGranularity = (1.0 / 8.0),
+      .pointSizeRange = {0.125, 4095.9375},
+      .lineWidthRange = {0.0, 7.9921875},
+      .pointSizeGranularity = (1.0 / 16.0),
       .lineWidthGranularity = (1.0 / 128.0),
       .strictLines = false, /* FINISHME */
       .standardSampleLocations = true,
@@ -831,45 +660,90 @@ panvk_GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
       .nonCoherentAtomSize = 64,
    };
 
-   pProperties->properties = (VkPhysicalDeviceProperties) {
+   pProperties->properties = (VkPhysicalDeviceProperties){
       .apiVersion = PANVK_API_VERSION,
       .driverVersion = vk_get_driver_version(),
       .vendorID = 0, /* TODO */
       .deviceID = 0,
       .deviceType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
       .limits = limits,
-      .sparseProperties = { 0 },
+      .sparseProperties = {0},
    };
 
    strcpy(pProperties->properties.deviceName, pdevice->name);
-   memcpy(pProperties->properties.pipelineCacheUUID, pdevice->cache_uuid, VK_UUID_SIZE);
+   memcpy(pProperties->properties.pipelineCacheUUID, pdevice->cache_uuid,
+          VK_UUID_SIZE);
+
+   VkPhysicalDeviceVulkan11Properties core_1_1 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES,
+      .deviceLUIDValid = false,
+      .pointClippingBehavior = VK_POINT_CLIPPING_BEHAVIOR_ALL_CLIP_PLANES,
+      .maxMultiviewViewCount = 0,
+      .maxMultiviewInstanceIndex = 0,
+      .protectedNoFault = false,
+      /* Make sure everything is addressable by a signed 32-bit int, and
+       * our largest descriptors are 96 bytes. */
+      .maxPerSetDescriptors = (1ull << 31) / 96,
+      /* Our buffer size fields allow only this much */
+      .maxMemoryAllocationSize = 0xFFFFFFFFull,
+   };
+   memcpy(core_1_1.driverUUID, pdevice->driver_uuid, VK_UUID_SIZE);
+   memcpy(core_1_1.deviceUUID, pdevice->device_uuid, VK_UUID_SIZE);
+
+   const VkPhysicalDeviceVulkan12Properties core_1_2 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES,
+   };
+
+   const VkPhysicalDeviceVulkan13Properties core_1_3 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES,
+   };
+
+   vk_foreach_struct(ext, pProperties->pNext)
+   {
+      if (vk_get_physical_device_core_1_1_property_ext(ext, &core_1_1))
+         continue;
+      if (vk_get_physical_device_core_1_2_property_ext(ext, &core_1_2))
+         continue;
+      if (vk_get_physical_device_core_1_3_property_ext(ext, &core_1_3))
+         continue;
+
+      switch (ext->sType) {
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR: {
+         VkPhysicalDevicePushDescriptorPropertiesKHR *properties =
+            (VkPhysicalDevicePushDescriptorPropertiesKHR *)ext;
+         properties->maxPushDescriptors = MAX_PUSH_DESCRIPTORS;
+         break;
+      }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_EXT: {
+         VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT *properties =
+            (VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT *)ext;
+         /* We have to restrict this a bit for multiview */
+         properties->maxVertexAttribDivisor = UINT32_MAX / (16 * 2048);
+         break;
+      }
+      default:
+         break;
+      }
+   }
 }
 
 static const VkQueueFamilyProperties panvk_queue_family_properties = {
-   .queueFlags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
+   .queueFlags =
+      VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
    .queueCount = 1,
    .timestampValidBits = 64,
-   .minImageTransferGranularity = { 1, 1, 1 },
+   .minImageTransferGranularity = {1, 1, 1},
 };
 
 void
-panvk_GetPhysicalDeviceQueueFamilyProperties(VkPhysicalDevice physicalDevice,
-                                             uint32_t *pQueueFamilyPropertyCount,
-                                             VkQueueFamilyProperties *pQueueFamilyProperties)
+panvk_GetPhysicalDeviceQueueFamilyProperties2(
+   VkPhysicalDevice physicalDevice, uint32_t *pQueueFamilyPropertyCount,
+   VkQueueFamilyProperties2 *pQueueFamilyProperties)
 {
-   VK_OUTARRAY_MAKE(out, pQueueFamilyProperties, pQueueFamilyPropertyCount);
+   VK_OUTARRAY_MAKE_TYPED(VkQueueFamilyProperties2, out, pQueueFamilyProperties,
+                          pQueueFamilyPropertyCount);
 
-   vk_outarray_append(&out, p) { *p = panvk_queue_family_properties; }
-}
-
-void
-panvk_GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice,
-                                              uint32_t *pQueueFamilyPropertyCount,
-                                              VkQueueFamilyProperties2 *pQueueFamilyProperties)
-{
-   VK_OUTARRAY_MAKE(out, pQueueFamilyProperties, pQueueFamilyPropertyCount);
-
-   vk_outarray_append(&out, p)
+   vk_outarray_append_typed(VkQueueFamilyProperties2, &out, p)
    {
       p->queueFamilyProperties = panvk_queue_family_properties;
    }
@@ -896,10 +770,11 @@ panvk_get_system_heap_size()
 }
 
 void
-panvk_GetPhysicalDeviceMemoryProperties2(VkPhysicalDevice physicalDevice,
-                                         VkPhysicalDeviceMemoryProperties2 *pMemoryProperties)
+panvk_GetPhysicalDeviceMemoryProperties2(
+   VkPhysicalDevice physicalDevice,
+   VkPhysicalDeviceMemoryProperties2 *pMemoryProperties)
 {
-   pMemoryProperties->memoryProperties = (VkPhysicalDeviceMemoryProperties) {
+   pMemoryProperties->memoryProperties = (VkPhysicalDeviceMemoryProperties){
       .memoryHeapCount = 1,
       .memoryHeaps[0].size = panvk_get_system_heap_size(),
       .memoryHeaps[0].flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT,
@@ -912,10 +787,8 @@ panvk_GetPhysicalDeviceMemoryProperties2(VkPhysicalDevice physicalDevice,
 }
 
 static VkResult
-panvk_queue_init(struct panvk_device *device,
-                 struct panvk_queue *queue,
-                 int idx,
-                 const VkDeviceQueueCreateInfo *create_info)
+panvk_queue_init(struct panvk_device *device, struct panvk_queue *queue,
+                 int idx, const VkDeviceQueueCreateInfo *create_info)
 {
    const struct panfrost_device *pdev = &device->physical_device->pdev;
 
@@ -934,6 +807,17 @@ panvk_queue_init(struct panvk_device *device,
       return VK_ERROR_OUT_OF_HOST_MEMORY;
    }
 
+   switch (pdev->arch) {
+   case 6:
+      queue->vk.driver_submit = panvk_v6_queue_submit;
+      break;
+   case 7:
+      queue->vk.driver_submit = panvk_v7_queue_submit;
+      break;
+   default:
+      unreachable("Invalid arch");
+   }
+
    queue->sync = create.handle;
    return VK_SUCCESS;
 }
@@ -947,8 +831,7 @@ panvk_queue_finish(struct panvk_queue *queue)
 VkResult
 panvk_CreateDevice(VkPhysicalDevice physicalDevice,
                    const VkDeviceCreateInfo *pCreateInfo,
-                   const VkAllocationCallbacks *pAllocator,
-                   VkDevice *pDevice)
+                   const VkAllocationCallbacks *pAllocator, VkDevice *pDevice)
 {
    VK_FROM_HANDLE(panvk_physical_device, physical_device, physicalDevice);
    VkResult result;
@@ -960,31 +843,44 @@ panvk_CreateDevice(VkPhysicalDevice physicalDevice,
       return vk_error(physical_device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    const struct vk_device_entrypoint_table *dev_entrypoints;
+   const struct vk_command_buffer_ops *cmd_buffer_ops;
    struct vk_device_dispatch_table dispatch_table;
 
    switch (physical_device->pdev.arch) {
-   case 5:
-      dev_entrypoints = &panvk_v5_device_entrypoints;
-      break;
    case 6:
       dev_entrypoints = &panvk_v6_device_entrypoints;
+      cmd_buffer_ops = &panvk_v6_cmd_buffer_ops;
       break;
    case 7:
       dev_entrypoints = &panvk_v7_device_entrypoints;
+      cmd_buffer_ops = &panvk_v7_cmd_buffer_ops;
       break;
    default:
       unreachable("Unsupported architecture");
    }
 
-   vk_device_dispatch_table_from_entrypoints(&dispatch_table,
-                                             dev_entrypoints,
-                                             true);
-   vk_device_dispatch_table_from_entrypoints(&dispatch_table,
-                                             &panvk_device_entrypoints,
+   /* For secondary command buffer support, overwrite any command entrypoints
+    * in the main device-level dispatch table with
+    * vk_cmd_enqueue_unless_primary_Cmd*.
+    */
+   vk_device_dispatch_table_from_entrypoints(
+      &dispatch_table, &vk_cmd_enqueue_unless_primary_device_entrypoints, true);
+
+   vk_device_dispatch_table_from_entrypoints(&dispatch_table, dev_entrypoints,
                                              false);
    vk_device_dispatch_table_from_entrypoints(&dispatch_table,
-                                             &wsi_device_entrypoints,
-                                             false);
+                                             &panvk_device_entrypoints, false);
+   vk_device_dispatch_table_from_entrypoints(&dispatch_table,
+                                             &wsi_device_entrypoints, false);
+
+   /* Populate our primary cmd_dispatch table. */
+   vk_device_dispatch_table_from_entrypoints(&device->cmd_dispatch,
+                                             dev_entrypoints, true);
+   vk_device_dispatch_table_from_entrypoints(&device->cmd_dispatch,
+                                             &panvk_device_entrypoints, false);
+   vk_device_dispatch_table_from_entrypoints(
+      &device->cmd_dispatch, &vk_common_device_entrypoints, false);
+
    result = vk_device_init(&device->vk, &physical_device->vk, &dispatch_table,
                            pCreateInfo, pAllocator);
    if (result != VK_SUCCESS) {
@@ -992,8 +888,17 @@ panvk_CreateDevice(VkPhysicalDevice physicalDevice,
       return result;
    }
 
+   /* Must be done after vk_device_init() because this function memset(0) the
+    * whole struct.
+    */
+   device->vk.command_dispatch_table = &device->cmd_dispatch;
+   device->vk.command_buffer_ops = cmd_buffer_ops;
+
    device->instance = physical_device->instance;
    device->physical_device = physical_device;
+
+   const struct panfrost_device *pdev = &physical_device->pdev;
+   vk_device_set_drm_fd(&device->vk, pdev->fd);
 
    for (unsigned i = 0; i < pCreateInfo->queueCreateInfoCount; i++) {
       const VkDeviceQueueCreateInfo *queue_create =
@@ -1001,8 +906,8 @@ panvk_CreateDevice(VkPhysicalDevice physicalDevice,
       uint32_t qfi = queue_create->queueFamilyIndex;
       device->queues[qfi] =
          vk_alloc(&device->vk.alloc,
-                  queue_create->queueCount * sizeof(struct panvk_queue),
-                  8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+                  queue_create->queueCount * sizeof(struct panvk_queue), 8,
+                  VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
       if (!device->queues[qfi]) {
          result = VK_ERROR_OUT_OF_HOST_MEMORY;
          goto fail;
@@ -1014,8 +919,8 @@ panvk_CreateDevice(VkPhysicalDevice physicalDevice,
       device->queue_count[qfi] = queue_create->queueCount;
 
       for (unsigned q = 0; q < queue_create->queueCount; q++) {
-         result = panvk_queue_init(device, &device->queues[qfi][q], q,
-                                   queue_create);
+         result =
+            panvk_queue_init(device, &device->queues[qfi][q], q, queue_create);
          if (result != VK_SUCCESS)
             goto fail;
       }
@@ -1072,7 +977,7 @@ panvk_QueueWaitIdle(VkQueue _queue)
 
    const struct panfrost_device *pdev = &queue->device->physical_device->pdev;
    struct drm_syncobj_wait wait = {
-      .handles = (uint64_t) (uintptr_t)(&queue->sync),
+      .handles = (uint64_t)(uintptr_t)(&queue->sync),
       .count_handles = 1,
       .timeout_nsec = INT64_MAX,
       .flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL,
@@ -1093,16 +998,15 @@ panvk_EnumerateInstanceExtensionProperties(const char *pLayerName,
    if (pLayerName)
       return vk_error(NULL, VK_ERROR_LAYER_NOT_PRESENT);
 
-   return vk_enumerate_instance_extension_properties(&panvk_instance_extensions,
-                                                     pPropertyCount, pProperties);
+   return vk_enumerate_instance_extension_properties(
+      &panvk_instance_extensions, pPropertyCount, pProperties);
 }
 
 PFN_vkVoidFunction
 panvk_GetInstanceProcAddr(VkInstance _instance, const char *pName)
 {
    VK_FROM_HANDLE(panvk_instance, instance, _instance);
-   return vk_instance_get_proc_addr(&instance->vk,
-                                    &panvk_instance_entrypoints,
+   return vk_instance_get_proc_addr(&instance->vk, &panvk_instance_entrypoints,
                                     pName);
 }
 
@@ -1118,6 +1022,21 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName)
 {
    return panvk_GetInstanceProcAddr(instance, pName);
+}
+
+/* With version 4+ of the loader interface the ICD should expose
+ * vk_icdGetPhysicalDeviceProcAddr()
+ */
+PUBLIC
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+vk_icdGetPhysicalDeviceProcAddr(VkInstance _instance, const char *pName);
+
+PFN_vkVoidFunction
+vk_icdGetPhysicalDeviceProcAddr(VkInstance _instance, const char *pName)
+{
+   VK_FROM_HANDLE(panvk_instance, instance, _instance);
+
+   return vk_instance_get_physical_device_proc_addr(&instance->vk, pName);
 }
 
 VkResult
@@ -1143,17 +1062,15 @@ panvk_AllocateMemory(VkDevice _device,
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    const VkImportMemoryFdInfoKHR *fd_info =
-      vk_find_struct_const(pAllocateInfo->pNext,
-                           IMPORT_MEMORY_FD_INFO_KHR);
+      vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_FD_INFO_KHR);
 
    if (fd_info && !fd_info->handleType)
       fd_info = NULL;
 
    if (fd_info) {
-      assert(fd_info->handleType ==
-                VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
-             fd_info->handleType ==
-                VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
+      assert(
+         fd_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
+         fd_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
 
       /*
        * TODO Importing the same fd twice gives us the same handle without
@@ -1177,8 +1094,7 @@ panvk_AllocateMemory(VkDevice _device,
 }
 
 void
-panvk_FreeMemory(VkDevice _device,
-                 VkDeviceMemory _mem,
+panvk_FreeMemory(VkDevice _device, VkDeviceMemory _mem,
                  const VkAllocationCallbacks *pAllocator)
 {
    VK_FROM_HANDLE(panvk_device, device, _device);
@@ -1192,12 +1108,8 @@ panvk_FreeMemory(VkDevice _device,
 }
 
 VkResult
-panvk_MapMemory(VkDevice _device,
-                VkDeviceMemory _memory,
-                VkDeviceSize offset,
-                VkDeviceSize size,
-                VkMemoryMapFlags flags,
-                void **ppData)
+panvk_MapMemory(VkDevice _device, VkDeviceMemory _memory, VkDeviceSize offset,
+                VkDeviceSize size, VkMemoryMapFlags flags, void **ppData)
 {
    VK_FROM_HANDLE(panvk_device, device, _device);
    VK_FROM_HANDLE(panvk_device_memory, mem, _memory);
@@ -1226,32 +1138,17 @@ panvk_UnmapMemory(VkDevice _device, VkDeviceMemory _memory)
 }
 
 VkResult
-panvk_FlushMappedMemoryRanges(VkDevice _device,
-                              uint32_t memoryRangeCount,
+panvk_FlushMappedMemoryRanges(VkDevice _device, uint32_t memoryRangeCount,
                               const VkMappedMemoryRange *pMemoryRanges)
 {
    return VK_SUCCESS;
 }
 
 VkResult
-panvk_InvalidateMappedMemoryRanges(VkDevice _device,
-                                   uint32_t memoryRangeCount,
+panvk_InvalidateMappedMemoryRanges(VkDevice _device, uint32_t memoryRangeCount,
                                    const VkMappedMemoryRange *pMemoryRanges)
 {
    return VK_SUCCESS;
-}
-
-void
-panvk_GetBufferMemoryRequirements(VkDevice _device,
-                                  VkBuffer _buffer,
-                                  VkMemoryRequirements *pMemoryRequirements)
-{
-   VK_FROM_HANDLE(panvk_buffer, buffer, _buffer);
-
-   pMemoryRequirements->memoryTypeBits = 1;
-   pMemoryRequirements->alignment = 64;
-   pMemoryRequirements->size =
-      MAX2(align64(buffer->size, pMemoryRequirements->alignment), buffer->size);
 }
 
 void
@@ -1259,59 +1156,49 @@ panvk_GetBufferMemoryRequirements2(VkDevice device,
                                    const VkBufferMemoryRequirementsInfo2 *pInfo,
                                    VkMemoryRequirements2 *pMemoryRequirements)
 {
-   panvk_GetBufferMemoryRequirements(device, pInfo->buffer,
-                                     &pMemoryRequirements->memoryRequirements);
-}
+   VK_FROM_HANDLE(panvk_buffer, buffer, pInfo->buffer);
 
-void
-panvk_GetImageMemoryRequirements(VkDevice _device,
-                                 VkImage _image,
-                                 VkMemoryRequirements *pMemoryRequirements)
-{
-   VK_FROM_HANDLE(panvk_image, image, _image);
+   const uint64_t align = 64;
+   const uint64_t size = align64(buffer->vk.size, align);
 
-   pMemoryRequirements->memoryTypeBits = 1;
-   pMemoryRequirements->size = panvk_image_get_total_size(image);
-   pMemoryRequirements->alignment = 4096;
+   pMemoryRequirements->memoryRequirements.memoryTypeBits = 1;
+   pMemoryRequirements->memoryRequirements.alignment = align;
+   pMemoryRequirements->memoryRequirements.size = size;
 }
 
 void
 panvk_GetImageMemoryRequirements2(VkDevice device,
-                                 const VkImageMemoryRequirementsInfo2 *pInfo,
-                                 VkMemoryRequirements2 *pMemoryRequirements)
+                                  const VkImageMemoryRequirementsInfo2 *pInfo,
+                                  VkMemoryRequirements2 *pMemoryRequirements)
 {
-   panvk_GetImageMemoryRequirements(device, pInfo->image,
-                                    &pMemoryRequirements->memoryRequirements);
+   VK_FROM_HANDLE(panvk_image, image, pInfo->image);
+
+   const uint64_t align = 4096;
+   const uint64_t size = panvk_image_get_total_size(image);
+
+   pMemoryRequirements->memoryRequirements.memoryTypeBits = 1;
+   pMemoryRequirements->memoryRequirements.alignment = align;
+   pMemoryRequirements->memoryRequirements.size = size;
 }
 
 void
-panvk_GetImageSparseMemoryRequirements(VkDevice device, VkImage image,
-                                       uint32_t *pSparseMemoryRequirementCount,
-                                       VkSparseImageMemoryRequirements *pSparseMemoryRequirements)
-{
-   panvk_stub();
-}
-
-void
-panvk_GetImageSparseMemoryRequirements2(VkDevice device,
-                                        const VkImageSparseMemoryRequirementsInfo2 *pInfo,
-                                        uint32_t *pSparseMemoryRequirementCount,
-                                        VkSparseImageMemoryRequirements2 *pSparseMemoryRequirements)
+panvk_GetImageSparseMemoryRequirements2(
+   VkDevice device, const VkImageSparseMemoryRequirementsInfo2 *pInfo,
+   uint32_t *pSparseMemoryRequirementCount,
+   VkSparseImageMemoryRequirements2 *pSparseMemoryRequirements)
 {
    panvk_stub();
 }
 
 void
-panvk_GetDeviceMemoryCommitment(VkDevice device,
-                                VkDeviceMemory memory,
+panvk_GetDeviceMemoryCommitment(VkDevice device, VkDeviceMemory memory,
                                 VkDeviceSize *pCommittedMemoryInBytes)
 {
    *pCommittedMemoryInBytes = 0;
 }
 
 VkResult
-panvk_BindBufferMemory2(VkDevice device,
-                        uint32_t bindInfoCount,
+panvk_BindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
                         const VkBindBufferMemoryInfo *pBindInfos)
 {
    for (uint32_t i = 0; i < bindInfoCount; ++i) {
@@ -1329,24 +1216,7 @@ panvk_BindBufferMemory2(VkDevice device,
 }
 
 VkResult
-panvk_BindBufferMemory(VkDevice device,
-                       VkBuffer buffer,
-                       VkDeviceMemory memory,
-                       VkDeviceSize memoryOffset)
-{
-   const VkBindBufferMemoryInfo info = {
-      .sType = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO,
-      .buffer = buffer,
-      .memory = memory,
-      .memoryOffset = memoryOffset
-   };
-
-   return panvk_BindBufferMemory2(device, 1, &info);
-}
-
-VkResult
-panvk_BindImageMemory2(VkDevice device,
-                       uint32_t bindInfoCount,
+panvk_BindImageMemory2(VkDevice device, uint32_t bindInfoCount,
                        const VkBindImageMemoryInfo *pBindInfos)
 {
    for (uint32_t i = 0; i < bindInfoCount; ++i) {
@@ -1358,14 +1228,18 @@ panvk_BindImageMemory2(VkDevice device,
          image->pimage.data.offset = pBindInfos[i].memoryOffset;
          /* Reset the AFBC headers */
          if (drm_is_afbc(image->pimage.layout.modifier)) {
-            void *base = image->pimage.data.bo->ptr.cpu + image->pimage.data.offset;
+            void *base =
+               image->pimage.data.bo->ptr.cpu + image->pimage.data.offset;
 
-            for (unsigned layer = 0; layer < image->pimage.layout.array_size; layer++) {
-               for (unsigned level = 0; level < image->pimage.layout.nr_slices; level++) {
+            for (unsigned layer = 0; layer < image->pimage.layout.array_size;
+                 layer++) {
+               for (unsigned level = 0; level < image->pimage.layout.nr_slices;
+                    level++) {
                   void *header = base +
                                  (layer * image->pimage.layout.array_stride) +
                                  image->pimage.layout.slices[level].offset;
-                  memset(header, 0, image->pimage.layout.slices[level].afbc.header_size);
+                  memset(header, 0,
+                         image->pimage.layout.slices[level].afbc.header_size);
                }
             }
          }
@@ -1379,41 +1253,13 @@ panvk_BindImageMemory2(VkDevice device,
 }
 
 VkResult
-panvk_BindImageMemory(VkDevice device,
-                      VkImage image,
-                      VkDeviceMemory memory,
-                      VkDeviceSize memoryOffset)
-{
-   const VkBindImageMemoryInfo info = {
-      .sType = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO,
-      .image = image,
-      .memory = memory,
-      .memoryOffset = memoryOffset
-   };
-
-   return panvk_BindImageMemory2(device, 1, &info);
-}
-
-VkResult
-panvk_QueueBindSparse(VkQueue _queue,
-                      uint32_t bindInfoCount,
-                      const VkBindSparseInfo *pBindInfo,
-                      VkFence _fence)
-{
-   return VK_SUCCESS;
-}
-
-VkResult
-panvk_CreateEvent(VkDevice _device,
-                  const VkEventCreateInfo *pCreateInfo,
-                  const VkAllocationCallbacks *pAllocator,
-                  VkEvent *pEvent)
+panvk_CreateEvent(VkDevice _device, const VkEventCreateInfo *pCreateInfo,
+                  const VkAllocationCallbacks *pAllocator, VkEvent *pEvent)
 {
    VK_FROM_HANDLE(panvk_device, device, _device);
    const struct panfrost_device *pdev = &device->physical_device->pdev;
-   struct panvk_event *event =
-      vk_object_zalloc(&device->vk, pAllocator, sizeof(*event),
-                       VK_OBJECT_TYPE_EVENT);
+   struct panvk_event *event = vk_object_zalloc(
+      &device->vk, pAllocator, sizeof(*event), VK_OBJECT_TYPE_EVENT);
    if (!event)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
@@ -1432,8 +1278,7 @@ panvk_CreateEvent(VkDevice _device,
 }
 
 void
-panvk_DestroyEvent(VkDevice _device,
-                   VkEvent _event,
+panvk_DestroyEvent(VkDevice _device, VkEvent _event,
                    const VkAllocationCallbacks *pAllocator)
 {
    VK_FROM_HANDLE(panvk_device, device, _device);
@@ -1443,7 +1288,7 @@ panvk_DestroyEvent(VkDevice _device,
    if (!event)
       return;
 
-   struct drm_syncobj_destroy destroy = { .handle = event->syncobj };
+   struct drm_syncobj_destroy destroy = {.handle = event->syncobj};
    drmIoctl(pdev->fd, DRM_IOCTL_SYNCOBJ_DESTROY, &destroy);
 
    vk_object_free(&device->vk, pAllocator, event);
@@ -1458,7 +1303,7 @@ panvk_GetEventStatus(VkDevice _device, VkEvent _event)
    bool signaled;
 
    struct drm_syncobj_wait wait = {
-      .handles = (uintptr_t) &event->syncobj,
+      .handles = (uintptr_t)&event->syncobj,
       .count_handles = 1,
       .timeout_nsec = 0,
       .flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT,
@@ -1486,9 +1331,8 @@ panvk_SetEvent(VkDevice _device, VkEvent _event)
    const struct panfrost_device *pdev = &device->physical_device->pdev;
 
    struct drm_syncobj_array objs = {
-      .handles = (uint64_t) (uintptr_t) &event->syncobj,
-      .count_handles = 1
-   };
+      .handles = (uint64_t)(uintptr_t)&event->syncobj,
+      .count_handles = 1};
 
    /* This is going to just replace the fence for this syncobj with one that
     * is already in signaled state. This won't be a problem because the spec
@@ -1499,7 +1343,7 @@ panvk_SetEvent(VkDevice _device, VkEvent _event)
    if (drmIoctl(pdev->fd, DRM_IOCTL_SYNCOBJ_SIGNAL, &objs))
       return VK_ERROR_DEVICE_LOST;
 
-  return VK_SUCCESS;
+   return VK_SUCCESS;
 }
 
 VkResult
@@ -1510,35 +1354,28 @@ panvk_ResetEvent(VkDevice _device, VkEvent _event)
    const struct panfrost_device *pdev = &device->physical_device->pdev;
 
    struct drm_syncobj_array objs = {
-      .handles = (uint64_t) (uintptr_t) &event->syncobj,
-      .count_handles = 1
-   };
+      .handles = (uint64_t)(uintptr_t)&event->syncobj,
+      .count_handles = 1};
 
    if (drmIoctl(pdev->fd, DRM_IOCTL_SYNCOBJ_RESET, &objs))
       return VK_ERROR_DEVICE_LOST;
 
-  return VK_SUCCESS;
+   return VK_SUCCESS;
 }
 
 VkResult
-panvk_CreateBuffer(VkDevice _device,
-                   const VkBufferCreateInfo *pCreateInfo,
-                   const VkAllocationCallbacks *pAllocator,
-                   VkBuffer *pBuffer)
+panvk_CreateBuffer(VkDevice _device, const VkBufferCreateInfo *pCreateInfo,
+                   const VkAllocationCallbacks *pAllocator, VkBuffer *pBuffer)
 {
    VK_FROM_HANDLE(panvk_device, device, _device);
    struct panvk_buffer *buffer;
 
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO);
 
-   buffer = vk_object_alloc(&device->vk, pAllocator, sizeof(*buffer),
-                            VK_OBJECT_TYPE_BUFFER);
+   buffer =
+      vk_buffer_create(&device->vk, pCreateInfo, pAllocator, sizeof(*buffer));
    if (buffer == NULL)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
-
-   buffer->size = pCreateInfo->size;
-   buffer->usage = pCreateInfo->usage;
-   buffer->flags = pCreateInfo->flags;
 
    *pBuffer = panvk_buffer_to_handle(buffer);
 
@@ -1546,8 +1383,7 @@ panvk_CreateBuffer(VkDevice _device,
 }
 
 void
-panvk_DestroyBuffer(VkDevice _device,
-                    VkBuffer _buffer,
+panvk_DestroyBuffer(VkDevice _device, VkBuffer _buffer,
                     const VkAllocationCallbacks *pAllocator)
 {
    VK_FROM_HANDLE(panvk_device, device, _device);
@@ -1556,7 +1392,7 @@ panvk_DestroyBuffer(VkDevice _device,
    if (!buffer)
       return;
 
-   vk_object_free(&device->vk, pAllocator, buffer);
+   vk_buffer_destroy(&device->vk, pAllocator, &buffer->vk);
 }
 
 VkResult
@@ -1592,8 +1428,7 @@ panvk_CreateFramebuffer(VkDevice _device,
 }
 
 void
-panvk_DestroyFramebuffer(VkDevice _device,
-                         VkFramebuffer _fb,
+panvk_DestroyFramebuffer(VkDevice _device, VkFramebuffer _fb,
                          const VkAllocationCallbacks *pAllocator)
 {
    VK_FROM_HANDLE(panvk_device, device, _device);
@@ -1604,8 +1439,7 @@ panvk_DestroyFramebuffer(VkDevice _device,
 }
 
 void
-panvk_DestroySampler(VkDevice _device,
-                     VkSampler _sampler,
+panvk_DestroySampler(VkDevice _device, VkSampler _sampler,
                      const VkAllocationCallbacks *pAllocator)
 {
    VK_FROM_HANDLE(panvk_device, device, _device);
@@ -1657,14 +1491,22 @@ vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t *pSupportedVersion)
     *        - The ICD must implement vkCreate{PLATFORM}SurfaceKHR(),
     *          vkDestroySurfaceKHR(), and other API which uses VKSurfaceKHR,
     *          because the loader no longer does so.
+    *
+    *    - Loader interface v4 differs from v3 in:
+    *        - The ICD must implement vk_icdGetPhysicalDeviceProcAddr().
+    *
+    *    - Loader interface v5 differs from v4 in:
+    *        - The ICD must support 1.1 and must not return
+    *          VK_ERROR_INCOMPATIBLE_DRIVER from vkCreateInstance() unless a
+    *          Vulkan Loader with interface v4 or smaller is being used and the
+    *          application provides an API version that is greater than 1.0.
     */
-   *pSupportedVersion = MIN2(*pSupportedVersion, 3u);
+   *pSupportedVersion = MIN2(*pSupportedVersion, 5u);
    return VK_SUCCESS;
 }
 
 VkResult
-panvk_GetMemoryFdKHR(VkDevice _device,
-                     const VkMemoryGetFdInfoKHR *pGetFdInfo,
+panvk_GetMemoryFdKHR(VkDevice _device, const VkMemoryGetFdInfoKHR *pGetFdInfo,
                      int *pFd)
 {
    VK_FROM_HANDLE(panvk_device, device, _device);
@@ -1673,8 +1515,9 @@ panvk_GetMemoryFdKHR(VkDevice _device,
    assert(pGetFdInfo->sType == VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR);
 
    /* At the moment, we support only the below handle types. */
-   assert(pGetFdInfo->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
-          pGetFdInfo->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
+   assert(
+      pGetFdInfo->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
+      pGetFdInfo->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
 
    int prime_fd = panfrost_bo_export(memory->bo);
    if (prime_fd < 0)
@@ -1696,12 +1539,15 @@ panvk_GetMemoryFdPropertiesKHR(VkDevice _device,
 }
 
 void
-panvk_GetPhysicalDeviceExternalSemaphoreProperties(VkPhysicalDevice physicalDevice,
-                                                   const VkPhysicalDeviceExternalSemaphoreInfo *pExternalSemaphoreInfo,
-                                                   VkExternalSemaphoreProperties *pExternalSemaphoreProperties)
+panvk_GetPhysicalDeviceExternalSemaphoreProperties(
+   VkPhysicalDevice physicalDevice,
+   const VkPhysicalDeviceExternalSemaphoreInfo *pExternalSemaphoreInfo,
+   VkExternalSemaphoreProperties *pExternalSemaphoreProperties)
 {
-   if ((pExternalSemaphoreInfo->handleType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT ||
-        pExternalSemaphoreInfo->handleType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT)) {
+   if ((pExternalSemaphoreInfo->handleType ==
+           VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT ||
+        pExternalSemaphoreInfo->handleType ==
+           VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT)) {
       pExternalSemaphoreProperties->exportFromImportedHandleTypes =
          VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT |
          VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
@@ -1719,26 +1565,12 @@ panvk_GetPhysicalDeviceExternalSemaphoreProperties(VkPhysicalDevice physicalDevi
 }
 
 void
-panvk_GetPhysicalDeviceExternalFenceProperties(VkPhysicalDevice physicalDevice,
-                                               const VkPhysicalDeviceExternalFenceInfo *pExternalFenceInfo,
-                                               VkExternalFenceProperties *pExternalFenceProperties)
+panvk_GetPhysicalDeviceExternalFenceProperties(
+   VkPhysicalDevice physicalDevice,
+   const VkPhysicalDeviceExternalFenceInfo *pExternalFenceInfo,
+   VkExternalFenceProperties *pExternalFenceProperties)
 {
    pExternalFenceProperties->exportFromImportedHandleTypes = 0;
    pExternalFenceProperties->compatibleHandleTypes = 0;
    pExternalFenceProperties->externalFenceFeatures = 0;
-}
-
-void
-panvk_GetDeviceGroupPeerMemoryFeatures(VkDevice device,
-                                       uint32_t heapIndex,
-                                       uint32_t localDeviceIndex,
-                                       uint32_t remoteDeviceIndex,
-                                       VkPeerMemoryFeatureFlags *pPeerMemoryFeatures)
-{
-   assert(localDeviceIndex == remoteDeviceIndex);
-
-   *pPeerMemoryFeatures = VK_PEER_MEMORY_FEATURE_COPY_SRC_BIT |
-                          VK_PEER_MEMORY_FEATURE_COPY_DST_BIT |
-                          VK_PEER_MEMORY_FEATURE_GENERIC_SRC_BIT |
-                          VK_PEER_MEMORY_FEATURE_GENERIC_DST_BIT;
 }

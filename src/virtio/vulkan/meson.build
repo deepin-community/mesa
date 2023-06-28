@@ -30,6 +30,22 @@ virtio_icd = custom_target(
   install : true,
 )
 
+_dev_icdname = 'virtio_devenv_icd.@0@.json'.format(host_machine.cpu())
+_dev_icd = custom_target(
+  'virtio_devenv_icd',
+  input : [vk_icd_gen, vk_api_xml],
+  output : _dev_icdname,
+  command : [
+    prog_python, '@INPUT0@',
+    '--api-version', '1.2', '--xml', '@INPUT1@',
+    '--lib-path', meson.current_build_dir() / 'libvulkan_virtio.so',
+    '--out', '@OUTPUT@',
+  ],
+  build_by_default : true,
+)
+
+devenv.append('VK_ICD_FILENAMES', _dev_icd.full_path())
+
 libvn_files = files(
   'vn_buffer.c',
   'vn_command_buffer.c',
@@ -38,6 +54,7 @@ libvn_files = files(
   'vn_descriptor_set.c',
   'vn_device.c',
   'vn_device_memory.c',
+  'vn_feedback.c',
   'vn_icd.c',
   'vn_image.c',
   'vn_instance.c',
@@ -47,6 +64,8 @@ libvn_files = files(
   'vn_queue.c',
   'vn_render_pass.c',
   'vn_ring.c',
+  'vn_renderer_internal.c',
+  'vn_renderer_util.c',
   'vn_renderer_virtgpu.c',
   'vn_renderer_vtest.c',
 )
@@ -56,6 +75,7 @@ vn_deps = [
   dep_thread,
   idep_mesautil,
   idep_vulkan_util,
+  idep_vulkan_runtime,
   idep_vulkan_wsi,
   idep_xmlconfig,
 ]
@@ -68,6 +88,7 @@ vn_libs = []
 
 if with_platform_wayland or with_platform_x11
   libvn_files += files('vn_wsi.c')
+  libvn_files += wsi_entrypoints[0]
   vn_flags += '-DVN_USE_WSI_PLATFORM'
 endif
 
@@ -93,7 +114,8 @@ libvulkan_virtio = shared_library(
   link_with : vn_libs,
   dependencies : [vn_deps],
   c_args : [vn_flags],
-  link_args : [ld_args_bsymbolic, ld_args_gc_sections],
+  link_args : [vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections],
+  link_depends : vulkan_icd_link_depends,
   gnu_symbol_visibility : 'hidden',
   install : true,
 )

@@ -706,7 +706,6 @@ emit_DrawArrays_old(GLenum mode, GLint first, GLsizei count)
    size_t elements_per_request;
    unsigned total_requests = 0;
    unsigned i;
-   size_t total_sent = 0;
 
 
    pc = emit_DrawArrays_header_old(gc, arrays, &elements_per_request,
@@ -746,7 +745,6 @@ emit_DrawArrays_old(GLenum mode, GLint first, GLsizei count)
 
          first += elements_per_request;
 
-         total_sent += (size_t) (pc - gc->pc);
          __glXSendLargeChunk(gc, req, total_requests, gc->pc, pc - gc->pc);
 
          count -= elements_per_request;
@@ -1098,9 +1096,9 @@ __indirect_glMultiDrawArrays(GLenum mode, const GLint *first,
 
 
 void
-__indirect_glMultiDrawElementsEXT(GLenum mode, const GLsizei * count,
-                                  GLenum type, const GLvoid * const * indices,
-                                  GLsizei primcount)
+__indirect_glMultiDrawElements(GLenum mode, const GLsizei * count,
+                               GLenum type, const GLvoid * const * indices,
+                               GLsizei primcount)
 {
    struct glx_context *gc = __glXGetCurrentContext();
    const __GLXattribute *state =

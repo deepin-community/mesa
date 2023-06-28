@@ -127,7 +127,7 @@ clear_stale_syncobjs(struct crocus_batch *batch)
                                           struct drm_i915_gem_exec_fence));
 
    /* Skip the first syncobj, as it's the signalling one. */
-   for (int i = n - 1; i > 1; i--) {
+   for (int i = n - 1; i > 0; i--) {
       struct crocus_syncobj **syncobj =
          util_dynarray_element(&batch->syncobjs, struct crocus_syncobj *, i);
       struct drm_i915_gem_exec_fence *fence =
@@ -551,6 +551,8 @@ crocus_fence_signal(struct pipe_context *ctx, struct pipe_fence_handle *fence)
          crocus_batch_add_syncobj(&ice->batches[b], fine->syncobj,
                                   I915_EXEC_FENCE_SIGNAL);
       }
+      if (ice->batches[b].contains_fence_signal)
+         crocus_batch_flush(&ice->batches[b]);
    }
 }
 

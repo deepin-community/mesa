@@ -1,4 +1,3 @@
-# coding=utf-8
 COPYRIGHT=u"""
 /* Copyright © 2015-2021 Intel Corporation
  * Copyright © 2021 Collabora, Ltd.
@@ -34,14 +33,32 @@ from mako.template import Template
 
 # Mesa-local imports must be declared in meson variable
 # '{file_without_suffix}_depend_files'.
-from vk_dispatch_table_gen import get_entrypoints_from_xml, EntrypointParam
+from vk_entrypoints import EntrypointParam, get_entrypoints_from_xml
+from vk_extensions import filter_api, get_all_required
 
-MANUAL_COMMANDS = ['CmdPushDescriptorSetKHR',             # This script doesn't know how to copy arrays in structs in arrays
-                   'CmdPushDescriptorSetWithTemplateKHR', # pData's size cannot be calculated from the xml
-                   'CmdDrawMultiEXT',                     # The size of the elements is specified in a stride param
-                   'CmdDrawMultiIndexedEXT',              # The size of the elements is specified in a stride param
-                   'CmdBindDescriptorSets',               # The VkPipelineLayout object could be released before the command is executed
-                  ]
+# These have hand-typed implementations in vk_cmd_enqueue.c
+MANUAL_COMMANDS = [
+    # This script doesn't know how to copy arrays in structs in arrays
+    'CmdPushDescriptorSetKHR',
+
+    # The size of the elements is specified in a stride param
+    'CmdDrawMultiEXT',
+    'CmdDrawMultiIndexedEXT',
+
+    # The VkPipelineLayout object could be released before the command is
+    # executed
+    'CmdBindDescriptorSets',
+]
+
+NO_ENQUEUE_COMMANDS = [
+    # pData's size cannot be calculated from the xml
+    'CmdPushDescriptorSetWithTemplateKHR',
+
+    # These don't return void
+    'CmdSetPerformanceMarkerINTEL',
+    'CmdSetPerformanceStreamMarkerINTEL',
+    'CmdSetPerformanceOverrideINTEL',
+]
 
 TEMPLATE_H = Template(COPYRIGHT + """\
 /* This file generated from ${filename}, don't edit directly. */
@@ -51,14 +68,16 @@ TEMPLATE_H = Template(COPYRIGHT + """\
 #include "util/list.h"
 
 #define VK_PROTOTYPES
-#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_core.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+struct vk_device_dispatch_table;
+
 struct vk_cmd_queue {
-   VkAllocationCallbacks *alloc;
+   const VkAllocationCallbacks *alloc;
    struct list_head cmds;
 };
 
@@ -111,16 +130,18 @@ struct vk_cmd_queue_entry {
 % endfor
    } u;
    void *driver_data;
+   void (*driver_free_cb)(struct vk_cmd_queue *queue,
+                          struct vk_cmd_queue_entry *cmd);
 };
 
 % for c in commands:
-% if c.name in manual_commands:
+% if c.name in manual_commands or c.name in no_enqueue_commands:
 <% continue %>
 % endif
 % if c.guard is not None:
 #ifdef ${c.guard}
 % endif
-  void vk_enqueue_${to_underscore(c.name)}(struct vk_cmd_queue *queue
+  VkResult vk_enqueue_${to_underscore(c.name)}(struct vk_cmd_queue *queue
 % for p in c.params[1:]:
    , ${p.decl}
 % endfor
@@ -133,6 +154,31 @@ struct vk_cmd_queue_entry {
 
 void vk_free_queue(struct vk_cmd_queue *queue);
 
+static inline void
+vk_cmd_queue_init(struct vk_cmd_queue *queue, VkAllocationCallbacks *alloc)
+{
+   queue->alloc = alloc;
+   list_inithead(&queue->cmds);
+}
+
+static inline void
+vk_cmd_queue_reset(struct vk_cmd_queue *queue)
+{
+   vk_free_queue(queue);
+   list_inithead(&queue->cmds);
+}
+
+static inline void
+vk_cmd_queue_finish(struct vk_cmd_queue *queue)
+{
+   vk_free_queue(queue);
+   list_inithead(&queue->cmds);
+}
+
+void vk_cmd_queue_execute(struct vk_cmd_queue *queue,
+                          VkCommandBuffer commandBuffer,
+                          const struct vk_device_dispatch_table *disp);
+
 #ifdef __cplusplus
 }
 #endif
@@ -144,9 +190,13 @@ TEMPLATE_C = Template(COPYRIGHT + """
 #include "${header}"
 
 #define VK_PROTOTYPES
-#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_core.h>
 
 #include "vk_alloc.h"
+#include "vk_cmd_enqueue_entrypoints.h"
+#include "vk_command_buffer.h"
+#include "vk_dispatch_table.h"
+#include "vk_device.h"
 
 const char *vk_cmd_queue_type_names[] = {
 % for c in commands:
@@ -161,13 +211,30 @@ const char *vk_cmd_queue_type_names[] = {
 };
 
 % for c in commands:
-% if c.name in manual_commands:
-<% continue %>
-% endif
 % if c.guard is not None:
 #ifdef ${c.guard}
 % endif
-void vk_enqueue_${to_underscore(c.name)}(struct vk_cmd_queue *queue
+static void
+vk_free_${to_underscore(c.name)}(struct vk_cmd_queue *queue,
+${' ' * len('vk_free_' + to_underscore(c.name) + '(')}\\
+struct vk_cmd_queue_entry *cmd)
+{
+   if (cmd->driver_free_cb)
+      cmd->driver_free_cb(queue, cmd);
+   else
+      vk_free(queue->alloc, cmd->driver_data);
+% for p in c.params[1:]:
+% if p.len:
+   vk_free(queue->alloc, (${remove_suffix(p.decl.replace("const", ""), p.name)})cmd->u.${to_struct_field_name(c.name)}.${to_field_name(p.name)});
+% elif '*' in p.decl:
+   ${get_struct_free(c, p, types)}
+% endif
+% endfor
+   vk_free(queue->alloc, cmd);
+}
+
+% if c.name not in manual_commands and c.name not in no_enqueue_commands:
+VkResult vk_enqueue_${to_underscore(c.name)}(struct vk_cmd_queue *queue
 % for p in c.params[1:]:
 , ${p.decl}
 % endfor
@@ -175,30 +242,42 @@ void vk_enqueue_${to_underscore(c.name)}(struct vk_cmd_queue *queue
 {
    struct vk_cmd_queue_entry *cmd = vk_zalloc(queue->alloc,
                                               sizeof(*cmd), 8,
-                                              VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);
-   if (!cmd)
-      return;
+                                              VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+   if (!cmd) return VK_ERROR_OUT_OF_HOST_MEMORY;
 
    cmd->type = ${to_enum_name(c.name)};
-   list_addtail(&cmd->cmd_link, &queue->cmds);
-
+   \
+   <% need_error_handling = False %>
 % for p in c.params[1:]:
 % if p.len:
    if (${p.name}) {
       ${get_array_copy(c, p)}
-   }
+   }\
+   <% need_error_handling = True %>
 % elif '[' in p.decl:
    memcpy(cmd->u.${to_struct_field_name(c.name)}.${to_field_name(p.name)}, ${p.name},
           sizeof(*${p.name}) * ${get_array_len(p)});
 % elif p.type == "void":
    cmd->u.${to_struct_field_name(c.name)}.${to_field_name(p.name)} = (${remove_suffix(p.decl.replace("const", ""), p.name)}) ${p.name};
 % elif '*' in p.decl:
-   ${get_struct_copy("cmd->u.%s.%s" % (to_struct_field_name(c.name), to_field_name(p.name)), p.name, p.type, 'sizeof(%s)' % p.type, types)}
+   ${get_struct_copy("cmd->u.%s.%s" % (to_struct_field_name(c.name), to_field_name(p.name)), p.name, p.type, 'sizeof(%s)' % p.type, types)}\
+   <% need_error_handling = True %>
 % else:
    cmd->u.${to_struct_field_name(c.name)}.${to_field_name(p.name)} = ${p.name};
 % endif
 % endfor
+
+   list_addtail(&cmd->cmd_link, &queue->cmds);
+   return VK_SUCCESS;
+
+% if need_error_handling:
+err:
+   if (cmd)
+      vk_free_${to_underscore(c.name)}(queue, cmd);
+   return VK_ERROR_OUT_OF_HOST_MEMORY;
+% endif
 }
+% endif
 % if c.guard is not None:
 #endif // ${c.guard}
 % endif
@@ -216,23 +295,93 @@ vk_free_queue(struct vk_cmd_queue *queue)
 #ifdef ${c.guard}
 % endif
       case ${to_enum_name(c.name)}:
-% for p in c.params[1:]:
-% if p.len:
-   vk_free(queue->alloc, (${remove_suffix(p.decl.replace("const", ""), p.name)})cmd->u.${to_struct_field_name(c.name)}.${to_field_name(p.name)});
-% elif '*' in p.decl:
-   ${get_struct_free(c, p, types)}
-% endif
-% endfor
+         vk_free_${to_underscore(c.name)}(queue, cmd);
          break;
 % if c.guard is not None:
 #endif // ${c.guard}
 % endif
 % endfor
       }
-      vk_free(queue->alloc, cmd);
    }
 }
 
+void
+vk_cmd_queue_execute(struct vk_cmd_queue *queue,
+                     VkCommandBuffer commandBuffer,
+                     const struct vk_device_dispatch_table *disp)
+{
+   list_for_each_entry(struct vk_cmd_queue_entry, cmd, &queue->cmds, cmd_link) {
+      switch (cmd->type) {
+% for c in commands:
+% if c.guard is not None:
+#ifdef ${c.guard}
+% endif
+      case ${to_enum_name(c.name)}:
+          disp->${c.name}(commandBuffer
+% for p in c.params[1:]:
+             , cmd->u.${to_struct_field_name(c.name)}.${to_field_name(p.name)}\\
+% endfor
+          );
+          break;
+% if c.guard is not None:
+#endif // ${c.guard}
+% endif
+% endfor
+      default: unreachable("Unsupported command");
+      }
+   }
+}
+
+% for c in commands:
+% if c.name in no_enqueue_commands:
+/* TODO: Generate vk_cmd_enqueue_${c.name}() */
+<% continue %>
+% endif
+
+% if c.guard is not None:
+#ifdef ${c.guard}
+% endif
+<% assert c.return_type == 'void' %>
+
+% if c.name in manual_commands:
+/* vk_cmd_enqueue_${c.name}() is hand-typed in vk_cmd_enqueue.c */
+% else:
+VKAPI_ATTR void VKAPI_CALL
+vk_cmd_enqueue_${c.name}(${c.decl_params()})
+{
+   VK_FROM_HANDLE(vk_command_buffer, cmd_buffer, commandBuffer);
+
+   if (vk_command_buffer_has_error(cmd_buffer))
+      return;
+% if len(c.params) == 1:
+   VkResult result = vk_enqueue_${to_underscore(c.name)}(&cmd_buffer->cmd_queue);
+% else:
+   VkResult result = vk_enqueue_${to_underscore(c.name)}(&cmd_buffer->cmd_queue,
+                                       ${c.call_params(1)});
+% endif
+   if (unlikely(result != VK_SUCCESS))
+      vk_command_buffer_set_error(cmd_buffer, result);
+}
+% endif
+
+VKAPI_ATTR void VKAPI_CALL
+vk_cmd_enqueue_unless_primary_${c.name}(${c.decl_params()})
+{
+    VK_FROM_HANDLE(vk_command_buffer, cmd_buffer, commandBuffer);
+
+   if (cmd_buffer->level == VK_COMMAND_BUFFER_LEVEL_PRIMARY) {
+      const struct vk_device_dispatch_table *disp =
+         cmd_buffer->base.device->command_dispatch_table;
+
+      disp->${c.name}(${c.call_params()});
+   } else {
+      vk_cmd_enqueue_${c.name}(${c.call_params()});
+   }
+}
+% if c.guard is not None:
+#endif // ${c.guard}
+% endif
+% endfor
 """, output_encoding='utf-8')
 
 def remove_prefix(text, prefix):
@@ -255,7 +404,10 @@ def to_field_name(name):
     return remove_prefix(to_underscore(name).replace('cmd_', ''), 'p_')
 
 def to_field_decl(decl):
-    decl = decl.replace('const ', '')
+    if 'const*' in decl:
+        decl = decl.replace('const*', '*')
+    else:
+        decl = decl.replace('const ', '')
     [decl, name] = decl.rsplit(' ', 1)
     return decl + ' ' + to_field_name(name)
 
@@ -274,18 +426,21 @@ def get_array_copy(command, param):
         field_size = "1"
     else:
         field_size = "sizeof(*%s)" % field_name
-    allocation = "%s = vk_zalloc(queue->alloc, %s * %s, 8, VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);" % (field_name, field_size, param.len)
+    allocation = "%s = vk_zalloc(queue->alloc, %s * (%s), 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);\n   if (%s == NULL) goto err;\n" % (field_name, field_size, param.len, field_name)
     const_cast = remove_suffix(param.decl.replace("const", ""), param.name)
-    copy = "memcpy((%s)%s, %s, %s * %s);" % (const_cast, field_name, param.name, field_size, param.len)
+    copy = "memcpy((%s)%s, %s, %s * (%s));" % (const_cast, field_name, param.name, field_size, param.len)
     return "%s\n   %s" % (allocation, copy)
 
 def get_array_member_copy(struct, src_name, member):
     field_name = "%s->%s" % (struct, member.name)
-    len_field_name = "%s->%s" % (struct, member.len)
-    allocation = "%s = vk_zalloc(queue->alloc, sizeof(*%s) * %s, 8, VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);" % (field_name, field_name, len_field_name)
+    if member.len == "struct-ptr":
+        field_size = "sizeof(*%s)" % (field_name)
+    else:
+        field_size = "sizeof(*%s) * %s->%s" % (field_name, struct, member.len)
+    allocation = "%s = vk_zalloc(queue->alloc, %s, 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);\n   if (%s == NULL) goto err;\n" % (field_name, field_size, field_name)
     const_cast = remove_suffix(member.decl.replace("const", ""), member.name)
-    copy = "memcpy((%s)%s, %s->%s, sizeof(*%s) * %s);" % (const_cast, field_name, src_name, member.name, field_name, len_field_name)
-    return "%s\n   %s\n" % (allocation, copy)
+    copy = "memcpy((%s)%s, %s->%s, %s);" % (const_cast, field_name, src_name, member.name, field_size)
+    return "if (%s->%s) {\n   %s\n   %s\n}\n" % (src_name, member.name, allocation, copy)
 
 def get_pnext_member_copy(struct, src_type, member, types, level):
     if not types[src_type].extended_by:
@@ -294,11 +449,18 @@ def get_pnext_member_copy(struct, src_type, member, types, level):
     pnext_decl = "const VkBaseInStructure *pnext = %s;" % field_name
     case_stmts = ""
     for type in types[src_type].extended_by:
+        guard_pre_stmt = ""
+        guard_post_stmt = ""
+        if type.guard is not None:
+            guard_pre_stmt = "#ifdef %s" % type.guard
+            guard_post_stmt = "#endif"
         case_stmts += """
+%s
       case %s:
          %s
          break;
-      """ % (type.enum, get_struct_copy(field_name, "pnext", type.name, "sizeof(%s)" % type.name, types, level))
+%s
+      """ % (guard_pre_stmt, type.enum, get_struct_copy(field_name, "pnext", type.name, "sizeof(%s)" % type.name, types, level), guard_post_stmt)
     return """
       %s
       if (pnext) {
@@ -312,7 +474,7 @@ def get_struct_copy(dst, src_name, src_type, size, types, level=0):
     global tmp_dst_idx
     global tmp_src_idx
 
-    allocation = "%s = vk_zalloc(queue->alloc, %s, 8, VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);" % (dst, size)
+    allocation = "%s = vk_zalloc(queue->alloc, %s, 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);\n      if (%s == NULL) goto err;\n" % (dst, size, dst)
     copy = "memcpy((void*)%s, %s, %s);" % (dst, src_name, size)
 
     level += 1
@@ -334,7 +496,6 @@ def get_struct_copy(dst, src_name, src_type, size, types, level=0):
 def get_struct_free(command, param, types):
     field_name = "cmd->u.%s.%s" % (to_struct_field_name(command.name), to_field_name(param.name))
     const_cast = remove_suffix(param.decl.replace("const", ""), param.name)
-    driver_data_free = "vk_free(queue->alloc, cmd->driver_data);\n"
     struct_free = "vk_free(queue->alloc, (%s)%s);" % (const_cast, field_name)
     member_frees = ""
     if (param.type in types):
@@ -343,32 +504,73 @@ def get_struct_free(command, param, types):
                 member_name = "cmd->u.%s.%s->%s" % (to_struct_field_name(command.name), to_field_name(param.name), member.name)
                 const_cast = remove_suffix(member.decl.replace("const", ""), member.name)
                 member_frees += "vk_free(queue->alloc, (%s)%s);\n" % (const_cast, member_name)
-    return "%s      %s      %s\n" % (member_frees, driver_data_free, struct_free)
+    return "%s      %s\n" % (member_frees, struct_free)
 
-EntrypointType = namedtuple('EntrypointType', 'name enum members extended_by')
+EntrypointType = namedtuple('EntrypointType', 'name enum members extended_by guard')
 
-def get_types(doc):
+def get_types_defines(doc):
+    """Maps types to extension defines."""
+    types_to_defines = {}
+
+    platform_define = {}
+    for platform in doc.findall('./platforms/platform'):
+        name = platform.attrib['name']
+        define = platform.attrib['protect']
+        platform_define[name] = define
+
+    for extension in doc.findall('./extensions/extension[@platform]'):
+        platform = extension.attrib['platform']
+        define = platform_define[platform]
+
+        for types in extension.findall('./require/type'):
+            fullname = types.attrib['name']
+            types_to_defines[fullname] = define
+
+    return types_to_defines
+
+def get_types(doc, api, types_to_defines):
     """Extract the types from the registry."""
     types = {}
+
+    required = get_all_required(doc, 'type', api)
 
     for _type in doc.findall('./types/type'):
         if _type.attrib.get('category') != 'struct':
             continue
+        if not filter_api(_type, api):
+            continue
+        if _type.attrib['name'] not in required:
+            continue
+
         members = []
         type_enum = None
         for p in _type.findall('./member'):
-            member = EntrypointParam(type=p.find('./type').text,
-                                     name=p.find('./name').text,
-                                     decl=''.join(p.itertext()),
-                                     len=p.attrib.get('len', None))
+            if not filter_api(p, api):
+                continue
+
+            mem_type = p.find('./type').text
+            mem_name = p.find('./name').text
+            mem_decl = ''.join(p.itertext())
+            mem_len = p.attrib.get('altlen', p.attrib.get('len', None))
+            if mem_len is None and '*' in mem_decl and mem_name != 'pNext':
+                mem_len = "struct-ptr"
+
+            member = EntrypointParam(type=mem_type,
+                                     name=mem_name,
+                                     decl=mem_decl,
+                                     len=mem_len)
             members.append(member)
 
-            if p.find('./name').text == 'sType':
+            if mem_name == 'sType':
                 type_enum = p.attrib.get('values')
-        types[_type.attrib['name']] = EntrypointType(name=_type.attrib['name'], enum=type_enum, members=members, extended_by=[])
+        types[_type.attrib['name']] = EntrypointType(name=_type.attrib['name'], enum=type_enum, members=members, extended_by=[], guard=types_to_defines.get(_type.attrib['name']))
 
     for _type in doc.findall('./types/type'):
         if _type.attrib.get('category') != 'struct':
+            continue
+        if not filter_api(_type, api):
+            continue
+        if _type.attrib['name'] not in required:
             continue
         if _type.attrib.get('structextends') is None:
             continue
@@ -377,12 +579,12 @@ def get_types(doc):
 
     return types
 
-def get_types_from_xml(xml_files):
+def get_types_from_xml(xml_files, api='vulkan'):
     types = {}
 
     for filename in xml_files:
         doc = et.parse(filename)
-        types.update(get_types(doc))
+        types.update(get_types(doc, api, get_types_defines(doc)))
 
     return types
 
@@ -421,6 +623,7 @@ def main():
         'get_struct_free': get_struct_free,
         'types': types,
         'manual_commands': MANUAL_COMMANDS,
+        'no_enqueue_commands': NO_ENQUEUE_COMMANDS,
         'remove_suffix': remove_suffix,
     }
 
@@ -435,12 +638,10 @@ def main():
         # to print a useful stack trace and prints it, then exits with
         # status 1, if python is run with debug; otherwise it just raises
         # the exception
-        if __debug__:
-            import sys
-            from mako import exceptions
-            sys.stderr.write(exceptions.text_error_template().render() + '\n')
-            sys.exit(1)
-        raise
+        import sys
+        from mako import exceptions
+        print(exceptions.text_error_template().render(), file=sys.stderr)
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()

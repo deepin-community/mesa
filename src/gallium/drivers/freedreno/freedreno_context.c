@@ -38,6 +38,7 @@
 #include "freedreno_state.h"
 #include "freedreno_texture.h"
 #include "freedreno_util.h"
+#include "freedreno_tracepoints.h"
 #include "util/u_trace_gallium.h"
 
 static void
@@ -53,7 +54,7 @@ fd_context_flush(struct pipe_context *pctx, struct pipe_fence_handle **fencep,
     */
    fd_batch_reference(&batch, ctx->batch);
 
-   DBG("%p: flush: flags=%x, fencep=%p", batch, flags, fencep);
+   DBG("%p: %p: flush: flags=%x, fencep=%p", ctx, batch, flags, fencep);
 
    if (fencep && !batch) {
       batch = fd_context_batch(ctx);
@@ -77,15 +78,15 @@ fd_context_flush(struct pipe_context *pctx, struct pipe_fence_handle **fencep,
        */
       assert(!(flags & PIPE_FLUSH_FENCE_FD));
 
-      fd_fence_set_batch(*fencep, batch);
-      fd_fence_ref(&batch->fence, *fencep);
+      fd_pipe_fence_set_batch(*fencep, batch);
+      fd_pipe_fence_ref(&batch->fence, *fencep);
 
       /* If we have nothing to flush, update the pre-created unflushed
        * fence with the current state of the last-fence:
        */
       if (ctx->last_fence) {
-         fd_fence_repopulate(*fencep, ctx->last_fence);
-         fd_fence_ref(&fence, *fencep);
+         fd_pipe_fence_repopulate(*fencep, ctx->last_fence);
+         fd_pipe_fence_ref(&fence, *fencep);
          fd_bc_dump(ctx, "%p: (deferred) reuse last_fence, remaining:\n", ctx);
          goto out;
       }
@@ -96,7 +97,7 @@ fd_context_flush(struct pipe_context *pctx, struct pipe_fence_handle **fencep,
        */
       flags &= ~PIPE_FLUSH_DEFERRED;
    } else if (!batch->fence) {
-      batch->fence = fd_fence_create(batch);
+      batch->fence = fd_pipe_fence_create(batch);
    }
 
    /* In some sequence of events, we can end up with a last_fence that is
@@ -104,23 +105,23 @@ fd_context_flush(struct pipe_context *pctx, struct pipe_fence_handle **fencep,
     * errors.
     */
    if ((flags & PIPE_FLUSH_FENCE_FD) && ctx->last_fence &&
-       !fd_fence_is_fd(ctx->last_fence))
-      fd_fence_ref(&ctx->last_fence, NULL);
+       !fd_pipe_fence_is_fd(ctx->last_fence))
+      fd_pipe_fence_ref(&ctx->last_fence, NULL);
 
    /* if no rendering since last flush, ie. app just decided it needed
     * a fence, re-use the last one:
     */
    if (ctx->last_fence) {
-      fd_fence_ref(&fence, ctx->last_fence);
+      fd_pipe_fence_ref(&fence, ctx->last_fence);
       fd_bc_dump(ctx, "%p: reuse last_fence, remaining:\n", ctx);
       goto out;
    }
 
    /* Take a ref to the batch's fence (batch can be unref'd when flushed: */
-   fd_fence_ref(&fence, batch->fence);
+   fd_pipe_fence_ref(&fence, batch->fence);
 
    if (flags & PIPE_FLUSH_FENCE_FD)
-      fence->submit_fence.use_fence_fd = true;
+      fence->use_fence_fd = true;
 
    fd_bc_dump(ctx, "%p: flushing %p<%u>, flags=0x%x, pending:\n", ctx,
               batch, batch->seqno, flags);
@@ -140,11 +141,11 @@ fd_context_flush(struct pipe_context *pctx, struct pipe_fence_handle **fencep,
 
 out:
    if (fencep)
-      fd_fence_ref(fencep, fence);
+      fd_pipe_fence_ref(fencep, fence);
 
-   fd_fence_ref(&ctx->last_fence, fence);
+   fd_pipe_fence_ref(&ctx->last_fence, fence);
 
-   fd_fence_ref(&fence, NULL);
+   fd_pipe_fence_ref(&fence, NULL);
 
    fd_batch_reference(&batch, NULL);
 
@@ -155,15 +156,6 @@ out:
 static void
 fd_texture_barrier(struct pipe_context *pctx, unsigned flags) in_dt
 {
-   if (flags == PIPE_TEXTURE_BARRIER_FRAMEBUFFER) {
-      struct fd_context *ctx = fd_context(pctx);
-
-      if (ctx->framebuffer_barrier) {
-         ctx->framebuffer_barrier(ctx);
-         return;
-      }
-   }
-
    /* On devices that could sample from GMEM we could possibly do better.
     * Or if we knew that we were doing GMEM bypass we could just emit a
     * cache flush, perhaps?  But we don't know if future draws would cause
@@ -179,10 +171,6 @@ fd_memory_barrier(struct pipe_context *pctx, unsigned flags)
       return;
 
    fd_context_flush(pctx, NULL, 0);
-
-   /* TODO do we need to check for persistently mapped buffers and
-    * fd_bo_cpu_prep()??
-    */
 }
 
 static void
@@ -241,7 +229,7 @@ fd_emit_string_marker(struct pipe_context *pctx, const char *string,
    if (!ctx->batch)
       return;
 
-   struct fd_batch *batch = fd_context_batch_locked(ctx);
+   struct fd_batch *batch = fd_context_batch(ctx);
 
    fd_batch_needs_flush(batch);
 
@@ -251,8 +239,59 @@ fd_emit_string_marker(struct pipe_context *pctx, const char *string,
       fd_emit_string(batch->draw, string, len);
    }
 
-   fd_batch_unlock_submit(batch);
    fd_batch_reference(&batch, NULL);
+}
+
+static void
+fd_cs_magic_write_string(void *cs, struct u_trace_context *utctx, int magic,
+                         const char *fmt, va_list args)
+{
+   struct fd_context *ctx =
+      container_of(utctx, struct fd_context, trace_context);
+   int fmt_len = vsnprintf(NULL, 0, fmt, args);
+   int len = 4 + fmt_len + 1;
+   char *string = (char *)malloc(len);
+
+   /* format: <magic><formatted string>\0 */
+   *(uint32_t *)string = magic;
+   vsnprintf(string + 4, fmt_len + 1, fmt, args);
+
+   if (ctx->screen->gen >= 5) {
+      fd_emit_string5((struct fd_ringbuffer *)cs, string, len);
+   } else {
+      fd_emit_string((struct fd_ringbuffer *)cs, string, len);
+   }
+   free(string);
+}
+
+void
+fd_cs_trace_msg(struct u_trace_context *utctx, void *cs, const char *fmt, ...)
+{
+   va_list args;
+   va_start(args, fmt);
+   int magic = CP_NOP_MESG;
+   fd_cs_magic_write_string(cs, utctx, magic, fmt, args);
+   va_end(args);
+}
+
+void
+fd_cs_trace_start(struct u_trace_context *utctx, void *cs, const char *fmt, ...)
+{
+   va_list args;
+   va_start(args, fmt);
+   int magic = CP_NOP_BEGN;
+   fd_cs_magic_write_string(cs, utctx, magic, fmt, args);
+   va_end(args);
+}
+
+void
+fd_cs_trace_end(struct u_trace_context *utctx, void *cs, const char *fmt, ...)
+{
+   va_list args;
+   va_start(args, fmt);
+   int magic = CP_NOP_END;
+   fd_cs_magic_write_string(cs, utctx, magic, fmt, args);
+   va_end(args);
 }
 
 /**
@@ -294,6 +333,11 @@ fd_context_batch(struct fd_context *ctx)
 
    tc_assert_driver_thread(ctx->tc);
 
+   if (ctx->batch_nondraw) {
+      fd_batch_reference(&ctx->batch_nondraw, NULL);
+      fd_context_all_dirty(ctx);
+   }
+
    fd_batch_reference(&batch, ctx->batch);
 
    if (unlikely(!batch)) {
@@ -309,22 +353,23 @@ fd_context_batch(struct fd_context *ctx)
 }
 
 /**
- * Return a locked reference to the current batch.  A batch with emit
- * lock held is protected against flushing while the lock is held.
- * The emit-lock should be acquired before screen-lock.  The emit-lock
- * should be held while emitting cmdstream.
+ * Return a reference to the current non-draw (compute/blit) batch.
  */
 struct fd_batch *
-fd_context_batch_locked(struct fd_context *ctx)
+fd_context_batch_nondraw(struct fd_context *ctx)
 {
    struct fd_batch *batch = NULL;
 
-   while (!batch) {
-      batch = fd_context_batch(ctx);
-      if (!fd_batch_lock_submit(batch)) {
-         fd_batch_reference(&batch, NULL);
-      }
+   tc_assert_driver_thread(ctx->tc);
+
+   fd_batch_reference(&batch, ctx->batch_nondraw);
+
+   if (unlikely(!batch)) {
+      batch = fd_bc_alloc_batch(ctx, true);
+      fd_batch_reference(&ctx->batch_nondraw, batch);
+      fd_context_all_dirty(ctx);
    }
+   fd_context_switch_to(ctx, batch);
 
    return batch;
 }
@@ -341,7 +386,7 @@ fd_context_destroy(struct pipe_context *pctx)
    list_del(&ctx->node);
    fd_screen_unlock(ctx->screen);
 
-   fd_fence_ref(&ctx->last_fence, NULL);
+   fd_pipe_fence_ref(&ctx->last_fence, NULL);
 
    if (ctx->in_fence_fd != -1)
       close(ctx->in_fence_fd);
@@ -402,9 +447,12 @@ fd_context_destroy(struct pipe_context *pctx)
 
 static void
 fd_set_debug_callback(struct pipe_context *pctx,
-                      const struct pipe_debug_callback *cb)
+                      const struct util_debug_callback *cb)
 {
    struct fd_context *ctx = fd_context(pctx);
+   struct fd_screen *screen = ctx->screen;
+
+   util_queue_finish(&screen->compile_queue);
 
    if (cb)
       ctx->debug = *cb;
@@ -417,8 +465,8 @@ fd_get_reset_count(struct fd_context *ctx, bool per_context)
 {
    uint64_t val;
    enum fd_param_id param = per_context ? FD_CTX_FAULTS : FD_GLOBAL_FAULTS;
-   int ret = fd_pipe_get_param(ctx->pipe, param, &val);
-   debug_assert(!ret);
+   ASSERTED int ret = fd_pipe_get_param(ctx->pipe, param, &val);
+   assert(!ret);
    return val;
 }
 
@@ -446,7 +494,7 @@ fd_get_device_reset_status(struct pipe_context *pctx)
 
 static void
 fd_trace_record_ts(struct u_trace *ut, void *cs, void *timestamps,
-                   unsigned idx)
+                   unsigned idx, bool end_of_pipe)
 {
    struct fd_batch *batch = container_of(ut, struct fd_batch, trace);
    struct fd_ringbuffer *ring = cs;
@@ -508,7 +556,7 @@ static struct pipe_resource *
 create_solid_vertexbuf(struct pipe_context *pctx)
 {
    static const float init_shader_const[] = {
-      -1.000000, +1.000000, +1.000000, +1.000000, -1.000000, +1.000000,
+      -1.000000f, +1.000000f, +1.000000f, +1.000000f, -1.000000f, +1.000000f,
    };
    struct pipe_resource *prsc =
       pipe_buffer_create(pctx->screen, PIPE_BIND_CUSTOM, PIPE_USAGE_IMMUTABLE,
@@ -587,15 +635,15 @@ fd_context_init(struct fd_context *ctx, struct pipe_screen *pscreen,
 {
    struct fd_screen *screen = fd_screen(pscreen);
    struct pipe_context *pctx;
-   unsigned prio = 1;
+   unsigned prio = screen->prio_norm;
 
    /* lower numerical value == higher priority: */
    if (FD_DBG(HIPRIO))
-      prio = 0;
+      prio = screen->prio_high;
    else if (flags & PIPE_CONTEXT_HIGH_PRIORITY)
-      prio = 0;
+      prio = screen->prio_high;
    else if (flags & PIPE_CONTEXT_LOW_PRIORITY)
-      prio = 2;
+      prio = screen->prio_low;
 
    /* Some of the stats will get printed out at context destroy, so
     * make sure they are collected:
@@ -603,6 +651,7 @@ fd_context_init(struct fd_context *ctx, struct pipe_screen *pscreen,
    if (FD_DBG(BSTAT) || FD_DBG(MSGS))
       ctx->stats_users++;
 
+   ctx->flags = flags;
    ctx->screen = screen;
    ctx->pipe = fd_pipe_new2(screen->dev, FD_PIPE_3D, prio);
 
@@ -628,9 +677,9 @@ fd_context_init(struct fd_context *ctx, struct pipe_screen *pscreen,
    pctx->emit_string_marker = fd_emit_string_marker;
    pctx->set_debug_callback = fd_set_debug_callback;
    pctx->get_device_reset_status = fd_get_device_reset_status;
-   pctx->create_fence_fd = fd_create_fence_fd;
-   pctx->fence_server_sync = fd_fence_server_sync;
-   pctx->fence_server_signal = fd_fence_server_signal;
+   pctx->create_fence_fd = fd_create_pipe_fence_fd;
+   pctx->fence_server_sync = fd_pipe_fence_server_sync;
+   pctx->fence_server_signal = fd_pipe_fence_server_signal;
    pctx->texture_barrier = fd_texture_barrier;
    pctx->memory_barrier = fd_memory_barrier;
 
@@ -656,12 +705,13 @@ fd_context_init(struct fd_context *ctx, struct pipe_screen *pscreen,
    list_inithead(&ctx->acc_active_queries);
 
    fd_screen_lock(ctx->screen);
-   ctx->seqno = ++screen->ctx_seqno;
+   ctx->seqno = seqno_next_u16(&screen->ctx_seqno);
    list_add(&ctx->node, &ctx->screen->context_list);
    fd_screen_unlock(ctx->screen);
 
-   ctx->current_scissor = &ctx->disabled_scissor;
+   ctx->current_scissor = ctx->disabled_scissor;
 
+   fd_gpu_tracepoint_config_variable();
    u_trace_pipe_context_init(&ctx->trace_context, pctx,
                              fd_trace_record_ts,
                              fd_trace_read_ts,
@@ -692,9 +742,10 @@ fd_context_init_tc(struct pipe_context *pctx, unsigned flags)
       pctx, &ctx->screen->transfer_pool,
       fd_replace_buffer_storage,
       &(struct threaded_context_options){
-         .create_fence = fd_fence_create_unflushed,
+         .create_fence = fd_pipe_fence_create_unflushed,
          .is_resource_busy = fd_resource_busy,
          .unsynchronized_get_device_reset_status = true,
+         .unsynchronized_create_fence_fd = true,
       },
       &ctx->tc);
 

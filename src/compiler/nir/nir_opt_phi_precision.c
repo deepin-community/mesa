@@ -205,19 +205,19 @@ try_move_narrowing_dst(nir_builder *b, nir_phi_instr *phi)
    /* Are the only uses of the phi conversion instructions, and
     * are they all the same conversion?
     */
-   nir_foreach_use (use, &phi->dest.ssa) {
+   nir_foreach_use_including_if (use, &phi->dest.ssa) {
+      /* an if use means the phi is used directly in a conditional, ie.
+       * without a conversion
+       */
+      if (use->is_if)
+         return false;
+
       op = narrowing_conversion_op(use->parent_instr, op);
 
       /* Not a (compatible) narrowing conversion: */
       if (op == INVALID_OP)
          return false;
    }
-
-   /* an if_uses means the phi is used directly in a conditional, ie.
-    * without a conversion
-    */
-   if (!list_is_empty(&phi->dest.ssa.if_uses))
-      return false;
 
    /* If the phi has no uses, then nothing to do: */
    if (op == INVALID_OP)
@@ -249,14 +249,12 @@ try_move_narrowing_dst(nir_builder *b, nir_phi_instr *phi)
     */
    nir_foreach_use (use, &phi->dest.ssa) {
       /* We've previously established that all the uses were alu
-       * conversion ops:
+       * conversion ops.  Turn them into movs instead.
        */
       nir_alu_instr *alu = nir_instr_as_alu(use->parent_instr);
-
-      assert(alu->dest.dest.is_ssa);
-
-      nir_ssa_def_rewrite_uses(&alu->dest.dest.ssa, &new_phi->dest.ssa);
+      alu->op = nir_op_mov;
    }
+   nir_ssa_def_rewrite_uses(&phi->dest.ssa, &new_phi->dest.ssa);
 
    /* And finally insert the new phi after all sources are in place: */
    b->cursor = nir_after_instr(&phi->instr);

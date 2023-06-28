@@ -13,7 +13,9 @@
 
 #include "vn_common.h"
 
+#include "vn_buffer.h"
 #include "vn_device_memory.h"
+#include "vn_feedback.h"
 
 struct vn_device {
    struct vn_device_base base;
@@ -22,13 +24,24 @@ struct vn_device {
    struct vn_physical_device *physical_device;
    struct vn_renderer *renderer;
 
-   struct vn_queue *queues;
-   uint32_t queue_count;
+   /* unique queue family indices in which to create the device queues */
+   uint32_t *queue_families;
+   uint32_t queue_family_count;
 
    struct vn_device_memory_pool memory_pools[VK_MAX_MEMORY_TYPES];
 
-   /* cache memory type requirement for AHB backed VkBuffer */
-   uint32_t ahb_buffer_memory_type_bits;
+   struct vn_buffer_cache buffer_cache;
+
+   struct vn_feedback_pool feedback_pool;
+
+   /* feedback cmd pool per queue family used by the device
+    * - length matches queue_family_count
+    * - order matches queue_families
+    */
+   struct vn_feedback_cmd_pool *cmd_pools;
+
+   struct vn_queue *queues;
+   uint32_t queue_count;
 };
 VK_DEFINE_HANDLE_CASTS(vn_device,
                        base.base.base,

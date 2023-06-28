@@ -565,6 +565,17 @@ namespace brw {
          }
       }
 
+      instruction *
+      emit_undef_for_dst(const instruction *old_inst) const
+      {
+         assert(old_inst->dst.file == VGRF);
+         instruction *inst = emit(SHADER_OPCODE_UNDEF,
+                                  retype(old_inst->dst, BRW_REGISTER_TYPE_UD));
+         inst->size_written = old_inst->size_written;
+
+         return inst;
+      }
+
       /**
        * Assorted arithmetic ops.
        * @{
@@ -616,8 +627,6 @@ namespace brw {
       ALU2(DP3)
       ALU2(DP4)
       ALU2(DPH)
-      ALU1(F16TO32)
-      ALU1(F32TO16)
       ALU1(FBH)
       ALU1(FBL)
       ALU1(FRC)
@@ -650,6 +659,36 @@ namespace brw {
 #undef ALU2_ACC
 #undef ALU2
 #undef ALU1
+
+      instruction *
+      F32TO16(const dst_reg &dst, const src_reg &src) const
+      {
+         assert(dst.type == BRW_REGISTER_TYPE_HF);
+         assert(src.type == BRW_REGISTER_TYPE_F);
+
+         if (shader->devinfo->ver >= 8) {
+            return MOV(dst, src);
+         } else {
+            assert(shader->devinfo->ver == 7);
+            return emit(BRW_OPCODE_F32TO16,
+                        retype(dst, BRW_REGISTER_TYPE_W), src);
+         }
+      }
+
+      instruction *
+      F16TO32(const dst_reg &dst, const src_reg &src) const
+      {
+         assert(dst.type == BRW_REGISTER_TYPE_F);
+         assert(src.type == BRW_REGISTER_TYPE_HF);
+
+         if (shader->devinfo->ver >= 8) {
+            return MOV(dst, src);
+         } else {
+            assert(shader->devinfo->ver == 7);
+            return emit(BRW_OPCODE_F16TO32,
+                        dst, retype(src, BRW_REGISTER_TYPE_W));
+         }
+      }
       /** @} */
 
       /**
@@ -771,9 +810,8 @@ namespace brw {
          inst->header_size = header_size;
          inst->size_written = header_size * REG_SIZE;
          for (unsigned i = header_size; i < sources; i++) {
-            inst->size_written +=
-               ALIGN(dispatch_width() * type_sz(src[i].type) * dst.stride,
-                     REG_SIZE);
+            inst->size_written += dispatch_width() * type_sz(src[i].type) *
+                                  dst.stride;
          }
 
          return inst;
@@ -783,9 +821,10 @@ namespace brw {
       UNDEF(const dst_reg &dst) const
       {
          assert(dst.file == VGRF);
+         assert(dst.offset % REG_SIZE == 0);
          instruction *inst = emit(SHADER_OPCODE_UNDEF,
                                   retype(dst, BRW_REGISTER_TYPE_UD));
-         inst->size_written = shader->alloc.sizes[dst.nr] * REG_SIZE;
+         inst->size_written = shader->alloc.sizes[dst.nr] * REG_SIZE - dst.offset;
 
          return inst;
       }

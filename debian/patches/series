@@ -1,15 +1,4 @@
 07_gallium-fix-build-failure-on-powerpcspe.diff
 path_max.diff
 src_glx_dri_common.h.diff
-
-# zhaoxin for deepin
 0001-add-zx-s-driver-to-mesa-s-driver-map-list-and-export.patch
-0001-loader-dri3-Clean-up-dri3_find_back-logic.patch
-0002-loader-dri3-Find-idle-buffer-with-minimum-buffer-age.patch
-0003-loader-dri3-Simplify-new-buffer-allocation-in-dri3_f.patch
-0004-egl-wayland-Prefer-back-buffer-with-minimum-buffer-a.patch
-0005-loader-dri3-Move-NULL-handling-into-dri3_free_render.patch
-0006-loader-dri3-Add-dri3_set_render_buffer-helper.patch
-0007-loader-dri3-Overhaul-draw-cur_num_back-handling.patch
-
-

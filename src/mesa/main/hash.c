@@ -35,7 +35,7 @@
  */
 
 #include "errors.h"
-#include "glheader.h"
+#include "util/glheader.h"
 #include "hash.h"
 #include "util/hash_table.h"
 #include "util/u_memory.h"
@@ -97,7 +97,7 @@ _mesa_DeleteHashTable(struct _mesa_HashTable *table)
    }
 
    simple_mtx_destroy(&table->Mutex);
-   free(table);
+   FREE(table);
 }
 
 static void init_name_reuse(struct _mesa_HashTable *table)

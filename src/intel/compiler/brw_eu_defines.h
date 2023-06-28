@@ -59,29 +59,6 @@
 #define GET_BITS(data, high, low) ((data & INTEL_MASK((high), (low))) >> (low))
 #define GET_FIELD(word, field) (((word)  & field ## _MASK) >> field ## _SHIFT)
 
-#define _3DPRIM_POINTLIST         0x01
-#define _3DPRIM_LINELIST          0x02
-#define _3DPRIM_LINESTRIP         0x03
-#define _3DPRIM_TRILIST           0x04
-#define _3DPRIM_TRISTRIP          0x05
-#define _3DPRIM_TRIFAN            0x06
-#define _3DPRIM_QUADLIST          0x07
-#define _3DPRIM_QUADSTRIP         0x08
-#define _3DPRIM_LINELIST_ADJ      0x09 /* G45+ */
-#define _3DPRIM_LINESTRIP_ADJ     0x0A /* G45+ */
-#define _3DPRIM_TRILIST_ADJ       0x0B /* G45+ */
-#define _3DPRIM_TRISTRIP_ADJ      0x0C /* G45+ */
-#define _3DPRIM_TRISTRIP_REVERSE  0x0D
-#define _3DPRIM_POLYGON           0x0E
-#define _3DPRIM_RECTLIST          0x0F
-#define _3DPRIM_LINELOOP          0x10
-#define _3DPRIM_POINTLIST_BF      0x11
-#define _3DPRIM_LINESTRIP_CONT    0x12
-#define _3DPRIM_LINESTRIP_BF      0x13
-#define _3DPRIM_LINESTRIP_CONT_BF 0x14
-#define _3DPRIM_TRIFAN_NOSTIPPLE  0x16
-#define _3DPRIM_PATCHLIST(n) ({ assert(n > 0 && n <= 32); 0x20 + (n - 1); })
-
 /* Bitfields for the URB_WRITE message, DW2 of message header: */
 #define URB_WRITE_PRIM_END		0x1
 #define URB_WRITE_PRIM_START		0x2
@@ -356,6 +333,7 @@ enum opcode {
    SHADER_OPCODE_TXF_CMS_LOGICAL,
    SHADER_OPCODE_TXF_CMS_W,
    SHADER_OPCODE_TXF_CMS_W_LOGICAL,
+   SHADER_OPCODE_TXF_CMS_W_GFX12_LOGICAL,
    SHADER_OPCODE_TXF_UMS,
    SHADER_OPCODE_TXF_UMS_LOGICAL,
    SHADER_OPCODE_TXF_MCS,
@@ -394,8 +372,6 @@ enum opcode {
     */
    FS_OPCODE_PACK,
 
-   SHADER_OPCODE_SHADER_TIME_ADD,
-
    /**
     * Typed and untyped surface access opcodes.
     *
@@ -412,13 +388,11 @@ enum opcode {
     */
    VEC4_OPCODE_UNTYPED_ATOMIC,
    SHADER_OPCODE_UNTYPED_ATOMIC_LOGICAL,
-   SHADER_OPCODE_UNTYPED_ATOMIC_FLOAT_LOGICAL,
    VEC4_OPCODE_UNTYPED_SURFACE_READ,
    SHADER_OPCODE_UNTYPED_SURFACE_READ_LOGICAL,
    VEC4_OPCODE_UNTYPED_SURFACE_WRITE,
    SHADER_OPCODE_UNTYPED_SURFACE_WRITE_LOGICAL,
 
-   SHADER_OPCODE_OWORD_BLOCK_READ_LOGICAL,
    SHADER_OPCODE_UNALIGNED_OWORD_BLOCK_READ_LOGICAL,
    SHADER_OPCODE_OWORD_BLOCK_WRITE_LOGICAL,
 
@@ -438,11 +412,6 @@ enum opcode {
    SHADER_OPCODE_A64_UNALIGNED_OWORD_BLOCK_READ_LOGICAL,
    SHADER_OPCODE_A64_OWORD_BLOCK_WRITE_LOGICAL,
    SHADER_OPCODE_A64_UNTYPED_ATOMIC_LOGICAL,
-   SHADER_OPCODE_A64_UNTYPED_ATOMIC_INT16_LOGICAL,
-   SHADER_OPCODE_A64_UNTYPED_ATOMIC_INT64_LOGICAL,
-   SHADER_OPCODE_A64_UNTYPED_ATOMIC_FLOAT16_LOGICAL,
-   SHADER_OPCODE_A64_UNTYPED_ATOMIC_FLOAT32_LOGICAL,
-   SHADER_OPCODE_A64_UNTYPED_ATOMIC_FLOAT64_LOGICAL,
 
    SHADER_OPCODE_TYPED_ATOMIC_LOGICAL,
    SHADER_OPCODE_TYPED_SURFACE_READ_LOGICAL,
@@ -491,23 +460,23 @@ enum opcode {
    SHADER_OPCODE_SCRATCH_HEADER,
 
    /**
-    * Gfx8+ SIMD8 URB Read messages.
+    * Gfx8+ SIMD8 URB messages.
     */
-   SHADER_OPCODE_URB_READ_SIMD8,
-   SHADER_OPCODE_URB_READ_SIMD8_PER_SLOT,
-
-   SHADER_OPCODE_URB_WRITE_SIMD8,
-   SHADER_OPCODE_URB_WRITE_SIMD8_PER_SLOT,
-   SHADER_OPCODE_URB_WRITE_SIMD8_MASKED,
-   SHADER_OPCODE_URB_WRITE_SIMD8_MASKED_PER_SLOT,
+   SHADER_OPCODE_URB_READ_LOGICAL,
+   SHADER_OPCODE_URB_WRITE_LOGICAL,
 
    /**
-    * Return the index of an arbitrary live channel (i.e. one of the channels
-    * enabled in the current execution mask) and assign it to the first
-    * component of the destination.  Expected to be used as input for the
-    * BROADCAST pseudo-opcode.
+    * Return the index of the first enabled live channel and assign it to
+    * to the first component of the destination.  Frequently used as input
+    * for the BROADCAST pseudo-opcode.
     */
    SHADER_OPCODE_FIND_LIVE_CHANNEL,
+
+   /**
+    * Return the index of the last enabled live channel and assign it to
+    * the first component of the destination.
+    */
+   SHADER_OPCODE_FIND_LAST_LIVE_CHANNEL,
 
    /**
     * Return the current execution mask in the specified flag subregister.
@@ -590,7 +559,6 @@ enum opcode {
    FS_OPCODE_PIXEL_X,
    FS_OPCODE_PIXEL_Y,
    FS_OPCODE_UNIFORM_PULL_CONSTANT_LOAD,
-   FS_OPCODE_UNIFORM_PULL_CONSTANT_LOAD_GFX7,
    FS_OPCODE_VARYING_PULL_CONSTANT_LOAD_GFX4,
    FS_OPCODE_VARYING_PULL_CONSTANT_LOAD_LOGICAL,
    FS_OPCODE_SET_SAMPLE_ID,
@@ -599,7 +567,7 @@ enum opcode {
    FS_OPCODE_INTERPOLATE_AT_SHARED_OFFSET,
    FS_OPCODE_INTERPOLATE_AT_PER_SLOT_OFFSET,
 
-   VS_OPCODE_URB_WRITE,
+   VEC4_VS_OPCODE_URB_WRITE,
    VS_OPCODE_PULL_CONSTANT_LOAD,
    VS_OPCODE_PULL_CONSTANT_LOAD_GFX7,
 
@@ -608,11 +576,11 @@ enum opcode {
    /**
     * Write geometry shader output data to the URB.
     *
-    * Unlike VS_OPCODE_URB_WRITE, this opcode doesn't do an implied move from
+    * Unlike VEC4_VS_OPCODE_URB_WRITE, this opcode doesn't do an implied move from
     * R0 to the first MRF.  This allows the geometry shader to override the
     * "Slot {0,1} Offset" fields in the message header.
     */
-   GS_OPCODE_URB_WRITE,
+   VEC4_GS_OPCODE_URB_WRITE,
 
    /**
     * Write geometry shader output data to the URB and request a new URB
@@ -620,7 +588,7 @@ enum opcode {
     *
     * This opcode doesn't do an implied move from R0 to the first MRF.
     */
-   GS_OPCODE_URB_WRITE_ALLOCATE,
+   VEC4_GS_OPCODE_URB_WRITE_ALLOCATE,
 
    /**
     * Terminate the geometry shader thread by doing an empty URB write.
@@ -794,9 +762,9 @@ enum opcode {
 
    VEC4_OPCODE_URB_READ,
    TCS_OPCODE_GET_INSTANCE_ID,
-   TCS_OPCODE_URB_WRITE,
-   TCS_OPCODE_SET_INPUT_URB_OFFSETS,
-   TCS_OPCODE_SET_OUTPUT_URB_OFFSETS,
+   VEC4_TCS_OPCODE_URB_WRITE,
+   VEC4_TCS_OPCODE_SET_INPUT_URB_OFFSETS,
+   VEC4_TCS_OPCODE_SET_OUTPUT_URB_OFFSETS,
    TCS_OPCODE_GET_PRIMITIVE_ID,
    TCS_OPCODE_CREATE_BARRIER_HEADER,
    TCS_OPCODE_SRC0_010_IS_ZERO,
@@ -807,9 +775,10 @@ enum opcode {
    TES_OPCODE_CREATE_INPUT_READ_HEADER,
    TES_OPCODE_ADD_INDIRECT_URB_OFFSET,
 
-   SHADER_OPCODE_GET_DSS_ID,
    SHADER_OPCODE_BTD_SPAWN_LOGICAL,
    SHADER_OPCODE_BTD_RETIRE_LOGICAL,
+
+   SHADER_OPCODE_READ_SR_REG,
 
    RT_OPCODE_TRACE_RAY_LOGICAL,
 };
@@ -918,6 +887,17 @@ enum tex_logical_srcs {
    TEX_LOGICAL_NUM_SRCS,
 };
 
+enum pull_uniform_constant_srcs {
+   /** Surface binding table index */
+   PULL_UNIFORM_CONSTANT_SRC_SURFACE,
+   /** Surface offset */
+   PULL_UNIFORM_CONSTANT_SRC_OFFSET,
+   /** Pull size */
+   PULL_UNIFORM_CONSTANT_SRC_SIZE,
+
+   PULL_UNIFORM_CONSTANT_SRCS,
+};
+
 enum surface_logical_srcs {
    /** Surface binding table index */
    SURFACE_LOGICAL_SRC_SURFACE,
@@ -939,6 +919,45 @@ enum surface_logical_srcs {
 
    SURFACE_LOGICAL_NUM_SRCS
 };
+
+enum a64_logical_srcs {
+   /** Address the A64 message operates on */
+   A64_LOGICAL_ADDRESS,
+   /** Source for the operation (unused of LOAD ops) */
+   A64_LOGICAL_SRC,
+   /** Per-opcode immediate argument. Number of dwords, bit size, or atomic op. */
+   A64_LOGICAL_ARG,
+   /**
+    * Some instructions do want to run on helper lanes (like ray queries).
+    */
+   A64_LOGICAL_ENABLE_HELPERS,
+
+   A64_LOGICAL_NUM_SRCS
+};
+
+enum rt_logical_srcs {
+   /** Address of the globals */
+   RT_LOGICAL_SRC_GLOBALS,
+   /** Level at which the tracing should start */
+   RT_LOGICAL_SRC_BVH_LEVEL,
+   /** Type of tracing operation */
+   RT_LOGICAL_SRC_TRACE_RAY_CONTROL,
+   /** Synchronous tracing (ray query) */
+   RT_LOGICAL_SRC_SYNCHRONOUS,
+
+   RT_LOGICAL_NUM_SRCS
+};
+
+enum urb_logical_srcs {
+   URB_LOGICAL_SRC_HANDLE,
+   URB_LOGICAL_SRC_PER_SLOT_OFFSETS,
+   URB_LOGICAL_SRC_CHANNEL_MASK,
+   /** Data to be written.  BAD_FILE for reads. */
+   URB_LOGICAL_SRC_DATA,
+
+   URB_LOGICAL_NUM_SRCS
+};
+
 
 #ifdef __cplusplus
 /**
@@ -1221,15 +1240,13 @@ tgl_swsb_encode(const struct intel_device_info *devinfo, struct tgl_swsb swsb)
  * tgl_swsb.
  */
 static inline struct tgl_swsb
-tgl_swsb_decode(const struct intel_device_info *devinfo, const enum opcode opcode,
-                const uint8_t x)
+tgl_swsb_decode(const struct intel_device_info *devinfo,
+                const bool is_unordered, const uint8_t x)
 {
    if (x & 0x80) {
       const struct tgl_swsb swsb = { (x & 0x70u) >> 4, TGL_PIPE_NONE,
                                      x & 0xfu,
-                                     (opcode == BRW_OPCODE_SEND ||
-                                      opcode == BRW_OPCODE_SENDC ||
-                                      opcode == BRW_OPCODE_MATH) ?
+                                     is_unordered ?
                                      TGL_SBID_SET : TGL_SBID_DST };
       return swsb;
    } else if ((x & 0x70) == 0x20) {
@@ -1301,6 +1318,9 @@ enum brw_message_target {
 #define BRW_SAMPLER_RETURN_FORMAT_UINT32      2
 #define BRW_SAMPLER_RETURN_FORMAT_SINT32      3
 
+#define GFX8_SAMPLER_RETURN_FORMAT_32BITS    0
+#define GFX8_SAMPLER_RETURN_FORMAT_16BITS    1
+
 #define BRW_SAMPLER_MESSAGE_SIMD8_SAMPLE              0
 #define BRW_SAMPLER_MESSAGE_SIMD16_SAMPLE             0
 #define BRW_SAMPLER_MESSAGE_SIMD16_SAMPLE_BIAS        0
@@ -1349,6 +1369,9 @@ enum brw_message_target {
 #define BRW_SAMPLER_SIMD_MODE_SIMD8                     1
 #define BRW_SAMPLER_SIMD_MODE_SIMD16                    2
 #define BRW_SAMPLER_SIMD_MODE_SIMD32_64                 3
+
+#define GFX10_SAMPLER_SIMD_MODE_SIMD8H                  5
+#define GFX10_SAMPLER_SIMD_MODE_SIMD16H                 6
 
 /* GFX9 changes SIMD mode 0 to mean SIMD8D, but lets us get the SIMD4x2
  * behavior by setting bit 22 of dword 2 in the message header. */
@@ -1545,6 +1568,11 @@ enum brw_message_target {
 #define GFX8_BTI_STATELESS_IA_COHERENT   255
 #define GFX8_BTI_STATELESS_NON_COHERENT  253
 #define GFX9_BTI_BINDLESS                252
+
+/* This ID doesn't map anything HW related value. It exists to inform the
+ * lowering code to not use the bindless heap.
+ */
+#define GFX125_NON_BINDLESS              (1u << 16)
 
 /* Dataport atomic operations for Untyped Atomic Integer Operation message
  * (and others).
@@ -1957,6 +1985,11 @@ enum PACKED lsc_flush_type {
     * Flush "RW" section of the L3 cache, but leave L1 and L2 caches untouched.
     */
    LSC_FLUSH_TYPE_L3ONLY = 5,
+   /*
+    * HW maps this flush type internally to NONE.
+    */
+   LSC_FLUSH_TYPE_NONE_6 = 6,
+
 };
 
 enum PACKED lsc_backup_fence_routing {

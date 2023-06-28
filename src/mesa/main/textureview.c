@@ -31,7 +31,7 @@
  * GL_ARB_texture_view functions
  */
 
-#include "glheader.h"
+#include "util/glheader.h"
 #include "context.h"
 #include "enums.h"
 
@@ -43,6 +43,9 @@
 #include "textureview.h"
 #include "stdbool.h"
 #include "mtypes.h"
+#include "api_exec_decl.h"
+
+#include "state_tracker/st_cb_texture.h"
 
 /* Table 3.X.2 (Compatible internal formats for TextureView)
     ---------------------------------------------------------------------------
@@ -620,9 +623,9 @@ texture_view(struct gl_context *ctx, struct gl_texture_object *origTexObj,
          return;
       }
 
-      sizeOK = ctx->Driver.TestProxyTexImage(ctx, target, 1, 0, texFormat,
-                                             origTexImage->NumSamples,
-                                             width, height, depth);
+      sizeOK = st_TestProxyTexImage(ctx, target, 1, 0, texFormat,
+                                    origTexImage->NumSamples,
+                                    width, height, depth);
       if (!sizeOK) {
          _mesa_error(ctx, GL_INVALID_OPERATION,
                      "glTextureView(invalid texture size)");
@@ -698,9 +701,9 @@ texture_view(struct gl_context *ctx, struct gl_texture_object *origTexObj,
    texObj->Target = target;
    texObj->TargetIndex = _mesa_tex_target_to_index(ctx, target);
    assert(texObj->TargetIndex < NUM_TEXTURE_TARGETS);
+   _mesa_update_texture_object_swizzle(ctx, texObj);
 
-   if (ctx->Driver.TextureView != NULL &&
-       !ctx->Driver.TextureView(ctx, texObj, origTexObj)) {
+   if (!st_TextureView(ctx, texObj, origTexObj)) {
       return; /* driver recorded error */
    }
 }

@@ -69,8 +69,41 @@ void
 isl_genX(emit_depth_stencil_hiz_s)(const struct isl_device *dev, void *batch,
                                    const struct isl_depth_stencil_hiz_emit_info *restrict info)
 {
+   if (info->depth_surf && info->stencil_surf) {
+      if (!dev->info->has_hiz_and_separate_stencil) {
+         assert(info->depth_surf == info->stencil_surf);
+         assert(info->depth_address == info->stencil_address);
+      }
+      assert(info->depth_surf->dim == info->stencil_surf->dim);
+   }
+
+   if (info->depth_surf) {
+      assert((info->depth_surf->usage & ISL_SURF_USAGE_DEPTH_BIT));
+      if (info->depth_surf->dim == ISL_SURF_DIM_3D) {
+         assert(info->view->base_array_layer + info->view->array_len <=
+                info->depth_surf->logical_level0_px.depth);
+      } else {
+         assert(info->view->base_array_layer + info->view->array_len <=
+                info->depth_surf->logical_level0_px.array_len);
+      }
+   }
+
+   if (info->stencil_surf) {
+      assert((info->stencil_surf->usage & ISL_SURF_USAGE_STENCIL_BIT));
+      if (info->stencil_surf->dim == ISL_SURF_DIM_3D) {
+         assert(info->view->base_array_layer + info->view->array_len <=
+                info->stencil_surf->logical_level0_px.depth);
+      } else {
+         assert(info->view->base_array_layer + info->view->array_len <=
+                info->stencil_surf->logical_level0_px.array_len);
+      }
+   }
+
    struct GENX(3DSTATE_DEPTH_BUFFER) db = {
       GENX(3DSTATE_DEPTH_BUFFER_header),
+#if GFX_VER >= 6
+      .MOCS = info->mocs,
+#endif
    };
 
    if (info->depth_surf) {
@@ -81,12 +114,20 @@ isl_genX(emit_depth_stencil_hiz_s)(const struct isl_device *dev, void *batch,
       if (db.SurfaceType == SURFTYPE_3D)
          db.Depth = info->depth_surf->logical_level0_px.depth - 1;
    } else if (info->stencil_surf) {
+      /* On Gfx12+ 3DSTATE_STENCIL_BUFFER has its own fields for all of
+       * this. No need to replicate it here.
+       */
+#if GFX_VER < 12
       db.SurfaceType = isl_encode_ds_surftype[info->stencil_surf->dim];
       db.SurfaceFormat = D32_FLOAT;
       db.Width = info->stencil_surf->logical_level0_px.width - 1;
       db.Height = info->stencil_surf->logical_level0_px.height - 1;
       if (db.SurfaceType == SURFTYPE_3D)
          db.Depth = info->stencil_surf->logical_level0_px.depth - 1;
+#else
+      db.SurfaceType = SURFTYPE_NULL;
+      db.SurfaceFormat = D32_FLOAT;
+#endif
    } else {
       db.SurfaceType = SURFTYPE_NULL;
       db.SurfaceFormat = D32_FLOAT;
@@ -118,9 +159,6 @@ isl_genX(emit_depth_stencil_hiz_s)(const struct isl_device *dev, void *batch,
       db.DepthWriteEnable = true;
 #endif
       db.SurfaceBaseAddress = info->depth_address;
-#if GFX_VER >= 6
-      db.MOCS = info->mocs;
-#endif
 
 #if GFX_VERx10 >= 125
       db.TiledMode = isl_encode_tiling[info->depth_surf->tiling];
@@ -129,9 +167,9 @@ isl_genX(emit_depth_stencil_hiz_s)(const struct isl_device *dev, void *batch,
       db.RenderCompressionFormat =
          isl_get_render_compression_format(info->depth_surf->format);
 #elif GFX_VER <= 6
-      db.TiledSurface = info->depth_surf->tiling != ISL_TILING_LINEAR;
-      db.TileWalk = info->depth_surf->tiling == ISL_TILING_Y0 ? TILEWALK_YMAJOR :
-                                                                TILEWALK_XMAJOR;
+      assert(info->depth_surf->tiling == ISL_TILING_Y0);
+      db.TiledSurface = true;
+      db.TileWalk = TILEWALK_YMAJOR;
       db.MIPMapLayoutMode = MIPLAYOUT_BELOW;
 #endif
 
@@ -152,14 +190,25 @@ isl_genX(emit_depth_stencil_hiz_s)(const struct isl_device *dev, void *batch,
       info->stencil_surf && info->stencil_surf->format == ISL_FORMAT_R8_UINT;
    if (separate_stencil || info->hiz_usage == ISL_AUX_USAGE_HIZ) {
       assert(ISL_DEV_USE_SEPARATE_STENCIL(dev));
+      /* From the IronLake PRM, Vol 2 Part 1:
+       *
+       *    3DSTATE_DEPTH_BUFFER::Separate Stencil Buffer Enable
+       *    If this field is enabled, Hierarchical Depth Buffer Enable must
+       *    also be enabled.
+       *
+       *    3DSTATE_DEPTH_BUFFER::Tiled Surface
+       *    When Hierarchical Depth Buffer is enabled, this bit must be set.
+       */
       db.SeparateStencilBufferEnable = true;
       db.HierarchicalDepthBufferEnable = true;
+      db.TiledSurface = true;
    }
 #endif
 
 #if GFX_VER >= 6
    struct GENX(3DSTATE_STENCIL_BUFFER) sb = {
       GENX(3DSTATE_STENCIL_BUFFER_header),
+      .MOCS = info->mocs,
    };
 #else
 #  define sb db
@@ -193,9 +242,6 @@ isl_genX(emit_depth_stencil_hiz_s)(const struct isl_device *dev, void *batch,
       sb.StencilBufferEnable = true;
 #endif
       sb.SurfaceBaseAddress = info->stencil_address;
-#if GFX_VER >= 6
-      sb.MOCS = info->mocs;
-#endif
       sb.SurfacePitch = info->stencil_surf->row_pitch_B - 1;
 #if GFX_VER >= 8
       sb.SurfaceQPitch =
@@ -209,7 +255,7 @@ isl_genX(emit_depth_stencil_hiz_s)(const struct isl_device *dev, void *batch,
        * to match the depth-buffer value for `Depth`. It may be a
        * documentation bug, since the other fields don't require this.
        *
-       * TODO: Confirm documentation and remove seeting of `Depth` if not
+       * TODO: Confirm documentation and remove setting of `Depth` if not
        * required.
        */
       sb.Depth = db.Depth;
@@ -219,6 +265,7 @@ isl_genX(emit_depth_stencil_hiz_s)(const struct isl_device *dev, void *batch,
 #if GFX_VER >= 6
    struct GENX(3DSTATE_HIER_DEPTH_BUFFER) hiz = {
       GENX(3DSTATE_HIER_DEPTH_BUFFER_header),
+      .MOCS = info->mocs,
    };
    struct GENX(3DSTATE_CLEAR_PARAMS) clear = {
       GENX(3DSTATE_CLEAR_PARAMS_header),
@@ -231,11 +278,27 @@ isl_genX(emit_depth_stencil_hiz_s)(const struct isl_device *dev, void *batch,
       db.HierarchicalDepthBufferEnable = true;
 
       hiz.SurfaceBaseAddress = info->hiz_address;
-      hiz.MOCS = info->mocs;
       hiz.SurfacePitch = info->hiz_surf->row_pitch_B - 1;
 
 #if GFX_VERx10 >= 125
-      hiz.TiledMode = isl_encode_tiling[info->hiz_surf->tiling];
+      /* From 3DSTATE_HIER_DEPTH_BUFFER_BODY::TiledMode,
+       *
+       *    HZ buffer only supports Tile4 mode
+       *
+       * and from Bspec 47009, "Hierarchical Depth Buffer",
+       *
+       *    The format of the data in the hierarchical depth buffer is not
+       *    documented here, as this surface needs only to be allocated by
+       *    software.
+       *
+       * We choose to apply the second quote to the first. ISL describes HiZ
+       * with a tiling that has the same extent as Tile4 (128Bx32), but a
+       * different internal layout. This has two benefits: 1) it allows us to
+       * have the correct allocation size and 2) we can continue to use a
+       * tiling that was determined to exist on some prior platforms.
+       */
+      assert(info->hiz_surf->tiling == ISL_TILING_HIZ);
+      hiz.TiledMode = TILE4;
 #endif
 
 #if GFX_VER >= 12
@@ -249,7 +312,7 @@ isl_genX(emit_depth_stencil_hiz_s)(const struct isl_device *dev, void *batch,
        * value of RENDER_SURFACE_STATE::AuxiliarySurfaceMode say:
        *
        *    "If Number of multisamples > 1, programming this value means MSAA
-       *    compression is enabled for that surface. Auxillary surface is MSC
+       *    compression is enabled for that surface. Auxiliary surface is MSC
        *    with tile y."
        *
        * Since this interpretation ignores whether the surface is

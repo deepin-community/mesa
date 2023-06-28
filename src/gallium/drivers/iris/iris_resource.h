@@ -44,7 +44,7 @@ struct iris_format_info {
 #define IRIS_RESOURCE_FLAG_SHADER_MEMZONE   (PIPE_RESOURCE_FLAG_DRV_PRIV << 0)
 #define IRIS_RESOURCE_FLAG_SURFACE_MEMZONE  (PIPE_RESOURCE_FLAG_DRV_PRIV << 1)
 #define IRIS_RESOURCE_FLAG_DYNAMIC_MEMZONE  (PIPE_RESOURCE_FLAG_DRV_PRIV << 2)
-#define IRIS_RESOURCE_FLAG_BINDLESS_MEMZONE (PIPE_RESOURCE_FLAG_DRV_PRIV << 3)
+#define IRIS_RESOURCE_FLAG_SCRATCH_MEMZONE  (PIPE_RESOURCE_FLAG_DRV_PRIV << 3)
 #define IRIS_RESOURCE_FLAG_DEVICE_MEM       (PIPE_RESOURCE_FLAG_DRV_PRIV << 4)
 
 /**
@@ -145,18 +145,6 @@ struct iris_resource {
       enum isl_aux_usage usage;
 
       /**
-       * A bitfield of ISL_AUX_* modes that might this resource might use.
-       *
-       * For example, a surface might use both CCS_E and CCS_D at times.
-       */
-      unsigned possible_usages;
-
-      /**
-       * Same as possible_usages, but only with modes supported for sampling.
-       */
-      unsigned sampler_usages;
-
-      /**
        * \brief Maps miptree slices to their current aux state.
        *
        * This two-dimensional array is indexed as [level][layer] and stores an
@@ -205,6 +193,12 @@ struct iris_surface_state {
     * This can be updated and re-uploaded if (e.g.) addresses need to change.
     */
    uint32_t *cpu;
+
+   /**
+    * A bitfield of ISL_AUX_USAGE_* modes that are present in the surface
+    * states.
+    */
+   unsigned aux_usages;
 
    /**
     * How many states are there?  (Each aux mode has its own state.)
@@ -278,7 +272,7 @@ struct iris_surface {
  */
 struct iris_transfer {
    struct threaded_transfer base;
-   struct pipe_debug_callback *dbg;
+   struct util_debug_callback *dbg;
    void *buffer;
    void *ptr;
 
@@ -286,8 +280,6 @@ struct iris_transfer {
    struct pipe_resource *staging;
    struct blorp_context *blorp;
    struct iris_batch *batch;
-
-   bool dest_had_defined_contents;
 
    void (*unmap)(struct iris_transfer *);
 };
@@ -317,7 +309,10 @@ iris_mocs(const struct iris_bo *bo,
           const struct isl_device *dev,
           isl_surf_usage_flags_t usage)
 {
-   return isl_mocs(dev, usage, bo && iris_bo_is_external(bo));
+   return isl_mocs(dev,
+                   usage |
+                   ((bo && bo->real.protected) ? ISL_SURF_USAGE_PROTECTED_BIT : 0),
+                   bo && iris_bo_is_external(bo));
 }
 
 struct iris_format_info iris_format_for_usage(const struct intel_device_info *,
@@ -345,14 +340,6 @@ void iris_init_screen_resource_functions(struct pipe_screen *pscreen);
 
 void iris_dirty_for_history(struct iris_context *ice,
                             struct iris_resource *res);
-uint32_t iris_flush_bits_for_history(struct iris_context *ice,
-                                     struct iris_resource *res);
-
-void iris_flush_and_dirty_for_history(struct iris_context *ice,
-                                      struct iris_batch *batch,
-                                      struct iris_resource *res,
-                                      uint32_t extra_flags,
-                                      const char *reason);
 
 unsigned iris_get_num_logical_layers(const struct iris_resource *res,
                                      unsigned level);
@@ -475,7 +462,9 @@ iris_resource_access_raw(struct iris_context *ice,
 
 enum isl_aux_usage iris_resource_texture_aux_usage(struct iris_context *ice,
                                                    const struct iris_resource *res,
-                                                   enum isl_format view_fmt);
+                                                   enum isl_format view_fmt,
+                                                   unsigned start_level,
+                                                   unsigned num_levels);
 void iris_resource_prepare_texture(struct iris_context *ice,
                                    struct iris_resource *res,
                                    enum isl_format view_format,
@@ -495,7 +484,8 @@ bool iris_has_invalid_primary(const struct iris_resource *res,
 void iris_resource_check_level_layer(const struct iris_resource *res,
                                      uint32_t level, uint32_t layer);
 
-bool iris_resource_level_has_hiz(const struct iris_resource *res,
+bool iris_resource_level_has_hiz(const struct intel_device_info *devinfo,
+                                 const struct iris_resource *res,
                                  uint32_t level);
 
 bool iris_sample_with_depth_aux(const struct intel_device_info *devinfo,

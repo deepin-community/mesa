@@ -38,7 +38,7 @@ brw_compile_clip(const struct brw_compiler *compiler,
 
    /* Begin the compilation:
     */
-   brw_init_codegen(compiler->devinfo, &c.func, mem_ctx);
+   brw_init_codegen(&compiler->isa, &c.func, mem_ctx);
 
    c.func.single_program_flow = 1;
 
@@ -63,16 +63,16 @@ brw_compile_clip(const struct brw_compiler *compiler,
     * do all three:
     */
    switch (key->primitive) {
-   case GL_TRIANGLES:
+   case SHADER_PRIM_TRIANGLES:
       if (key->do_unfilled)
 	 brw_emit_unfilled_clip( &c );
       else
 	 brw_emit_tri_clip( &c );
       break;
-   case GL_LINES:
+   case SHADER_PRIM_LINES:
       brw_emit_line_clip( &c );
       break;
-   case GL_POINTS:
+   case SHADER_PRIM_POINTS:
       brw_emit_point_clip( &c );
       break;
    default:
@@ -87,7 +87,7 @@ brw_compile_clip(const struct brw_compiler *compiler,
 
    if (INTEL_DEBUG(DEBUG_CLIP)) {
       fprintf(stderr, "clip:\n");
-      brw_disassemble_with_labels(compiler->devinfo,
+      brw_disassemble_with_labels(&compiler->isa,
                                   program, 0, *final_assembly_size, stderr);
       fprintf(stderr, "\n");
    }

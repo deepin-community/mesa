@@ -1,5 +1,5 @@
 /**************************************************************************
- * 
+ *
  * Copyright 2008 VMware, Inc.
  * All Rights Reserved.
  *
@@ -10,11 +10,11 @@
  * distribute, sub license, and/or sell copies of the Software, and to
  * permit persons to whom the Software is furnished to do so, subject to
  * the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice (including the
  * next paragraph) shall be included in all copies or substantial portions
  * of the Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
  * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
  * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
@@ -22,7 +22,7 @@
  * ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- * 
+ *
  **************************************************************************/
 
 /**
@@ -133,7 +133,7 @@ generate_pstip_fs(struct pstip_stage *pstip)
    struct pipe_shader_state pstip_fs;
    enum tgsi_file_type wincoord_file;
 
-   wincoord_file = screen->get_param(screen, PIPE_CAP_TGSI_FS_POSITION_IS_SYSVAL) ?
+   wincoord_file = screen->get_param(screen, PIPE_CAP_FS_POSITION_IS_SYSVAL) ?
                    TGSI_FILE_SYSTEM_VALUE : TGSI_FILE_INPUT;
 
    pstip_fs = *orig_fs; /* copy to init */
@@ -147,7 +147,8 @@ generate_pstip_fs(struct pstip_stage *pstip)
    } else {
       pstip_fs.ir.nir = nir_shader_clone(NULL, orig_fs->ir.nir);
       nir_lower_pstipple_fs(pstip_fs.ir.nir,
-                            &pstip->fs->sampler_unit, 0, wincoord_file == TGSI_FILE_SYSTEM_VALUE);
+                            &pstip->fs->sampler_unit, 0, wincoord_file == TGSI_FILE_SYSTEM_VALUE,
+                            nir_type_bool32);
    }
 
    assert(pstip->fs->sampler_unit < PIPE_MAX_SAMPLERS);
@@ -183,7 +184,7 @@ bind_pstip_fragment_shader(struct pstip_stage *pstip)
 
 
 static inline struct pstip_stage *
-pstip_stage( struct draw_stage *stage )
+pstip_stage(struct draw_stage *stage)
 {
    return (struct pstip_stage *) stage;
 }
@@ -244,7 +245,7 @@ pstip_flush(struct draw_stage *stage, unsigned flags)
    struct pipe_context *pipe = pstip->pipe;
 
    stage->tri = pstip_first_tri;
-   stage->next->flush( stage->next, flags );
+   stage->next->flush(stage->next, flags);
 
    /* restore original frag shader, texture, sampler state */
    draw->suspend_flushing = TRUE;
@@ -265,7 +266,7 @@ pstip_flush(struct draw_stage *stage, unsigned flags)
 static void
 pstip_reset_stipple_counter(struct draw_stage *stage)
 {
-   stage->next->reset_stipple_counter( stage->next );
+   stage->next->reset_stipple_counter(stage->next);
 }
 
 
@@ -273,9 +274,8 @@ static void
 pstip_destroy(struct draw_stage *stage)
 {
    struct pstip_stage *pstip = pstip_stage(stage);
-   uint i;
 
-   for (i = 0; i < PIPE_MAX_SHADER_SAMPLER_VIEWS; i++) {
+   for (unsigned i = 0; i < PIPE_MAX_SHADER_SAMPLER_VIEWS; i++) {
       pipe_sampler_view_reference(&pstip->state.sampler_views[i], NULL);
    }
 
@@ -287,8 +287,8 @@ pstip_destroy(struct draw_stage *stage)
       pipe_sampler_view_reference(&pstip->sampler_view, NULL);
    }
 
-   draw_free_temp_verts( stage );
-   FREE( stage );
+   draw_free_temp_verts(stage);
+   FREE(stage);
 }
 
 
@@ -312,14 +312,14 @@ draw_pstip_stage(struct draw_context *draw, struct pipe_context *pipe)
    pstip->stage.reset_stipple_counter = pstip_reset_stipple_counter;
    pstip->stage.destroy = pstip_destroy;
 
-   if (!draw_alloc_temp_verts( &pstip->stage, 8 ))
+   if (!draw_alloc_temp_verts(&pstip->stage, 8))
       goto fail;
 
    return pstip;
 
 fail:
    if (pstip)
-      pstip->stage.destroy( &pstip->stage );
+      pstip->stage.destroy(&pstip->stage);
 
    return NULL;
 }
@@ -397,14 +397,13 @@ pstip_bind_sampler_states(struct pipe_context *pipe,
                           unsigned start, unsigned num, void **sampler)
 {
    struct pstip_stage *pstip = pstip_stage_from_pipe(pipe);
-   uint i;
 
    assert(start == 0);
 
    if (shader == PIPE_SHADER_FRAGMENT) {
       /* save current */
       memcpy(pstip->state.samplers, sampler, num * sizeof(void *));
-      for (i = num; i < PIPE_MAX_SAMPLERS; i++) {
+      for (unsigned i = num; i < PIPE_MAX_SAMPLERS; i++) {
          pstip->state.samplers[i] = NULL;
       }
       pstip->num_samplers = num;
@@ -424,10 +423,10 @@ pstip_set_sampler_views(struct pipe_context *pipe,
                         struct pipe_sampler_view **views)
 {
    struct pstip_stage *pstip = pstip_stage_from_pipe(pipe);
-   uint i;
 
    if (shader == PIPE_SHADER_FRAGMENT) {
       /* save current */
+      unsigned i;
       for (i = 0; i < num; i++) {
          pipe_sampler_view_reference(&pstip->state.sampler_views[start + i],
                                      views[i]);
@@ -471,14 +470,12 @@ boolean
 draw_install_pstipple_stage(struct draw_context *draw,
                             struct pipe_context *pipe)
 {
-   struct pstip_stage *pstip;
-
    pipe->draw = (void *) draw;
 
    /*
     * Create / install pgon stipple drawing / prim stage
     */
-   pstip = draw_pstip_stage( draw, pipe );
+   struct pstip_stage *pstip = draw_pstip_stage(draw, pipe);
    if (!pstip)
       goto fail;
 
@@ -520,7 +517,7 @@ draw_install_pstipple_stage(struct draw_context *draw,
 
  fail:
    if (pstip)
-      pstip->stage.destroy( &pstip->stage );
+      pstip->stage.destroy(&pstip->stage);
 
    return FALSE;
 }

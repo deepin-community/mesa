@@ -29,16 +29,21 @@
 
 static void si_pm4_cmd_begin(struct si_pm4_state *state, unsigned opcode)
 {
-   assert(state->ndw < SI_PM4_MAX_DW);
+   if (!state->max_dw)
+      state->max_dw = ARRAY_SIZE(state->pm4);
+   assert(state->ndw < state->max_dw);
+   assert(opcode <= 254);
    state->last_opcode = opcode;
    state->last_pm4 = state->ndw++;
 }
 
 void si_pm4_cmd_add(struct si_pm4_state *state, uint32_t dw)
 {
-   assert(state->ndw < SI_PM4_MAX_DW);
+   if (!state->max_dw)
+      state->max_dw = ARRAY_SIZE(state->pm4);
+   assert(state->ndw < state->max_dw);
    state->pm4[state->ndw++] = dw;
-   state->last_opcode = -1;
+   state->last_opcode = 255; /* invalid opcode */
 }
 
 static void si_pm4_cmd_end(struct si_pm4_state *state, bool predicate)
@@ -46,6 +51,28 @@ static void si_pm4_cmd_end(struct si_pm4_state *state, bool predicate)
    unsigned count;
    count = state->ndw - state->last_pm4 - 2;
    state->pm4[state->last_pm4] = PKT3(state->last_opcode, count, predicate);
+}
+
+static void si_pm4_set_reg_custom(struct si_pm4_state *state, unsigned reg, uint32_t val,
+                                  unsigned opcode, unsigned idx)
+{
+   reg >>= 2;
+
+   if (!state->max_dw)
+      state->max_dw = ARRAY_SIZE(state->pm4);
+
+   assert(state->ndw + 2 <= state->max_dw);
+
+   if (opcode != state->last_opcode || reg != (state->last_reg + 1) || idx != state->last_idx) {
+      si_pm4_cmd_begin(state, opcode);
+      state->pm4[state->ndw++] = reg | (idx << 28);
+   }
+
+   assert(reg <= UINT16_MAX);
+   state->last_reg = reg;
+   state->last_idx = idx;
+   state->pm4[state->ndw++] = val;
+   si_pm4_cmd_end(state, false);
 }
 
 void si_pm4_set_reg(struct si_pm4_state *state, unsigned reg, uint32_t val)
@@ -75,18 +102,24 @@ void si_pm4_set_reg(struct si_pm4_state *state, unsigned reg, uint32_t val)
       return;
    }
 
-   reg >>= 2;
+   si_pm4_set_reg_custom(state, reg, val, opcode, 0);
+}
 
-   assert(state->ndw + 2 <= SI_PM4_MAX_DW);
+void si_pm4_set_reg_idx3(struct si_screen *sscreen, struct si_pm4_state *state,
+                         unsigned reg, uint32_t val)
+{
+   SI_CHECK_SHADOWED_REGS(reg, 1);
 
-   if (opcode != state->last_opcode || reg != (state->last_reg + 1)) {
-      si_pm4_cmd_begin(state, opcode);
-      state->pm4[state->ndw++] = reg;
-   }
+   if (sscreen->info.gfx_level >= GFX10)
+      si_pm4_set_reg_custom(state, reg - SI_SH_REG_OFFSET, val, PKT3_SET_SH_REG_INDEX, 3);
+   else
+      si_pm4_set_reg_custom(state, reg - SI_SH_REG_OFFSET, val, PKT3_SET_SH_REG, 0);
+}
 
-   state->last_reg = reg;
-   state->pm4[state->ndw++] = val;
-   si_pm4_cmd_end(state, false);
+void si_pm4_set_reg_va(struct si_pm4_state *state, unsigned reg, uint32_t val)
+{
+   si_pm4_set_reg(state, reg, val);
+   state->reg_va_low_idx = state->ndw - 1;
 }
 
 void si_pm4_clear_state(struct si_pm4_state *state)
@@ -109,7 +142,6 @@ void si_pm4_free_state(struct si_context *sctx, struct si_pm4_state *state, unsi
       }
    }
 
-   si_pm4_clear_state(state);
    FREE(state);
 }
 
@@ -119,7 +151,7 @@ void si_pm4_emit(struct si_context *sctx, struct si_pm4_state *state)
 
    if (state->is_shader) {
       radeon_add_to_buffer_list(sctx, &sctx->gfx_cs, ((struct si_shader*)state)->bo,
-                                RADEON_USAGE_READ, RADEON_PRIO_SHADER_BINARY);
+                                RADEON_USAGE_READ | RADEON_PRIO_SHADER_BINARY);
    }
 
    radeon_begin(cs);
@@ -130,23 +162,8 @@ void si_pm4_emit(struct si_context *sctx, struct si_pm4_state *state)
       state->atom.emit(sctx);
 }
 
-void si_pm4_reset_emitted(struct si_context *sctx, bool first_cs)
+void si_pm4_reset_emitted(struct si_context *sctx)
 {
-   if (!first_cs && sctx->shadowed_regs) {
-      /* Only dirty states that contain buffers, so that they are
-       * added to the buffer list on the next draw call.
-       */
-      for (unsigned i = 0; i < SI_NUM_STATES; i++) {
-         struct si_pm4_state *state = sctx->queued.array[i];
-
-         if (state && state->is_shader) {
-            sctx->emitted.array[i] = NULL;
-            sctx->dirty_states |= 1 << i;
-         }
-      }
-      return;
-   }
-
    memset(&sctx->emitted, 0, sizeof(sctx->emitted));
 
    for (unsigned i = 0; i < SI_NUM_STATES; i++) {

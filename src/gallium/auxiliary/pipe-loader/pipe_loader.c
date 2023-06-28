@@ -27,7 +27,6 @@
 
 #include "pipe_loader_priv.h"
 
-#include "util/u_cpu_detect.h"
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
 #include "util/u_string.h"
@@ -98,8 +97,12 @@ merge_driconf(const driOptionDescription *driver_driconf, unsigned driver_count,
       return NULL;
    }
 
-   memcpy(merged, gallium_driconf, sizeof(*merged) * gallium_count);
-   memcpy(&merged[gallium_count], driver_driconf, sizeof(*merged) * driver_count);
+   if (gallium_count)
+      memcpy(merged, gallium_driconf, sizeof(*merged) * gallium_count);
+   if (driver_count) {
+      memcpy(&merged[gallium_count], driver_driconf,
+             sizeof(*merged) * driver_count);
+   }
 
    *merged_count = driver_count + gallium_count;
    return merged;
@@ -165,7 +168,6 @@ pipe_loader_create_screen_vk(struct pipe_loader_device *dev, bool sw_vk)
 {
    struct pipe_screen_config config;
 
-   util_cpu_detect();
    pipe_loader_load_options(dev);
    config.options_info = &dev->option_info;
    config.options = &dev->option_cache;

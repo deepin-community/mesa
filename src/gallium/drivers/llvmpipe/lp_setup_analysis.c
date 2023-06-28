@@ -239,10 +239,10 @@ check_elts24(struct lp_setup_context *setup, const void *vb, int stride)
     * commands for this triangle list directly.  Instead, introduce
     * some new vertices and feed to the rectangle setup code:
     */
-   PIPE_ALIGN_VAR(16) float vA[2][4];
-   PIPE_ALIGN_VAR(16) float vB[2][4];
-   PIPE_ALIGN_VAR(16) float vC[2][4];
-   PIPE_ALIGN_VAR(16) float vD[2][4];
+   alignas(16) float vA[2][4];
+   alignas(16) float vB[2][4];
+   alignas(16) float vC[2][4];
+   alignas(16) float vD[2][4];
 
    float as, bs;
    float at, bt;
@@ -326,7 +326,7 @@ lp_setup_analyse_triangles(struct lp_setup_context *setup,
    const boolean variant_blit = setup->fs.current.variant->blit;
 
    if (0) {
-      debug_printf("%s %d\n", __FUNCTION__, nr);
+      debug_printf("%s %d\n", __func__, nr);
 
       if (variant_blit) {
          debug_printf("  - blit variant\n");

@@ -30,7 +30,6 @@
 #include <stdio.h>
 #include "util/u_atomic.h"
 #include "util/u_debug.h"
-#include "util/u_queue.h"
 
 #include "adreno_common.xml.h"
 #include "adreno_pm4.xml.h"
@@ -93,39 +92,25 @@ struct fd_ringbuffer *fd_submit_new_ringbuffer(struct fd_submit *submit,
                                                uint32_t size,
                                                enum fd_ringbuffer_flags flags);
 
-/**
- * Encapsulates submit out-fence(s), which consist of a 'timestamp' (per-
- * pipe (submitqueue) sequence number) and optionally, if requested, an
- * out-fence-fd
- */
-struct fd_submit_fence {
-   /**
-    * The ready fence is signaled once the submit is actually flushed down
-    * to the kernel, and fence/fence_fd are populated.  You must wait for
-    * this fence to be signaled before reading fence/fence_fd.
-    */
-   struct util_queue_fence ready;
-
-   struct fd_fence fence;
-
-   /**
-    * Optional dma_fence fd, returned by submit if use_fence_fd is true
-    */
-   int fence_fd;
-   bool use_fence_fd;
-};
-
 /* in_fence_fd: -1 for no in-fence, else fence fd
- * out_fence can be NULL if no output fence is required
+ * if use_fence_fd is true the output fence will be dma_fence fd backed
  */
-int fd_submit_flush(struct fd_submit *submit, int in_fence_fd,
-                    struct fd_submit_fence *out_fence);
+struct fd_fence *fd_submit_flush(struct fd_submit *submit, int in_fence_fd,
+                                 bool use_fence_fd);
 
 struct fd_ringbuffer;
 struct fd_reloc;
 
 struct fd_ringbuffer_funcs {
    void (*grow)(struct fd_ringbuffer *ring, uint32_t size);
+
+   /**
+    * Alternative to emit_reloc for the softpin case, where we only need
+    * to track that the bo is used (and not track all the extra info that
+    * the kernel would need to do a legacy reloc.
+    */
+   void (*emit_bo)(struct fd_ringbuffer *ring, struct fd_bo *bo);
+
    void (*emit_reloc)(struct fd_ringbuffer *ring, const struct fd_reloc *reloc);
    uint32_t (*emit_reloc_ring)(struct fd_ringbuffer *ring,
                                struct fd_ringbuffer *target, uint32_t cmd_idx);
@@ -154,10 +139,33 @@ struct fd_ringbuffer {
 struct fd_ringbuffer *fd_ringbuffer_new_object(struct fd_pipe *pipe,
                                                uint32_t size);
 
+/*
+ * Helpers for ref/unref with some extra debugging.. unref() returns true if
+ * the object is still live
+ */
+
+static inline void
+ref(int32_t *ref)
+{
+   ASSERTED int32_t count = p_atomic_inc_return(ref);
+   /* We should never see a refcnt transition 0->1, this is a sign of a
+    * zombie coming back from the dead!
+    */
+   assert(count != 1);
+}
+
+static inline bool
+unref(int32_t *ref)
+{
+   int32_t count = p_atomic_dec_return(ref);
+   assert(count != -1);
+   return count == 0;
+}
+
 static inline void
 fd_ringbuffer_del(struct fd_ringbuffer *ring)
 {
-   if (!p_atomic_dec_zero(&ring->refcnt))
+   if (--ring->refcnt > 0)
       return;
 
    ring->funcs->destroy(ring);
@@ -166,7 +174,7 @@ fd_ringbuffer_del(struct fd_ringbuffer *ring)
 static inline struct fd_ringbuffer *
 fd_ringbuffer_ref(struct fd_ringbuffer *ring)
 {
-   p_atomic_inc(&ring->refcnt);
+   ring->refcnt++;
    return ring;
 }
 
@@ -174,9 +182,6 @@ static inline void
 fd_ringbuffer_grow(struct fd_ringbuffer *ring, uint32_t ndwords)
 {
    assert(ring->funcs->grow); /* unsupported on kgsl */
-
-   /* there is an upper bound on IB size, which appears to be 0x0fffff */
-   ring->size = MIN2(ring->size << 1, 0x0fffff);
 
    ring->funcs->grow(ring, ring->size);
 }
@@ -196,13 +201,12 @@ fd_ringbuffer_emit(struct fd_ringbuffer *ring, uint32_t data)
 struct fd_reloc {
    struct fd_bo *bo;
    uint64_t iova;
+   uint64_t orval;
 #define FD_RELOC_READ  0x0001
 #define FD_RELOC_WRITE 0x0002
 #define FD_RELOC_DUMP  0x0004
    uint32_t offset;
-   uint32_t orlo;
    int32_t shift;
-   uint32_t orhi; /* used for a5xx+ */
 };
 
 /* We always mark BOs for write, instead of tracking it across reloc
@@ -216,6 +220,12 @@ struct fd_reloc {
 #define FD_RELOC_FLAGS_INIT (FD_RELOC_READ | FD_RELOC_WRITE)
 
 /* NOTE: relocs are 2 dwords on a5xx+ */
+
+static inline void
+fd_ringbuffer_attach_bo(struct fd_ringbuffer *ring, struct fd_bo *bo)
+{
+   ring->funcs->emit_bo(ring, bo);
+}
 
 static inline void
 fd_ringbuffer_reloc(struct fd_ringbuffer *ring, const struct fd_reloc *reloc)
@@ -252,7 +262,7 @@ fd_ringbuffer_size(struct fd_ringbuffer *ring)
     * do what you expect for growable rb's.. so lets just restrict
     * this to stateobj's for now:
     */
-   debug_assert(!(ring->flags & FD_RINGBUFFER_GROWABLE));
+   assert(!(ring->flags & FD_RINGBUFFER_GROWABLE));
    return offset_bytes(ring->cur, ring->start);
 }
 
@@ -275,20 +285,9 @@ OUT_RING(struct fd_ringbuffer *ring, uint32_t data)
    fd_ringbuffer_emit(ring, data);
 }
 
-/*
- * NOTE: OUT_RELOC() is 2 dwords (64b) on a5xx+
- */
-#ifndef __cplusplus
-static inline void
-OUT_RELOC(struct fd_ringbuffer *ring, struct fd_bo *bo, uint32_t offset,
-          uint64_t or, int32_t shift)
+static inline uint64_t
+__reloc_iova(struct fd_bo *bo, uint32_t offset, uint64_t orval, int32_t shift)
 {
-   if (LOG_DWORDS) {
-      fprintf(stderr, "ring[%p]: OUT_RELOC   %04x:  %p+%u << %d", ring,
-              (uint32_t)(ring->cur - ring->start), bo, offset, shift);
-   }
-   debug_assert(offset < fd_bo_size(bo));
-
    uint64_t iova = fd_bo_get_iova(bo) + offset;
 
    if (shift < 0)
@@ -296,19 +295,43 @@ OUT_RELOC(struct fd_ringbuffer *ring, struct fd_bo *bo, uint32_t offset,
    else
       iova <<= shift;
 
-   iova |= or ;
+   iova |= orval;
 
-   fd_ringbuffer_reloc(ring, &(struct fd_reloc){
-                                .bo = bo,
-                                .iova = iova,
-                                .offset = offset,
-                                .orlo = or
-                                ,
-                                .shift = shift,
-                                .orhi = or >> 32,
-                             });
+   return iova;
 }
+
+/*
+ * NOTE: OUT_RELOC() is 2 dwords (64b) on a5xx+
+ */
+static inline void
+OUT_RELOC(struct fd_ringbuffer *ring, struct fd_bo *bo, uint32_t offset,
+          uint64_t orval, int32_t shift)
+{
+   if (LOG_DWORDS) {
+      fprintf(stderr, "ring[%p]: OUT_RELOC   %04x:  %p+%u << %d", ring,
+              (uint32_t)(ring->cur - ring->start), bo, offset, shift);
+   }
+   assert(offset < fd_bo_size(bo));
+
+   uint64_t iova = __reloc_iova(bo, offset, orval, shift);
+
+#if FD_BO_NO_HARDPIN
+   uint64_t *cur = (uint64_t *)ring->cur;
+   *cur = iova;
+   ring->cur += 2;
+   fd_ringbuffer_attach_bo(ring, bo);
+#else
+   struct fd_reloc reloc = {
+         .bo = bo,
+         .iova = iova,
+         .orval = orval,
+         .offset = offset,
+         .shift = shift,
+   };
+
+   fd_ringbuffer_reloc(ring, &reloc);
 #endif
+}
 
 static inline void
 OUT_RB(struct fd_ringbuffer *ring, struct fd_ringbuffer *target)

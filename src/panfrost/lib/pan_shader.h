@@ -27,206 +27,240 @@
 
 #include "compiler/nir/nir.h"
 #include "panfrost/util/pan_ir.h"
+#include "panfrost/util/pan_lower_framebuffer.h"
 
-#include "pan_device.h"
 #include "genxml/gen_macros.h"
+#include "pan_device.h"
 
 struct panfrost_device;
 
+void bifrost_preprocess_nir(nir_shader *nir, unsigned gpu_id);
+void midgard_preprocess_nir(nir_shader *nir, unsigned gpu_id);
+
+static inline void
+pan_shader_preprocess(nir_shader *nir, unsigned gpu_id)
+{
+   if (pan_arch(gpu_id) >= 6)
+      bifrost_preprocess_nir(nir, gpu_id);
+   else
+      midgard_preprocess_nir(nir, gpu_id);
+}
+
+uint8_t pan_raw_format_mask_midgard(enum pipe_format *formats);
+
 #ifdef PAN_ARCH
-const nir_shader_compiler_options *
-GENX(pan_shader_get_compiler_options)(void);
+const nir_shader_compiler_options *GENX(pan_shader_get_compiler_options)(void);
 
-void
-GENX(pan_shader_compile)(nir_shader *nir,
-                         struct panfrost_compile_inputs *inputs,
-                         struct util_dynarray *binary,
-                         struct pan_shader_info *info);
+void GENX(pan_shader_compile)(nir_shader *nir,
+                              struct panfrost_compile_inputs *inputs,
+                              struct util_dynarray *binary,
+                              struct pan_shader_info *info);
 
+#if PAN_ARCH >= 6 && PAN_ARCH <= 7
+enum mali_register_file_format
+   GENX(pan_fixup_blend_type)(nir_alu_type T_size, enum pipe_format format);
+#endif
+
+#if PAN_ARCH >= 9
+static inline enum mali_shader_stage
+pan_shader_stage(const struct pan_shader_info *info)
+{
+   switch (info->stage) {
+   case MESA_SHADER_VERTEX:
+      return MALI_SHADER_STAGE_VERTEX;
+   case MESA_SHADER_FRAGMENT:
+      return MALI_SHADER_STAGE_FRAGMENT;
+   default:
+      return MALI_SHADER_STAGE_COMPUTE;
+   }
+}
+#endif
+
+#if PAN_ARCH >= 7
+static inline enum mali_shader_register_allocation
+pan_register_allocation(unsigned work_reg_count)
+{
+   return (work_reg_count <= 32)
+             ? MALI_SHADER_REGISTER_ALLOCATION_32_PER_THREAD
+             : MALI_SHADER_REGISTER_ALLOCATION_64_PER_THREAD;
+}
+#endif
+
+static inline enum mali_depth_source
+pan_depth_source(const struct pan_shader_info *info)
+{
+   return info->fs.writes_depth ? MALI_DEPTH_SOURCE_SHADER
+                                : MALI_DEPTH_SOURCE_FIXED_FUNCTION;
+}
+
+#if PAN_ARCH <= 7
 #if PAN_ARCH <= 5
 static inline void
 pan_shader_prepare_midgard_rsd(const struct pan_shader_info *info,
                                struct MALI_RENDERER_STATE *rsd)
 {
-        assert((info->push.count & 3) == 0);
+   assert((info->push.count & 3) == 0);
 
-        rsd->properties.uniform_count = info->push.count / 4;
-        rsd->properties.shader_has_side_effects = info->writes_global;
-        rsd->properties.fp_mode = MALI_FP_MODE_GL_INF_NAN_ALLOWED;
+   rsd->properties.uniform_count = info->push.count / 4;
+   rsd->properties.shader_has_side_effects = info->writes_global;
+   rsd->properties.fp_mode = MALI_FP_MODE_GL_INF_NAN_ALLOWED;
 
-        /* For fragment shaders, work register count, early-z, reads at draw-time */
+   /* For fragment shaders, work register count, early-z, reads at draw-time */
 
-        if (info->stage != MESA_SHADER_FRAGMENT) {
-                rsd->properties.work_register_count = info->work_reg_count;
-        } else {
-                rsd->properties.shader_reads_tilebuffer =
-                        info->fs.outputs_read;
+   if (info->stage != MESA_SHADER_FRAGMENT) {
+      rsd->properties.work_register_count = info->work_reg_count;
+   } else {
+      rsd->properties.shader_reads_tilebuffer = info->fs.outputs_read;
 
-                /* However, forcing early-z in the shader overrides draw-time */
-                rsd->properties.force_early_z =
-                        info->fs.early_fragment_tests;
-        }
+      /* However, forcing early-z in the shader overrides draw-time */
+      rsd->properties.force_early_z = info->fs.early_fragment_tests;
+   }
 }
 
 #else
 
-/* Classify a shader into the following pixel kill categories:
- *
- * (force early, strong early): no side effects/depth/stencil/coverage writes (force)
- * (weak early, weak early): no side effects/depth/stencil/coverage writes
- * (weak early, force late): no side effects/depth/stencil writes
- * (force late, weak early): side effects but no depth/stencil/coverage writes
- * (force late, force early): only run for side effects
- * (force late, force late): depth/stencil writes
- *
- * Note that discard is considered a coverage write. TODO: what about
- * alpha-to-coverage?
- * */
+#define pan_preloads(reg) (preload & BITFIELD64_BIT(reg))
 
-#define SET_PIXEL_KILL(kill, update) do { \
-        rsd->properties.pixel_kill_operation = MALI_PIXEL_KILL_## kill; \
-        rsd->properties.zs_update_operation = MALI_PIXEL_KILL_## update; \
-} while(0)
-
-static inline void
-pan_shader_classify_pixel_kill_coverage(const struct pan_shader_info *info,
-                struct MALI_RENDERER_STATE *rsd)
+static void
+pan_make_preload(gl_shader_stage stage, uint64_t preload,
+                 struct MALI_PRELOAD *out)
 {
-        bool force_early = info->fs.early_fragment_tests;
-        bool sidefx = info->writes_global;
-        bool coverage = info->fs.writes_coverage || info->fs.can_discard;
-        bool depth = info->fs.writes_depth;
-        bool stencil = info->fs.writes_stencil;
+   switch (stage) {
+   case MESA_SHADER_VERTEX:
+      out->vertex.position_result_address_lo = pan_preloads(58);
+      out->vertex.position_result_address_hi = pan_preloads(59);
+      out->vertex.vertex_id = pan_preloads(61);
+      out->vertex.instance_id = pan_preloads(62);
+      break;
 
-        rsd->properties.shader_modifies_coverage = coverage;
+   case MESA_SHADER_FRAGMENT:
+      out->fragment.primitive_id = pan_preloads(57);
+      out->fragment.primitive_flags = pan_preloads(58);
+      out->fragment.fragment_position = pan_preloads(59);
+      out->fragment.sample_mask_id = pan_preloads(61);
+      out->fragment.coverage = true;
+      break;
 
-        if (force_early)
-                SET_PIXEL_KILL(FORCE_EARLY, STRONG_EARLY);
-        else if (depth || stencil || (sidefx && coverage))
-                SET_PIXEL_KILL(FORCE_LATE, FORCE_LATE);
-        else if (sidefx)
-                SET_PIXEL_KILL(FORCE_LATE, WEAK_EARLY);
-        else if (coverage)
-                SET_PIXEL_KILL(WEAK_EARLY, FORCE_LATE);
-        else
-                SET_PIXEL_KILL(WEAK_EARLY, WEAK_EARLY);
+   default:
+      out->compute.local_invocation_xy = pan_preloads(55);
+      out->compute.local_invocation_z = pan_preloads(56);
+      out->compute.work_group_x = pan_preloads(57);
+      out->compute.work_group_y = pan_preloads(58);
+      out->compute.work_group_z = pan_preloads(59);
+      out->compute.global_invocation_x = pan_preloads(60);
+      out->compute.global_invocation_y = pan_preloads(61);
+      out->compute.global_invocation_z = pan_preloads(62);
+      break;
+   }
 }
 
-#undef SET_PIXEL_KILL
+#if PAN_ARCH == 7
+static inline void
+pan_pack_message_preload(struct MALI_MESSAGE_PRELOAD *cfg,
+                         const struct bifrost_message_preload *msg)
+{
+   enum mali_message_preload_register_format regfmt =
+      msg->fp16 ? MALI_MESSAGE_PRELOAD_REGISTER_FORMAT_F16
+                : MALI_MESSAGE_PRELOAD_REGISTER_FORMAT_F32;
+
+   if (msg->enabled && msg->texture) {
+      cfg->type = MALI_MESSAGE_TYPE_VAR_TEX;
+      cfg->var_tex.varying_index = msg->varying_index;
+      cfg->var_tex.texture_index = msg->texture_index;
+      cfg->var_tex.register_format = regfmt;
+      cfg->var_tex.skip = msg->skip;
+      cfg->var_tex.zero_lod = msg->zero_lod;
+   } else if (msg->enabled) {
+      cfg->type = MALI_MESSAGE_TYPE_LD_VAR;
+      cfg->ld_var.varying_index = msg->varying_index;
+      cfg->ld_var.register_format = regfmt;
+      cfg->ld_var.num_components = msg->num_components;
+   } else {
+      cfg->type = MALI_MESSAGE_TYPE_DISABLED;
+   }
+}
+#endif
 
 static inline void
 pan_shader_prepare_bifrost_rsd(const struct pan_shader_info *info,
                                struct MALI_RENDERER_STATE *rsd)
 {
-        unsigned fau_count = DIV_ROUND_UP(info->push.count, 2);
-        rsd->preload.uniform_count = fau_count;
+   unsigned fau_count = DIV_ROUND_UP(info->push.count, 2);
+   rsd->preload.uniform_count = fau_count;
 
 #if PAN_ARCH >= 7
-        rsd->properties.shader_register_allocation =
-                (info->work_reg_count <= 32) ?
-                MALI_SHADER_REGISTER_ALLOCATION_32_PER_THREAD :
-                MALI_SHADER_REGISTER_ALLOCATION_64_PER_THREAD;
+   rsd->properties.shader_register_allocation =
+      pan_register_allocation(info->work_reg_count);
 #endif
 
-        switch (info->stage) {
-        case MESA_SHADER_VERTEX:
-                rsd->preload.vertex.vertex_id = true;
-                rsd->preload.vertex.instance_id = true;
-                break;
+   pan_make_preload(info->stage, info->preload, &rsd->preload);
 
-        case MESA_SHADER_FRAGMENT:
-                pan_shader_classify_pixel_kill_coverage(info, rsd);
+   if (info->stage == MESA_SHADER_FRAGMENT) {
+      rsd->properties.shader_modifies_coverage =
+         info->fs.writes_coverage || info->fs.can_discard;
+
+      rsd->properties.allow_forward_pixel_to_be_killed = !info->writes_global;
 
 #if PAN_ARCH >= 7
-                rsd->properties.shader_wait_dependency_6 = info->bifrost.wait_6;
-                rsd->properties.shader_wait_dependency_7 = info->bifrost.wait_7;
+      rsd->properties.shader_wait_dependency_6 = info->bifrost.wait_6;
+      rsd->properties.shader_wait_dependency_7 = info->bifrost.wait_7;
+
+      pan_pack_message_preload(&rsd->message_preload_1,
+                               &info->bifrost.messages[0]);
+      pan_pack_message_preload(&rsd->message_preload_2,
+                               &info->bifrost.messages[1]);
 #endif
+   } else if (info->stage == MESA_SHADER_VERTEX && info->vs.secondary_enable) {
+      rsd->secondary_preload.uniform_count = fau_count;
 
-                /* Match the mesa/st convention. If this needs to be flipped,
-                 * nir_lower_pntc_ytransform will do so. */
-                rsd->properties.point_sprite_coord_origin_max_y = true;
+      pan_make_preload(info->stage, info->vs.secondary_preload,
+                       &rsd->secondary_preload);
 
-                rsd->properties.allow_forward_pixel_to_be_killed =
-                        !info->fs.sidefx;
-
-                rsd->preload.fragment.fragment_position = info->fs.reads_frag_coord;
-                rsd->preload.fragment.coverage = true;
-                rsd->preload.fragment.primitive_flags = info->fs.reads_face;
-
-                /* Contains sample ID and sample mask. Sample position and
-                 * helper invocation are expressed in terms of the above, so
-                 * preload for those too */
-                rsd->preload.fragment.sample_mask_id =
-                        info->fs.reads_sample_id |
-                        info->fs.reads_sample_pos |
-                        info->fs.reads_sample_mask_in |
-                        info->fs.reads_helper_invocation |
-                        info->fs.sample_shading;
+      rsd->secondary_shader = rsd->shader.shader + info->vs.secondary_offset;
 
 #if PAN_ARCH >= 7
-                rsd->message_preload_1 = info->bifrost.messages[0];
-                rsd->message_preload_2 = info->bifrost.messages[1];
+      rsd->properties.secondary_shader_register_allocation =
+         pan_register_allocation(info->vs.secondary_work_reg_count);
 #endif
-                break;
-
-        case MESA_SHADER_COMPUTE:
-                rsd->preload.compute.local_invocation_xy = true;
-                rsd->preload.compute.local_invocation_z = true;
-                rsd->preload.compute.work_group_x = true;
-                rsd->preload.compute.work_group_y = true;
-                rsd->preload.compute.work_group_z = true;
-                rsd->preload.compute.global_invocation_x = true;
-                rsd->preload.compute.global_invocation_y = true;
-                rsd->preload.compute.global_invocation_z = true;
-                break;
-
-        default:
-                unreachable("TODO");
-        }
+   }
 }
 
 #endif
 
 static inline void
 pan_shader_prepare_rsd(const struct pan_shader_info *shader_info,
-                       mali_ptr shader_ptr,
-                       struct MALI_RENDERER_STATE *rsd)
+                       mali_ptr shader_ptr, struct MALI_RENDERER_STATE *rsd)
 {
 #if PAN_ARCH <= 5
-        shader_ptr |= shader_info->midgard.first_tag;
+   shader_ptr |= shader_info->midgard.first_tag;
 #endif
 
-        rsd->shader.shader = shader_ptr;
-        rsd->shader.attribute_count = shader_info->attribute_count;
-        rsd->shader.varying_count = shader_info->varyings.input_count +
-                                   shader_info->varyings.output_count;
-        rsd->shader.texture_count = shader_info->texture_count;
-        rsd->shader.sampler_count = shader_info->sampler_count;
-        rsd->properties.shader_contains_barrier = shader_info->contains_barrier;
-        rsd->properties.uniform_buffer_count = shader_info->ubo_count;
+   rsd->shader.shader = shader_ptr;
+   rsd->shader.attribute_count = shader_info->attribute_count;
+   rsd->shader.varying_count =
+      shader_info->varyings.input_count + shader_info->varyings.output_count;
+   rsd->shader.texture_count = shader_info->texture_count;
+   rsd->shader.sampler_count = shader_info->sampler_count;
+   rsd->properties.shader_contains_barrier = shader_info->contains_barrier;
+   rsd->properties.uniform_buffer_count = shader_info->ubo_count;
 
-        if (shader_info->stage == MESA_SHADER_FRAGMENT) {
-                rsd->properties.shader_contains_barrier |=
-                        shader_info->fs.helper_invocations;
-                rsd->properties.stencil_from_shader =
-                        shader_info->fs.writes_stencil;
-                rsd->properties.depth_source =
-                        shader_info->fs.writes_depth ?
-                        MALI_DEPTH_SOURCE_SHADER :
-                        MALI_DEPTH_SOURCE_FIXED_FUNCTION;
+   if (shader_info->stage == MESA_SHADER_FRAGMENT) {
+      rsd->properties.stencil_from_shader = shader_info->fs.writes_stencil;
+      rsd->properties.depth_source = pan_depth_source(shader_info);
 
-                /* This also needs to be set if the API forces per-sample
-                 * shading, but that'll just got ORed in */
-                rsd->multisample_misc.evaluate_per_sample =
-                        shader_info->fs.sample_shading;
-        }
+      /* This also needs to be set if the API forces per-sample
+       * shading, but that'll just got ORed in */
+      rsd->multisample_misc.evaluate_per_sample =
+         shader_info->fs.sample_shading;
+   }
 
 #if PAN_ARCH >= 6
-        pan_shader_prepare_bifrost_rsd(shader_info, rsd);
+   pan_shader_prepare_bifrost_rsd(shader_info, rsd);
 #else
-        pan_shader_prepare_midgard_rsd(shader_info, rsd);
+   pan_shader_prepare_midgard_rsd(shader_info, rsd);
 #endif
 }
 #endif /* PAN_ARCH */
+#endif
 
 #endif

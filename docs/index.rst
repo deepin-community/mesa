@@ -6,7 +6,7 @@ The Mesa project began as an open-source implementation of the
 
 Over the years the project has grown to implement more graphics APIs,
 including `OpenGL ES`_, `OpenCL`_, `OpenMAX`_, `VDPAU`_, `VA-API`_,
-`XvMC`_, `Vulkan`_ and `EGL`_.
+`Vulkan`_ and `EGL`_.
 
 A variety of device drivers allows the Mesa libraries to be used in many
 different environments ranging from software emulation to complete
@@ -22,8 +22,7 @@ Linux, FreeBSD, and other operating systems.
 .. _OpenMAX: https://www.khronos.org/openmax/
 .. _VDPAU: https://en.wikipedia.org/wiki/VDPAU
 .. _VA-API: https://en.wikipedia.org/wiki/Video_Acceleration_API
-.. _XvMC: https://en.wikipedia.org/wiki/X-Video_Motion_Compensation
-.. _Vulkan: https://www.khronos.org/vulkan/
+.. _Vulkan: https://www.vulkan.org/
 .. _EGL: https://www.khronos.org/egl/
 .. _Direct Rendering Infrastructure: https://dri.freedesktop.org/
 .. _X.org: https://x.org
@@ -36,12 +35,11 @@ Linux, FreeBSD, and other operating systems.
 
    self
    history
-   developers
+   amber
    systems
    license
    faq
    relnotes
-   thanks
 
 .. toctree::
    :maxdepth: 2
@@ -72,9 +70,10 @@ Linux, FreeBSD, and other operating systems.
    osmesa
    debugging
    perf
-   perfetto
+   gpu-perf-tracing
    extensions
    application-issues
+   gallium-nine
    viewperf
    xlibdriver
 
@@ -83,16 +82,19 @@ Linux, FreeBSD, and other operating systems.
    :caption: Drivers
    :hidden:
 
+   drivers/anv
+   drivers/asahi
    drivers/d3d12
    drivers/freedreno
    drivers/lima
    drivers/llvmpipe
-   drivers/openswr
    drivers/panfrost
+   drivers/radv
    drivers/svga3d
    drivers/v3d
    drivers/vc4
    drivers/venus
+   drivers/virgl
    drivers/zink
 
 .. toctree::
@@ -111,8 +113,10 @@ Linux, FreeBSD, and other operating systems.
    release-calendar
    dispatch
    gallium/index
+   vulkan/index
    nir/index
    isl/index
+   rusticl
    android
    macos
    Linux Kernel Drivers <https://www.kernel.org/doc/html/latest/gpu/>

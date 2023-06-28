@@ -88,6 +88,12 @@ enum radeon_micro_mode
 #define RADEON_SURF_NO_HTILE              (1ull << 30)
 #define RADEON_SURF_FORCE_MICRO_TILE_MODE (1ull << 31)
 #define RADEON_SURF_PRT                   (1ull << 32)
+#define RADEON_SURF_VRS_RATE              (1ull << 33)
+/* Block compressed + linear format is not supported in addrlib. These surface can be
+ * used as transfer resource. This flag indicates not to set flags.texture flag in
+ * gfx9_compute_surface(). */
+#define RADEON_SURF_NO_TEXTURE            (1ull << 34)
+#define RADEON_SURF_NO_STENCIL_ADJUST     (1ull << 35)
 
 struct legacy_surf_level {
    uint32_t offset_256B;   /* divided by 256, the hw can only do 40-bit addresses */
@@ -330,6 +336,7 @@ struct radeon_surf {
    /* Not supported yet for depth + stencil. */
    uint16_t prt_tile_width;
    uint16_t prt_tile_height;
+   uint16_t prt_tile_depth;
 
    /* Tile swizzle can be OR'd with low bits of the BASE_256B address.
     * The value is the same for all mipmap levels. Supported tile modes:
@@ -344,7 +351,7 @@ struct radeon_surf {
     * - CMASK if it's TC-compatible or if the gen is GFX9
     * - depth/stencil if HTILE is not TC-compatible and if the gen is not GFX9
     */
-   uint8_t tile_swizzle;
+   uint16_t tile_swizzle; /* it has 16 bits because gfx11 shifts it by 2 bits */
    uint8_t fmask_tile_swizzle;
 
    /* Use (1 << log2) to compute the alignment. */
@@ -414,6 +421,17 @@ struct ac_surf_config {
    unsigned is_cube : 1;
 };
 
+/* Output parameters for ac_surface_compute_nbc_view */
+struct ac_surf_nbc_view {
+   bool valid;
+   uint32_t width;
+   uint32_t height;
+   uint32_t level;
+   uint32_t num_levels; /* Used for max_mip in the resource descriptor */
+   uint8_t tile_swizzle;
+   uint64_t base_address_offset;
+};
+
 struct ac_addrlib *ac_addrlib_create(const struct radeon_info *info, uint64_t *max_alignment);
 void ac_addrlib_destroy(struct ac_addrlib *addrlib);
 void *ac_addrlib_get_handle(struct ac_addrlib *addrlib);
@@ -423,17 +441,18 @@ int ac_compute_surface(struct ac_addrlib *addrlib, const struct radeon_info *inf
                        struct radeon_surf *surf);
 void ac_surface_zero_dcc_fields(struct radeon_surf *surf);
 
-void ac_surface_set_bo_metadata(const struct radeon_info *info, struct radeon_surf *surf,
-                                uint64_t tiling_flags, enum radeon_surf_mode *mode);
-void ac_surface_get_bo_metadata(const struct radeon_info *info, struct radeon_surf *surf,
-                                uint64_t *tiling_flags);
+void ac_surface_apply_bo_metadata(const struct radeon_info *info, struct radeon_surf *surf,
+                                  uint64_t tiling_flags, enum radeon_surf_mode *mode);
+void ac_surface_compute_bo_metadata(const struct radeon_info *info, struct radeon_surf *surf,
+                                    uint64_t *tiling_flags);
 
-bool ac_surface_set_umd_metadata(const struct radeon_info *info, struct radeon_surf *surf,
-                                 unsigned num_storage_samples, unsigned num_mipmap_levels,
-                                 unsigned size_metadata, const uint32_t metadata[64]);
-void ac_surface_get_umd_metadata(const struct radeon_info *info, struct radeon_surf *surf,
-                                 unsigned num_mipmap_levels, uint32_t desc[8],
-                                 unsigned *size_metadata, uint32_t metadata[64]);
+bool ac_surface_apply_umd_metadata(const struct radeon_info *info, struct radeon_surf *surf,
+                                   unsigned num_storage_samples, unsigned num_mipmap_levels,
+                                   unsigned size_metadata, const uint32_t metadata[64]);
+void ac_surface_compute_umd_metadata(const struct radeon_info *info, struct radeon_surf *surf,
+                                     unsigned num_mipmap_levels, uint32_t desc[8],
+                                     unsigned *size_metadata, uint32_t metadata[64],
+                                     bool include_tool_md);
 
 bool ac_surface_override_offset_stride(const struct radeon_info *info, struct radeon_surf *surf,
                                        unsigned num_mipmap_levels, uint64_t offset, unsigned pitch);
@@ -459,20 +478,29 @@ void ac_modifier_max_extent(const struct radeon_info *info,
                             uint64_t modifier, uint32_t *width, uint32_t *height);
 
 unsigned ac_surface_get_nplanes(const struct radeon_surf *surf);
-uint64_t ac_surface_get_plane_offset(enum chip_class chip_class,
+uint64_t ac_surface_get_plane_offset(enum amd_gfx_level gfx_level,
                                      const struct radeon_surf *surf,
                                      unsigned plane, unsigned layer);
-uint64_t ac_surface_get_plane_stride(enum chip_class chip_class,
+uint64_t ac_surface_get_plane_stride(enum amd_gfx_level gfx_level,
                                      const struct radeon_surf *surf,
-                                     unsigned plane);
+                                     unsigned plane, unsigned level);
 /* Of the whole miplevel, not an individual layer */
 uint64_t ac_surface_get_plane_size(const struct radeon_surf *surf,
                                    unsigned plane);
 
+uint64_t ac_surface_addr_from_coord(struct ac_addrlib *addrlib, const struct radeon_info *info,
+                                    const struct radeon_surf *surf,
+                                    const struct ac_surf_info *surf_info, unsigned level,
+                                    unsigned x, unsigned y, unsigned layer, bool is_3d);
+void ac_surface_compute_nbc_view(struct ac_addrlib *addrlib, const struct radeon_info *info,
+                                 const struct radeon_surf *surf,
+                                 const struct ac_surf_info *surf_info, unsigned level,
+                                 unsigned layer, struct ac_surf_nbc_view *out);
+
 void ac_surface_print_info(FILE *out, const struct radeon_info *info,
                            const struct radeon_surf *surf);
 
-bool ac_surface_supports_dcc_image_stores(enum chip_class chip_class,
+bool ac_surface_supports_dcc_image_stores(enum amd_gfx_level gfx_level,
                                           const struct radeon_surf *surf);
 
 #ifdef AC_SURFACE_INCLUDE_NIR

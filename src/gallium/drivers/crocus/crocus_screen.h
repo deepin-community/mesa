@@ -34,7 +34,6 @@
 #include "crocus_bufmgr.h"
 #include "compiler/shader_enums.h"
 
-struct crocus_monitor_config;
 struct crocus_resource;
 struct crocus_context;
 struct crocus_sampler_state;
@@ -199,16 +198,18 @@ struct crocus_screen {
       bool dual_color_blend_by_location;
       bool disable_throttling;
       bool always_flush_cache;
+      bool limit_trig_input_range;
+      float lower_depth_range_rate;
    } driconf;
 
    uint64_t aperture_bytes;
+   uint64_t aperture_threshold;
 
    struct intel_device_info devinfo;
    struct isl_device isl_dev;
    struct crocus_bufmgr *bufmgr;
    struct brw_compiler *compiler;
-   struct crocus_monitor_config *monitor_cfg;
-   bool has_swizzling;
+   struct intel_perf_config *perf_cfg;
 
    const struct intel_l3_config *l3_config_3d;
    const struct intel_l3_config *l3_config_cs;

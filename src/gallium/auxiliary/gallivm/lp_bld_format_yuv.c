@@ -83,7 +83,7 @@ uyvy_to_yuv_soa(struct gallivm_state *gallivm,
     * v = (uyvy >>  8) & 0xff
     */
 
-#if defined(PIPE_ARCH_X86) || defined(PIPE_ARCH_X86_64)
+#if DETECT_ARCH_X86 || DETECT_ARCH_X86_64
    /*
     * Avoid shift with per-element count.
     * No support on x86, gets translated to roughly 5 instructions
@@ -167,7 +167,7 @@ yuyv_to_yuv_soa(struct gallivm_state *gallivm,
     * v = (yuyv)                & 0xff
     */
 
-#if defined(PIPE_ARCH_X86) || defined(PIPE_ARCH_X86_64)
+#if DETECT_ARCH_X86 || DETECT_ARCH_X86_64
    /*
     * Avoid shift with per-element count.
     * No support on x86, gets translated to roughly 5 instructions
@@ -335,7 +335,6 @@ rgb_to_rgba_aos(struct gallivm_state *gallivm,
     */
 
 #if UTIL_ARCH_LITTLE_ENDIAN
-   r = r;
    g = LLVMBuildShl(builder, g, lp_build_const_int_vec(gallivm, type, 8), "");
    b = LLVMBuildShl(builder, b, lp_build_const_int_vec(gallivm, type, 16), "");
    a = lp_build_const_int_vec(gallivm, type, 0xff000000);

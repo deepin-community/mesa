@@ -95,21 +95,18 @@ v3d_get_tex_format(const struct v3d_device_info *devinfo, enum pipe_format f)
 
 uint8_t
 v3d_get_tex_return_size(const struct v3d_device_info *devinfo,
-                        enum pipe_format f, enum pipe_tex_compare compare)
+                        enum pipe_format f)
 {
         const struct v3d_format *vf = get_format(devinfo, f);
 
         if (!vf)
                 return 0;
 
-        if (unlikely(V3D_DEBUG & V3D_DEBUG_TMU_16BIT))
+        if (V3D_DBG(TMU_16BIT))
                 return 16;
 
-        if (unlikely(V3D_DEBUG & V3D_DEBUG_TMU_32BIT))
+        if (V3D_DBG(TMU_32BIT))
                 return 32;
-
-        if (compare == PIPE_TEX_COMPARE_R_TO_TEXTURE)
-                return 16;
 
         return vf->return_size;
 }

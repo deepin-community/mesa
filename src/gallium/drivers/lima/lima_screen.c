@@ -63,6 +63,7 @@ lima_screen_destroy(struct pipe_screen *pscreen)
    lima_bo_cache_fini(screen);
    lima_bo_table_fini(screen);
    disk_cache_destroy(screen->disk_cache);
+   lima_resource_screen_destroy(screen);
    ralloc_free(screen);
 }
 
@@ -84,7 +85,7 @@ lima_screen_get_name(struct pipe_screen *pscreen)
 static const char *
 lima_screen_get_vendor(struct pipe_screen *pscreen)
 {
-   return "lima";
+   return "Mesa";
 }
 
 static const char *
@@ -106,23 +107,20 @@ lima_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_FRAGMENT_SHADER_TEXTURE_LOD:
    case PIPE_CAP_TEXTURE_SWIZZLE:
    case PIPE_CAP_VERTEX_COLOR_UNCLAMPED:
-      return 1;
-
-   /* Unimplemented, but for exporting OpenGL 2.0 */
-   case PIPE_CAP_OCCLUSION_QUERY:
-   case PIPE_CAP_POINT_SPRITE:
+   case PIPE_CAP_TEXTURE_BARRIER:
+   case PIPE_CAP_SURFACE_SAMPLE_COUNT:
       return 1;
 
    /* not clear supported */
-   case PIPE_CAP_TGSI_FS_COORD_ORIGIN_UPPER_LEFT:
-   case PIPE_CAP_TGSI_FS_COORD_ORIGIN_LOWER_LEFT:
-   case PIPE_CAP_TGSI_FS_COORD_PIXEL_CENTER_INTEGER:
-   case PIPE_CAP_TGSI_FS_COORD_PIXEL_CENTER_HALF_INTEGER:
+   case PIPE_CAP_FS_COORD_ORIGIN_UPPER_LEFT:
+   case PIPE_CAP_FS_COORD_ORIGIN_LOWER_LEFT:
+   case PIPE_CAP_FS_COORD_PIXEL_CENTER_INTEGER:
+   case PIPE_CAP_FS_COORD_PIXEL_CENTER_HALF_INTEGER:
       return 1;
 
-   case PIPE_CAP_TGSI_FS_POSITION_IS_SYSVAL:
-   case PIPE_CAP_TGSI_FS_POINT_IS_SYSVAL:
-   case PIPE_CAP_TGSI_FS_FACE_IS_INTEGER_SYSVAL:
+   case PIPE_CAP_FS_POSITION_IS_SYSVAL:
+   case PIPE_CAP_FS_POINT_IS_SYSVAL:
+   case PIPE_CAP_FS_FACE_IS_INTEGER_SYSVAL:
       return 1;
 
    case PIPE_CAP_TEXTURE_HALF_FLOAT_LINEAR:
@@ -146,7 +144,7 @@ lima_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_PCI_FUNCTION:
       return 0;
 
-   case PIPE_CAP_PREFER_BLIT_BASED_TEXTURE_TRANSFER:
+   case PIPE_CAP_TEXTURE_TRANSFER_MODES:
    case PIPE_CAP_SHAREABLE_SHADERS:
       return 0;
 
@@ -161,6 +159,16 @@ lima_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_FRAGMENT_SHADER_DERIVATIVES:
       return 1;
 
+   /* Mali4x0 PP doesn't have a swizzle for load_input, so use POT-aligned
+    * varyings to avoid unnecessary movs for vec3 and precision downgrade
+    * in case if this vec3 is coordinates for a sampler
+    */
+   case PIPE_CAP_PREFER_POT_ALIGNED_VARYINGS:
+      return 1;
+
+   case PIPE_CAP_MAX_DUAL_SOURCE_RENDER_TARGETS:
+      return 1;
+
    default:
       return u_pipe_screen_get_param_defaults(pscreen, param);
    }
@@ -170,10 +178,18 @@ static float
 lima_screen_get_paramf(struct pipe_screen *pscreen, enum pipe_capf param)
 {
    switch (param) {
+   case PIPE_CAPF_MIN_LINE_WIDTH:
+   case PIPE_CAPF_MIN_LINE_WIDTH_AA:
+   case PIPE_CAPF_MIN_POINT_SIZE:
+   case PIPE_CAPF_MIN_POINT_SIZE_AA:
+      return 1;
+   case PIPE_CAPF_POINT_SIZE_GRANULARITY:
+   case PIPE_CAPF_LINE_WIDTH_GRANULARITY:
+      return 0.1;
    case PIPE_CAPF_MAX_LINE_WIDTH:
    case PIPE_CAPF_MAX_LINE_WIDTH_AA:
-   case PIPE_CAPF_MAX_POINT_WIDTH:
-   case PIPE_CAPF_MAX_POINT_WIDTH_AA:
+   case PIPE_CAPF_MAX_POINT_SIZE:
+   case PIPE_CAPF_MAX_POINT_SIZE_AA:
       return 100.0f;
    case PIPE_CAPF_MAX_TEXTURE_ANISOTROPY:
       return 16.0f;
@@ -207,7 +223,7 @@ get_vertex_shader_param(struct lima_screen *screen,
 
    /* Mali-400 GP provides space for 304 vec4 uniforms, globals and
     * temporary variables. */
-   case PIPE_SHADER_CAP_MAX_CONST_BUFFER_SIZE:
+   case PIPE_SHADER_CAP_MAX_CONST_BUFFER0_SIZE:
       return 304 * 4 * sizeof(float);
 
    case PIPE_SHADER_CAP_MAX_CONST_BUFFERS:
@@ -218,9 +234,6 @@ get_vertex_shader_param(struct lima_screen *screen,
 
    case PIPE_SHADER_CAP_MAX_TEMPS:
       return 256; /* need investigate */
-
-   case PIPE_SHADER_CAP_MAX_UNROLL_ITERATIONS_HINT:
-      return 32;
 
    default:
       return 0;
@@ -248,7 +261,7 @@ get_fragment_shader_param(struct lima_screen *screen,
     * However, indirect access to an uniform only supports indices up
     * to 8192 (a 2048 vec4 array). To prevent indices bigger than that,
     * limit max const buffer size to 8192 for now. */
-   case PIPE_SHADER_CAP_MAX_CONST_BUFFER_SIZE:
+   case PIPE_SHADER_CAP_MAX_CONST_BUFFER0_SIZE:
       return 2048 * 4 * sizeof(float);
 
    case PIPE_SHADER_CAP_MAX_CONST_BUFFERS:
@@ -271,9 +284,6 @@ get_fragment_shader_param(struct lima_screen *screen,
    case PIPE_SHADER_CAP_INDIRECT_TEMP_ADDR:
    case PIPE_SHADER_CAP_INDIRECT_OUTPUT_ADDR:
       return 0;
-
-   case PIPE_SHADER_CAP_MAX_UNROLL_ITERATIONS_HINT:
-      return 32;
 
    default:
       return 0;
@@ -310,6 +320,7 @@ lima_screen_is_format_supported(struct pipe_screen *pscreen,
    case PIPE_BUFFER:
    case PIPE_TEXTURE_1D:
    case PIPE_TEXTURE_2D:
+   case PIPE_TEXTURE_3D:
    case PIPE_TEXTURE_RECT:
    case PIPE_TEXTURE_CUBE:
       break;
@@ -320,7 +331,7 @@ lima_screen_is_format_supported(struct pipe_screen *pscreen,
    if (MAX2(1, sample_count) != MAX2(1, storage_sample_count))
       return false;
 
-   /* be able to support 16, now limit to 4 */
+   /* Utgard supports 16x, but for now limit it to 4x */
    if (sample_count > 1 && sample_count != 4)
       return false;
 
@@ -584,7 +595,9 @@ static const struct debug_named_value lima_debug_options[] = {
           "Precompile shaders for shader-db" },
         { "diskcache", LIMA_DEBUG_DISK_CACHE,
           "print debug info for shader disk cache" },
-        { NULL }
+        { "noblit", LIMA_DEBUG_NO_BLIT,
+          "use generic u_blitter instead of lima-specific" },
+        DEBUG_NAMED_VALUE_END
 };
 
 DEBUG_GET_ONCE_FLAGS_OPTION(lima_debug, "LIMA_DEBUG", lima_debug_options, 0)
@@ -634,8 +647,16 @@ lima_get_disk_shader_cache (struct pipe_screen *pscreen)
    return screen->disk_cache;
 }
 
+static int
+lima_screen_get_fd(struct pipe_screen *pscreen)
+{
+   struct lima_screen *screen = lima_screen(pscreen);
+   return screen->fd;
+}
+
 struct pipe_screen *
-lima_screen_create(int fd, struct renderonly *ro)
+lima_screen_create(int fd, const struct pipe_screen_config *config,
+                   struct renderonly *ro)
 {
    uint64_t system_memory;
    struct lima_screen *screen;
@@ -687,7 +708,7 @@ lima_screen_create(int fd, struct renderonly *ro)
           pp_clear_program, sizeof(pp_clear_program));
 
    /* copy texture to framebuffer, used to reload gpu tile buffer
-    * load.v $1 0.xy, texld_2d 0, mov.v0 $0 ^tex_sampler, sync, stop
+    * load.v $1 0.xy, texld 0, mov.v0 $0 ^tex_sampler, sync, stop
     */
    static const uint32_t pp_reload_program[] = {
       0x000005e6, 0xf1003c20, 0x00000000, 0x39001000,
@@ -718,6 +739,7 @@ lima_screen_create(int fd, struct renderonly *ro)
    pp_frame_rsw[13] = 0x00000100;
 
    screen->base.destroy = lima_screen_destroy;
+   screen->base.get_screen_fd = lima_screen_get_fd;
    screen->base.get_name = lima_screen_get_name;
    screen->base.get_vendor = lima_screen_get_vendor;
    screen->base.get_device_vendor = lima_screen_get_device_vendor;
@@ -736,8 +758,6 @@ lima_screen_create(int fd, struct renderonly *ro)
    lima_disk_cache_init(screen);
 
    slab_create_parent(&screen->transfer_pool, sizeof(struct lima_transfer), 16);
-
-   screen->refcnt = 1;
 
    return &screen->base;
 

@@ -19,10 +19,6 @@
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
- *
- * Authors:
- *    Jason Ekstrand (jason@jlekstrand.net)
- *
  */
 
 #ifndef _VTN_PRIVATE_H_
@@ -37,11 +33,19 @@
 #include "spirv.h"
 #include "vtn_generator_ids.h"
 
+extern uint32_t mesa_spirv_debug;
+
+#ifndef NDEBUG
+#define MESA_SPIRV_DEBUG(flag) unlikely(mesa_spirv_debug & (MESA_SPIRV_DEBUG_ ## flag))
+#else
+#define MESA_SPIRV_DEBUG(flag) false
+#endif
+
 struct vtn_builder;
 struct vtn_decoration;
 
 /* setjmp/longjmp is broken on MinGW: https://sourceforge.net/p/mingw-w64/bugs/406/ */
-#ifdef __MINGW32__
+#if defined(__MINGW32__) && !defined(_UCRT)
   #define vtn_setjmp __builtin_setjmp
   #define vtn_longjmp __builtin_longjmp
 #else
@@ -142,6 +146,7 @@ enum vtn_branch_type {
    vtn_branch_type_terminate_invocation,
    vtn_branch_type_ignore_intersection,
    vtn_branch_type_terminate_ray,
+   vtn_branch_type_emit_mesh_tasks,
    vtn_branch_type_return,
 };
 
@@ -274,6 +279,7 @@ struct vtn_function {
 
    const uint32_t *end;
 
+   SpvLinkageType linkage;
    SpvFunctionControlMask control;
 };
 
@@ -336,6 +342,7 @@ enum vtn_base_type {
    vtn_base_type_sampler,
    vtn_base_type_sampled_image,
    vtn_base_type_accel_struct,
+   vtn_base_type_ray_query,
    vtn_base_type_function,
    vtn_base_type_event,
 };
@@ -479,6 +486,8 @@ struct vtn_access_chain {
    /* Access qualifiers */
    enum gl_access_qualifier access;
 
+   bool in_bounds;
+
    /** Struct elements and array offsets.
     *
     * This is an array of 1 so that it can conveniently be created on the
@@ -498,6 +507,7 @@ enum vtn_variable_mode {
    vtn_variable_mode_push_constant,
    vtn_variable_mode_workgroup,
    vtn_variable_mode_cross_workgroup,
+   vtn_variable_mode_task_payload,
    vtn_variable_mode_generic,
    vtn_variable_mode_constant,
    vtn_variable_mode_input,
@@ -586,6 +596,9 @@ const struct glsl_type *
 vtn_type_get_nir_type(struct vtn_builder *b, struct vtn_type *type,
                       enum vtn_variable_mode mode);
 
+nir_scope
+vtn_scope_to_nir_scope(struct vtn_builder *b, SpvScope scope);
+
 struct vtn_image_pointer {
    nir_deref_instr *image;
    nir_ssa_def *coord;
@@ -624,23 +637,34 @@ struct vtn_value {
 
 #define VTN_DEC_DECORATION -1
 #define VTN_DEC_EXECUTION_MODE -2
+#define VTN_DEC_STRUCT_MEMBER_NAME0 -3
 #define VTN_DEC_STRUCT_MEMBER0 0
 
 struct vtn_decoration {
    struct vtn_decoration *next;
 
-   /* Specifies how to apply this decoration.  Negative values represent a
-    * decoration or execution mode. (See the VTN_DEC_ #defines above.)
-    * Non-negative values specify that it applies to a structure member.
+   /* Different kinds of decorations are stored in a value,
+      the scope defines what decoration it refers to:
+
+      - VTN_DEC_DECORATION:
+            decoration associated with the value
+      - VTN_DEC_EXECUTION_MODE:
+            an execution mode associated with an entrypoint value
+      - VTN_DEC_STRUCT_MEMBER0 + m:
+            decoration associated with member m of a struct value
+      - VTN_DEC_STRUCT_MEMBER_NAME0 - m:
+            name of m'th member of a struct value
     */
    int scope;
 
+   uint32_t num_operands;
    const uint32_t *operands;
    struct vtn_value *group;
 
    union {
       SpvDecoration decoration;
       SpvExecutionMode exec_mode;
+      const char *member_name;
    };
 };
 
@@ -702,6 +726,9 @@ struct vtn_builder {
    /* True if we need to ignore undef initializers */
    bool wa_llvm_spirv_ignore_workgroup_initializer;
 
+   /* True if we need to ignore OpReturn after OpEmitMeshTasksEXT. */
+   bool wa_ignore_return_after_emit_mesh_tasks;
+
    /* Workaround discard bugs in HLSL -> SPIR-V compilers */
    bool uses_demote_to_helper_invocation;
    bool convert_discard_to_demote;
@@ -730,6 +757,10 @@ struct vtn_builder {
    /* memory model specified by OpMemoryModel */
    unsigned mem_model;
 };
+
+const char *
+vtn_string_literal(struct vtn_builder *b, const uint32_t *words,
+                   unsigned word_count, unsigned *words_used);
 
 nir_ssa_def *
 vtn_pointer_to_ssa(struct vtn_builder *b, struct vtn_pointer *ptr);
@@ -984,6 +1015,9 @@ struct vtn_builder* vtn_create_builder(const uint32_t *words, size_t word_count,
 void vtn_handle_entry_point(struct vtn_builder *b, const uint32_t *w,
                             unsigned count);
 
+void vtn_handle_debug_text(struct vtn_builder *b, SpvOp opcode,
+                           const uint32_t *w, unsigned count);
+
 void vtn_handle_decoration(struct vtn_builder *b, SpvOp opcode,
                            const uint32_t *w, unsigned count);
 
@@ -1029,6 +1063,13 @@ SpvMemorySemanticsMask vtn_mode_to_memory_semantics(enum vtn_variable_mode mode)
 
 void vtn_emit_memory_barrier(struct vtn_builder *b, SpvScope scope,
                              SpvMemorySemanticsMask semantics);
+
+bool vtn_value_is_relaxed_precision(struct vtn_builder *b, struct vtn_value *val);
+nir_ssa_def *
+vtn_mediump_downconvert(struct vtn_builder *b, enum glsl_base_type base_type, nir_ssa_def *def);
+struct vtn_ssa_value *
+vtn_mediump_downconvert_value(struct vtn_builder *b, struct vtn_ssa_value *src);
+void vtn_mediump_upconvert_value(struct vtn_builder *b, struct vtn_ssa_value *value);
 
 static inline int
 cmp_uint32_t(const void *pa, const void *pb)

@@ -10,8 +10,8 @@
 
 #include "vn_wsi.h"
 
+#include "drm-uapi/drm_fourcc.h"
 #include "vk_enum_to_str.h"
-
 #include "wsi_common_entrypoints.h"
 
 #include "vn_device.h"
@@ -81,14 +81,11 @@ vn_wsi_init(struct vn_physical_device *physical_dev)
    VkResult result = wsi_device_init(
       &physical_dev->wsi_device, vn_physical_device_to_handle(physical_dev),
       vn_wsi_proc_addr, alloc, -1, &physical_dev->instance->dri_options,
-      false);
+      &(struct wsi_device_options){.sw_device = false, .extra_xwayland_image = true});
    if (result != VK_SUCCESS)
       return result;
 
-   if (physical_dev->base.base.supported_extensions
-          .EXT_image_drm_format_modifier)
-      physical_dev->wsi_device.supports_modifiers = true;
-
+   physical_dev->wsi_device.supports_modifiers = true;
    physical_dev->base.base.wsi_device = &physical_dev->wsi_device;
 
    return VK_SUCCESS;
@@ -111,17 +108,29 @@ vn_wsi_create_image(struct vn_device *dev,
                     struct vn_image **out_img)
 {
    /* TODO This is the legacy path used by wsi_create_native_image when there
-    * is no modifier support.  Instead of forcing VK_IMAGE_TILING_LINEAR, we
-    * should ask wsi to use wsi_create_prime_image instead.
+    * is no modifier support.  Instead of forcing linear tiling, we should ask
+    * wsi to use wsi_create_prime_image instead.
     *
     * In fact, this is not enough when the image is truely used for scanout by
     * the host compositor.  There can be requirements we fail to meet.  We
     * should require modifier support at some point.
     */
+   const uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
+   const VkImageDrmFormatModifierListCreateInfoEXT mod_list_info = {
+      .sType =
+         VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT,
+      .pNext = create_info->pNext,
+      .drmFormatModifierCount = 1,
+      .pDrmFormatModifiers = &modifier,
+   };
    VkImageCreateInfo local_create_info;
    if (wsi_info->scanout) {
+      assert(!vk_find_struct_const(
+         create_info->pNext, IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT));
+
       local_create_info = *create_info;
-      local_create_info.tiling = VK_IMAGE_TILING_LINEAR;
+      local_create_info.pNext = &mod_list_info;
+      local_create_info.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
       create_info = &local_create_info;
 
       if (VN_DEBUG(WSI))
@@ -133,8 +142,84 @@ vn_wsi_create_image(struct vn_device *dev,
    if (result != VK_SUCCESS)
       return result;
 
-   img->is_wsi = true;
-   img->is_prime_blit_src = wsi_info->prime_blit_src;
+   img->wsi.is_wsi = true;
+   img->wsi.is_prime_blit_src = wsi_info->blit_src;
+   img->wsi.tiling_override = create_info->tiling;
+
+   if (create_info->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
+      VkDevice dev_handle = vn_device_to_handle(dev);
+      VkImage img_handle = vn_image_to_handle(img);
+
+      VkImageDrmFormatModifierPropertiesEXT props = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_PROPERTIES_EXT,
+      };
+      result = vn_GetImageDrmFormatModifierPropertiesEXT(dev_handle,
+                                                         img_handle, &props);
+      if (result != VK_SUCCESS) {
+         vn_DestroyImage(dev_handle, img_handle, alloc);
+         return result;
+      }
+
+      img->wsi.drm_format_modifier = props.drmFormatModifier;
+   }
+
+   *out_img = img;
+   return VK_SUCCESS;
+}
+
+VkResult
+vn_wsi_create_image_from_swapchain(
+   struct vn_device *dev,
+   const VkImageCreateInfo *create_info,
+   const VkImageSwapchainCreateInfoKHR *swapchain_info,
+   const VkAllocationCallbacks *alloc,
+   struct vn_image **out_img)
+{
+   const struct vn_image *swapchain_img = vn_image_from_handle(
+      wsi_common_get_image(swapchain_info->swapchain, 0));
+   assert(swapchain_img->wsi.is_wsi);
+
+   /* must match what the common WSI and vn_wsi_create_image do */
+   VkImageCreateInfo local_create_info = *create_info;
+
+   /* match external memory */
+   const VkExternalMemoryImageCreateInfo local_external_info = {
+      .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+      .pNext = local_create_info.pNext,
+      .handleTypes =
+         dev->physical_device->external_memory.renderer_handle_type,
+   };
+   local_create_info.pNext = &local_external_info;
+
+   /* match image tiling */
+   local_create_info.tiling = swapchain_img->wsi.tiling_override;
+
+   VkImageDrmFormatModifierListCreateInfoEXT local_mod_info;
+   if (local_create_info.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
+      local_mod_info = (const VkImageDrmFormatModifierListCreateInfoEXT){
+         .sType =
+            VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT,
+         .pNext = local_create_info.pNext,
+         .drmFormatModifierCount = 1,
+         .pDrmFormatModifiers = &swapchain_img->wsi.drm_format_modifier,
+      };
+      local_create_info.pNext = &local_mod_info;
+   }
+
+   /* match image usage */
+   if (swapchain_img->wsi.is_prime_blit_src)
+      local_create_info.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+
+   create_info = &local_create_info;
+
+   struct vn_image *img;
+   VkResult result = vn_image_create(dev, create_info, alloc, &img);
+   if (result != VK_SUCCESS)
+      return result;
+
+   img->wsi.is_wsi = true;
+   img->wsi.tiling_override = swapchain_img->wsi.tiling_override;
+   img->wsi.drm_format_modifier = swapchain_img->wsi.drm_format_modifier;
 
    *out_img = img;
    return VK_SUCCESS;
@@ -150,8 +235,8 @@ vn_CreateSwapchainKHR(VkDevice device,
 {
    struct vn_device *dev = vn_device_from_handle(device);
 
-   VkResult result = wsi_CreateSwapchainKHR(device, pCreateInfo,
-                                            pAllocator, pSwapchain);
+   VkResult result =
+      wsi_CreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
    if (VN_DEBUG(WSI) && result == VK_SUCCESS) {
       vn_log(dev->instance,
              "swapchain %p: created with surface %p, min count %d, size "
@@ -181,6 +266,7 @@ vn_DestroySwapchainKHR(VkDevice device,
 VkResult
 vn_QueuePresentKHR(VkQueue _queue, const VkPresentInfoKHR *pPresentInfo)
 {
+   VN_TRACE_FUNC();
    struct vn_queue *queue = vn_queue_from_handle(_queue);
 
    VkResult result =
@@ -206,6 +292,7 @@ vn_AcquireNextImage2KHR(VkDevice device,
                         const VkAcquireNextImageInfoKHR *pAcquireInfo,
                         uint32_t *pImageIndex)
 {
+   VN_TRACE_FUNC();
    struct vn_device *dev = vn_device_from_handle(device);
 
    VkResult result = wsi_common_acquire_next_image2(

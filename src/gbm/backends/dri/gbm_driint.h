@@ -36,6 +36,8 @@
 
 #include <GL/gl.h> /* dri_interface needs GL types */
 #include "GL/internal/dri_interface.h"
+#include "GL/internal/mesa_interface.h"
+#include "kopper_interface.h"
 
 struct gbm_dri_surface;
 struct gbm_dri_bo;
@@ -70,10 +72,11 @@ struct gbm_dri_device {
    mtx_t mutex;
 
    const __DRIcoreExtension   *core;
+   const __DRImesaCoreExtension   *mesa;
    const __DRIdri2Extension   *dri2;
-   const __DRI2fenceExtension *fence;
    const __DRIimageExtension  *image;
    const __DRIswrastExtension *swrast;
+   const __DRIkopperExtension *kopper;
    const __DRI2flushExtension *flush;
 
    const __DRIconfig   **driver_configs;
@@ -176,7 +179,7 @@ gbm_dri_bo_map_dumb(struct gbm_dri_bo *bo)
    if (ret)
       return NULL;
 
-   bo->map = mmap(0, bo->size, PROT_WRITE,
+   bo->map = mmap(NULL, bo->size, PROT_WRITE,
                   MAP_SHARED, bo->base.gbm->v0.fd, map_arg.offset);
    if (bo->map == MAP_FAILED) {
       bo->map = NULL;

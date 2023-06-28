@@ -35,7 +35,6 @@ libpanfrost_midgard_files = files(
   'mir_promote_uniforms.c',
   'mir_squeeze.c',
   'midgard_nir_lower_image_bitsize.c',
-  'midgard_nir_lower_helper_writes.c',
   'midgard_opt_copy_prop.c',
   'midgard_opt_dce.c',
   'midgard_opt_perspective.c',
@@ -48,8 +47,7 @@ midgard_nir_algebraic_c = custom_target(
   input : 'midgard_nir_algebraic.py',
   output : 'midgard_nir_algebraic.c',
   command : [
-    prog_python, '@INPUT@',
-    '-p', join_paths(meson.source_root(), 'src/compiler/nir/'),
+    prog_python, '@INPUT@', '-p', dir_compiler_nir,
   ],
   capture : true,
   depend_files : nir_algebraic_depends,

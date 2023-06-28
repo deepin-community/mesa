@@ -28,7 +28,7 @@
 #include "pipe/p_state.h"
 #include "pipe/p_defines.h"
 #include "util/u_inlines.h"
-#include "os/os_thread.h"
+#include "util/u_thread.h"
 #include "util/format/u_format.h"
 #include "util/u_math.h"
 #include "util/u_memory.h"
@@ -223,7 +223,9 @@ svga_destroy_sampler_view_priv(struct svga_sampler_view *v)
    if (v->handle != tex->handle) {
       struct svga_screen *ss = svga_screen(v->texture->screen);
       SVGA_DBG(DEBUG_DMA, "unref sid %p (sampler view)\n", v->handle);
-      svga_screen_surface_destroy(ss, &v->key, &v->handle);
+      svga_screen_surface_destroy(ss, &v->key,
+                                  svga_was_texture_rendered_to(tex),
+                                  &v->handle);
    }
 
    /* Note: we're not refcounting the texture resource here to avoid

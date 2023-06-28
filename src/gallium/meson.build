@@ -45,11 +45,6 @@ subdir('winsys/sw/wrapper')
 if with_platform_haiku
   subdir('winsys/sw/hgl')
 endif
-if with_gallium_swr
-  subdir('drivers/swr')
-else
-  driver_swr = declare_dependency()
-endif
 if with_gallium_softpipe
   subdir('drivers/softpipe')
   if draw_with_llvm
@@ -59,6 +54,7 @@ else
   driver_swrast = declare_dependency()
 endif
 if with_gallium_asahi
+  subdir('winsys/asahi/drm')
   subdir('drivers/asahi')
 else
   driver_asahi = declare_dependency()
@@ -187,6 +183,10 @@ if with_gallium_opencl
   subdir('frontends/clover')
   subdir('targets/opencl')
 endif
+if with_gallium_rusticl
+  subdir('frontends/rusticl')
+  subdir('targets/rusticl')
+endif
 if with_dri
   subdir('frontends/dri')
   subdir('targets/dri')
@@ -195,7 +195,7 @@ if with_osmesa
   subdir('frontends/osmesa')
   subdir('targets/osmesa')
 endif
-if with_glx == 'gallium-xlib'
+if with_glx == 'xlib'
   subdir('winsys/sw/xlib')
   subdir('frontends/glx/xlib')
   subdir('targets/libgl-xlib')
@@ -203,10 +203,6 @@ endif
 if with_gallium_vdpau
   subdir('frontends/vdpau')
   subdir('targets/vdpau')
-endif
-if with_gallium_xvmc
-  subdir('frontends/xvmc')
-  subdir('targets/xvmc')
 endif
 if with_gallium_omx != 'disabled'
   subdir('frontends/omx')
@@ -222,7 +218,6 @@ if with_gallium_xa
 endif
 if with_platform_haiku
   subdir('frontends/hgl')
-  subdir('targets/haiku-softpipe')
 endif
 if with_gallium_st_nine
   subdir('frontends/nine')
@@ -236,20 +231,15 @@ if with_platform_windows
   subdir('frontends/wgl')
   if with_gallium_d3d12
     subdir('winsys/d3d12/wgl')
-    subdir('targets/libgl-d3d12')
   else
     winsys_d3d12_wgl = declare_dependency()
   endif
   subdir('targets/wgl')
-  subdir('targets/libgl-gdi')
+  if with_opengl
+    subdir('targets/libgl-gdi')
+  endif
 endif
 if with_tests
-  subdir('targets/graw-null')
-  if with_platform_windows
-    subdir('targets/graw-gdi')
-  elif with_glx == 'gallium-xlib'
-    subdir('targets/graw-xlib')
-  endif
   subdir('tests')
 endif
 if with_swrast_vk

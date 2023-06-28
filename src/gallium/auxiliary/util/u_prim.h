@@ -33,6 +33,7 @@
 #include "pipe/p_defines.h"
 #include "util/compiler.h"
 #include "util/u_debug.h"
+#include "compiler/shader_enums.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -314,6 +315,21 @@ u_base_prim_type(enum pipe_prim_type prim_type)
    }
 }
 
+static inline enum pipe_prim_type
+u_tess_prim_from_shader(enum tess_primitive_mode shader_mode)
+{
+   switch (shader_mode) {
+   case TESS_PRIMITIVE_TRIANGLES:
+      return PIPE_PRIM_TRIANGLES;
+   case TESS_PRIMITIVE_QUADS:
+      return PIPE_PRIM_QUADS;
+   case TESS_PRIMITIVE_ISOLINES:
+      return PIPE_PRIM_LINES;
+   default:
+      return PIPE_PRIM_POINTS;
+   }
+}
+
 static inline unsigned
 u_vertices_for_prims(enum pipe_prim_type prim_type, int count)
 {
@@ -355,6 +371,21 @@ u_stream_outputs_for_vertices(enum pipe_prim_type primitive, unsigned nr)
 
    /* One output per vertex after decomposition */
    enum pipe_prim_type base = u_base_prim_type(primitive);
+
+   /* The GL 4.6 compatibility spec says
+    *
+    *    When quads and polygons are provided to transform feedback with a
+    *    primitive mode of TRIANGLES, they will be tessellated and recorded as
+    *    triangles (the order of tessellation within a primitive is undefined)
+    *
+    * Further, quads and polygons are always provided as TRIANGLES. So
+    * tessellate quads into triangles.
+    */
+   if (base == PIPE_PRIM_QUADS) {
+      base = PIPE_PRIM_TRIANGLES;
+      prims *= 2;
+   }
+
    return u_vertices_for_prims(base, prims);
 }
 

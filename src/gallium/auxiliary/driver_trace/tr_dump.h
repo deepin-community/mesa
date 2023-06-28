@@ -35,7 +35,7 @@
 
 
 #include "pipe/p_compiler.h"
-#include "pipe/p_format.h"
+#include "util/format/u_formats.h"
 
 struct pipe_resource;
 struct pipe_surface;
@@ -107,6 +107,7 @@ void trace_dump_ptr(const void *value);
 /* will turn a wrapped object into the real one and dump ptr */
 void trace_dump_surface_ptr(struct pipe_surface *_surface);
 void trace_dump_transfer_ptr(struct pipe_transfer *_transfer);
+void trace_dump_nir(void *nir);
 
 void trace_dump_trigger_active(bool active);
 void trace_dump_check_trigger(void);
@@ -120,6 +121,13 @@ bool trace_dump_is_triggered(void);
    do { \
       trace_dump_arg_begin(#_arg); \
       trace_dump_##_type(_arg); \
+      trace_dump_arg_end(); \
+   } while(0)
+
+#define trace_dump_arg_enum(_arg, _value) \
+   do { \
+      trace_dump_arg_begin(#_arg); \
+      trace_dump_enum(_value); \
       trace_dump_arg_end(); \
    } while(0)
 
@@ -137,14 +145,14 @@ bool trace_dump_is_triggered(void);
       trace_dump_ret_end(); \
    } while(0)
 
-#define trace_dump_array(_type, _obj, _size) \
+#define trace_dump_array_impl(_type, _obj, _size, _prefix) \
    do { \
       if (_obj) { \
          size_t idx; \
          trace_dump_array_begin(); \
          for(idx = 0; idx < (_size); ++idx) { \
             trace_dump_elem_begin(); \
-            trace_dump_##_type((_obj)[idx]); \
+            trace_dump_##_type(_prefix(_obj)[idx]); \
             trace_dump_elem_end(); \
          } \
          trace_dump_array_end(); \
@@ -152,6 +160,12 @@ bool trace_dump_is_triggered(void);
          trace_dump_null(); \
       } \
    } while(0)
+
+#define trace_dump_array(_type, _obj, _size) \
+   trace_dump_array_impl(_type, _obj, _size, );
+
+#define trace_dump_array_val(_type, _obj, _size) \
+   trace_dump_array_impl(_type, _obj, _size, *);
 
 #define trace_dump_struct_array(_type, _obj, _size) \
    do { \
@@ -176,11 +190,33 @@ bool trace_dump_is_triggered(void);
       trace_dump_member_end(); \
    } while(0)
 
+
+#define trace_dump_member_enum(_obj, _member, _value) \
+   do { \
+      trace_dump_member_begin(#_member); \
+      trace_dump_enum(_value); \
+      trace_dump_member_end(); \
+   } while(0)
+
 #define trace_dump_arg_array(_type, _arg, _size) \
    do { \
       trace_dump_arg_begin(#_arg); \
       trace_dump_array(_type, _arg, _size); \
       trace_dump_arg_end(); \
+   } while(0)
+
+#define trace_dump_arg_array_val(_type, _arg, _size) \
+   do { \
+      trace_dump_arg_begin(#_arg); \
+      trace_dump_array_val(_type, _arg, _size); \
+      trace_dump_arg_end(); \
+   } while(0)
+
+#define trace_dump_ret_array_val(_type, _arg, _size) \
+   do { \
+      trace_dump_ret_begin(); \
+      trace_dump_array_val(_type, _arg, _size); \
+      trace_dump_ret_end(); \
    } while(0)
 
 #define trace_dump_member_array(_type, _obj, _member) \

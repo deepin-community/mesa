@@ -27,7 +27,7 @@
 #define IMAGE_H
 
 
-#include "glheader.h"
+#include "util/glheader.h"
 
 struct gl_context;
 struct gl_pixelstore_attrib;
@@ -94,12 +94,6 @@ _mesa_expand_bitmap(GLsizei width, GLsizei height,
                     const GLubyte *bitmap,
                     GLubyte *destBuffer, GLint destStride,
                     GLubyte onValue);
-
-
-extern void
-_mesa_convert_colors(GLenum srcType, const GLvoid *src,
-                     GLenum dstType, GLvoid *dst,
-                     GLuint count, const GLubyte mask[]);
 
 
 extern GLboolean

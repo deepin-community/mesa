@@ -33,6 +33,8 @@
 
 #include "freedreno_util.h"
 
+BEGINC;
+
 /**
  * The ir3 hwcso type, use ir3_get_shader() to dereference the
  * underlying ir3_shader
@@ -41,7 +43,7 @@ struct ir3_shader_state;
 
 struct ir3_shader_variant *
 ir3_shader_variant(struct ir3_shader *shader, struct ir3_shader_key key,
-                   bool binning_pass, struct pipe_debug_callback *debug);
+                   bool binning_pass, struct util_debug_callback *debug);
 
 void *ir3_shader_compute_state_create(struct pipe_context *pctx,
                                       const struct pipe_compute_state *cso);
@@ -67,7 +69,7 @@ static inline bool
 ir3_point_sprite(const struct ir3_shader_variant *fs, int i,
                  uint32_t sprite_coord_enable, bool *coord_mode)
 {
-   gl_varying_slot slot = fs->inputs[i].slot;
+   gl_varying_slot slot = (gl_varying_slot)fs->inputs[i].slot;
    switch (slot) {
    case VARYING_SLOT_PNTC:
       *coord_mode = true;
@@ -81,5 +83,7 @@ ir3_point_sprite(const struct ir3_shader_variant *fs, int i,
 
 void ir3_update_max_tf_vtx(struct fd_context *ctx,
                            const struct ir3_shader_variant *v) assert_dt;
+
+ENDC;
 
 #endif /* IR3_GALLIUM_H_ */

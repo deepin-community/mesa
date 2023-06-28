@@ -38,7 +38,7 @@
 #define PROG_INSTRUCTION_H
 
 
-#include "main/glheader.h"
+#include "util/glheader.h"
 
 
 /**
@@ -275,12 +275,6 @@ _mesa_num_inst_src_regs(enum prog_opcode opcode);
 
 extern GLuint
 _mesa_num_inst_dst_regs(enum prog_opcode opcode);
-
-extern GLboolean
-_mesa_is_tex_instruction(enum prog_opcode opcode);
-
-extern GLboolean
-_mesa_check_soa_dependencies(const struct prog_instruction *inst);
 
 extern const char *
 _mesa_opcode_string(enum prog_opcode opcode);

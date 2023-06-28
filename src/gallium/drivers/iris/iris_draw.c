@@ -38,6 +38,7 @@
 #include "util/u_upload_mgr.h"
 #include "intel/compiler/brw_compiler.h"
 #include "intel/compiler/brw_eu_defines.h"
+#include "compiler/shader_info.h"
 #include "iris_context.h"
 #include "iris_defines.h"
 
@@ -65,6 +66,7 @@ iris_update_draw_info(struct iris_context *ice,
                       const struct pipe_draw_info *info)
 {
    struct iris_screen *screen = (struct iris_screen *)ice->ctx.screen;
+   const struct intel_device_info *devinfo = screen->devinfo;
    const struct brw_compiler *compiler = screen->compiler;
 
    if (ice->state.prim_mode != info->mode) {
@@ -85,8 +87,8 @@ iris_update_draw_info(struct iris_context *ice,
       ice->state.vertices_per_patch = ice->state.patch_vertices;
       ice->state.dirty |= IRIS_DIRTY_VF_TOPOLOGY;
 
-      /* 8_PATCH TCS needs this for key->input_vertices */
-      if (compiler->use_tcs_8_patch)
+      /* MULTI_PATCH TCS needs this for key->input_vertices */
+      if (compiler->use_tcs_multi_patch)
          ice->state.stage_dirty |= IRIS_STAGE_DIRTY_UNCOMPILED_TCS;
 
       /* Flag constants dirty for gl_PatchVerticesIn if needed. */
@@ -105,8 +107,11 @@ iris_update_draw_info(struct iris_context *ice,
    if (ice->state.primitive_restart != info->primitive_restart ||
        ice->state.cut_index != cut_index) {
       ice->state.dirty |= IRIS_DIRTY_VF;
-      ice->state.primitive_restart = info->primitive_restart;
       ice->state.cut_index = cut_index;
+      ice->state.dirty |=
+         ((ice->state.primitive_restart != info->primitive_restart) &&
+          devinfo->verx10 >= 125) ? IRIS_DIRTY_VFG : 0;
+      ice->state.primitive_restart = info->primitive_restart;
    }
 }
 
@@ -265,7 +270,7 @@ iris_draw_vbo(struct pipe_context *ctx, const struct pipe_draw_info *info,
 
    struct iris_context *ice = (struct iris_context *) ctx;
    struct iris_screen *screen = (struct iris_screen*)ice->ctx.screen;
-   const struct intel_device_info *devinfo = &screen->devinfo;
+   const struct intel_device_info *devinfo = screen->devinfo;
    struct iris_batch *batch = &ice->batches[IRIS_BATCH_RENDER];
 
    if (ice->state.predicate == IRIS_PREDICATE_STATE_DONT_RENDER)
@@ -300,7 +305,7 @@ iris_draw_vbo(struct pipe_context *ctx, const struct pipe_draw_info *info,
 
    iris_binder_reserve_3d(ice);
 
-   batch->screen->vtbl.update_surface_base_address(batch, &ice->state.binder);
+   batch->screen->vtbl.update_binder_address(batch, &ice->state.binder);
 
    iris_handle_always_flush_cache(batch);
 
@@ -311,7 +316,7 @@ iris_draw_vbo(struct pipe_context *ctx, const struct pipe_draw_info *info,
 
    iris_handle_always_flush_cache(batch);
 
-   iris_postdraw_update_resolve_tracking(ice, batch);
+   iris_postdraw_update_resolve_tracking(ice);
 
    ice->state.dirty &= ~IRIS_ALL_DIRTY_FOR_RENDER;
    ice->state.stage_dirty &= ~IRIS_ALL_STAGE_DIRTY_FOR_RENDER;
@@ -377,6 +382,8 @@ void
 iris_launch_grid(struct pipe_context *ctx, const struct pipe_grid_info *grid)
 {
    struct iris_context *ice = (struct iris_context *) ctx;
+   struct iris_screen *screen = (struct iris_screen *) ctx->screen;
+   const struct intel_device_info *devinfo = screen->devinfo;
    struct iris_batch *batch = &ice->batches[IRIS_BATCH_COMPUTE];
 
    if (ice->state.predicate == IRIS_PREDICATE_STATE_DONT_RENDER)
@@ -403,10 +410,16 @@ iris_launch_grid(struct pipe_context *ctx, const struct pipe_grid_info *grid)
       ice->state.shaders[MESA_SHADER_COMPUTE].sysvals_need_upload = true;
    }
 
+   if (ice->state.last_grid_dim != grid->work_dim) {
+      ice->state.last_grid_dim = grid->work_dim;
+      ice->state.stage_dirty |= IRIS_STAGE_DIRTY_CONSTANTS_CS;
+      ice->state.shaders[MESA_SHADER_COMPUTE].sysvals_need_upload = true;
+   }
+
    iris_update_grid_size_resource(ice, grid);
 
    iris_binder_reserve_compute(ice);
-   batch->screen->vtbl.update_surface_base_address(batch, &ice->state.binder);
+   batch->screen->vtbl.update_binder_address(batch, &ice->state.binder);
 
    if (ice->state.compute_predicate) {
       batch->screen->vtbl.load_register_mem64(batch, MI_PREDICATE_RESULT,
@@ -423,7 +436,6 @@ iris_launch_grid(struct pipe_context *ctx, const struct pipe_grid_info *grid)
    ice->state.dirty &= ~IRIS_ALL_DIRTY_FOR_COMPUTE;
    ice->state.stage_dirty &= ~IRIS_ALL_STAGE_DIRTY_FOR_COMPUTE;
 
-   /* Note: since compute shaders can't access the framebuffer, there's
-    * no need to call iris_postdraw_update_resolve_tracking.
-    */
+   if (devinfo->ver >= 12)
+      iris_postdraw_update_image_resolve_tracking(ice, MESA_SHADER_COMPUTE);
 }

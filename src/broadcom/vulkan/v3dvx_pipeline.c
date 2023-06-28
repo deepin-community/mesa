@@ -1,5 +1,5 @@
 /*
- * Copyright © 2021 Raspberry Pi
+ * Copyright © 2021 Raspberry Pi Ltd
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -25,8 +25,6 @@
 #include "broadcom/common/v3d_macros.h"
 #include "broadcom/cle/v3dx_pack.h"
 #include "broadcom/compiler/v3d_compiler.h"
-
-#include "vk_format_info.h"
 
 static uint8_t
 blend_factor(VkBlendFactor factor, bool dst_alpha_one, bool *needs_constants)
@@ -58,15 +56,10 @@ blend_factor(VkBlendFactor factor, bool dst_alpha_one, bool *needs_constants)
    case VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR:
    case VK_BLEND_FACTOR_SRC1_ALPHA:
    case VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA:
-      assert(!"Invalid blend factor: dual source blending not supported.");
+      unreachable("Invalid blend factor: dual source blending not supported.");
    default:
-      assert(!"Unknown blend factor.");
+      unreachable("Unknown blend factor.");
    }
-
-   /* Should be handled by the switch, added to avoid a "end of non-void
-    * function" error
-    */
-   unreachable("Unknown blend factor.");
 }
 
 static void
@@ -91,7 +84,6 @@ pack_blend(struct v3dv_pipeline *pipeline,
       return;
 
    assert(pipeline->subpass->color_count == cb_info->attachmentCount);
-
    pipeline->blend.needs_color_constants = false;
    uint32_t color_write_masks = 0;
    for (uint32_t i = 0; i < pipeline->subpass->color_count; i++) {
@@ -108,10 +100,15 @@ pack_blend(struct v3dv_pipeline *pipeline,
       if (!b_state->blendEnable)
          continue;
 
-      VkAttachmentDescription *desc =
+      VkAttachmentDescription2 *desc =
          &pipeline->pass->attachments[attachment_idx].desc;
       const struct v3dv_format *format = v3dX(get_format)(desc->format);
-      bool dst_alpha_one = (format->swizzle[3] == PIPE_SWIZZLE_1);
+
+      /* We only do blending with render pass attachments, so we should not have
+       * multiplanar images here
+       */
+      assert(format->plane_count == 1);
+      bool dst_alpha_one = (format->planes[0].swizzle[3] == PIPE_SWIZZLE_1);
 
       uint8_t rt_mask = 1 << i;
       pipeline->blend.enables |= rt_mask;
@@ -148,6 +145,7 @@ pack_cfg_bits(struct v3dv_pipeline *pipeline,
               const VkPipelineDepthStencilStateCreateInfo *ds_info,
               const VkPipelineRasterizationStateCreateInfo *rs_info,
               const VkPipelineRasterizationProvokingVertexStateCreateInfoEXT *pv_info,
+              const VkPipelineRasterizationLineStateCreateInfoEXT *ls_info,
               const VkPipelineMultisampleStateCreateInfo *ms_info)
 {
    assert(sizeof(pipeline->cfg_bits) == cl_packet_length(CFG_BITS));
@@ -166,13 +164,21 @@ pack_cfg_bits(struct v3dv_pipeline *pipeline,
       config.clockwise_primitives =
          rs_info ? rs_info->frontFace == VK_FRONT_FACE_COUNTER_CLOCKWISE : false;
 
-      config.enable_depth_offset = rs_info ? rs_info->depthBiasEnable: false;
+      /* Even if rs_info->depthBiasEnabled is true, we can decide to not
+       * enable it, like if there isn't a depth/stencil attachment with the
+       * pipeline.
+       */
+      config.enable_depth_offset = pipeline->depth_bias.enabled;
 
       /* This is required to pass line rasterization tests in CTS while
        * exposing, at least, a minimum of 4-bits of subpixel precision
        * (the minimum requirement).
        */
-      config.line_rasterization = 1; /* perp end caps */
+      if (ls_info &&
+          ls_info->lineRasterizationMode == VK_LINE_RASTERIZATION_MODE_BRESENHAM_EXT)
+         config.line_rasterization = V3D_LINE_RASTERIZATION_DIAMOND_EXIT;
+      else
+         config.line_rasterization = V3D_LINE_RASTERIZATION_PERP_END_CAPS;
 
       if (rs_info && rs_info->polygonMode != VK_POLYGON_MODE_FILL) {
          config.direct3d_wireframe_triangles_mode = true;
@@ -180,7 +186,10 @@ pack_cfg_bits(struct v3dv_pipeline *pipeline,
             rs_info->polygonMode == VK_POLYGON_MODE_POINT;
       }
 
-      config.rasterizer_oversample_mode = pipeline->msaa ? 1 : 0;
+      /* diamond-exit rasterization does not support oversample */
+      config.rasterizer_oversample_mode =
+         (config.line_rasterization == V3D_LINE_RASTERIZATION_PERP_END_CAPS &&
+          pipeline->msaa) ? 1 : 0;
 
       /* From the Vulkan spec:
        *
@@ -344,10 +353,11 @@ v3dX(pipeline_pack_state)(struct v3dv_pipeline *pipeline,
                           const VkPipelineDepthStencilStateCreateInfo *ds_info,
                           const VkPipelineRasterizationStateCreateInfo *rs_info,
                           const VkPipelineRasterizationProvokingVertexStateCreateInfoEXT *pv_info,
+                          const VkPipelineRasterizationLineStateCreateInfoEXT *ls_info,
                           const VkPipelineMultisampleStateCreateInfo *ms_info)
 {
    pack_blend(pipeline, cb_info);
-   pack_cfg_bits(pipeline, ds_info, rs_info, pv_info, ms_info);
+   pack_cfg_bits(pipeline, ds_info, rs_info, pv_info, ls_info, ms_info);
    pack_stencil_cfg(pipeline, ds_info);
 }
 
@@ -390,6 +400,7 @@ pack_shader_state_record(struct v3dv_pipeline *pipeline)
        * shader needs to write the Z value (even just discards).
        */
       shader.fragment_shader_does_z_writes = prog_data_fs->writes_z;
+
       /* Set if the EZ test must be disabled (due to shader side
        * effects and the early_z flag not being present in the
        * shader).
@@ -432,7 +443,7 @@ pack_shader_state_record(struct v3dv_pipeline *pipeline)
       shader.vertex_shader_propagate_nans = true;
       shader.fragment_shader_propagate_nans = true;
 
-      /* Note: see previous note about adresses */
+      /* Note: see previous note about addresses */
       /* shader.coordinate_shader_code_address */
       /* shader.vertex_shader_code_address */
       /* shader.fragment_shader_code_address */
@@ -457,7 +468,7 @@ pack_shader_state_record(struct v3dv_pipeline *pipeline)
       shader.vertex_shader_output_vpm_segment_size =
          prog_data_vs->vpm_output_size;
 
-      /* Note: see previous note about adresses */
+      /* Note: see previous note about addresses */
       /* shader.coordinate_shader_uniforms_address */
       /* shader.vertex_shader_uniforms_address */
       /* shader.fragment_shader_uniforms_address */
@@ -499,7 +510,7 @@ pack_shader_state_record(struct v3dv_pipeline *pipeline)
       shader.instance_id_read_by_vertex_shader =
          prog_data_vs->uses_iid;
 
-      /* Note: see previous note about adresses */
+      /* Note: see previous note about addresses */
       /* shader.address_of_default_attribute_values */
    }
 }

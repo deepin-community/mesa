@@ -72,11 +72,12 @@ bool
 dxil_container_add_features(struct dxil_container *c,
                             const struct dxil_features *features)
 {
-   union {
-      struct dxil_features flags;
-      uint64_t bits;
-   } u = { .flags = *features };
-   return add_part(c, DXIL_SFI0, &u.bits, sizeof(u.bits));
+   /* DXIL feature info is a bitfield packed into a uint64_t. */
+   static_assert(sizeof(struct dxil_features) <= sizeof(uint64_t),
+                 "Expected dxil_features to fit into a uint64_t");
+   uint64_t bits = 0;
+   memcpy(&bits, features, sizeof(struct dxil_features));
+   return add_part(c, DXIL_SFI0, &bits, sizeof(uint64_t));
 }
 
 typedef struct {
@@ -89,12 +90,13 @@ typedef struct {
 
 static uint32_t
 get_semantic_name_offset(name_offset_cache_t *cache, const char *name,
-                         struct _mesa_string_buffer *buf, uint32_t buf_offset)
+                         struct _mesa_string_buffer *buf, uint32_t buf_offset,
+                         bool validator_7)
 {
    uint32_t offset = buf->length + buf_offset;
 
-   // DXC doesn't de-duplicate arbitrary semantic names, only SVs.
-   if (strncmp(name, "SV_", 3) == 0) {
+   /* DXC doesn't de-duplicate arbitrary semantic names until validator 1.7, only SVs. */
+   if (validator_7 || strncmp(name, "SV_", 3) == 0) {
       /* consider replacing this with a binary search using rb_tree */
       for (unsigned i = 0; i < cache->num_entries; ++i) {
          if (!strcmp(name, cache->entries[i].name))
@@ -114,16 +116,22 @@ static uint32_t
 collect_semantic_names(unsigned num_records,
                        struct dxil_signature_record *io_data,
                        struct _mesa_string_buffer *buf,
-                       uint32_t buf_offset)
+                       uint32_t buf_offset,
+                       bool validator_7)
 {
    name_offset_cache_t cache;
    cache.num_entries = 0;
 
    for (unsigned i = 0; i < num_records; ++i) {
       struct dxil_signature_record *io = &io_data[i];
-      uint32_t offset = get_semantic_name_offset(&cache, io->name, buf, buf_offset);
+      uint32_t offset = get_semantic_name_offset(&cache, io->name, buf, buf_offset, validator_7);
       for (unsigned j = 0; j < io->num_elements; ++j)
          io->elements[j].semantic_name_offset = offset;
+   }
+   if (validator_7 && buf->length % sizeof(uint32_t) != 0) {
+      unsigned padding_to_add = sizeof(uint32_t) - (buf->length % sizeof(uint32_t));
+      char padding[sizeof(uint32_t)] = { 0 };
+      _mesa_string_buffer_append_len(buf, padding, padding_to_add);
    }
    return buf_offset + buf->length;
 }
@@ -132,7 +140,8 @@ bool
 dxil_container_add_io_signature(struct dxil_container *c,
                                 enum dxil_part_fourcc part,
                                 unsigned num_records,
-                                struct dxil_signature_record *io_data)
+                                struct dxil_signature_record *io_data,
+                                bool validator_7)
 {
    struct {
       uint32_t param_count;
@@ -156,7 +165,8 @@ dxil_container_add_io_signature(struct dxil_container *c,
          _mesa_string_buffer_create(NULL, 1024);
 
    uint32_t last_offset = collect_semantic_names(num_records, io_data,
-                                                 names, fixed_size);
+                                                 names, fixed_size,
+                                                 validator_7);
 
 
    if (!add_part_header(c, part, last_offset) ||
@@ -185,17 +195,31 @@ cleanup:
    return retval;
 }
 
+static uint32_t
+compute_mask_dwords_from_vectors(uint32_t vectors)
+{
+   return ((vectors + 7) >> 3);
+}
+static uint32_t
+compute_input_output_table_dwords(unsigned input_vectors, unsigned output_vectors)
+{
+   return compute_mask_dwords_from_vectors(output_vectors) * input_vectors * 4;
+}
+
 bool
 dxil_container_add_state_validation(struct dxil_container *c,
                                     const struct dxil_module *m,
                                     struct dxil_validation_state *state)
 {
-   uint32_t psv1_size = sizeof(struct dxil_psv_runtime_info_1);
-   uint32_t resource_bind_info_size = 4 * sizeof(uint32_t);
+   uint32_t psv_size = m->minor_validator >= 6 ?
+      sizeof(struct dxil_psv_runtime_info_2) :
+      sizeof(struct dxil_psv_runtime_info_1);
+   uint32_t resource_bind_info_size = m->minor_validator >= 6 ?
+      sizeof(struct dxil_resource_v1) : sizeof(struct dxil_resource_v0);
    uint32_t dxil_pvs_sig_size = sizeof(struct dxil_psv_signature_element);
    uint32_t resource_count = state->num_resources;
 
-   uint32_t size = psv1_size + 2 * sizeof(uint32_t);
+   uint32_t size = psv_size + 2 * sizeof(uint32_t);
    if (resource_count > 0) {
       size += sizeof (uint32_t) +
               resource_bind_info_size * resource_count;
@@ -203,43 +227,63 @@ dxil_container_add_state_validation(struct dxil_container *c,
    uint32_t string_table_size = (m->sem_string_table->length + 3) & ~3u;
    size  += sizeof(uint32_t) + string_table_size;
 
-   // Semantic index table size, currently always 0
    size  += sizeof(uint32_t) + m->sem_index_table.size * sizeof(uint32_t);
 
-   if (m->num_sig_inputs || m->num_sig_outputs) {
+   if (m->num_sig_inputs || m->num_sig_outputs || m->num_sig_patch_consts) {
       size  += sizeof(uint32_t);
    }
 
    size += dxil_pvs_sig_size * m->num_sig_inputs;
    size += dxil_pvs_sig_size * m->num_sig_outputs;
-   // size += dxil_pvs_sig_size * m->num_sig_patch_const...;
+   size += dxil_pvs_sig_size * m->num_sig_patch_consts;
 
-   state->state.sig_input_vectors = (uint8_t)m->num_psv_inputs;
+   state->state.psv1.sig_input_vectors = (uint8_t)m->num_psv_inputs;
 
-   // TODO: check proper stream
-   state->state.sig_output_vectors[0] = (uint8_t)m->num_psv_outputs;
+   for (unsigned i = 0; i < 4; ++i)
+      state->state.psv1.sig_output_vectors[i] = (uint8_t)m->num_psv_outputs[i];
 
-   // TODO: Add viewID records size
-
-   // TODO: Add sig input output dependency table size
-   uint32_t dependency_table_size = 0;
-   if (state->state.sig_input_vectors > 0) {
+   uint32_t view_id_table_size = 0;
+   if (state->state.psv1.uses_view_id) {
       for (unsigned i = 0; i < 4; ++i) {
-         if (state->state.sig_output_vectors[i] > 0)
-            dependency_table_size += sizeof(uint32_t) * ((state->state.sig_output_vectors[i] + 7) >> 3) *
-                    state->state.sig_input_vectors * 4;
+         if (state->state.psv1.sig_output_vectors[i] > 0)
+            view_id_table_size += sizeof(uint32_t) *
+            compute_mask_dwords_from_vectors(state->state.psv1.sig_output_vectors[i]);
+      }
+      if (state->state.psv1.shader_stage == DXIL_HULL_SHADER && state->state.psv1.sig_patch_const_or_prim_vectors) {
+         view_id_table_size += sizeof(uint32_t) *
+            compute_mask_dwords_from_vectors(state->state.psv1.sig_patch_const_or_prim_vectors);
       }
    }
+   size += view_id_table_size;
+
+   uint32_t dependency_table_size = 0;
+   if (state->state.psv1.sig_input_vectors > 0) {
+      for (unsigned i = 0; i < 4; ++i) {
+         if (state->state.psv1.sig_output_vectors[i] > 0)
+            dependency_table_size += sizeof(uint32_t) *
+            compute_input_output_table_dwords(state->state.psv1.sig_input_vectors,
+               state->state.psv1.sig_output_vectors[i]);
+      }
+      if (state->state.psv1.shader_stage == DXIL_HULL_SHADER && state->state.psv1.sig_patch_const_or_prim_vectors) {
+         dependency_table_size += sizeof(uint32_t) * compute_input_output_table_dwords(state->state.psv1.sig_input_vectors,
+            state->state.psv1.sig_patch_const_or_prim_vectors);
+      }
+   }
+   if (state->state.psv1.shader_stage == DXIL_DOMAIN_SHADER &&
+       state->state.psv1.sig_patch_const_or_prim_vectors &&
+       state->state.psv1.sig_output_vectors[0]) {
+      dependency_table_size += sizeof(uint32_t) * compute_input_output_table_dwords(
+         state->state.psv1.sig_patch_const_or_prim_vectors, state->state.psv1.sig_output_vectors[0]);
+   }
    size += dependency_table_size;
-   // TODO: Domain shader table goes here
 
    if (!add_part_header(c, DXIL_PSV0, size))
       return false;
 
-   if (!blob_write_bytes(&c->parts, &psv1_size, sizeof(psv1_size)))
+   if (!blob_write_bytes(&c->parts, &psv_size, sizeof(psv_size)))
        return false;
 
-   if (!blob_write_bytes(&c->parts, &state->state, psv1_size))
+   if (!blob_write_bytes(&c->parts, &state->state, psv_size))
       return false;
 
    if (!blob_write_bytes(&c->parts, &resource_count, sizeof(resource_count)))
@@ -247,7 +291,7 @@ dxil_container_add_state_validation(struct dxil_container *c,
 
    if (resource_count > 0) {
       if (!blob_write_bytes(&c->parts, &resource_bind_info_size, sizeof(resource_bind_info_size)) ||
-          !blob_write_bytes(&c->parts, state->resources, resource_bind_info_size * state->num_resources))
+          !blob_write_bytes(&c->parts, state->resources.v0, resource_bind_info_size * state->num_resources))
          return false;
    }
 
@@ -258,7 +302,6 @@ dxil_container_add_state_validation(struct dxil_container *c,
        !blob_write_bytes(&c->parts, &fill, string_table_size - m->sem_string_table->length))
       return false;
 
-   // TODO: write the correct semantic index table. Currently it is empty
    if (!blob_write_bytes(&c->parts, &m->sem_index_table.size, sizeof(uint32_t)))
       return false;
 
@@ -268,7 +311,7 @@ dxil_container_add_state_validation(struct dxil_container *c,
          return false;
    }
 
-   if (m->num_sig_inputs || m->num_sig_outputs) {
+   if (m->num_sig_inputs || m->num_sig_outputs || m->num_sig_patch_consts) {
       if (!blob_write_bytes(&c->parts, &dxil_pvs_sig_size, sizeof(dxil_pvs_sig_size)))
          return false;
 
@@ -277,14 +320,16 @@ dxil_container_add_state_validation(struct dxil_container *c,
 
       if (!blob_write_bytes(&c->parts, &m->psv_outputs, dxil_pvs_sig_size * m->num_sig_outputs))
          return false;
+
+      if (!blob_write_bytes(&c->parts, &m->psv_patch_consts, dxil_pvs_sig_size * m->num_sig_patch_consts))
+         return false;
    }
 
-   // TODO: Write PatchConst...
-
    // TODO: Handle case when ViewID is used
+   for (uint32_t i = 0; i < view_id_table_size; ++i)
+      blob_write_uint8(&c->parts, 0);
 
    // TODO: Handle sig input output dependency table
-
    for (uint32_t i = 0; i < dependency_table_size; ++i)
       blob_write_uint8(&c->parts, 0);
 

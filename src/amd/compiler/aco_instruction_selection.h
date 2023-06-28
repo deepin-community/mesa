@@ -27,13 +27,20 @@
 
 #include "aco_ir.h"
 
-#include "vulkan/radv_shader_args.h"
+#include "nir.h"
 
 #include <array>
 #include <unordered_map>
 #include <vector>
 
 namespace aco {
+
+enum aco_color_output_type {
+   ACO_TYPE_ANY32,
+   ACO_TYPE_FLOAT16,
+   ACO_TYPE_INT16,
+   ACO_TYPE_UINT16,
+};
 
 struct shader_io_state {
    uint8_t mask[VARYING_SLOT_MAX];
@@ -47,8 +54,8 @@ struct shader_io_state {
 };
 
 struct isel_context {
-   const struct radv_nir_compiler_options* options;
-   const struct radv_shader_args* args;
+   const struct aco_compiler_options* options;
+   const struct ac_shader_args* args;
    Program* program;
    nir_shader* shader;
    uint32_t constant_data_offset;
@@ -67,6 +74,7 @@ struct isel_context {
       struct {
          bool is_divergent = false;
       } parent_if;
+      bool had_divergent_discard = false;
       bool exec_potentially_empty_discard =
          false; /* set to false when loop_nest_depth==0 && parent_if.is_divergent==false */
       uint16_t exec_potentially_empty_break_depth = UINT16_MAX;
@@ -96,8 +104,10 @@ struct isel_context {
 
    /* tessellation information */
    uint64_t tcs_temp_only_inputs;
-   uint32_t tcs_num_patches;
    bool tcs_in_out_eq = false;
+
+   /* Fragment color output information */
+   uint16_t output_color_types;
 
    /* I/O information */
    shader_io_state inputs;
@@ -116,7 +126,9 @@ void cleanup_context(isel_context* ctx);
 
 isel_context setup_isel_context(Program* program, unsigned shader_count,
                                 struct nir_shader* const* shaders, ac_shader_config* config,
-                                const struct radv_shader_args* args, bool is_gs_copy_shader);
+                                const struct aco_compiler_options* options,
+                                const struct aco_shader_info* info,
+                                const struct ac_shader_args* args, bool is_ps_epilog);
 
 } // namespace aco
 

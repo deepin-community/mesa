@@ -111,7 +111,7 @@ iris_is_format_supported(struct pipe_screen *pscreen,
                          unsigned usage)
 {
    struct iris_screen *screen = (struct iris_screen *) pscreen;
-   const struct intel_device_info *devinfo = &screen->devinfo;
+   const struct intel_device_info *devinfo = screen->devinfo;
    uint32_t max_samples = devinfo->ver == 8 ? 8 : 16;
 
    if (sample_count > max_samples ||
@@ -120,6 +120,10 @@ iris_is_format_supported(struct pipe_screen *pscreen,
 
    if (pformat == PIPE_FORMAT_NONE)
       return true;
+
+   /* Rely on gallium fallbacks for better YUV format support. */
+   if (util_format_is_yuv(pformat))
+      return false;
 
    enum isl_format format = isl_format_for_pipe_format(pformat);
 

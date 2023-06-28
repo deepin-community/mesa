@@ -36,7 +36,7 @@ Basic formatting guidelines
 
 -  Use comments wherever you think it would be helpful for other
    developers. Several specific cases and style examples follow. Note
-   that we roughly follow `Doxygen <http://www.doxygen.nl>`__
+   that we roughly follow `Doxygen <https://www.doxygen.nl>`__
    conventions.
 
    Single-line comments:
@@ -128,5 +128,5 @@ Basic formatting guidelines
    prefer the use of ``bool``, ``true``, and ``false`` over
    ``GLboolean``, ``GL_TRUE``, and ``GL_FALSE``. In C code, this may
    mean that ``#include <stdbool.h>`` needs to be added. The
-   ``try_emit_*`` methods in ``src/mesa/program/ir_to_mesa.cpp`` and
-   ``src/mesa/state_tracker/st_glsl_to_tgsi.cpp`` can serve as examples.
+   ``try_emit_*`` method ``src/mesa/state_tracker/st_glsl_to_tgsi.cpp``
+   can serve as an example.

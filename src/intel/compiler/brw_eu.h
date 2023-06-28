@@ -38,8 +38,11 @@
 #include "brw_inst.h"
 #include "brw_compiler.h"
 #include "brw_eu_defines.h"
+#include "brw_isa_info.h"
 #include "brw_reg.h"
 #include "brw_disasm_info.h"
+
+#include "util/bitset.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -110,6 +113,7 @@ struct brw_codegen {
    bool automatic_exec_sizes;
 
    bool single_program_flow;
+   const struct brw_isa_info *isa;
    const struct intel_device_info *devinfo;
 
    /* Control flow stacks:
@@ -171,22 +175,22 @@ void brw_set_default_flag_reg(struct brw_codegen *p, int reg, int subreg);
 void brw_set_default_acc_write_control(struct brw_codegen *p, unsigned value);
 void brw_set_default_swsb(struct brw_codegen *p, struct tgl_swsb value);
 
-void brw_init_codegen(const struct intel_device_info *, struct brw_codegen *p,
-		      void *mem_ctx);
+void brw_init_codegen(const struct brw_isa_info *isa,
+                      struct brw_codegen *p, void *mem_ctx);
 bool brw_has_jip(const struct intel_device_info *devinfo, enum opcode opcode);
 bool brw_has_uip(const struct intel_device_info *devinfo, enum opcode opcode);
 const struct brw_label *brw_find_label(const struct brw_label *root, int offset);
 void brw_create_label(struct brw_label **labels, int offset, void *mem_ctx);
-int brw_disassemble_inst(FILE *file, const struct intel_device_info *devinfo,
+int brw_disassemble_inst(FILE *file, const struct brw_isa_info *isa,
                          const struct brw_inst *inst, bool is_compacted,
                          int offset, const struct brw_label *root_label);
 const struct
-brw_label *brw_label_assembly(const struct intel_device_info *devinfo,
+brw_label *brw_label_assembly(const struct brw_isa_info *isa,
                               const void *assembly, int start, int end,
                               void *mem_ctx);
-void brw_disassemble_with_labels(const struct intel_device_info *devinfo,
+void brw_disassemble_with_labels(const struct brw_isa_info *isa,
                                  const void *assembly, int start, int end, FILE *out);
-void brw_disassemble(const struct intel_device_info *devinfo,
+void brw_disassemble(const struct brw_isa_info *isa,
                      const void *assembly, int start, int end,
                      const struct brw_label *root_label, FILE *out);
 const struct brw_shader_reloc *brw_get_shader_relocs(struct brw_codegen *p,
@@ -396,13 +400,25 @@ brw_sampler_desc(const struct intel_device_info *devinfo,
 {
    const unsigned desc = (SET_BITS(binding_table_index, 7, 0) |
                           SET_BITS(sampler, 11, 8));
+
+   /* From the CHV Bspec: Shared Functions - Message Descriptor -
+    * Sampling Engine:
+    *
+    *   SIMD Mode[2]  29    This field is the upper bit of the 3-bit
+    *                       SIMD Mode field.
+    */
+   if (devinfo->ver >= 8)
+      return desc | SET_BITS(msg_type, 16, 12) |
+             SET_BITS(simd_mode & 0x3, 18, 17) |
+             SET_BITS(simd_mode >> 2, 29, 29) |
+             SET_BITS(return_format, 30, 30);
    if (devinfo->ver >= 7)
       return (desc | SET_BITS(msg_type, 16, 12) |
               SET_BITS(simd_mode, 18, 17));
    else if (devinfo->ver >= 5)
       return (desc | SET_BITS(msg_type, 15, 12) |
               SET_BITS(simd_mode, 17, 16));
-   else if (devinfo->is_g4x)
+   else if (devinfo->verx10 >= 45)
       return desc | SET_BITS(msg_type, 15, 12);
    else
       return (desc | SET_BITS(return_format, 13, 12) |
@@ -429,7 +445,7 @@ brw_sampler_desc_msg_type(const struct intel_device_info *devinfo, uint32_t desc
 {
    if (devinfo->ver >= 7)
       return GET_BITS(desc, 16, 12);
-   else if (devinfo->ver >= 5 || devinfo->is_g4x)
+   else if (devinfo->verx10 >= 45)
       return GET_BITS(desc, 15, 12);
    else
       return GET_BITS(desc, 15, 14);
@@ -440,7 +456,9 @@ brw_sampler_desc_simd_mode(const struct intel_device_info *devinfo,
                            uint32_t desc)
 {
    assert(devinfo->ver >= 5);
-   if (devinfo->ver >= 7)
+   if (devinfo->ver >= 8)
+      return GET_BITS(desc, 18, 17) | GET_BITS(desc, 29, 29) << 2;
+   else if (devinfo->ver >= 7)
       return GET_BITS(desc, 18, 17);
    else
       return GET_BITS(desc, 17, 16);
@@ -450,8 +468,11 @@ static  inline unsigned
 brw_sampler_desc_return_format(ASSERTED const struct intel_device_info *devinfo,
                                uint32_t desc)
 {
-   assert(devinfo->ver == 4 && !devinfo->is_g4x);
-   return GET_BITS(desc, 13, 12);
+   assert(devinfo->verx10 == 40 || devinfo->ver >= 8);
+   if (devinfo->ver >= 8)
+      return GET_BITS(desc, 30, 30);
+   else
+      return GET_BITS(desc, 13, 12);
 }
 
 /**
@@ -522,7 +543,7 @@ brw_dp_read_desc(const struct intel_device_info *devinfo,
 {
    if (devinfo->ver >= 6)
       return brw_dp_desc(devinfo, binding_table_index, msg_type, msg_control);
-   else if (devinfo->ver >= 5 || devinfo->is_g4x)
+   else if (devinfo->verx10 >= 45)
       return (SET_BITS(binding_table_index, 7, 0) |
               SET_BITS(msg_control, 10, 8) |
               SET_BITS(msg_type, 13, 11) |
@@ -540,7 +561,7 @@ brw_dp_read_desc_msg_type(const struct intel_device_info *devinfo,
 {
    if (devinfo->ver >= 6)
       return brw_dp_desc_msg_type(devinfo, desc);
-   else if (devinfo->ver >= 5 || devinfo->is_g4x)
+   else if (devinfo->verx10 >= 45)
       return GET_BITS(desc, 13, 11);
    else
       return GET_BITS(desc, 13, 12);
@@ -552,7 +573,7 @@ brw_dp_read_desc_msg_control(const struct intel_device_info *devinfo,
 {
    if (devinfo->ver >= 6)
       return brw_dp_desc_msg_control(devinfo, desc);
-   else if (devinfo->ver >= 5 || devinfo->is_g4x)
+   else if (devinfo->verx10 >= 45)
       return GET_BITS(desc, 10, 8);
    else
       return GET_BITS(desc, 11, 8);
@@ -779,7 +800,7 @@ brw_dp_dword_scattered_rw_desc(const struct intel_device_info *devinfo,
    } else {
       if (devinfo->ver >= 7) {
          msg_type = GFX7_DATAPORT_DC_DWORD_SCATTERED_READ;
-      } else if (devinfo->ver > 4 || devinfo->is_g4x) {
+      } else if (devinfo->verx10 >= 45) {
          msg_type = G45_DATAPORT_READ_MESSAGE_DWORD_SCATTERED_READ;
       } else {
          msg_type = BRW_DATAPORT_READ_MESSAGE_DWORD_SCATTERED_READ;
@@ -1182,6 +1203,135 @@ lsc_opcode_has_transpose(enum lsc_opcode opcode)
    return opcode == LSC_OP_LOAD || opcode == LSC_OP_STORE;
 }
 
+static inline bool
+lsc_opcode_is_store(enum lsc_opcode opcode)
+{
+   return opcode == LSC_OP_STORE ||
+          opcode == LSC_OP_STORE_CMASK;
+}
+
+static inline bool
+lsc_opcode_is_atomic(enum lsc_opcode opcode)
+{
+   switch (opcode) {
+   case LSC_OP_ATOMIC_INC:
+   case LSC_OP_ATOMIC_DEC:
+   case LSC_OP_ATOMIC_LOAD:
+   case LSC_OP_ATOMIC_STORE:
+   case LSC_OP_ATOMIC_ADD:
+   case LSC_OP_ATOMIC_SUB:
+   case LSC_OP_ATOMIC_MIN:
+   case LSC_OP_ATOMIC_MAX:
+   case LSC_OP_ATOMIC_UMIN:
+   case LSC_OP_ATOMIC_UMAX:
+   case LSC_OP_ATOMIC_CMPXCHG:
+   case LSC_OP_ATOMIC_FADD:
+   case LSC_OP_ATOMIC_FSUB:
+   case LSC_OP_ATOMIC_FMIN:
+   case LSC_OP_ATOMIC_FMAX:
+   case LSC_OP_ATOMIC_FCMPXCHG:
+   case LSC_OP_ATOMIC_AND:
+   case LSC_OP_ATOMIC_OR:
+   case LSC_OP_ATOMIC_XOR:
+      return true;
+
+   default:
+      return false;
+   }
+}
+
+static inline bool
+lsc_opcode_is_atomic_float(enum lsc_opcode opcode)
+{
+   switch (opcode) {
+   case LSC_OP_ATOMIC_FADD:
+   case LSC_OP_ATOMIC_FSUB:
+   case LSC_OP_ATOMIC_FMIN:
+   case LSC_OP_ATOMIC_FMAX:
+   case LSC_OP_ATOMIC_FCMPXCHG:
+      return true;
+
+   default:
+      return false;
+   }
+}
+
+static inline unsigned
+lsc_op_num_data_values(unsigned _op)
+{
+   enum lsc_opcode op = (enum lsc_opcode) _op;
+
+   switch (op) {
+   case LSC_OP_ATOMIC_CMPXCHG:
+   case LSC_OP_ATOMIC_FCMPXCHG:
+      return 2;
+   case LSC_OP_ATOMIC_INC:
+   case LSC_OP_ATOMIC_DEC:
+   case LSC_OP_LOAD:
+   case LSC_OP_LOAD_CMASK:
+   case LSC_OP_FENCE:
+      /* XXX: actually check docs */
+      return 0;
+   default:
+      return 1;
+   }
+}
+
+static inline unsigned
+lsc_op_to_legacy_atomic(unsigned _op)
+{
+   enum lsc_opcode op = (enum lsc_opcode) _op;
+
+   switch (op) {
+   case LSC_OP_ATOMIC_INC:
+      return BRW_AOP_INC;
+   case LSC_OP_ATOMIC_DEC:
+      return BRW_AOP_DEC;
+   case LSC_OP_ATOMIC_STORE:
+      return BRW_AOP_MOV;
+   case LSC_OP_ATOMIC_ADD:
+      return BRW_AOP_ADD;
+   case LSC_OP_ATOMIC_SUB:
+      return BRW_AOP_SUB;
+   case LSC_OP_ATOMIC_MIN:
+      return BRW_AOP_IMIN;
+   case LSC_OP_ATOMIC_MAX:
+      return BRW_AOP_IMAX;
+   case LSC_OP_ATOMIC_UMIN:
+      return BRW_AOP_UMIN;
+   case LSC_OP_ATOMIC_UMAX:
+      return BRW_AOP_UMAX;
+   case LSC_OP_ATOMIC_CMPXCHG:
+      return BRW_AOP_CMPWR;
+   case LSC_OP_ATOMIC_FADD:
+      return BRW_AOP_FADD;
+   case LSC_OP_ATOMIC_FMIN:
+      return BRW_AOP_FMIN;
+   case LSC_OP_ATOMIC_FMAX:
+      return BRW_AOP_FMAX;
+   case LSC_OP_ATOMIC_FCMPXCHG:
+      return BRW_AOP_FCMPWR;
+   case LSC_OP_ATOMIC_AND:
+      return BRW_AOP_AND;
+   case LSC_OP_ATOMIC_OR:
+      return BRW_AOP_OR;
+   case LSC_OP_ATOMIC_XOR:
+      return BRW_AOP_XOR;
+   /* No LSC op maps to BRW_AOP_PREDEC */
+   case LSC_OP_ATOMIC_LOAD:
+   case LSC_OP_ATOMIC_FSUB:
+      unreachable("no corresponding legacy atomic operation");
+   case LSC_OP_LOAD:
+   case LSC_OP_LOAD_CMASK:
+   case LSC_OP_STORE:
+   case LSC_OP_STORE_CMASK:
+   case LSC_OP_FENCE:
+      unreachable("not an atomic op");
+   }
+
+   unreachable("invalid LSC op");
+}
+
 static inline uint32_t
 lsc_data_size_bytes(enum lsc_data_size data_size)
 {
@@ -1521,9 +1671,13 @@ brw_pixel_interp_desc(UNUSED const struct intel_device_info *devinfo,
                       unsigned msg_type,
                       bool noperspective,
                       bool coarse_pixel_rate,
-                      unsigned simd_mode,
-                      unsigned slot_group)
+                      unsigned exec_size,
+                      unsigned group)
 {
+   assert(exec_size == 8 || exec_size == 16);
+   const bool simd_mode = exec_size == 16;
+   const bool slot_group = group >= 16;
+
    assert(devinfo->ver >= 10 || !coarse_pixel_rate);
    return (SET_BITS(slot_group, 11, 11) |
            SET_BITS(msg_type, 13, 12) |
@@ -1566,6 +1720,7 @@ brw_send_indirect_split_message(struct brw_codegen *p,
                                 unsigned desc_imm,
                                 struct brw_reg ex_desc,
                                 unsigned ex_desc_imm,
+                                bool ex_desc_scratch,
                                 bool eot);
 
 void brw_ff_sync(struct brw_codegen *p,
@@ -1655,10 +1810,6 @@ void gfx7_block_read_scratch(struct brw_codegen *p,
                              struct brw_reg dest,
                              int num_regs,
                              unsigned offset);
-
-void brw_shader_time_add(struct brw_codegen *p,
-                         struct brw_reg payload,
-                         uint32_t surf_index);
 
 /**
  * Return the generation-specific jump distance scaling factor.
@@ -1766,6 +1917,7 @@ brw_memory_fence(struct brw_codegen *p,
                  struct brw_reg src,
                  enum opcode send_op,
                  enum brw_message_target sfid,
+                 uint32_t desc,
                  bool commit_enable,
                  unsigned bti);
 
@@ -1783,7 +1935,7 @@ brw_pixel_interpolator_query(struct brw_codegen *p,
 void
 brw_find_live_channel(struct brw_codegen *p,
                       struct brw_reg dst,
-                      struct brw_reg mask);
+                      bool last);
 
 void
 brw_broadcast(struct brw_codegen *p,
@@ -1796,7 +1948,7 @@ brw_float_controls_mode(struct brw_codegen *p,
                         unsigned mode, unsigned mask);
 
 void
-brw_update_reloc_imm(const struct intel_device_info *devinfo,
+brw_update_reloc_imm(const struct brw_isa_info *isa,
                      brw_inst *inst,
                      uint32_t value);
 
@@ -1805,6 +1957,10 @@ brw_MOV_reloc_imm(struct brw_codegen *p,
                   struct brw_reg dst,
                   enum brw_reg_type src_type,
                   uint32_t id);
+
+unsigned
+brw_num_sources_from_inst(const struct brw_isa_info *isa,
+                          const brw_inst *inst);
 
 /***********************************************************************
  * brw_eu_util.c:
@@ -1853,19 +2009,20 @@ enum brw_conditional_mod brw_swap_cmod(enum brw_conditional_mod cmod);
 /* brw_eu_compact.c */
 void brw_compact_instructions(struct brw_codegen *p, int start_offset,
                               struct disasm_info *disasm);
-void brw_uncompact_instruction(const struct intel_device_info *devinfo,
+void brw_uncompact_instruction(const struct brw_isa_info *isa,
                                brw_inst *dst, brw_compact_inst *src);
-bool brw_try_compact_instruction(const struct intel_device_info *devinfo,
+bool brw_try_compact_instruction(const struct brw_isa_info *isa,
                                  brw_compact_inst *dst, const brw_inst *src);
 
-void brw_debug_compact_uncompact(const struct intel_device_info *devinfo,
+void brw_debug_compact_uncompact(const struct brw_isa_info *isa,
                                  brw_inst *orig, brw_inst *uncompacted);
 
 /* brw_eu_validate.c */
-bool brw_validate_instruction(const struct intel_device_info *devinfo,
+bool brw_validate_instruction(const struct brw_isa_info *isa,
                               const brw_inst *inst, int offset,
+                              unsigned inst_size,
                               struct disasm_info *disasm);
-bool brw_validate_instructions(const struct intel_device_info *devinfo,
+bool brw_validate_instructions(const struct brw_isa_info *isa,
                                const void *assembly, int start_offset, int end_offset,
                                struct disasm_info *disasm);
 
@@ -1878,54 +2035,6 @@ next_offset(const struct intel_device_info *devinfo, void *store, int offset)
       return offset + 8;
    else
       return offset + 16;
-}
-
-struct opcode_desc {
-   unsigned ir;
-   unsigned hw;
-   const char *name;
-   int nsrc;
-   int ndst;
-   int gfx_vers;
-};
-
-const struct opcode_desc *
-brw_opcode_desc(const struct intel_device_info *devinfo, enum opcode opcode);
-
-const struct opcode_desc *
-brw_opcode_desc_from_hw(const struct intel_device_info *devinfo, unsigned hw);
-
-static inline unsigned
-brw_opcode_encode(const struct intel_device_info *devinfo, enum opcode opcode)
-{
-   return brw_opcode_desc(devinfo, opcode)->hw;
-}
-
-static inline enum opcode
-brw_opcode_decode(const struct intel_device_info *devinfo, unsigned hw)
-{
-   const struct opcode_desc *desc = brw_opcode_desc_from_hw(devinfo, hw);
-   return desc ? (enum opcode)desc->ir : BRW_OPCODE_ILLEGAL;
-}
-
-static inline void
-brw_inst_set_opcode(const struct intel_device_info *devinfo,
-                    brw_inst *inst, enum opcode opcode)
-{
-   brw_inst_set_hw_opcode(devinfo, inst, brw_opcode_encode(devinfo, opcode));
-}
-
-static inline enum opcode
-brw_inst_opcode(const struct intel_device_info *devinfo, const brw_inst *inst)
-{
-   return brw_opcode_decode(devinfo, brw_inst_hw_opcode(devinfo, inst));
-}
-
-static inline bool
-is_3src(const struct intel_device_info *devinfo, enum opcode opcode)
-{
-   const struct opcode_desc *desc = brw_opcode_desc(devinfo, opcode);
-   return desc && desc->nsrc == 3;
 }
 
 /** Maximum SEND message length */

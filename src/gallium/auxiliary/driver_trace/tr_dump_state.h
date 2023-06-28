@@ -66,8 +66,7 @@ void trace_dump_framebuffer_state_deep(const struct pipe_framebuffer_state *stat
 
 void trace_dump_sampler_state(const struct pipe_sampler_state *state);
 
-void trace_dump_sampler_view_template(const struct pipe_sampler_view *view,
-                                      enum pipe_texture_target target);
+void trace_dump_sampler_view_template(const struct pipe_sampler_view *view);
 
 void trace_dump_surface(const struct pipe_surface *surface);
 
@@ -94,7 +93,7 @@ void trace_dump_draw_indirect_info(const struct pipe_draw_indirect_info *state);
 
 void trace_dump_blit_info(const struct pipe_blit_info *);
 
-void trace_dump_query_result(unsigned query_type,
+void trace_dump_query_result(unsigned query_type, unsigned index,
                              const union pipe_query_result *result);
 
 void trace_dump_grid_info(const struct pipe_grid_info *state);

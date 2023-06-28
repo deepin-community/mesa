@@ -61,7 +61,7 @@ etna_blit_save_state(struct etna_context *ctx)
    util_blitter_save_blend(ctx->blitter, ctx->blend);
    util_blitter_save_depth_stencil_alpha(ctx->blitter, ctx->zsa);
    util_blitter_save_stencil_ref(ctx->blitter, &ctx->stencil_ref_s);
-   util_blitter_save_sample_mask(ctx->blitter, ctx->sample_mask);
+   util_blitter_save_sample_mask(ctx->blitter, ctx->sample_mask, 0);
    util_blitter_save_framebuffer(ctx->blitter, &ctx->framebuffer_s);
    util_blitter_save_fragment_sampler_states(ctx->blitter,
          ctx->num_fragment_samplers, (void **)ctx->sampler);
@@ -97,11 +97,12 @@ etna_blit(struct pipe_context *pctx, const struct pipe_blit_info *blit_info)
    struct etna_context *ctx = etna_context(pctx);
    struct pipe_blit_info info = *blit_info;
 
-   if (ctx->blit(pctx, &info))
-      return;
 
-   if (util_try_blit_via_copy_region(pctx, &info))
-      return;
+   if (ctx->blit(pctx, &info))
+      goto success;
+
+   if (util_try_blit_via_copy_region(pctx, &info, false))
+      goto success;
 
    if (info.mask & PIPE_MASK_S) {
       DBG("cannot blit stencil, skipping");
@@ -117,6 +118,10 @@ etna_blit(struct pipe_context *pctx, const struct pipe_blit_info *blit_info)
 
    etna_blit_save_state(ctx);
    util_blitter_blit(ctx->blitter, &info);
+
+success:
+   if (info.dst.resource->bind & PIPE_BIND_SAMPLER_VIEW)
+      ctx->dirty |= ETNA_DIRTY_TEXTURE_CACHES;
 }
 
 static void
@@ -177,7 +182,7 @@ etna_flush_resource(struct pipe_context *pctx, struct pipe_resource *prsc)
          etna_copy_resource(pctx, prsc, rsc->render, 0, 0);
          rsc->seqno = etna_resource(rsc->render)->seqno;
       }
-   } else if (etna_resource_needs_flush(rsc)) {
+   } else if (!etna_resource_ext_ts(rsc) && etna_resource_needs_flush(rsc)) {
       etna_copy_resource(pctx, prsc, prsc, 0, 0);
       rsc->flush_seqno = rsc->seqno;
    }
@@ -230,6 +235,7 @@ etna_copy_resource_box(struct pipe_context *pctx, struct pipe_resource *dst,
 {
    assert(src->format == dst->format);
    assert(src->array_size == dst->array_size);
+   assert(!etna_resource_needs_flush(etna_resource(dst)));
 
    struct pipe_blit_info blit = {};
    blit.mask = util_format_get_mask(dst->format);

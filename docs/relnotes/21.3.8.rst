@@ -19,7 +19,7 @@ SHA256 checksum
 
 ::
 
-    TBD.
+    e70d273bdc53a4e931871bb5550ba3900e6a3deab2fff64184107c33e92d9da7  mesa-21.3.8.tar.xz
 
 
 New features
@@ -106,7 +106,7 @@ Icecream95 (6):
 - pan/bi: Make disassembler build reproducibly
 - panfrost: Fix ubo_mask calculation
 
-Jason Ekstrand (2):
+Faith Ekstrand (2):
 
 - anv: Don't assume depth/stencil attachments have depth
 - lavapipe: Reset the free_cmd_buffers list in TrimCommandPool

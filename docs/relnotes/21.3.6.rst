@@ -19,7 +19,7 @@ SHA256 checksum
 
 ::
 
-    TBD.
+    96bb761fd546e9aa41d025fcc025225c5668443839dae21e3731959beb096736  mesa-21.3.6.tar.xz
 
 
 New features
@@ -88,7 +88,7 @@ Georg Lehmann (4):
 - vulkan/wsi/wayland: Add modifiers for RGB formats.
 - vulkan/wsi/wayland: Fix add_drm_format_modifier aplha/opaqueness.
 
-Jason Ekstrand (2):
+Faith Ekstrand (2):
 
 - anv/pass: Don't set first_subpass_layout for stencil-only attachments
 - vulkan/wsi: Set MUTABLE_FORMAT_BIT in the prime path

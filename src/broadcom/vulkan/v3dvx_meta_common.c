@@ -1,5 +1,5 @@
 /*
- * Copyright © 2021 Raspberry Pi
+ * Copyright © 2021 Raspberry Pi Ltd
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -25,10 +25,9 @@
 #include "v3dv_meta_common.h"
 
 #include "broadcom/common/v3d_macros.h"
+#include "broadcom/common/v3d_tfu.h"
 #include "broadcom/cle/v3dx_pack.h"
 #include "broadcom/compiler/v3d_compiler.h"
-
-#include "vk_format_info.h"
 
 struct rcl_clear_info {
    const union v3dv_clear_value *clear_value;
@@ -51,12 +50,14 @@ emit_rcl_prologue(struct v3dv_job *job,
    if (job->cmd_buffer->state.oom)
       return NULL;
 
+   assert(!tiling->msaa || !tiling->double_buffer);
    cl_emit(rcl, TILE_RENDERING_MODE_CFG_COMMON, config) {
       config.early_z_disable = true;
       config.image_width_pixels = tiling->width;
       config.image_height_pixels = tiling->height;
       config.number_of_render_targets = 1;
       config.multisample_mode_4x = tiling->msaa;
+      config.double_buffer_in_non_ms_mode = tiling->double_buffer;
       config.maximum_bpp_of_all_render_targets = tiling->internal_bpp;
       config.internal_depth_type = fb->internal_depth_type;
    }
@@ -65,11 +66,17 @@ emit_rcl_prologue(struct v3dv_job *job,
       uint32_t clear_pad = 0;
       if (clear_info->image) {
          const struct v3dv_image *image = clear_info->image;
+
+         /* From vkCmdClearColorImage:
+          *   "image must not use any of the formats that require a sampler
+          *    YCBCR conversion"
+          */
+         assert(image->plane_count == 1);
          const struct v3d_resource_slice *slice =
-            &image->slices[clear_info->level];
+            &image->planes[0].slices[clear_info->level];
          if (slice->tiling == V3D_TILING_UIF_NO_XOR ||
              slice->tiling == V3D_TILING_UIF_XOR) {
-            int uif_block_height = v3d_utile_height(image->cpp) * 2;
+            int uif_block_height = v3d_utile_height(image->planes[0].cpp) * 2;
 
             uint32_t implicit_padded_height =
                align(tiling->height, uif_block_height) / uif_block_height;
@@ -167,7 +174,11 @@ emit_frame_setup(struct v3dv_job *job,
       cl_emit(rcl, STORE_TILE_BUFFER_GENERAL, store) {
          store.buffer_to_store = NONE;
       }
-      if (clear_value && i == 0) {
+      /* When using double-buffering, we need to clear both buffers (unless
+       * we only have a single tile to render).
+       */
+      if (clear_value &&
+          (i == 0 || v3dv_do_double_initial_tile_clear(tiling))) {
          cl_emit(rcl, CLEAR_TILE_BUFFERS, clear) {
             clear.clear_z_stencil_buffer = true;
             clear.clear_all_render_targets = true;
@@ -254,6 +265,9 @@ choose_tlb_format(struct v3dv_meta_framebuffer *framebuffer,
                   bool is_copy_to_buffer,
                   bool is_copy_from_buffer)
 {
+   /* At this point the framebuffer was already lowered to single-plane */
+   assert(framebuffer->format->plane_count == 1);
+
    if (is_copy_to_buffer || is_copy_from_buffer) {
       switch (framebuffer->vk_format) {
       case VK_FORMAT_D16_UNORM:
@@ -295,11 +309,11 @@ choose_tlb_format(struct v3dv_meta_framebuffer *framebuffer,
             }
          }
       default: /* Color formats */
-         return framebuffer->format->rt_type;
+         return framebuffer->format->planes[0].rt_type;
          break;
       }
    } else {
-      return framebuffer->format->rt_type;
+      return framebuffer->format->planes[0].rt_type;
    }
 }
 
@@ -307,8 +321,24 @@ static inline bool
 format_needs_rb_swap(struct v3dv_device *device,
                      VkFormat format)
 {
-   const uint8_t *swizzle = v3dv_get_format_swizzle(device, format);
-   return swizzle[0] == PIPE_SWIZZLE_Z;
+   /* We are calling these methods for framebuffer formats, that at this point
+    * should be single-plane
+    */
+   assert(vk_format_get_plane_count(format) == 1);
+   const uint8_t *swizzle = v3dv_get_format_swizzle(device, format, 0);
+   return v3dv_format_swizzle_needs_rb_swap(swizzle);
+}
+
+static inline bool
+format_needs_reverse(struct v3dv_device *device,
+                     VkFormat format)
+{
+   /* We are calling these methods for framebuffer formats, that at this point
+    * should be single-plane
+    */
+   assert(vk_format_get_plane_count(format) == 1);
+   const uint8_t *swizzle = v3dv_get_format_swizzle(device, format, 0);
+   return v3dv_format_swizzle_needs_reverse(swizzle);
 }
 
 static void
@@ -322,22 +352,29 @@ emit_image_load(struct v3dv_device *device,
                 bool is_copy_to_buffer,
                 bool is_copy_from_buffer)
 {
-   uint32_t layer_offset = v3dv_layer_offset(image, mip_level, layer);
+   uint8_t plane = v3dv_plane_from_aspect(aspect);
+   uint32_t layer_offset = v3dv_layer_offset(image, mip_level, layer, plane);
 
+   /* For multi-plane formats we are copying plane by plane to the color
+    * tlb. Framebuffer format was already selected to be a tlb single-plane
+    * compatible format. We still need to use the real plane to get the
+    * address etc from the source image.
+    */
+   assert(framebuffer->format->plane_count == 1);
    /* For image to/from buffer copies we always load to and store from RT0,
     * even for depth/stencil aspects, because the hardware can't do raster
     * stores or loads from/to the depth/stencil tile buffers.
     */
    bool load_to_color_tlb = is_copy_to_buffer || is_copy_from_buffer ||
+                            image->format->plane_count > 1 ||
                             aspect == VK_IMAGE_ASPECT_COLOR_BIT;
 
-   const struct v3d_resource_slice *slice = &image->slices[mip_level];
+   const struct v3d_resource_slice *slice = &image->planes[plane].slices[mip_level];
    cl_emit(cl, LOAD_TILE_BUFFER_GENERAL, load) {
       load.buffer_to_load = load_to_color_tlb ?
          RENDER_TARGET_0 : v3dX(zs_buffer_from_aspect_bits)(aspect);
 
-      load.address = v3dv_cl_address(image->mem->bo, layer_offset);
-
+      load.address = v3dv_cl_address(image->planes[plane].mem->bo, layer_offset);
       load.input_image_format = choose_tlb_format(framebuffer, aspect, false,
                                                   is_copy_to_buffer,
                                                   is_copy_from_buffer);
@@ -374,6 +411,7 @@ emit_image_load(struct v3dv_device *device,
           * so we need to make sure we respect the format swizzle.
           */
          needs_rb_swap = format_needs_rb_swap(device, framebuffer->vk_format);
+         needs_chan_reverse = format_needs_reverse(device, framebuffer->vk_format);
       }
 
       load.r_b_swap = needs_rb_swap;
@@ -406,17 +444,28 @@ emit_image_store(struct v3dv_device *device,
                  bool is_copy_from_buffer,
                  bool is_multisample_resolve)
 {
-   uint32_t layer_offset = v3dv_layer_offset(image, mip_level, layer);
+   uint8_t plane = v3dv_plane_from_aspect(aspect);
+   uint32_t layer_offset = v3dv_layer_offset(image, mip_level, layer, plane);
+
+   /*
+    * For multi-plane formats we are copying plane by plane to the color
+    * tlb. Framebuffer format was already selected to be a tlb single-plane
+    * compatible format. We still need to use the real plane to get the
+    * address etc.
+    */
+   assert(framebuffer->format->plane_count == 1);
 
    bool store_from_color_tlb = is_copy_to_buffer || is_copy_from_buffer ||
+                               image->format->plane_count > 1 ||
                                aspect == VK_IMAGE_ASPECT_COLOR_BIT;
 
-   const struct v3d_resource_slice *slice = &image->slices[mip_level];
+   const struct v3d_resource_slice *slice = &image->planes[plane].slices[mip_level];
    cl_emit(cl, STORE_TILE_BUFFER_GENERAL, store) {
       store.buffer_to_store = store_from_color_tlb ?
          RENDER_TARGET_0 : v3dX(zs_buffer_from_aspect_bits)(aspect);
 
-      store.address = v3dv_cl_address(image->mem->bo, layer_offset);
+      store.address = v3dv_cl_address(image->planes[plane].mem->bo, layer_offset);
+
       store.clear_buffer_being_stored = false;
 
       /* See rationale in emit_image_load() */
@@ -431,6 +480,7 @@ emit_image_store(struct v3dv_device *device,
       } else if (!is_copy_from_buffer && !is_copy_to_buffer &&
                  (aspect & VK_IMAGE_ASPECT_COLOR_BIT)) {
          needs_rb_swap = format_needs_rb_swap(device, framebuffer->vk_format);
+         needs_chan_reverse = format_needs_reverse(device, framebuffer->vk_format);
       }
 
       store.r_b_swap = needs_rb_swap;
@@ -463,7 +513,7 @@ emit_copy_layer_to_buffer_per_tile_list(struct v3dv_job *job,
                                         struct v3dv_buffer *buffer,
                                         struct v3dv_image *image,
                                         uint32_t layer_offset,
-                                        const VkBufferImageCopy2KHR *region)
+                                        const VkBufferImageCopy2 *region)
 {
    struct v3dv_cl *cl = &job->indirect;
    v3dv_cl_ensure_space(cl, 200, 1);
@@ -512,9 +562,10 @@ emit_copy_layer_to_buffer_per_tile_list(struct v3dv_job *job,
     * Vulkan spec states that the output buffer must have packed stencil
     * values, where each stencil value is 1 byte.
     */
+   uint8_t plane = v3dv_plane_from_aspect(region->imageSubresource.aspectMask);
    uint32_t cpp =
       region->imageSubresource.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT ?
-         1 : image->cpp;
+      1 : image->planes[plane].cpp;
    uint32_t buffer_stride = width * cpp;
    uint32_t buffer_offset = buffer->mem_offset + region->bufferOffset +
                             height * buffer_stride * layer_offset;
@@ -543,7 +594,7 @@ emit_copy_layer_to_buffer(struct v3dv_job *job,
                           struct v3dv_image *image,
                           struct v3dv_meta_framebuffer *framebuffer,
                           uint32_t layer,
-                          const VkBufferImageCopy2KHR *region)
+                          const VkBufferImageCopy2 *region)
 {
    emit_copy_layer_to_buffer_per_tile_list(job, framebuffer, buffer,
                                            image, layer, region);
@@ -555,7 +606,7 @@ v3dX(meta_emit_copy_image_to_buffer_rcl)(struct v3dv_job *job,
                                          struct v3dv_buffer *buffer,
                                          struct v3dv_image *image,
                                          struct v3dv_meta_framebuffer *framebuffer,
-                                         const VkBufferImageCopy2KHR *region)
+                                         const VkBufferImageCopy2 *region)
 {
    struct v3dv_cl *rcl = emit_rcl_prologue(job, framebuffer, NULL);
    v3dv_return_if_oom(NULL, job);
@@ -572,7 +623,7 @@ emit_resolve_image_layer_per_tile_list(struct v3dv_job *job,
                                        struct v3dv_image *dst,
                                        struct v3dv_image *src,
                                        uint32_t layer_offset,
-                                       const VkImageResolve2KHR *region)
+                                       const VkImageResolve2 *region)
 {
    struct v3dv_cl *cl = &job->indirect;
    v3dv_cl_ensure_space(cl, 200, 1);
@@ -608,11 +659,14 @@ emit_resolve_image_layer_per_tile_list(struct v3dv_job *job,
       region->dstSubresource.baseArrayLayer + layer_offset :
       region->dstOffset.z + layer_offset;
 
+   bool is_depth_or_stencil =
+      region->dstSubresource.aspectMask &
+      (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
    emit_image_store(job->device, cl, framebuffer, dst,
                     region->dstSubresource.aspectMask,
                     dst_layer,
                     region->dstSubresource.mipLevel,
-                    false, false, true);
+                    false, false, !is_depth_or_stencil);
 
    cl_emit(cl, END_OF_TILE_MARKER, end);
 
@@ -630,7 +684,7 @@ emit_resolve_image_layer(struct v3dv_job *job,
                          struct v3dv_image *src,
                          struct v3dv_meta_framebuffer *framebuffer,
                          uint32_t layer,
-                         const VkImageResolve2KHR *region)
+                         const VkImageResolve2 *region)
 {
    emit_resolve_image_layer_per_tile_list(job, framebuffer,
                                           dst, src, layer, region);
@@ -642,7 +696,7 @@ v3dX(meta_emit_resolve_image_rcl)(struct v3dv_job *job,
                                   struct v3dv_image *dst,
                                   struct v3dv_image *src,
                                   struct v3dv_meta_framebuffer *framebuffer,
-                                  const VkImageResolve2KHR *region)
+                                  const VkImageResolve2 *region)
 {
    struct v3dv_cl *rcl = emit_rcl_prologue(job, framebuffer, NULL);
    v3dv_return_if_oom(NULL, job);
@@ -733,7 +787,7 @@ emit_copy_image_layer_per_tile_list(struct v3dv_job *job,
                                     struct v3dv_image *dst,
                                     struct v3dv_image *src,
                                     uint32_t layer_offset,
-                                    const VkImageCopy2KHR *region)
+                                    const VkImageCopy2 *region)
 {
    struct v3dv_cl *cl = &job->indirect;
    v3dv_cl_ensure_space(cl, 200, 1);
@@ -791,7 +845,7 @@ emit_copy_image_layer(struct v3dv_job *job,
                       struct v3dv_image *src,
                       struct v3dv_meta_framebuffer *framebuffer,
                       uint32_t layer,
-                      const VkImageCopy2KHR *region)
+                      const VkImageCopy2 *region)
 {
    emit_copy_image_layer_per_tile_list(job, framebuffer, dst, src, layer, region);
    emit_supertile_coordinates(job, framebuffer);
@@ -802,7 +856,7 @@ v3dX(meta_emit_copy_image_rcl)(struct v3dv_job *job,
                                struct v3dv_image *dst,
                                struct v3dv_image *src,
                                struct v3dv_meta_framebuffer *framebuffer,
-                               const VkImageCopy2KHR *region)
+                               const VkImageCopy2 *region)
 {
    struct v3dv_cl *rcl = emit_rcl_prologue(job, framebuffer, NULL);
    v3dv_return_if_oom(NULL, job);
@@ -815,78 +869,70 @@ v3dX(meta_emit_copy_image_rcl)(struct v3dv_job *job,
 
 void
 v3dX(meta_emit_tfu_job)(struct v3dv_cmd_buffer *cmd_buffer,
-                        struct v3dv_image *dst,
-                        uint32_t dst_mip_level,
-                        uint32_t dst_layer,
-                        struct v3dv_image *src,
-                        uint32_t src_mip_level,
-                        uint32_t src_layer,
+                        uint32_t dst_bo_handle,
+                        uint32_t dst_offset,
+                        enum v3d_tiling_mode dst_tiling,
+                        uint32_t dst_padded_height_or_stride,
+                        uint32_t dst_cpp,
+                        uint32_t src_bo_handle,
+                        uint32_t src_offset,
+                        enum v3d_tiling_mode src_tiling,
+                        uint32_t src_padded_height_or_stride,
+                        uint32_t src_cpp,
                         uint32_t width,
                         uint32_t height,
-                        const struct v3dv_format *format)
+                        const struct v3dv_format_plane *format_plane)
 {
-   const struct v3d_resource_slice *src_slice = &src->slices[src_mip_level];
-   const struct v3d_resource_slice *dst_slice = &dst->slices[dst_mip_level];
-
-   assert(dst->mem && dst->mem->bo);
-   const struct v3dv_bo *dst_bo = dst->mem->bo;
-
-   assert(src->mem && src->mem->bo);
-   const struct v3dv_bo *src_bo = src->mem->bo;
-
    struct drm_v3d_submit_tfu tfu = {
       .ios = (height << 16) | width,
       .bo_handles = {
-         dst_bo->handle,
-         src_bo->handle != dst_bo->handle ? src_bo->handle : 0
+         dst_bo_handle,
+         src_bo_handle != dst_bo_handle ? src_bo_handle : 0
       },
    };
 
-   const uint32_t src_offset =
-      src_bo->offset + v3dv_layer_offset(src, src_mip_level, src_layer);
    tfu.iia |= src_offset;
 
-   uint32_t icfg;
-   if (src_slice->tiling == V3D_TILING_RASTER) {
-      icfg = V3D_TFU_ICFG_FORMAT_RASTER;
+   if (src_tiling == V3D_TILING_RASTER) {
+      tfu.icfg = V3D33_TFU_ICFG_FORMAT_RASTER << V3D33_TFU_ICFG_FORMAT_SHIFT;
    } else {
-      icfg = V3D_TFU_ICFG_FORMAT_LINEARTILE +
-             (src_slice->tiling - V3D_TILING_LINEARTILE);
+      tfu.icfg = (V3D33_TFU_ICFG_FORMAT_LINEARTILE +
+                  (src_tiling - V3D_TILING_LINEARTILE)) <<
+                   V3D33_TFU_ICFG_FORMAT_SHIFT;
    }
-   tfu.icfg |= icfg << V3D_TFU_ICFG_FORMAT_SHIFT;
+   tfu.icfg |= format_plane->tex_type << V3D33_TFU_ICFG_TTYPE_SHIFT;
 
-   const uint32_t dst_offset =
-      dst_bo->offset + v3dv_layer_offset(dst, dst_mip_level, dst_layer);
-   tfu.ioa |= dst_offset;
+   tfu.ioa = dst_offset;
 
-   tfu.ioa |= (V3D_TFU_IOA_FORMAT_LINEARTILE +
-               (dst_slice->tiling - V3D_TILING_LINEARTILE)) <<
-                V3D_TFU_IOA_FORMAT_SHIFT;
-   tfu.icfg |= format->tex_type << V3D_TFU_ICFG_TTYPE_SHIFT;
+   tfu.ioa |= (V3D33_TFU_IOA_FORMAT_LINEARTILE +
+               (dst_tiling - V3D_TILING_LINEARTILE)) <<
+                V3D33_TFU_IOA_FORMAT_SHIFT;
 
-   switch (src_slice->tiling) {
+   switch (src_tiling) {
    case V3D_TILING_UIF_NO_XOR:
    case V3D_TILING_UIF_XOR:
-      tfu.iis |= src_slice->padded_height / (2 * v3d_utile_height(src->cpp));
+      tfu.iis |= src_padded_height_or_stride / (2 * v3d_utile_height(src_cpp));
       break;
    case V3D_TILING_RASTER:
-      tfu.iis |= src_slice->stride / src->cpp;
+      tfu.iis |= src_padded_height_or_stride / src_cpp;
       break;
    default:
       break;
    }
 
+   /* The TFU can handle raster sources but always produces UIF results */
+   assert(dst_tiling != V3D_TILING_RASTER);
+
    /* If we're writing level 0 (!IOA_DIMTW), then we need to supply the
     * OPAD field for the destination (how many extra UIF blocks beyond
     * those necessary to cover the height).
     */
-   if (dst_slice->tiling == V3D_TILING_UIF_NO_XOR ||
-       dst_slice->tiling == V3D_TILING_UIF_XOR) {
-      uint32_t uif_block_h = 2 * v3d_utile_height(dst->cpp);
+   if (dst_tiling == V3D_TILING_UIF_NO_XOR || dst_tiling == V3D_TILING_UIF_XOR) {
+      uint32_t uif_block_h = 2 * v3d_utile_height(dst_cpp);
       uint32_t implicit_padded_height = align(height, uif_block_h);
-      uint32_t icfg =
-         (dst_slice->padded_height - implicit_padded_height) / uif_block_h;
-      tfu.icfg |= icfg << V3D_TFU_ICFG_OPAD_SHIFT;
+      uint32_t icfg = (dst_padded_height_or_stride - implicit_padded_height) /
+                      uif_block_h;
+      tfu.icfg |= icfg << V3D33_TFU_ICFG_OPAD_SHIFT;
    }
 
    v3dv_cmd_buffer_add_tfu_job(cmd_buffer, &tfu);
@@ -1042,7 +1088,7 @@ emit_copy_buffer_to_layer_per_tile_list(struct v3dv_job *job,
                                         struct v3dv_image *image,
                                         struct v3dv_buffer *buffer,
                                         uint32_t layer,
-                                        const VkBufferImageCopy2KHR *region)
+                                        const VkBufferImageCopy2 *region)
 {
    struct v3dv_cl *cl = &job->indirect;
    v3dv_cl_ensure_space(cl, 200, 1);
@@ -1072,14 +1118,18 @@ emit_copy_buffer_to_layer_per_tile_list(struct v3dv_job *job,
    width = DIV_ROUND_UP(width, vk_format_get_blockwidth(image->vk.format));
    height = DIV_ROUND_UP(height, vk_format_get_blockheight(image->vk.format));
 
+   uint8_t plane = v3dv_plane_from_aspect(imgrsc->aspectMask);
    uint32_t cpp = imgrsc->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT ?
-                  1 : image->cpp;
+                  1 : image->planes[plane].cpp;
    uint32_t buffer_stride = width * cpp;
    uint32_t buffer_offset =
       buffer->mem_offset + region->bufferOffset + height * buffer_stride * layer;
 
    uint32_t format = choose_tlb_format(framebuffer, imgrsc->aspectMask,
                                        false, false, true);
+
+   uint32_t image_layer = layer + (image->vk.image_type != VK_IMAGE_TYPE_3D ?
+      imgrsc->baseArrayLayer : region->imageOffset.z);
 
    emit_linear_load(cl, RENDER_TARGET_0, buffer->mem->bo,
                     buffer_offset, buffer_stride, format);
@@ -1100,13 +1150,13 @@ emit_copy_buffer_to_layer_per_tile_list(struct v3dv_job *job,
       if (imgrsc->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT) {
          emit_image_load(job->device, cl, framebuffer, image,
                          VK_IMAGE_ASPECT_STENCIL_BIT,
-                         imgrsc->baseArrayLayer + layer, imgrsc->mipLevel,
+                         image_layer, imgrsc->mipLevel,
                          false, false);
       } else {
          assert(imgrsc->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT);
          emit_image_load(job->device, cl, framebuffer, image,
                          VK_IMAGE_ASPECT_DEPTH_BIT,
-                         imgrsc->baseArrayLayer + layer, imgrsc->mipLevel,
+                         image_layer, imgrsc->mipLevel,
                          false, false);
       }
    }
@@ -1117,20 +1167,20 @@ emit_copy_buffer_to_layer_per_tile_list(struct v3dv_job *job,
 
    /* Store TLB to image */
    emit_image_store(job->device, cl, framebuffer, image, imgrsc->aspectMask,
-                    imgrsc->baseArrayLayer + layer, imgrsc->mipLevel,
+                    image_layer, imgrsc->mipLevel,
                     false, true, false);
 
    if (framebuffer->vk_format == VK_FORMAT_D24_UNORM_S8_UINT) {
       if (imgrsc->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT) {
          emit_image_store(job->device, cl, framebuffer, image,
                           VK_IMAGE_ASPECT_STENCIL_BIT,
-                          imgrsc->baseArrayLayer + layer, imgrsc->mipLevel,
+                          image_layer, imgrsc->mipLevel,
                           false, false, false);
       } else {
          assert(imgrsc->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT);
          emit_image_store(job->device, cl, framebuffer, image,
                           VK_IMAGE_ASPECT_DEPTH_BIT,
-                          imgrsc->baseArrayLayer + layer, imgrsc->mipLevel,
+                          image_layer, imgrsc->mipLevel,
                           false, false, false);
       }
    }
@@ -1151,7 +1201,7 @@ emit_copy_buffer_to_layer(struct v3dv_job *job,
                           struct v3dv_buffer *buffer,
                           struct v3dv_meta_framebuffer *framebuffer,
                           uint32_t layer,
-                          const VkBufferImageCopy2KHR *region)
+                          const VkBufferImageCopy2 *region)
 {
    emit_copy_buffer_to_layer_per_tile_list(job, framebuffer, image, buffer,
                                            layer, region);
@@ -1163,7 +1213,7 @@ v3dX(meta_emit_copy_buffer_to_image_rcl)(struct v3dv_job *job,
                                          struct v3dv_image *image,
                                          struct v3dv_buffer *buffer,
                                          struct v3dv_meta_framebuffer *framebuffer,
-                                         const VkBufferImageCopy2KHR *region)
+                                         const VkBufferImageCopy2 *region)
 {
    struct v3dv_cl *rcl = emit_rcl_prologue(job, framebuffer, NULL);
    v3dv_return_if_oom(NULL, job);
@@ -1175,8 +1225,8 @@ v3dX(meta_emit_copy_buffer_to_image_rcl)(struct v3dv_job *job,
 }
 
 /* Figure out a TLB size configuration for a number of pixels to process.
- * Beware that we can't "render" more than 4096x4096 pixels in a single job,
- * if the pixel count is larger than this, the caller might need to split
+ * Beware that we can't "render" more than MAX_DIMxMAX_DIM pixels in a single
+ * job, if the pixel count is larger than this, the caller might need to split
  * the job and call this function multiple times.
  */
 static void
@@ -1186,7 +1236,7 @@ framebuffer_size_for_pixel_count(uint32_t num_pixels,
 {
    assert(num_pixels > 0);
 
-   const uint32_t max_dim_pixels = 4096;
+   const uint32_t max_dim_pixels = V3D_MAX_IMAGE_DIMENSION;
    const uint32_t max_pixels = max_dim_pixels * max_dim_pixels;
 
    uint32_t w, h;
@@ -1215,7 +1265,7 @@ v3dX(meta_copy_buffer)(struct v3dv_cmd_buffer *cmd_buffer,
                        uint32_t dst_offset,
                        struct v3dv_bo *src,
                        uint32_t src_offset,
-                       const VkBufferCopy2KHR *region)
+                       const VkBufferCopy2 *region)
 {
    const uint32_t internal_bpp = V3D_INTERNAL_BPP_32;
    const uint32_t internal_type = V3D_INTERNAL_TYPE_8UI;
@@ -1264,7 +1314,8 @@ v3dX(meta_copy_buffer)(struct v3dv_cmd_buffer *cmd_buffer,
       uint32_t width, height;
       framebuffer_size_for_pixel_count(num_items, &width, &height);
 
-      v3dv_job_start_frame(job, width, height, 1, true, 1, internal_bpp, false);
+      v3dv_job_start_frame(job, width, height, 1, true, true,
+                           1, internal_bpp, false);
 
       struct v3dv_meta_framebuffer framebuffer;
       v3dX(meta_framebuffer_init)(&framebuffer, vk_format, internal_type,
@@ -1310,7 +1361,8 @@ v3dX(meta_fill_buffer)(struct v3dv_cmd_buffer *cmd_buffer,
       uint32_t width, height;
       framebuffer_size_for_pixel_count(num_items, &width, &height);
 
-      v3dv_job_start_frame(job, width, height, 1, true, 1, internal_bpp, false);
+      v3dv_job_start_frame(job, width, height, 1, true, true,
+                           1, internal_bpp, false);
 
       struct v3dv_meta_framebuffer framebuffer;
       v3dX(meta_framebuffer_init)(&framebuffer, VK_FORMAT_R8G8B8A8_UINT,

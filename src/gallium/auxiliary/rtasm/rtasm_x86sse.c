@@ -22,10 +22,10 @@
  *
  **************************************************************************/
 
-#include "pipe/p_config.h"
+#include "util/detect.h"
 #include "util/u_cpu_detect.h"
 
-#if defined(PIPE_ARCH_X86) || defined(PIPE_ARCH_X86_64)
+#if DETECT_ARCH_X86 || DETECT_ARCH_X86_64
 
 #include "pipe/p_compiler.h"
 #include "util/u_debug.h"
@@ -84,12 +84,12 @@ void x86_print_reg( struct x86_reg reg )
 #define DUMP_END() debug_printf( "\n" )
 
 #define DUMP() do {                             \
-   const char *foo = __FUNCTION__;              \
+   const char *foo = __func__;                  \
    while (*foo && *foo != '_')                  \
       foo++;                                    \
    if  (*foo)                                   \
       foo++;                                    \
-   debug_printf( "\n%4x %14s ", p->csr - p->store, foo );             \
+   debug_printf( "\n%4tx %14s ", p->csr - p->store, foo );             \
 } while (0)
 
 #define DUMP_I( I ) do {                        \
@@ -174,7 +174,7 @@ static void do_realloc( struct x86_function *p )
  */
 static unsigned char *reserve( struct x86_function *p, int bytes )
 {
-   if (p->csr + bytes - p->store > (int) p->size)
+   if (p->csr - p->store + bytes > (int) p->size)
       do_realloc(p);
 
    {
@@ -1508,6 +1508,15 @@ void sse2_rcpss( struct x86_function *p,
    emit_modrm( p, dst, src );
 }
 
+void sse2_pcmpgtd(struct x86_function *p,
+                  struct x86_reg dst,
+                  struct x86_reg src)
+{
+   DUMP_RR(dst, src);
+   emit_3ub(p, 0x66, X86_TWOB, 0x66);
+   emit_modrm(p, dst, src);
+}
+
 /***********************************************************************
  * x87 instructions
  */
@@ -2150,7 +2159,6 @@ struct x86_reg x86_fn_arg( struct x86_function *p,
 
 static void x86_init_func_common( struct x86_function *p )
 {
-   util_cpu_detect();
    p->caps = 0;
    if(util_get_cpu_caps()->has_mmx)
       p->caps |= X86_MMX;
@@ -2165,7 +2173,7 @@ static void x86_init_func_common( struct x86_function *p )
    if(util_get_cpu_caps()->has_sse4_1)
       p->caps |= X86_SSE4_1;
    p->csr = p->store;
-#if defined(PIPE_ARCH_X86)
+#if DETECT_ARCH_X86
    emit_1i(p, 0xfb1e0ff3);
 #else
    emit_1i(p, 0xfa1e0ff3);

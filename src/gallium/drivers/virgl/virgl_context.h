@@ -53,8 +53,7 @@ struct virgl_rasterizer_state {
 };
 
 struct virgl_shader_binding_state {
-   struct pipe_sampler_view *views[16];
-   uint32_t view_enabled_mask;
+   struct pipe_sampler_view *views[PIPE_MAX_SHADER_SAMPLER_VIEWS];
 
    struct pipe_constant_buffer ubos[PIPE_MAX_CONSTANT_BUFFERS];
    uint32_t ubo_enabled_mask;
@@ -128,7 +127,8 @@ void virgl_init_blit_functions(struct virgl_context *vctx);
 void virgl_init_query_functions(struct virgl_context *vctx);
 void virgl_init_so_functions(struct virgl_context *vctx);
 
-struct tgsi_token *virgl_tgsi_transform(struct virgl_screen *vscreen, const struct tgsi_token *tokens_in);
+struct tgsi_token *virgl_tgsi_transform(struct virgl_screen *vscreen, const struct tgsi_token *tokens_in,
+                                        bool is_separable);
 
 bool
 virgl_can_rebind_resource(struct virgl_context *vctx,
@@ -138,6 +138,6 @@ void
 virgl_rebind_resource(struct virgl_context *vctx,
                       struct pipe_resource *res);
 
-void virgl_flush_eq(struct virgl_context *ctx, void *closure,
-		    struct pipe_fence_handle **fence);
+void virgl_flush_eq(struct virgl_context *ctx, void *closure, struct pipe_fence_handle **fence);
+
 #endif

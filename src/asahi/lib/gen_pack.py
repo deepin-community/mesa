@@ -1,31 +1,14 @@
 #encoding=utf-8
 
-# Copyright (C) 2016 Intel Corporation
-# Copyright (C) 2016 Broadcom
-# Copyright (C) 2020 Collabora, Ltd.
-#
-# Permission is hereby granted, free of charge, to any person obtaining a
-# copy of this software and associated documentation files (the "Software"),
-# to deal in the Software without restriction, including without limitation
-# the rights to use, copy, modify, merge, publish, distribute, sublicense,
-# and/or sell copies of the Software, and to permit persons to whom the
-# Software is furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice (including the next
-# paragraph) shall be included in all copies or substantial portions of the
-# Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
-# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-# IN THE SOFTWARE.
+# Copyright 2016 Intel Corporation
+# Copyright 2016 Broadcom
+# Copyright 2020 Collabora, Ltd.
+# SPDX-License-Identifier: MIT
 
 import xml.parsers.expat
 import sys
 import operator
+import math
 from functools import reduce
 
 global_prefix = "agx"
@@ -42,44 +25,11 @@ pack_header = """
 #define AGX_PACK_H
 
 #include <stdio.h>
-#include <stdint.h>
-#include <stdbool.h>
-#include <assert.h>
-#include <math.h>
 #include <inttypes.h>
-#include "util/macros.h"
-#include "util/u_math.h"
+
+#include "util/bitpack_helpers.h"
 
 #define __gen_unpack_float(x, y, z) uif(__gen_unpack_uint(x, y, z))
-
-static inline uint64_t
-__gen_uint(uint64_t v, uint32_t start, uint32_t end)
-{
-#ifndef NDEBUG
-   const int width = end - start + 1;
-   if (width < 64) {
-      const uint64_t max = (1ull << width) - 1;
-      assert(v <= max);
-   }
-#endif
-
-   return v << start;
-}
-
-static inline uint32_t
-__gen_sint(int32_t v, uint32_t start, uint32_t end)
-{
-#ifndef NDEBUG
-   const int width = end - start + 1;
-   if (width < 64) {
-      const int64_t max = (1ll << (width - 1)) - 1;
-      const int64_t min = -(1ll << (width - 1));
-      assert(min <= v && v <= max);
-   }
-#endif
-
-   return (((uint32_t) v) << start) & ((2ll << end) - 1);
-}
 
 static inline uint64_t
 __gen_unpack_uint(const uint8_t *restrict cl, uint32_t start, uint32_t end)
@@ -95,18 +45,57 @@ __gen_unpack_uint(const uint8_t *restrict cl, uint32_t start, uint32_t end)
    return (val >> (start % 8)) & mask;
 }
 
+/*
+ * LODs are 4:6 fixed point. We must clamp before converting to integers to
+ * avoid undefined behaviour for out-of-bounds inputs like +/- infinity.
+ */
+static inline uint32_t
+__gen_pack_lod(float f, uint32_t start, uint32_t end)
+{
+    uint32_t fixed = CLAMP(f * (1 << 6), 0 /* 0.0 */, 0x380 /* 14.0 */);
+    return util_bitpack_uint(fixed, start, end);
+}
+
+static inline float
+__gen_unpack_lod(const uint8_t *restrict cl, uint32_t start, uint32_t end)
+{
+    return ((float) __gen_unpack_uint(cl, start, end)) / (1 << 6);
+}
+
 static inline uint64_t
 __gen_unpack_sint(const uint8_t *restrict cl, uint32_t start, uint32_t end)
 {
    int size = end - start + 1;
    int64_t val = __gen_unpack_uint(cl, start, end);
 
-   /* Get the sign bit extended. */
-   return (val << (64 - size)) >> (64 - size);
+   return util_sign_extend(val, size);
 }
 
-#define agx_prepare(dst, T)                                 \\
-   *(dst) = (struct AGX_ ## T){ AGX_ ## T ## _header }
+static inline uint64_t
+__gen_to_groups(uint32_t value, uint32_t group_size, uint32_t length)
+{
+    /* Zero is not representable, clamp to minimum */
+    if (value == 0)
+        return 1;
+
+    /* Round up to the nearest number of groups */
+    uint32_t groups = DIV_ROUND_UP(value, group_size);
+
+    /* The 0 encoding means "all" */
+    if (groups == (1ull << length))
+        return 0;
+
+    /* Otherwise it's encoded as the identity */
+    assert(groups < (1u << length) && "out of bounds");
+    assert(groups >= 1 && "exhaustive");
+    return groups;
+}
+
+static inline uint64_t
+__gen_from_groups(uint32_t value, uint32_t group_size, uint32_t length)
+{
+    return group_size * (value ? value: (1 << length));
+}
 
 #define agx_pack(dst, T, name)                              \\
    for (struct AGX_ ## T name = { AGX_ ## T ## _header }, \\
@@ -122,24 +111,16 @@ __gen_unpack_sint(const uint8_t *restrict cl, uint32_t start, uint32_t end)
 #define agx_print(fp, T, var, indent)                   \\
         AGX_ ## T ## _print(fp, &(var), indent)
 
-#define agx_pixel_format_print(fp, format) do {\\
-   fprintf(fp, "%*sFormat: ", indent, ""); \\
-   \\
-   if (agx_channels_as_str((enum agx_channels)(format & 0x7F))) \\
-      fputs(agx_channels_as_str((enum agx_channels)(format & 0x7F)), fp); \\
-   else \\
-      fprintf(fp, "unknown channels %02X", format & 0x7F); \\
-   \\
-   fputs(" ", fp); \\
-   \\
-   if (agx_texture_type_as_str((enum agx_texture_type)(format >> 7))) \\
-      fputs(agx_texture_type_as_str((enum agx_texture_type)(format >> 7)), fp); \\
-   else \\
-      fprintf(fp, "unknown type %02X", format >> 7); \\
-   \\
-   fputs("\\n", fp); \\
-} while(0) \\
+static inline void agx_merge_helper(uint32_t *dst, const uint32_t *src, size_t bytes)
+{
+        assert((bytes & 3) == 0);
 
+        for (unsigned i = 0; i < (bytes / 4); ++i)
+                dst[i] |= src[i];
+}
+
+#define agx_merge(packed1, packed2, type) \
+        agx_merge_helper((packed1).opaque, (packed2).opaque, AGX_##type##_LENGTH)
 """
 
 def to_alphanum(name):
@@ -184,14 +165,7 @@ def prefixed_upper_name(prefix, name):
 def enum_name(name):
     return "{}_{}".format(global_prefix, safe_name(name)).lower()
 
-def num_from_str(num_str):
-    if num_str.lower().startswith('0x'):
-        return int(num_str, base=16)
-    else:
-        assert(not num_str.startswith('0') and 'octals numbers not allowed')
-        return int(num_str)
-
-MODIFIERS = ["shr", "minus", "align", "log2"]
+MODIFIERS = ["shr", "minus", "align", "log2", "groups"]
 
 def parse_modifier(modifier):
     if modifier is None:
@@ -239,11 +213,6 @@ class Field(object):
         else:
             self.prefix = None
 
-        if "exact" in attrs:
-            self.exact = int(attrs["exact"])
-        else:
-            self.exact = None
-
         self.default = attrs.get("default")
 
         # Map enum values
@@ -257,13 +226,13 @@ class Field(object):
             type = 'uint64_t'
         elif self.type == 'bool':
             type = 'bool'
-        elif self.type == 'float':
+        elif self.type in ['float', 'lod']:
             type = 'float'
         elif self.type in ['uint', 'hex'] and self.end - self.start > 32:
             type = 'uint64_t'
         elif self.type == 'int':
             type = 'int32_t'
-        elif self.type in ['uint', 'uint/float', 'Pixel Format', 'hex']:
+        elif self.type in ['uint', 'hex']:
             type = 'uint32_t'
         elif self.type in self.parser.structs:
             type = 'struct ' + self.parser.gen_prefix(safe_name(self.type.upper()))
@@ -314,9 +283,6 @@ class Group(object):
                 print("   int dummy;")
 
             for field in self.fields:
-                if field.exact is not None:
-                    continue
-
                 field.emit_template_struct(dim)
 
     class Word:
@@ -375,8 +341,6 @@ class Group(object):
             if field.modifier is None:
                 continue
 
-            assert(field.exact is None)
-
             if field.modifier[0] == "shr":
                 shift = field.modifier[1]
                 mask = hex((1 << shift) - 1)
@@ -386,7 +350,7 @@ class Group(object):
             elif field.modifier[0] == "log2":
                 print("   assert(util_is_power_of_two_nonzero(values->{}));".format(field.name))
 
-        for index in range(self.length // 4):
+        for index in range(math.ceil(self.length / 4)):
             # Handle MBZ words
             if not index in words:
                 print("   cl[%2d] = 0;" % index)
@@ -408,7 +372,7 @@ class Group(object):
                 start -= contrib_word_start
                 end -= contrib_word_start
 
-                value = str(field.exact) if field.exact is not None else "values->{}".format(contributor.path)
+                value = "values->{}".format(contributor.path)
                 if field.modifier is not None:
                     if field.modifier[0] == "shr":
                         value = "{} >> {}".format(value, field.modifier[1])
@@ -418,22 +382,28 @@ class Group(object):
                         value = "ALIGN_POT({}, {})".format(value, field.modifier[1])
                     elif field.modifier[0] == "log2":
                         value = "util_logbase2({})".format(value)
+                    elif field.modifier[0] == "groups":
+                        value = "__gen_to_groups({}, {}, {})".format(value,
+                                field.modifier[1], end - start + 1)
 
-                if field.type in ["uint", "hex", "Pixel Format", "address"]:
-                    s = "__gen_uint(%s, %d, %d)" % \
+                if field.type in ["uint", "hex", "address"]:
+                    s = "util_bitpack_uint(%s, %d, %d)" % \
                         (value, start, end)
                 elif field.type in self.parser.enums:
-                    s = "__gen_uint(%s, %d, %d)" % \
+                    s = "util_bitpack_uint(%s, %d, %d)" % \
                         (value, start, end)
                 elif field.type == "int":
-                    s = "__gen_sint(%s, %d, %d)" % \
+                    s = "util_bitpack_sint(%s, %d, %d)" % \
                         (value, start, end)
                 elif field.type == "bool":
-                    s = "__gen_uint(%s, %d, %d)" % \
+                    s = "util_bitpack_uint(%s, %d, %d)" % \
                         (value, start, end)
                 elif field.type == "float":
                     assert(start == 0 and end == 31)
-                    s = "__gen_uint(fui({}), 0, 32)".format(value)
+                    s = "util_bitpack_float({})".format(value)
+                elif field.type == "lod":
+                    assert(end - start + 1 == 10)
+                    s = "__gen_pack_lod(%s, %d, %d)" % (value, start, end)
                 else:
                     s = "#error unhandled field {}, type {}".format(contributor.path, field.type)
 
@@ -490,7 +460,7 @@ class Group(object):
             args.append(str(fieldref.start))
             args.append(str(fieldref.end))
 
-            if field.type in set(["uint", "uint/float", "address", "Pixel Format", "hex"]) | self.parser.enums:
+            if field.type in set(["uint", "address", "hex"]) | self.parser.enums:
                 convert = "__gen_unpack_uint"
             elif field.type == "int":
                 convert = "__gen_unpack_sint"
@@ -498,6 +468,8 @@ class Group(object):
                 convert = "__gen_unpack_uint"
             elif field.type == "float":
                 convert = "__gen_unpack_float"
+            elif field.type == "lod":
+                convert = "__gen_unpack_lod"
             else:
                 s = "/* unhandled field %s, type %s */\n" % (field.name, field.type)
 
@@ -510,6 +482,13 @@ class Group(object):
                     suffix = " << {}".format(field.modifier[1])
                 if field.modifier[0] == "log2":
                     prefix = "1 << "
+                elif field.modifier[0] == "groups":
+                    prefix = "__gen_from_groups("
+                    suffix = ", {}, {})".format(field.modifier[1],
+                                                fieldref.end - fieldref.start + 1)
+
+            if field.type in self.parser.enums:
+                prefix = f"(enum {enum_name(field.type)}) {prefix}"
 
             decoded = '{}{}({}){}'.format(prefix, convert, ', '.join(args), suffix)
 
@@ -539,16 +518,12 @@ class Group(object):
                 print('   fprintf(fp, "%*s{}: %d\\n", indent, "", {});'.format(name, val))
             elif field.type == "bool":
                 print('   fprintf(fp, "%*s{}: %s\\n", indent, "", {} ? "true" : "false");'.format(name, val))
-            elif field.type == "float":
+            elif field.type in ["float", "lod"]:
                 print('   fprintf(fp, "%*s{}: %f\\n", indent, "", {});'.format(name, val))
             elif field.type in ["uint", "hex"] and (field.end - field.start) >= 32:
                 print('   fprintf(fp, "%*s{}: 0x%" PRIx64 "\\n", indent, "", {});'.format(name, val))
             elif field.type == "hex":
                 print('   fprintf(fp, "%*s{}: 0x%" PRIx32 "\\n", indent, "", {});'.format(name, val))
-            elif field.type in "Pixel Format":
-                print('   agx_pixel_format_print(fp, {});'.format(val))
-            elif field.type == "uint/float":
-                print('   fprintf(fp, "%*s{}: 0x%X (%f)\\n", indent, "", {}, uif({}));'.format(name, val, val))
             else:
                 print('   fprintf(fp, "%*s{}: %u\\n", indent, "", {});'.format(name, val))
 
@@ -572,11 +547,10 @@ class Parser(object):
         return '{}_{}'.format(global_prefix.upper(), name)
 
     def start_element(self, name, attrs):
-        if name == "agxml":
+        if name == "genxml":
             print(pack_header)
         elif name == "struct":
             name = attrs["name"]
-            self.no_direct_packing = attrs.get("no-direct-packing", False)
             object_name = self.gen_prefix(safe_name(name.upper()))
             self.struct = object_name
 
@@ -609,7 +583,7 @@ class Parser(object):
         elif name  == "enum":
             self.emit_enum()
             self.enum = None
-        elif name == "agxml":
+        elif name == "genxml":
             print('#endif')
 
     def emit_header(self, name):
@@ -669,9 +643,8 @@ class Parser(object):
 
         self.emit_template_struct(self.struct, self.group)
         self.emit_header(name)
-        if self.no_direct_packing == False:
-            self.emit_pack_function(self.struct, self.group)
-            self.emit_unpack_function(self.struct, self.group)
+        self.emit_pack_function(self.struct, self.group)
+        self.emit_unpack_function(self.struct, self.group)
         self.emit_print_function(self.struct, self.group)
 
     def enum_prefix(self, name):

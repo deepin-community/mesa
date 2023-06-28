@@ -23,6 +23,7 @@
 
 from mako.template import Template
 from isa import ISA, BitSetDerivedField, BitSetAssertField
+import argparse
 import sys
 import re
 
@@ -63,18 +64,26 @@ import re
 # by an override, so the exact choice to encode a given field
 # in a bitset may be conditional
 class FieldCase(object):
-    def __init__(self, field, case):
+    def __init__(self, bitset, field, case):
         self.field = field
         self.expr  = None
         if case.expr is not None:
-            self.expr = isa.expressions[case.expr]
+            self.expr = bitset.isa.expressions[case.expr]
+
+    def signed(self):
+        if self.field.type in ['int', 'offset', 'branch']:
+            return 'true'
+        return 'false'
 
 class AssertField(object):
-    def __init__(self, field, case):
+    def __init__(self, bitset, field, case):
         self.field = field
         self.expr  = None
         if case.expr is not None:
-            self.expr = isa.expressions[case.expr]
+            self.expr = bitset.isa.expressions[case.expr]
+
+    def signed(self):
+        return 'false'
 
 # Represents a field to be encoded:
 class DisplayField(object):
@@ -108,13 +117,13 @@ class DisplayField(object):
                     expr = bitset.isa.expressions[field.expr]
                     self.case.append_expr_fields(expr)
                 elif not isinstance(field, BitSetAssertField):
-                    yield FieldCase(field, case)
+                    yield FieldCase(bitset, field, case)
                 # if we've found an unconditional case specifying
                 # the named field, we are done
                 if case.expr is None:
                     return
         if bitset.extends is not None:
-            yield from self.fields(isa.bitsets[bitset.extends])
+            yield from self.fields(bitset.isa.bitsets[bitset.extends])
 
 # Represents an if/else case in bitset encoding which has a display
 # template string:
@@ -124,9 +133,12 @@ class Case(object):
         self.case = case
         self.expr = None
         if case.expr is not None:
-            self.expr = isa.expressions[case.expr]
-        self.fieldnames = re.findall(r"{([a-zA-Z0-9_]+)}", case.display)
+            self.expr = bitset.isa.expressions[case.expr]
+        self.fieldnames = re.findall(r"{([a-zA-Z0-9_:]+)}", case.display)
         self.append_forced(bitset)
+
+        # remove special fieldname properties e.g. :align=
+        self.fieldnames = list(map(lambda name: name.split(':')[0], self.fieldnames))
 
     # Handle fields which don't appear in display template but have
     # force="true"
@@ -135,7 +147,7 @@ class Case(object):
             for name, val in bitset.encode.forced.items():
                 self.append_field(name)
         if bitset.extends is not None:
-            self.append_forced(isa.bitsets[bitset.extends])
+            self.append_forced(bitset.isa.bitsets[bitset.extends])
 
     # In the process of resolving a field, we might discover additional
     # fields that need resolving:
@@ -162,9 +174,9 @@ class Case(object):
         for case in bitset.cases:
             for name, field in case.fields.items():
                 if field.get_c_typename() == 'TYPE_ASSERT':
-                    yield AssertField(field, case)
+                    yield AssertField(bitset, field, case)
         if bitset.extends is not None:
-            yield from self.assert_cases(isa.bitsets[bitset.extends])
+            yield from self.assert_cases(bitset.isa.bitsets[bitset.extends])
 
 # State and helpers used by the template:
 class State(object):
@@ -180,7 +192,7 @@ class State(object):
                 # if this is the last case (ie. case.expr is None)
                 # then we need to go up the inheritance chain:
                 if case.expr is None and bitset.extends is not None:
-                    parent_bitset = isa.bitsets[bitset.extends]
+                    parent_bitset = bitset.isa.bitsets[bitset.extends]
                     yield from self.bitset_cases(parent_bitset, leaf_bitset)
                 continue;
             yield Case(leaf_bitset, case)
@@ -191,7 +203,7 @@ class State(object):
         unique_names = []
         for root in self.encode_roots():
             for leaf in self.encode_leafs(root):
-                for case in s.bitset_cases(leaf):
+                for case in self.bitset_cases(leaf):
                     for df in case.display_fields():
                         for f in df.fields():
                             if f.field.get_c_typename() == 'TYPE_BITSET':
@@ -211,10 +223,17 @@ class State(object):
           yield root
 
     def encode_leafs(self, root):
-       for name, leaf in self.isa.leafs.items():
-          if leaf.get_root() != root:
-             continue
-          yield leaf
+        for name, leafs in self.isa.leafs.items():
+            for leaf in leafs:
+                if leaf.get_root() != root:
+                    continue
+                yield leaf
+
+    def encode_leaf_groups(self, root):
+        for name, leafs in self.isa.leafs.items():
+            if leafs[0].get_root() != root:
+                continue
+            yield leafs
 
     # expressions used in a bitset (case or field or recursively parent bitsets)
     def bitset_used_exprs(self, bitset):
@@ -267,7 +286,7 @@ class State(object):
             else:
                 extr = self.extractor_fallback(bitset, name)
         if field and field.get_c_typename() == 'TYPE_BITSET':
-            extr = 'encode' + isa.roots[field.type].get_c_name() + '(s, ' + p + ', ' + extr + ')'
+            extr = 'encode' + self.isa.roots[field.type].get_c_name() + '(s, ' + p + ', ' + extr + ')'
         return extr
 
     # A limited resolver for field type which doesn't properly account for
@@ -284,7 +303,7 @@ class State(object):
         if field is not None:
             return field
         if bitset.extends is not None:
-            return self.resolve_simple_field(isa.bitsets[bitset.extends], name)
+            return self.resolve_simple_field(bitset.isa.bitsets[bitset.extends], name)
         return None
 
     def encode_type(self, bitset):
@@ -292,7 +311,7 @@ class State(object):
             if bitset.encode.type is not None:
                 return bitset.encode.type
         if bitset.extends is not None:
-            return self.encode_type(isa.bitsets[bitset.extends])
+            return self.encode_type(bitset.isa.bitsets[bitset.extends])
         return None
 
     def expr_name(self, root, expr):
@@ -338,7 +357,11 @@ typedef struct {
 static inline uint64_t
 bitmask_to_uint64_t(bitmask_t mask)
 {
+%   if isa.bitsize <= 32:
+    return mask.bitset[0];
+%   else:
     return ((uint64_t)mask.bitset[1] << 32) | mask.bitset[0];
+%   endif
 }
 
 static inline bitmask_t
@@ -346,7 +369,9 @@ uint64_t_to_bitmask(uint64_t val)
 {
     bitmask_t mask = {
         .bitset[0] = val & 0xffffffff,
+%   if isa.bitsize > 32:
         .bitset[1] = (val >> 32) & 0xffffffff,
+%   endif
     };
 
     return mask;
@@ -369,9 +394,20 @@ struct encode_state;
 struct bitset_params;
 
 static bitmask_t
-pack_field(unsigned low, unsigned high, uint64_t val)
+pack_field(unsigned low, unsigned high, int64_t val, bool is_signed)
 {
    bitmask_t field, mask;
+
+   if (is_signed) {
+      /* NOTE: Don't assume val is already sign-extended to 64b,
+       * just check that the bits above the valid range are either
+       * all zero or all one:
+       */
+      assert(!(( val & ~BITFIELD64_MASK(1 + high - low)) &&
+               (~val & ~BITFIELD64_MASK(1 + high - low))));
+   } else {
+      assert(!(val & ~BITFIELD64_MASK(1 + high - low)));
+   }
 
    BITSET_ZERO(field.bitset);
 
@@ -446,6 +482,14 @@ ${s.expr_name(leaf.get_root(), expr)}(struct encode_state *s, struct bitset_para
 ## the context in which they are used to know the correct src type
 
 %for root in s.encode_roots():
+%   for leaf in s.encode_leafs(root):
+%      for expr in s.bitset_used_exprs(leaf):
+static inline int64_t ${s.expr_name(leaf.get_root(), expr)}(struct encode_state *s, struct bitset_params *p, ${leaf.get_root().encode.type} src);
+%      endfor
+%   endfor
+%endfor
+
+%for root in s.encode_roots():
 <%
     rendered_exprs = []
 %>
@@ -487,12 +531,35 @@ encode${root.get_c_name()}(struct encode_state *s, struct bitset_params *p, ${ro
 {
 %   if root.encode.case_prefix is not None:
    switch (${root.get_c_name()}_case(s, src)) {
-%      for leaf in s.encode_leafs(root):
-   case ${s.case_name(root, leaf.name)}: {
+%      for leafs in s.encode_leaf_groups(root):
+   case ${s.case_name(root, leafs[0].name)}: {
+%         for leaf in leafs:
+%           if leaf.has_gen_restriction():
+      if (s->gen >= ${leaf.gen_min} && s->gen <= ${leaf.gen_max}) {
+%           endif
 <% snippet = encode_bitset.render(s=s, root=root, leaf=leaf) %>
-      bitmask_t val = uint64_t_to_bitmask(${hex(leaf.get_pattern().match)});
+<%    words = isa.split_bits((leaf.get_pattern().match), 64) %>
+      bitmask_t val = uint64_t_to_bitmask(${words[-1]});
+
+<%    words.pop() %>
+
+%     for x in reversed(range(len(words))):
+      {
+         bitmask_t word = uint64_t_to_bitmask(${words[x]});
+         BITSET_SHL(val.bitset, 64);
+         BITSET_OR(val.bitset, val.bitset, word.bitset);
+      }
+%     endfor
+
       BITSET_OR(val.bitset, val.bitset, ${root.snippets[snippet]}(s, p, src).bitset);
       return val;
+%           if leaf.has_gen_restriction():
+      }
+%           endif
+%         endfor
+%         if leaf.has_gen_restriction():
+      break;
+%         endif
     }
 %      endfor
    default:
@@ -554,6 +621,13 @@ isa = s.isa
 <%
     if case.expr is not None:
         visited_exprs.append(case.expr)
+
+    # per-expression-case track display-field-names that we have
+    # already emitted encoding for.  It is possible that an
+    # <override> case overrides a given field (for ex. #cat5-src3)
+    # and we don't want to emit encoding for both the override and
+    # the fallback
+    seen_fields = {}
 %>
     ${case_pre(root, case.expr)}
 %   for df in case.display_fields():
@@ -569,6 +643,13 @@ isa = s.isa
               # We are in an 'else'/'else-if' leg that we wouldn't
               # go down due to passing an earlier if()
               continue
+
+          if not expr in seen_fields.keys():
+              seen_fields[expr] = []
+
+          if f.field.name in seen_fields[expr]:
+              continue
+          seen_fields[expr].append(f.field.name)
 %>
            ${case_pre(root, expr)}
 %         if f.field.get_c_typename() == 'TYPE_BITSET':
@@ -579,7 +660,7 @@ isa = s.isa
 %         else:
              fld = ${s.extractor(leaf, f.field.name)};
 %         endif
-             const bitmask_t packed = pack_field(${f.field.low}, ${f.field.high}, fld);  /* ${f.field.name} */
+             const bitmask_t packed = pack_field(${f.field.low}, ${f.field.high}, fld, ${f.signed()});  /* ${f.field.name} */
              BITSET_OR(val.bitset, val.bitset, packed.bitset);
              ${case_post(root, expr)}
 %       endfor
@@ -599,21 +680,38 @@ isa = s.isa
           continue
 %>
        ${case_pre(root, expr)}
-       const bitmask_t packed = pack_field(${f.field.low}, ${f.field.high}, ${f.field.val});
+       const bitmask_t packed = pack_field(${f.field.low}, ${f.field.high}, ${f.field.val}, ${f.signed()});
        BITSET_OR(val.bitset, val.bitset, packed.bitset);
        ${case_post(root, None)}
 %   endfor
       {}  /* in case no unconditional field to close out last '} else' */
     ${case_post(root, case.expr)}
 %endfor
-      return val;
 """
 
-xml = sys.argv[1]
-dst = sys.argv[2]
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--xml', required=True, help='isaspec XML file.')
+    parser.add_argument('--out-h', required=True, help='Output H file.')
+    args = parser.parse_args()
 
-isa = ISA(xml)
-s = State(isa)
+    isa = ISA(args.xml)
+    s = State(isa)
 
-with open(dst, 'w') as f:
-    f.write(Template(template).render(s=s, encode_bitset=Template(encode_bitset_template)))
+    try:
+        with open(args.out_h, 'w') as f:
+            encode_bitset = Template(encode_bitset_template)
+            f.write(Template(template).render(s=s, encode_bitset=encode_bitset))
+
+    except Exception:
+        # In the event there's an error, this imports some helpers from mako
+        # to print a useful stack trace and prints it, then exits with
+        # status 1, if python is run with debug; otherwise it just raises
+        # the exception
+        import sys
+        from mako import exceptions
+        print(exceptions.text_error_template().render(), file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()

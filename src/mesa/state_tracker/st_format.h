@@ -31,15 +31,16 @@
 #define ST_FORMAT_H
 
 #include "main/formats.h"
-#include "main/glheader.h"
+#include "util/glheader.h"
 
-#include "pipe/p_format.h"
+#include "util/format/u_formats.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 struct gl_context;
+struct st_context;
 struct pipe_screen;
 
 
@@ -56,11 +57,6 @@ st_choose_format(struct st_context *st, GLenum internalFormat,
                  enum pipe_texture_target target, unsigned sample_count,
                  unsigned storage_sample_count,
                  unsigned bindings, bool swap_bytes, bool allow_dxt);
-
-extern enum pipe_format
-st_choose_renderbuffer_format(struct st_context *st,
-                              GLenum internalFormat, unsigned sample_count,
-                              unsigned storage_sample_count);
 
 extern enum pipe_format
 st_choose_matching_format_noverify(struct st_context *st,

@@ -37,6 +37,7 @@
 #include "pipe/p_screen.h"
 #include "pipe/p_state.h"
 
+#include "stw_gdishim.h"
 #include "gldrv.h"
 #include "stw_context.h"
 #include "stw_device.h"
@@ -107,12 +108,12 @@ wglBindTexImageARB(HPBUFFERARB hPbuffer, int iBuffer)
    struct stw_framebuffer *fb, *old_fb, *old_fbRead;
    GLenum texFormat, srcBuffer, target;
    boolean retVal;
-   int pixelFormatSave;
+   const struct stw_pixelformat_info *pfiSave;
 
    /*
     * Implementation notes:
     * Ideally, we'd implement this function with the
-    * st_context_iface::teximage() function which replaces a specific
+    * st_context_teximage() function which replaces a specific
     * texture image with a different resource (the pbuffer).
     * The main problem however, is the pbuffer image is upside down relative
     * to the texture image.
@@ -170,10 +171,10 @@ wglBindTexImageARB(HPBUFFERARB hPbuffer, int iBuffer)
     * an error condition.  After the stw_make_current() we restore the
     * buffer's pixel format.
     */
-   pixelFormatSave = fb->iPixelFormat;
-   fb->iPixelFormat = curctx->iPixelFormat;
+   pfiSave = fb->pfi;
+   fb->pfi = curctx->pfi;
    retVal = stw_make_current(fb, fb, curctx);
-   fb->iPixelFormat = pixelFormatSave;
+   fb->pfi = pfiSave;
    if (!retVal) {
       debug_printf("stw_make_current(#1) failed in wglBindTexImageARB()\n");
       return FALSE;

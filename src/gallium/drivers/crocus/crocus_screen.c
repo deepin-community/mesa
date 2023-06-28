@@ -37,7 +37,7 @@
 #include "pipe/p_state.h"
 #include "pipe/p_context.h"
 #include "pipe/p_screen.h"
-#include "util/debug.h"
+#include "util/u_debug.h"
 #include "util/u_inlines.h"
 #include "util/format/u_format.h"
 #include "util/u_transfer_helper.h"
@@ -84,15 +84,6 @@
       unreachable("Unknown hardware generation");       \
    }
 
-static void
-crocus_flush_frontbuffer(struct pipe_screen *_screen,
-                         struct pipe_context *_pipe,
-                         struct pipe_resource *resource,
-                         unsigned level, unsigned layer,
-                         void *context_private, struct pipe_box *box)
-{
-}
-
 static const char *
 crocus_get_vendor(struct pipe_screen *pscreen)
 {
@@ -109,9 +100,8 @@ static void
 crocus_get_device_uuid(struct pipe_screen *pscreen, char *uuid)
 {
    struct crocus_screen *screen = (struct crocus_screen *)pscreen;
-   const struct isl_device *isldev = &screen->isl_dev;
 
-   intel_uuid_compute_device_id((uint8_t *)uuid, isldev, PIPE_UUID_SIZE);
+   intel_uuid_compute_device_id((uint8_t *)uuid, &screen->devinfo, PIPE_UUID_SIZE);
 }
 
 static void
@@ -151,35 +141,31 @@ crocus_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    switch (param) {
    case PIPE_CAP_NPOT_TEXTURES:
    case PIPE_CAP_ANISOTROPIC_FILTER:
-   case PIPE_CAP_POINT_SPRITE:
    case PIPE_CAP_OCCLUSION_QUERY:
    case PIPE_CAP_TEXTURE_SWIZZLE:
    case PIPE_CAP_TEXTURE_MIRROR_CLAMP_TO_EDGE:
    case PIPE_CAP_BLEND_EQUATION_SEPARATE:
    case PIPE_CAP_FRAGMENT_SHADER_TEXTURE_LOD:
    case PIPE_CAP_FRAGMENT_SHADER_DERIVATIVES:
-   case PIPE_CAP_VERTEX_SHADER_SATURATE:
    case PIPE_CAP_PRIMITIVE_RESTART:
    case PIPE_CAP_PRIMITIVE_RESTART_FIXED_INDEX:
    case PIPE_CAP_INDEP_BLEND_ENABLE:
    case PIPE_CAP_RGB_OVERRIDE_DST_ALPHA_BLEND:
-   case PIPE_CAP_TGSI_FS_COORD_ORIGIN_UPPER_LEFT:
-   case PIPE_CAP_TGSI_FS_COORD_PIXEL_CENTER_INTEGER:
+   case PIPE_CAP_FS_COORD_ORIGIN_UPPER_LEFT:
+   case PIPE_CAP_FS_COORD_PIXEL_CENTER_INTEGER:
    case PIPE_CAP_DEPTH_CLIP_DISABLE:
-   case PIPE_CAP_TGSI_INSTANCEID:
+   case PIPE_CAP_VS_INSTANCEID:
    case PIPE_CAP_VERTEX_ELEMENT_INSTANCE_DIVISOR:
-   case PIPE_CAP_MIXED_COLORBUFFER_FORMATS:
    case PIPE_CAP_SEAMLESS_CUBE_MAP:
    case PIPE_CAP_SEAMLESS_CUBE_MAP_PER_TEXTURE:
    case PIPE_CAP_CONDITIONAL_RENDER:
    case PIPE_CAP_TEXTURE_BARRIER:
    case PIPE_CAP_VERTEX_COLOR_UNCLAMPED:
    case PIPE_CAP_START_INSTANCE:
-   case PIPE_CAP_BUFFER_MAP_PERSISTENT_COHERENT:
    case PIPE_CAP_FORCE_PERSAMPLE_INTERP:
    case PIPE_CAP_MIXED_FRAMEBUFFER_SIZES:
-   case PIPE_CAP_TGSI_VS_LAYER_VIEWPORT:
-   case PIPE_CAP_TGSI_TES_LAYER_VIEWPORT:
+   case PIPE_CAP_VS_LAYER_VIEWPORT:
+   case PIPE_CAP_TES_LAYER_VIEWPORT:
    case PIPE_CAP_ACCELERATED:
    case PIPE_CAP_UMA:
    case PIPE_CAP_CLIP_HALFZ:
@@ -193,24 +179,25 @@ crocus_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_TGSI_TEX_TXF_LZ:
    case PIPE_CAP_MULTISAMPLE_Z_RESOLVE:
    case PIPE_CAP_CLEAR_TEXTURE:
-   case PIPE_CAP_TGSI_VOTE:
-   case PIPE_CAP_TGSI_VS_WINDOW_SPACE_POSITION:
+   case PIPE_CAP_SHADER_GROUP_VOTE:
+   case PIPE_CAP_VS_WINDOW_SPACE_POSITION:
    case PIPE_CAP_TEXTURE_GATHER_SM5:
-   case PIPE_CAP_TGSI_ARRAY_COMPONENTS:
+   case PIPE_CAP_SHADER_ARRAY_COMPONENTS:
    case PIPE_CAP_GLSL_TESS_LEVELS_AS_INPUTS:
    case PIPE_CAP_NIR_COMPACT_ARRAYS:
-   case PIPE_CAP_TGSI_FS_POSITION_IS_SYSVAL:
-   case PIPE_CAP_TGSI_FS_FACE_IS_INTEGER_SYSVAL:
+   case PIPE_CAP_FS_POSITION_IS_SYSVAL:
+   case PIPE_CAP_FS_FACE_IS_INTEGER_SYSVAL:
    case PIPE_CAP_INVALIDATE_BUFFER:
    case PIPE_CAP_SURFACE_REINTERPRET_BLOCKS:
-   case PIPE_CAP_CS_DERIVED_SYSTEM_VALUES_SUPPORTED:
    case PIPE_CAP_FENCE_SIGNAL:
    case PIPE_CAP_DEMOTE_TO_HELPER_INVOCATION:
    case PIPE_CAP_GL_CLAMP:
+   case PIPE_CAP_LEGACY_MATH_RULES:
+   case PIPE_CAP_NATIVE_FENCE_FD:
       return true;
    case PIPE_CAP_INT64:
    case PIPE_CAP_INT64_DIVMOD:
-   case PIPE_CAP_TGSI_BALLOT:
+   case PIPE_CAP_SHADER_BALLOT:
    case PIPE_CAP_PACKED_UNIFORMS:
       return devinfo->ver == 8;
    case PIPE_CAP_QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION:
@@ -222,19 +209,21 @@ crocus_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_MULTI_DRAW_INDIRECT:
    case PIPE_CAP_MULTI_DRAW_INDIRECT_PARAMS:
    case PIPE_CAP_FRAMEBUFFER_NO_ATTACHMENT:
-   case PIPE_CAP_TGSI_FS_FINE_DERIVATIVE:
+   case PIPE_CAP_FS_FINE_DERIVATIVE:
    case PIPE_CAP_STREAM_OUTPUT_INTERLEAVE_BUFFERS:
-   case PIPE_CAP_TGSI_CLOCK:
-   case PIPE_CAP_TGSI_TXQS:
+   case PIPE_CAP_SHADER_CLOCK:
+   case PIPE_CAP_TEXTURE_QUERY_SAMPLES:
    case PIPE_CAP_COMPUTE:
    case PIPE_CAP_SAMPLER_VIEW_TARGET:
    case PIPE_CAP_SHADER_SAMPLES_IDENTICAL:
-   case PIPE_CAP_TGSI_PACK_HALF_FLOAT:
+   case PIPE_CAP_SHADER_PACK_HALF_FLOAT:
    case PIPE_CAP_GL_SPIRV:
    case PIPE_CAP_GL_SPIRV_VARIABLE_POINTERS:
    case PIPE_CAP_COMPUTE_SHADER_DERIVATIVES:
    case PIPE_CAP_DOUBLES:
    case PIPE_CAP_MEMOBJ:
+   case PIPE_CAP_IMAGE_STORE_FORMATTED:
+   case PIPE_CAP_ALPHA_TO_COVERAGE_DITHER_CONTROL:
       return devinfo->ver >= 7;
    case PIPE_CAP_QUERY_BUFFER_OBJECT:
    case PIPE_CAP_ROBUST_BUFFER_ACCESS_BEHAVIOR:
@@ -282,6 +271,7 @@ crocus_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return BRW_MAX_SOL_BINDINGS / CROCUS_MAX_SOL_BUFFERS;
    case PIPE_CAP_MAX_STREAM_OUTPUT_INTERLEAVED_COMPONENTS:
       return BRW_MAX_SOL_BINDINGS;
+   case PIPE_CAP_GLSL_FEATURE_LEVEL_COMPATIBILITY:
    case PIPE_CAP_GLSL_FEATURE_LEVEL: {
       if (devinfo->verx10 >= 75)
          return 460;
@@ -291,9 +281,11 @@ crocus_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
          return 330;
       return 140;
    }
-   case PIPE_CAP_GLSL_FEATURE_LEVEL_COMPATIBILITY:
-      return 140;
-
+   case PIPE_CAP_CLIP_PLANES:
+      if (devinfo->verx10 < 45)
+         return 6;
+      else
+         return 1; // defaults to MAX (8)
    case PIPE_CAP_CONSTANT_BUFFER_OFFSET_ALIGNMENT:
       /* 3DSTATE_CONSTANT_XS requires the start of UBOs to be 32B aligned */
       return 32;
@@ -301,13 +293,13 @@ crocus_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return CROCUS_MAP_BUFFER_ALIGNMENT;
    case PIPE_CAP_SHADER_BUFFER_OFFSET_ALIGNMENT:
       return devinfo->ver >= 7 ? 4 : 0;
-   case PIPE_CAP_MAX_SHADER_BUFFER_SIZE:
+   case PIPE_CAP_MAX_SHADER_BUFFER_SIZE_UINT:
       return devinfo->ver >= 7 ? (1 << 27) : 0;
    case PIPE_CAP_TEXTURE_BUFFER_OFFSET_ALIGNMENT:
       return 16; // XXX: u_screen says 256 is the minimum value...
-   case PIPE_CAP_PREFER_BLIT_BASED_TEXTURE_TRANSFER:
-      return true;
-   case PIPE_CAP_MAX_TEXTURE_BUFFER_SIZE:
+   case PIPE_CAP_TEXTURE_TRANSFER_MODES:
+      return PIPE_TEXTURE_TRANSFER_BLIT;
+   case PIPE_CAP_MAX_TEXEL_BUFFER_ELEMENTS_UINT:
       return CROCUS_MAX_TEXTURE_BUFFER_SIZE;
    case PIPE_CAP_MAX_VIEWPORTS:
       return devinfo->ver >= 6 ? 16 : 1;
@@ -350,7 +342,7 @@ crocus_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
        * flushing, etc.  That's the big cliff apps will care about.
        */
       const unsigned gpu_mappable_megabytes =
-         (screen->aperture_bytes * 3 / 4) / (1024 * 1024);
+         (screen->aperture_threshold) / (1024 * 1024);
 
       const long system_memory_pages = sysconf(_SC_PHYS_PAGES);
       const long system_page_size = sysconf(_SC_PAGE_SIZE);
@@ -398,6 +390,9 @@ crocus_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_PCI_FUNCTION:
       return 0;
 
+   case PIPE_CAP_HARDWARE_GL_SELECT:
+      return 0;
+
    default:
       return u_pipe_screen_get_param_defaults(pscreen, param);
    }
@@ -411,6 +406,16 @@ crocus_get_paramf(struct pipe_screen *pscreen, enum pipe_capf param)
    const struct intel_device_info *devinfo = &screen->devinfo;
 
    switch (param) {
+   case PIPE_CAPF_MIN_LINE_WIDTH:
+   case PIPE_CAPF_MIN_LINE_WIDTH_AA:
+   case PIPE_CAPF_MIN_POINT_SIZE:
+   case PIPE_CAPF_MIN_POINT_SIZE_AA:
+      return 1;
+
+   case PIPE_CAPF_POINT_SIZE_GRANULARITY:
+   case PIPE_CAPF_LINE_WIDTH_GRANULARITY:
+      return 0.1;
+
    case PIPE_CAPF_MAX_LINE_WIDTH:
    case PIPE_CAPF_MAX_LINE_WIDTH_AA:
       if (devinfo->ver >= 6)
@@ -418,8 +423,8 @@ crocus_get_paramf(struct pipe_screen *pscreen, enum pipe_capf param)
       else
          return 7.0f;
 
-   case PIPE_CAPF_MAX_POINT_WIDTH:
-   case PIPE_CAPF_MAX_POINT_WIDTH_AA:
+   case PIPE_CAPF_MAX_POINT_SIZE:
+   case PIPE_CAPF_MAX_POINT_SIZE_AA:
       return 255.0f;
 
    case PIPE_CAPF_MAX_TEXTURE_ANISOTROPY:
@@ -474,13 +479,13 @@ crocus_get_shader_param(struct pipe_screen *pscreen,
       return 32;
    case PIPE_SHADER_CAP_MAX_OUTPUTS:
       return 32;
-   case PIPE_SHADER_CAP_MAX_CONST_BUFFER_SIZE:
+   case PIPE_SHADER_CAP_MAX_CONST_BUFFER0_SIZE:
       return 16 * 1024 * sizeof(float);
    case PIPE_SHADER_CAP_MAX_CONST_BUFFERS:
       return devinfo->ver >= 6 ? 16 : 1;
    case PIPE_SHADER_CAP_MAX_TEMPS:
       return 256; /* GL_MAX_PROGRAM_TEMPORARIES_ARB */
-   case PIPE_SHADER_CAP_TGSI_CONT_SUPPORTED:
+   case PIPE_SHADER_CAP_CONT_SUPPORTED:
       return 0;
    case PIPE_SHADER_CAP_INDIRECT_INPUT_ADDR:
    case PIPE_SHADER_CAP_INDIRECT_OUTPUT_ADDR:
@@ -516,16 +521,10 @@ crocus_get_shader_param(struct pipe_screen *pscreen,
       return PIPE_SHADER_IR_NIR;
    case PIPE_SHADER_CAP_SUPPORTED_IRS:
       return 1 << PIPE_SHADER_IR_NIR;
-   case PIPE_SHADER_CAP_TGSI_DROUND_SUPPORTED:
-   case PIPE_SHADER_CAP_TGSI_LDEXP_SUPPORTED:
+   case PIPE_SHADER_CAP_DROUND_SUPPORTED:
       return 1;
-   case PIPE_SHADER_CAP_LOWER_IF_THRESHOLD:
-   case PIPE_SHADER_CAP_TGSI_SKIP_MERGE_REGISTERS:
-   case PIPE_SHADER_CAP_TGSI_DFRACEXP_DLDEXP_SUPPORTED:
-   case PIPE_SHADER_CAP_TGSI_FMA_SUPPORTED:
    case PIPE_SHADER_CAP_TGSI_ANY_INOUT_DECL_RANGE:
    case PIPE_SHADER_CAP_TGSI_SQRT_SUPPORTED:
-   case PIPE_SHADER_CAP_MAX_UNROLL_ITERATIONS_HINT:
    case PIPE_SHADER_CAP_FP16_DERIVATIVES:
    case PIPE_SHADER_CAP_INT16:
    case PIPE_SHADER_CAP_GLSL_16BIT_CONSTS:
@@ -610,10 +609,11 @@ static uint64_t
 crocus_get_timestamp(struct pipe_screen *pscreen)
 {
    struct crocus_screen *screen = (struct crocus_screen *) pscreen;
-   const unsigned TIMESTAMP = 0x2358;
    uint64_t result;
 
-   crocus_reg_read(screen->bufmgr, TIMESTAMP | 1, &result);
+   if (!intel_gem_read_render_timestamp(crocus_bufmgr_get_fd(screen->bufmgr),
+                                        screen->devinfo.kmd_type, &result))
+      return 0;
 
    result = intel_device_info_timebase_scale(&screen->devinfo, result);
    result &= (1ull << TIMESTAMP_BITS) - 1;
@@ -652,7 +652,7 @@ crocus_get_compiler_options(struct pipe_screen *pscreen,
    gl_shader_stage stage = stage_from_pipe(pstage);
    assert(ir == PIPE_SHADER_IR_NIR);
 
-   return screen->compiler->glsl_compiler_options[stage].NirOptions;
+   return screen->compiler->nir_options[stage];
 }
 
 static struct disk_cache *
@@ -676,21 +676,21 @@ crocus_get_default_l3_config(const struct intel_device_info *devinfo,
 static void
 crocus_shader_debug_log(void *data, unsigned *id, const char *fmt, ...)
 {
-   struct pipe_debug_callback *dbg = data;
+   struct util_debug_callback *dbg = data;
    va_list args;
 
    if (!dbg->debug_message)
       return;
 
    va_start(args, fmt);
-   dbg->debug_message(dbg->data, id, PIPE_DEBUG_TYPE_SHADER_INFO, fmt, args);
+   dbg->debug_message(dbg->data, id, UTIL_DEBUG_TYPE_SHADER_INFO, fmt, args);
    va_end(args);
 }
 
 static void
 crocus_shader_perf_log(void *data, unsigned *id, const char *fmt, ...)
 {
-   struct pipe_debug_callback *dbg = data;
+   struct util_debug_callback *dbg = data;
    va_list args;
    va_start(args, fmt);
 
@@ -702,38 +702,18 @@ crocus_shader_perf_log(void *data, unsigned *id, const char *fmt, ...)
    }
 
    if (dbg->debug_message) {
-      dbg->debug_message(dbg->data, id, PIPE_DEBUG_TYPE_PERF_INFO, fmt, args);
+      dbg->debug_message(dbg->data, id, UTIL_DEBUG_TYPE_PERF_INFO, fmt, args);
    }
 
    va_end(args);
 }
 
-static bool
-crocus_detect_swizzling(struct crocus_screen *screen)
+static int
+crocus_screen_get_fd(struct pipe_screen *pscreen)
 {
-   /* Broadwell PRM says:
-    *
-    *   "Before Gen8, there was a historical configuration control field to
-    *    swizzle address bit[6] for in X/Y tiling modes. This was set in three
-    *    different places: TILECTL[1:0], ARB_MODE[5:4], and
-    *    DISP_ARB_CTL[14:13].
-    *
-    *    For Gen8 and subsequent generations, the swizzle fields are all
-    *    reserved, and the CPU's memory controller performs all address
-    *    swizzling modifications."
-    */
-   uint32_t tiling = I915_TILING_X;
-   uint32_t swizzle_mode = 0;
-   struct crocus_bo *buffer =
-      crocus_bo_alloc_tiled(screen->bufmgr, "swizzle test", 32768,
-                            0, tiling, 512, 0);
-   if (buffer == NULL)
-      return false;
+   struct crocus_screen *screen = (struct crocus_screen *)pscreen;
 
-   crocus_bo_get_tiling(buffer, &tiling, &swizzle_mode);
-   crocus_bo_unreference(buffer);
-
-   return swizzle_mode != I915_BIT_6_SWIZZLE_NONE;
+   return screen->winsys_fd;
 }
 
 struct pipe_screen *
@@ -745,14 +725,14 @@ crocus_screen_create(int fd, const struct pipe_screen_config *config)
 
    if (!intel_get_device_info_from_fd(fd, &screen->devinfo))
       return NULL;
-   screen->pci_id = screen->devinfo.chipset_id;
+   screen->pci_id = screen->devinfo.pci_device_id;
 
    if (screen->devinfo.ver > 8)
       return NULL;
 
    if (screen->devinfo.ver == 8) {
       /* bind to cherryview or bdw if forced */
-      if (!screen->devinfo.is_cherryview &&
+      if (screen->devinfo.platform != INTEL_PLATFORM_CHV &&
           !getenv("CROCUS_GEN8"))
          return NULL;
    }
@@ -760,6 +740,7 @@ crocus_screen_create(int fd, const struct pipe_screen_config *config)
    p_atomic_set(&screen->refcount, 1);
 
    screen->aperture_bytes = get_aperture_size(fd);
+   screen->aperture_threshold = screen->aperture_bytes * 3 / 4;
 
    driParseConfigFiles(config->options, config->options_info, 0, "crocus",
                        NULL, NULL, NULL, 0, NULL, 0);
@@ -780,7 +761,6 @@ crocus_screen_create(int fd, const struct pipe_screen_config *config)
    screen->fd = crocus_bufmgr_get_fd(screen->bufmgr);
    screen->winsys_fd = fd;
 
-   screen->has_swizzling = crocus_detect_swizzling(screen);
    brw_process_intel_debug_variable();
 
    screen->driconf.dual_color_blend_by_location =
@@ -789,18 +769,19 @@ crocus_screen_create(int fd, const struct pipe_screen_config *config)
       driQueryOptionb(config->options, "disable_throttling");
    screen->driconf.always_flush_cache =
       driQueryOptionb(config->options, "always_flush_cache");
+   screen->driconf.limit_trig_input_range =
+      driQueryOptionb(config->options, "limit_trig_input_range");
+   screen->driconf.lower_depth_range_rate =
+      driQueryOptionf(config->options, "lower_depth_range_rate");
 
-   screen->precompile = env_var_as_boolean("shader_precompile", true);
+   screen->precompile = debug_get_bool_option("shader_precompile", true);
 
-   isl_device_init(&screen->isl_dev, &screen->devinfo,
-                   screen->has_swizzling);
+   isl_device_init(&screen->isl_dev, &screen->devinfo);
 
    screen->compiler = brw_compiler_create(screen, &screen->devinfo);
    screen->compiler->shader_debug_log = crocus_shader_debug_log;
    screen->compiler->shader_perf_log = crocus_shader_perf_log;
-   screen->compiler->supports_pull_constants = false;
    screen->compiler->supports_shader_constants = false;
-   screen->compiler->compact_params = false;
    screen->compiler->constant_buffer_0_is_relative = true;
 
    if (screen->devinfo.ver >= 7) {
@@ -822,6 +803,7 @@ crocus_screen_create(int fd, const struct pipe_screen_config *config)
    pscreen->get_name = crocus_get_name;
    pscreen->get_vendor = crocus_get_vendor;
    pscreen->get_device_vendor = crocus_get_device_vendor;
+   pscreen->get_screen_fd = crocus_screen_get_fd;
    pscreen->get_param = crocus_get_param;
    pscreen->get_shader_param = crocus_get_shader_param;
    pscreen->get_compute_param = crocus_get_compute_param;
@@ -832,7 +814,6 @@ crocus_screen_create(int fd, const struct pipe_screen_config *config)
    pscreen->get_disk_shader_cache = crocus_get_disk_shader_cache;
    pscreen->is_format_supported = crocus_is_format_supported;
    pscreen->context_create = crocus_create_context;
-   pscreen->flush_frontbuffer = crocus_flush_frontbuffer;
    pscreen->get_timestamp = crocus_get_timestamp;
    pscreen->query_memory_info = crocus_query_memory_info;
    pscreen->get_driver_query_group_info = crocus_get_monitor_group_info;

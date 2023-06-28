@@ -27,7 +27,7 @@
  *
  **************************************************************************/
 
-#include "main/glheader.h"
+#include "util/glheader.h"
 #include "main/context.h"
 
 #include "main/macros.h"
@@ -42,7 +42,7 @@
 #include "compiler/glsl/glsl_parser_extras.h"
 #include "compiler/glsl/glsl_symbol_table.h"
 #include "compiler/glsl_types.h"
-#include "program/ir_to_mesa.h"
+#include "program/link_program.h"
 #include "program/program.h"
 #include "program/programopt.h"
 #include "program/prog_cache.h"
@@ -1037,9 +1037,6 @@ create_new_program(struct gl_context *ctx, struct state_key *key)
 
    p.mem_ctx = ralloc_context(NULL);
    p.shader = _mesa_new_shader(0, MESA_SHADER_FRAGMENT);
-#ifdef DEBUG
-   p.shader->SourceChecksum = 0xf18ed; /* fixed */
-#endif
    p.shader->ir = new(p.shader) exec_list;
    state = new(p.shader) _mesa_glsl_parse_state(ctx, MESA_SHADER_FRAGMENT,
 						p.shader);
@@ -1095,16 +1092,6 @@ create_new_program(struct gl_context *ctx, struct state_key *key)
       emit_instructions(&p);
 
    validate_ir_tree(p.shader->ir);
-
-   const struct gl_shader_compiler_options *options =
-      &ctx->Const.ShaderCompilerOptions[MESA_SHADER_FRAGMENT];
-
-   /* Conservative approach: Don't optimize here, the linker does it too. */
-   if (!ctx->Const.GLSLOptimizeConservatively) {
-      while (do_common_optimization(p.shader->ir, false, false, options,
-                                    ctx->Const.NativeIntegers))
-         ;
-   }
 
    reparent_ir(p.shader->ir, p.shader->ir);
 

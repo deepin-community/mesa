@@ -278,4 +278,25 @@ TEST_F(xmlconfig_test, drirc_engine_versioned)
    EXPECT_EQ(driQueryOptioni(&cache, "mesa_drirc_option"), 5);
    driDestroyOptionCache(&cache);
 }
+
+TEST_F(xmlconfig_test, drirc_exec_regexp)
+{
+   driOptionCache cache = drirc_init("driver", "drm",
+                                     "app2v4",
+                                     NULL, 0,
+                                     NULL, 0);
+   EXPECT_EQ(driQueryOptioni(&cache, "mesa_drirc_option"), 7);
+   driDestroyOptionCache(&cache);
+}
+
+TEST_F(xmlconfig_test, drirc_exec_override)
+{
+   putenv("MESA_DRICONF_EXECUTABLE_OVERRIDE=app1");
+   driOptionCache cache = drirc_init("driver", "drm",
+                                     NULL,
+                                     NULL, 0,
+                                     NULL, 0);
+   EXPECT_EQ(driQueryOptioni(&cache, "mesa_drirc_option"), 1);
+   driDestroyOptionCache(&cache);
+}
 #endif

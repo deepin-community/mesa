@@ -27,16 +27,16 @@ Compiler
 The following compilers are known to work, if you know of others or
 you're willing to maintain support for other compiler get in touch.
 
--  GCC 4.2.0 or later (some parts of Mesa may require later versions)
--  Clang - exact minimum requirement is currently unknown.
--  Microsoft Visual Studio 2015 or later is required, for building on
-   Windows.
+-  GCC 8.0.0 or later (some parts of Mesa may require later versions)
+-  Clang 5.0 or later (some parts of Mesa may require later versions)
+-  Microsoft Visual Studio 2019 Version 16.11 or later and
+   Windows SDK of at least 20348 is required, for building on Windows.
 
 Third party/extra tools.
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
--  `Python <https://www.python.org/>`__ - Python 3.5 or newer is required.
--  `Python Mako module <http://www.makotemplates.org/>`__ - Python Mako
+-  `Python <https://www.python.org/>`__ - Python 3.6 or newer is required.
+-  `Python Mako module <https://www.makotemplates.org/>`__ - Python Mako
    module is required. Version 0.8.0 or later should work.
 -  Lex / Yacc - for building the Mesa IR and GLSL compiler.
 
@@ -49,7 +49,7 @@ Third party/extra tools.
       mingw-get install msys-flex msys-bison
 
    For MSVC on Windows, install `Win
-   flex-bison <http://winflexbison.sourceforge.net/>`__.
+   flex-bison <https://sourceforge.net/projects/winflexbison/>`__.
 
 .. note::
 
@@ -86,7 +86,7 @@ The general approach is:
 
 .. code-block:: console
 
-     meson builddir/
+     meson setup builddir/
      ninja -C builddir/
      sudo ninja -C builddir/ install
 
@@ -94,7 +94,7 @@ On Windows you can also use the Visual Studio backend
 
 .. code-block:: console
 
-     meson builddir --backend=vs
+     meson setup builddir --backend=vs
      cd builddir
      msbuild mesa.sln /m
 
@@ -115,7 +115,7 @@ First, configure Mesa and install in the temporary location:
 
 .. code-block:: console
 
-   meson builddir/ -Dprefix="$MESA_INSTALLDIR" OTHER_OPTIONS
+   meson setup builddir/ -Dprefix="$MESA_INSTALLDIR" OTHER_OPTIONS
    ninja -C builddir/ install
 
 where ``OTHER_OPTIONS`` is replaced by any meson configuration options you may
@@ -124,7 +124,7 @@ like this:
 
 .. code-block:: console
 
-   meson builddir/ -Dprefix="$MESA_INSTALLDIR" -Ddri-drivers= \
+   meson setup builddir/ -Dprefix="$MESA_INSTALLDIR" \
       -Dgallium-drivers=swrast -Dvulkan-drivers=swrast
    ninja -C builddir/ install
 
@@ -151,7 +151,7 @@ Vulkan
    VK_ICD_FILENAMES="$MESA_INSTALLDIR/share/vulkan/icd/my_icd.json" vulkaninfo
 
 where ``my_icd.json`` is replaced with the actual ICD json file name.  This
-will depend on your driver.  For instance, the 64-bit lavapipe driver ICD file
+will depend on your driver.  For instance, the 64-bit Lavapipe driver ICD file
 is named ``lvp_icd.x86_64.json``.
 
 OpenCL
@@ -182,10 +182,10 @@ here are a few things to check:
     32-bit and your Mesa build is probably 64-bit by default.
 
  4. 32 and 64-bit builds in the same local install directory doesn't typically
-    work.  Distros go to great lengths to make this work in your system install
-    and it's hard to get it right for a local install.  If you've recently
-    built 64-bit and are now building 32-bit, throw away the install directory
-    first to prevent conflicts.
+    work.  Distributions go to great lengths to make this work in your system
+    install and it's hard to get it right for a local install.  If you've
+    recently built 64-bit and are now building 32-bit, throw away the install
+    directory first to prevent conflicts.
 
 4. Building with AOSP (Android)
 -------------------------------

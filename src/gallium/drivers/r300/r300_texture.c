@@ -80,8 +80,6 @@ static unsigned r300_get_endian_swap(enum pipe_format format)
         return R300_SURF_NO_SWAP;
 
     desc = util_format_description(format);
-    if (!desc)
-        return R300_SURF_NO_SWAP;
 
     /* Compressed formats should be in the little endian format. */
     if (desc->block.width != 1 || desc->block.height != 1)
@@ -171,7 +169,7 @@ uint32_t r300_translate_texformat(enum pipe_format format,
 {
     uint32_t result = 0;
     const struct util_format_description *desc;
-    unsigned i;
+    int i;
     boolean uniform = TRUE;
     const uint32_t sign_bit[4] = {
         R300_TX_FORMAT_SIGNED_W,
@@ -360,14 +358,8 @@ uint32_t r300_translate_texformat(enum pipe_format format,
         return ~0; /* Unsupported/unknown. */
     }
 
-    /* Find the first non-VOID channel. */
-    for (i = 0; i < 4; i++) {
-        if (desc->channel[i].type != UTIL_FORMAT_TYPE_VOID) {
-            break;
-        }
-    }
-
-    if (i == 4)
+    i = util_format_get_first_non_void_channel(format);
+    if (i == -1)
         return ~0; /* Unsupported/unknown. */
 
     /* And finally, uniform formats. */
@@ -593,21 +585,15 @@ static uint32_t r300_translate_zsformat(enum pipe_format format)
 static uint32_t r300_translate_out_fmt(enum pipe_format format)
 {
     uint32_t modifier = 0;
-    unsigned i;
+    int i;
     const struct util_format_description *desc;
     boolean uniform_sign;
 
     format = r300_unbyteswap_array_format(format);
     desc = util_format_description(format);
 
-    /* Find the first non-VOID channel. */
-    for (i = 0; i < 4; i++) {
-        if (desc->channel[i].type != UTIL_FORMAT_TYPE_VOID) {
-            break;
-        }
-    }
-
-    if (i == 4)
+    i = util_format_get_first_non_void_channel(format);
+    if (i == -1)
         return ~0; /* Unsupported/unknown. */
 
     /* Specifies how the shader output is written to the fog unit. */
@@ -900,7 +886,7 @@ boolean r300_is_zs_format_supported(enum pipe_format format)
 
 boolean r300_is_sampler_format_supported(enum pipe_format format)
 {
-    return r300_translate_texformat(format, 0, TRUE, FALSE) != ~0;
+    return r300_translate_texformat(format, NULL, TRUE, FALSE) != ~0;
 }
 
 void r300_texture_setup_format_state(struct r300_screen *screen,
@@ -1076,12 +1062,12 @@ r300_texture_create_object(struct r300_screen *rscreen,
 
     /* Figure out the ideal placement for the texture.. */
     if (tex->domain & RADEON_DOMAIN_VRAM &&
-        tex->tex.size_in_bytes >= rscreen->info.vram_size) {
+        tex->tex.size_in_bytes >= (uint64_t)rscreen->info.vram_size_kb * 1024) {
         tex->domain &= ~RADEON_DOMAIN_VRAM;
         tex->domain |= RADEON_DOMAIN_GTT;
     }
     if (tex->domain & RADEON_DOMAIN_GTT &&
-        tex->tex.size_in_bytes >= rscreen->info.gart_size) {
+        tex->tex.size_in_bytes >= (uint64_t)rscreen->info.gart_size_kb * 1024) {
         tex->domain &= ~RADEON_DOMAIN_GTT;
     }
     /* Just fail if the texture is too large. */
@@ -1167,7 +1153,7 @@ struct pipe_resource *r300_texture_from_handle(struct pipe_screen *screen,
         return NULL;
     }
 
-    buffer = rws->buffer_from_handle(rws, whandle, 0);
+    buffer = rws->buffer_from_handle(rws, whandle, 0, false);
     if (!buffer)
         return NULL;
 

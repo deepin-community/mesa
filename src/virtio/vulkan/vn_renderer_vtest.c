@@ -16,13 +16,14 @@
 #include <unistd.h>
 
 #include "util/os_file.h"
+#include "util/os_misc.h"
 #include "util/sparse_array.h"
 #include "util/u_process.h"
 #define VIRGL_RENDERER_UNSTABLE_APIS
 #include "virtio-gpu/virglrenderer_hw.h"
 #include "vtest/vtest_protocol.h"
 
-#include "vn_renderer.h"
+#include "vn_renderer_internal.h"
 
 #define VTEST_PCI_VENDOR_ID 0x1af4
 #define VTEST_PCI_DEVICE_ID 0x1050
@@ -54,7 +55,7 @@ struct vtest {
    int sock_fd;
 
    uint32_t protocol_version;
-   uint32_t max_sync_queue_count;
+   uint32_t max_timeline_count;
 
    struct {
       enum virgl_renderer_capset id;
@@ -62,8 +63,12 @@ struct vtest {
       struct virgl_renderer_capset_venus data;
    } capset;
 
+   uint32_t shmem_blob_mem;
+
    struct util_sparse_array shmem_array;
    struct util_sparse_array bo_array;
+
+   struct vn_renderer_shmem_cache shmem_cache;
 };
 
 static int
@@ -536,10 +541,9 @@ vtest_vcmd_submit_cmd2(struct vtest *vtest,
          .sync_offset = sync_offset / sizeof(uint32_t),
          .sync_count = batch->sync_count,
       };
-      if (!batch->sync_queue_cpu) {
-         dst.flags = VCMD_SUBMIT_CMD2_FLAG_SYNC_QUEUE;
-         dst.sync_queue_index = batch->sync_queue_index;
-         dst.sync_queue_id = batch->vk_queue_id;
+      if (vtest->base.info.supports_multiple_timelines) {
+         dst.flags = VCMD_SUBMIT_CMD2_FLAG_RING_IDX;
+         dst.ring_idx = batch->ring_idx;
       }
       vtest_write(vtest, &dst, sizeof(dst));
 
@@ -775,8 +779,8 @@ vtest_bo_create_from_device_memory(
 }
 
 static void
-vtest_shmem_destroy(struct vn_renderer *renderer,
-                    struct vn_renderer_shmem *_shmem)
+vtest_shmem_destroy_now(struct vn_renderer *renderer,
+                        struct vn_renderer_shmem *_shmem)
 {
    struct vtest *vtest = (struct vtest *)renderer;
    struct vtest_shmem *shmem = (struct vtest_shmem *)_shmem;
@@ -788,15 +792,35 @@ vtest_shmem_destroy(struct vn_renderer *renderer,
    mtx_unlock(&vtest->sock_mutex);
 }
 
+static void
+vtest_shmem_destroy(struct vn_renderer *renderer,
+                    struct vn_renderer_shmem *shmem)
+{
+   struct vtest *vtest = (struct vtest *)renderer;
+
+   if (vn_renderer_shmem_cache_add(&vtest->shmem_cache, shmem))
+      return;
+
+   vtest_shmem_destroy_now(&vtest->base, shmem);
+}
+
 static struct vn_renderer_shmem *
 vtest_shmem_create(struct vn_renderer *renderer, size_t size)
 {
    struct vtest *vtest = (struct vtest *)renderer;
 
+   struct vn_renderer_shmem *cached_shmem =
+      vn_renderer_shmem_cache_get(&vtest->shmem_cache, size);
+   if (cached_shmem) {
+      cached_shmem->refcount = VN_REFCOUNT_INIT(1);
+      return cached_shmem;
+   }
+
    mtx_lock(&vtest->sock_mutex);
    int res_fd;
    uint32_t res_id = vtest_vcmd_resource_create_blob(
-      vtest, VCMD_BLOB_TYPE_GUEST, VCMD_BLOB_FLAG_MAPPABLE, size, 0, &res_fd);
+      vtest, vtest->shmem_blob_mem, VCMD_BLOB_FLAG_MAPPABLE, size, 0,
+      &res_fd);
    assert(res_id > 0 && res_fd >= 0);
    mtx_unlock(&vtest->sock_mutex);
 
@@ -899,21 +923,23 @@ vtest_submit(struct vn_renderer *renderer,
 }
 
 static void
-vtest_get_info(struct vn_renderer *renderer, struct vn_renderer_info *info)
+vtest_init_renderer_info(struct vtest *vtest)
 {
-   struct vtest *vtest = (struct vtest *)renderer;
+   struct vn_renderer_info *info = &vtest->base.info;
 
-   memset(info, 0, sizeof(*info));
+   info->drm.has_primary = false;
+   info->drm.primary_major = 0;
+   info->drm.primary_minor = 0;
+   info->drm.has_render = false;
+   info->drm.render_major = 0;
+   info->drm.render_minor = 0;
 
    info->pci.vendor_id = VTEST_PCI_VENDOR_ID;
    info->pci.device_id = VTEST_PCI_DEVICE_ID;
 
    info->has_dma_buf_import = false;
-   info->has_cache_management = false;
    info->has_external_sync = false;
    info->has_implicit_fencing = false;
-
-   info->max_sync_queue_count = vtest->max_sync_queue_count;
 
    const struct virgl_renderer_capset_venus *capset = &vtest->capset.data;
    info->wire_format_version = capset->wire_format_version;
@@ -922,6 +948,18 @@ vtest_get_info(struct vn_renderer *renderer, struct vn_renderer_info *info)
       capset->vk_ext_command_serialization_spec_version;
    info->vk_mesa_venus_protocol_spec_version =
       capset->vk_mesa_venus_protocol_spec_version;
+   info->supports_blob_id_0 = capset->supports_blob_id_0;
+
+   /* ensure vk_extension_mask is large enough to hold all capset masks */
+   STATIC_ASSERT(sizeof(info->vk_extension_mask) >=
+                 sizeof(capset->vk_extension_mask1));
+   memcpy(info->vk_extension_mask, capset->vk_extension_mask1,
+          sizeof(capset->vk_extension_mask1));
+
+   info->allow_vk_wait_syncs = capset->allow_vk_wait_syncs;
+
+   info->supports_multiple_timelines = capset->supports_multiple_timelines;
+   info->max_timeline_count = vtest->max_timeline_count;
 }
 
 static void
@@ -929,6 +967,8 @@ vtest_destroy(struct vn_renderer *renderer,
               const VkAllocationCallbacks *alloc)
 {
    struct vtest *vtest = (struct vtest *)renderer;
+
+   vn_renderer_shmem_cache_fini(&vtest->shmem_cache);
 
    if (vtest->sock_fd >= 0) {
       shutdown(vtest->sock_fd, SHUT_RDWR);
@@ -961,13 +1001,12 @@ vtest_init_capset(struct vtest *vtest)
 static VkResult
 vtest_init_params(struct vtest *vtest)
 {
-   uint32_t val =
-      vtest_vcmd_get_param(vtest, VCMD_PARAM_MAX_SYNC_QUEUE_COUNT);
+   uint32_t val = vtest_vcmd_get_param(vtest, VCMD_PARAM_MAX_TIMELINE_COUNT);
    if (!val) {
-      vn_log(vtest->instance, "no sync queue support");
+      vn_log(vtest->instance, "no timeline support");
       return VK_ERROR_INITIALIZATION_FAILED;
    }
-   vtest->max_sync_queue_count = val;
+   vtest->max_timeline_count = val;
 
    return VK_SUCCESS;
 }
@@ -993,13 +1032,15 @@ vtest_init_protocol_version(struct vtest *vtest)
 static VkResult
 vtest_init(struct vtest *vtest)
 {
+   const char *socket_name = os_get_option("VTEST_SOCKET_NAME");
+
    util_sparse_array_init(&vtest->shmem_array, sizeof(struct vtest_shmem),
                           1024);
    util_sparse_array_init(&vtest->bo_array, sizeof(struct vtest_bo), 1024);
 
    mtx_init(&vtest->sock_mutex, mtx_plain);
-   vtest->sock_fd =
-      vtest_connect_socket(vtest->instance, VTEST_DEFAULT_SOCKET_NAME);
+   vtest->sock_fd = vtest_connect_socket(
+      vtest->instance, socket_name ? socket_name : VTEST_DEFAULT_SOCKET_NAME);
    if (vtest->sock_fd < 0)
       return VK_ERROR_INITIALIZATION_FAILED;
 
@@ -1016,10 +1057,18 @@ vtest_init(struct vtest *vtest)
    if (result != VK_SUCCESS)
       return result;
 
+   /* see virtgpu_init_shmem_blob_mem */
+   assert(vtest->capset.data.supports_blob_id_0);
+   vtest->shmem_blob_mem = VCMD_BLOB_TYPE_HOST3D;
+
+   vn_renderer_shmem_cache_init(&vtest->shmem_cache, &vtest->base,
+                                vtest_shmem_destroy_now);
+
    vtest_vcmd_context_init(vtest, vtest->capset.id);
 
+   vtest_init_renderer_info(vtest);
+
    vtest->base.ops.destroy = vtest_destroy;
-   vtest->base.ops.get_info = vtest_get_info;
    vtest->base.ops.submit = vtest_submit;
    vtest->base.ops.wait = vtest_wait;
 

@@ -27,11 +27,15 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_core.h>
 
 #include "util/u_math.h"
 #include "util/macros.h"
 #include "util/u_printf.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 const VkAllocationCallbacks *
 vk_default_allocator(void);
@@ -177,14 +181,11 @@ struct vk_multialloc {
     size_t align;
 
     uint32_t ptr_count;
-    void **ptrs[8];
+    void **ptrs[12];
 };
 
-#define VK_MULTIALLOC_INIT \
-   ((struct vk_multialloc) { 0, })
-
 #define VK_MULTIALLOC(_name) \
-   struct vk_multialloc _name = VK_MULTIALLOC_INIT
+   struct vk_multialloc _name = { 0, }
 
 static ALWAYS_INLINE void
 vk_multialloc_add_size_align(struct vk_multialloc *ma,
@@ -230,7 +231,7 @@ vk_multialloc_alloc(struct vk_multialloc *ma,
                     const VkAllocationCallbacks *alloc,
                     VkSystemAllocationScope scope)
 {
-   char *ptr = (char *)vk_alloc(alloc, ma->size, ma->align, scope);
+   void *ptr = vk_alloc(alloc, ma->size, ma->align, scope);
    if (!ptr)
       return NULL;
 
@@ -243,10 +244,10 @@ vk_multialloc_alloc(struct vk_multialloc *ma,
     * constant, GCC is incapable of figuring this out and unrolling the loop
     * so we have to give it a little help.
     */
-   STATIC_ASSERT(ARRAY_SIZE(ma->ptrs) == 8);
+   STATIC_ASSERT(ARRAY_SIZE(ma->ptrs) == 12);
 #define _VK_MULTIALLOC_UPDATE_POINTER(_i) \
    if ((_i) < ma->ptr_count) \
-      *ma->ptrs[_i] = ptr + (uintptr_t)*ma->ptrs[_i]
+      *ma->ptrs[_i] = (char *)ptr + (uintptr_t)*ma->ptrs[_i]
    _VK_MULTIALLOC_UPDATE_POINTER(0);
    _VK_MULTIALLOC_UPDATE_POINTER(1);
    _VK_MULTIALLOC_UPDATE_POINTER(2);
@@ -255,6 +256,10 @@ vk_multialloc_alloc(struct vk_multialloc *ma,
    _VK_MULTIALLOC_UPDATE_POINTER(5);
    _VK_MULTIALLOC_UPDATE_POINTER(6);
    _VK_MULTIALLOC_UPDATE_POINTER(7);
+   _VK_MULTIALLOC_UPDATE_POINTER(8);
+   _VK_MULTIALLOC_UPDATE_POINTER(9);
+   _VK_MULTIALLOC_UPDATE_POINTER(10);
+   _VK_MULTIALLOC_UPDATE_POINTER(11);
 #undef _VK_MULTIALLOC_UPDATE_POINTER
 
    return ptr;
@@ -292,5 +297,9 @@ vk_multialloc_zalloc2(struct vk_multialloc *ma,
 {
    return vk_multialloc_zalloc(ma, alloc ? alloc : parent_alloc, scope);
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

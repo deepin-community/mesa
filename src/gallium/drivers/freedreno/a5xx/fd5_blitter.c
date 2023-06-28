@@ -118,9 +118,9 @@ can_do_blit(const struct pipe_blit_info *info)
    if (!ok_dims(info->dst.resource, &info->dst.box, info->dst.level))
       return false;
 
-   debug_assert(info->dst.box.width >= 0);
-   debug_assert(info->dst.box.height >= 0);
-   debug_assert(info->dst.box.depth >= 0);
+   assert(info->dst.box.width >= 0);
+   assert(info->dst.box.height >= 0);
+   assert(info->dst.box.depth >= 0);
 
    if ((info->dst.resource->nr_samples > 1) ||
        (info->src.resource->nr_samples > 1))
@@ -156,11 +156,11 @@ emit_setup(struct fd_ringbuffer *ring)
    OUT_PKT4(ring, REG_A5XX_RB_RENDER_CNTL, 1);
    OUT_RING(ring, 0x00000008);
 
-   OUT_PKT4(ring, REG_A5XX_UNKNOWN_2100, 1);
-   OUT_RING(ring, 0x86000000); /* UNKNOWN_2100 */
+   OUT_PKT4(ring, REG_A5XX_RB_2D_BLIT_CNTL, 1);
+   OUT_RING(ring, 0x86000000); /* RB_2D_BLIT_CNTL */
 
-   OUT_PKT4(ring, REG_A5XX_UNKNOWN_2180, 1);
-   OUT_RING(ring, 0x86000000); /* UNKNOWN_2180 */
+   OUT_PKT4(ring, REG_A5XX_GRAS_2D_BLIT_CNTL, 1);
+   OUT_RING(ring, 0x86000000); /* 2D_BLIT_CNTL */
 
    OUT_PKT4(ring, REG_A5XX_UNKNOWN_2184, 1);
    OUT_RING(ring, 0x00000009); /* UNKNOWN_2184 */
@@ -198,16 +198,16 @@ emit_blit_buffer(struct fd_ringbuffer *ring, const struct pipe_blit_info *info)
    src = fd_resource(info->src.resource);
    dst = fd_resource(info->dst.resource);
 
-   debug_assert(src->layout.cpp == 1);
-   debug_assert(dst->layout.cpp == 1);
-   debug_assert(info->src.resource->format == info->dst.resource->format);
-   debug_assert((sbox->y == 0) && (sbox->height == 1));
-   debug_assert((dbox->y == 0) && (dbox->height == 1));
-   debug_assert((sbox->z == 0) && (sbox->depth == 1));
-   debug_assert((dbox->z == 0) && (dbox->depth == 1));
-   debug_assert(sbox->width == dbox->width);
-   debug_assert(info->src.level == 0);
-   debug_assert(info->dst.level == 0);
+   assert(src->layout.cpp == 1);
+   assert(dst->layout.cpp == 1);
+   assert(info->src.resource->format == info->dst.resource->format);
+   assert((sbox->y == 0) && (sbox->height == 1));
+   assert((dbox->y == 0) && (dbox->height == 1));
+   assert((sbox->z == 0) && (sbox->depth == 1));
+   assert((dbox->z == 0) && (dbox->depth == 1));
+   assert(sbox->width == dbox->width);
+   assert(info->src.level == 0);
+   assert(info->dst.level == 0);
 
    /*
     * Buffers can have dimensions bigger than max width, remap into
@@ -239,8 +239,8 @@ emit_blit_buffer(struct fd_ringbuffer *ring, const struct pipe_blit_info *info)
       w = MIN2(sbox->width - off, (0x4000 - 0x40));
       p = align(w, 64);
 
-      debug_assert((soff + w) <= fd_bo_size(src->bo));
-      debug_assert((doff + w) <= fd_bo_size(dst->bo));
+      assert((soff + w) <= fd_bo_size(src->bo));
+      assert((doff + w) <= fd_bo_size(dst->bo));
 
       OUT_PKT7(ring, CP_SET_RENDER_MODE, 1);
       OUT_RING(ring, CP_SET_RENDER_MODE_0_MODE(BLIT2D));
@@ -308,19 +308,15 @@ emit_blit(struct fd_ringbuffer *ring, const struct pipe_blit_info *info)
    const struct pipe_box *sbox = &info->src.box;
    const struct pipe_box *dbox = &info->dst.box;
    struct fd_resource *src, *dst;
-   struct fdl_slice *sslice, *dslice;
    enum a5xx_color_fmt sfmt, dfmt;
    enum a5xx_tile_mode stile, dtile;
    enum a3xx_color_swap sswap, dswap;
-   unsigned ssize, dsize, spitch, dpitch;
+   unsigned spitch, dpitch;
    unsigned sx1, sy1, sx2, sy2;
    unsigned dx1, dy1, dx2, dy2;
 
    src = fd_resource(info->src.resource);
    dst = fd_resource(info->dst.resource);
-
-   sslice = fd_resource_slice(src, info->src.level);
-   dslice = fd_resource_slice(dst, info->dst.level);
 
    sfmt = fd5_pipe2color(info->src.format);
    dfmt = fd5_pipe2color(info->dst.format);
@@ -340,7 +336,7 @@ emit_blit(struct fd_ringbuffer *ring, const struct pipe_blit_info *info)
     * dst swap mode (so we don't change component order)
     */
    if (stile || dtile) {
-      debug_assert(info->src.format == info->dst.format);
+      assert(info->src.format == info->dst.format);
       sswap = dswap = WZYX;
    }
 
@@ -354,22 +350,15 @@ emit_blit(struct fd_ringbuffer *ring, const struct pipe_blit_info *info)
    dx2 = dbox->x + dbox->width - 1;
    dy2 = dbox->y + dbox->height - 1;
 
-   if (info->src.resource->target == PIPE_TEXTURE_3D)
-      ssize = sslice->size0;
-   else
-      ssize = src->layout.layer_size;
-
-   if (info->dst.resource->target == PIPE_TEXTURE_3D)
-      dsize = dslice->size0;
-   else
-      dsize = dst->layout.layer_size;
+   uint32_t sarray_pitch = fd_resource_layer_stride(src, info->src.level);
+   uint32_t darray_pitch = fd_resource_layer_stride(dst, info->dst.level);
 
    for (unsigned i = 0; i < info->dst.box.depth; i++) {
       unsigned soff = fd_resource_offset(src, info->src.level, sbox->z + i);
       unsigned doff = fd_resource_offset(dst, info->dst.level, dbox->z + i);
 
-      debug_assert((soff + (sbox->height * spitch)) <= fd_bo_size(src->bo));
-      debug_assert((doff + (dbox->height * dpitch)) <= fd_bo_size(dst->bo));
+      assert((soff + (sbox->height * spitch)) <= fd_bo_size(src->bo));
+      assert((doff + (dbox->height * dpitch)) <= fd_bo_size(dst->bo));
 
       OUT_PKT7(ring, CP_SET_RENDER_MODE, 1);
       OUT_RING(ring, CP_SET_RENDER_MODE_0_MODE(BLIT2D));
@@ -383,7 +372,7 @@ emit_blit(struct fd_ringbuffer *ring, const struct pipe_blit_info *info)
                         A5XX_RB_2D_SRC_INFO_COLOR_SWAP(sswap));
       OUT_RELOC(ring, src->bo, soff, 0, 0); /* RB_2D_SRC_LO/HI */
       OUT_RING(ring, A5XX_RB_2D_SRC_SIZE_PITCH(spitch) |
-                        A5XX_RB_2D_SRC_SIZE_ARRAY_PITCH(ssize));
+                        A5XX_RB_2D_SRC_SIZE_ARRAY_PITCH(sarray_pitch));
       OUT_RING(ring, 0x00000000);
       OUT_RING(ring, 0x00000000);
       OUT_RING(ring, 0x00000000);
@@ -404,7 +393,7 @@ emit_blit(struct fd_ringbuffer *ring, const struct pipe_blit_info *info)
                         A5XX_RB_2D_DST_INFO_COLOR_SWAP(dswap));
       OUT_RELOC(ring, dst->bo, doff, 0, 0); /* RB_2D_DST_LO/HI */
       OUT_RING(ring, A5XX_RB_2D_DST_SIZE_PITCH(dpitch) |
-                        A5XX_RB_2D_DST_SIZE_ARRAY_PITCH(dsize));
+                        A5XX_RB_2D_DST_SIZE_ARRAY_PITCH(darray_pitch));
       OUT_RING(ring, 0x00000000);
       OUT_RING(ring, 0x00000000);
       OUT_RING(ring, 0x00000000);
@@ -466,8 +455,8 @@ fd5_blitter_blit(struct fd_context *ctx,
       emit_blit_buffer(batch->draw, info);
    } else {
       /* I don't *think* we need to handle blits between buffer <-> !buffer */
-      debug_assert(info->src.resource->target != PIPE_BUFFER);
-      debug_assert(info->dst.resource->target != PIPE_BUFFER);
+      assert(info->src.resource->target != PIPE_BUFFER);
+      assert(info->dst.resource->target != PIPE_BUFFER);
       emit_blit(batch->draw, info);
    }
 
@@ -479,7 +468,7 @@ fd5_blitter_blit(struct fd_context *ctx,
    /* Acc query state will have been dirtied by our fd_batch_update_queries, so
     * the ctx->batch may need to turn its queries back on.
     */
-   ctx->update_active_queries = true;
+   fd_context_dirty(ctx, FD_DIRTY_QUERY);
 
    return true;
 }

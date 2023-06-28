@@ -43,8 +43,8 @@
 
 _X_HIDDEN GLXContext
 glXCreateContextAttribsARB(Display *dpy, GLXFBConfig config,
-			   GLXContext share_context, Bool direct,
-			   const int *attrib_list)
+                           GLXContext share_context, Bool direct,
+                           const int *attrib_list)
 {
    xcb_connection_t *const c = XGetXCBConnection(dpy);
    struct glx_config *const cfg = (struct glx_config *) config;
@@ -54,7 +54,7 @@ glXCreateContextAttribsARB(Display *dpy, GLXFBConfig config,
    struct glx_screen *psc;
    xcb_generic_error_t *err;
    xcb_void_cookie_t cookie;
-   unsigned dummy_err = 0;
+   unsigned error = BadImplementation;
    uint32_t xid, share_xid;
    int screen = -1;
 
@@ -66,7 +66,7 @@ glXCreateContextAttribsARB(Display *dpy, GLXFBConfig config,
     */
    if (attrib_list != NULL) {
       for (/* empty */; attrib_list[num_attribs * 2] != 0; num_attribs++)
-	 /* empty */ ;
+         /* empty */ ;
    }
 
    if (cfg) {
@@ -92,24 +92,38 @@ glXCreateContextAttribsARB(Display *dpy, GLXFBConfig config,
 
    assert(screen == psc->scr);
 
-   if (direct && psc->vtable->create_context_attribs) {
-      /* GLX drops the error returned by the driver.  The expectation is that
-       * an error will also be returned by the server.  The server's error
-       * will be delivered to the application.
-       */
-      gc = psc->vtable->create_context_attribs(psc, cfg, share, num_attribs,
-					       (const uint32_t *) attrib_list,
-					       &dummy_err);
+   /* Some application may request an indirect context but we may want to force a direct
+    * one because Xorg only allows indirect contexts if they were enabled.
+    */
+   if (!direct &&
+       psc->force_direct_context) {
+      direct = true;
    }
 
-   if (gc == NULL) {
 #ifdef GLX_USE_APPLEGL
-      gc = applegl_create_context(psc, cfg, share, 0);
+   gc = applegl_create_context(psc, cfg, share, 0);
 #else
+   if (direct && psc->vtable->create_context_attribs) {
+      gc = psc->vtable->create_context_attribs(psc, cfg, share, num_attribs,
+					       (const uint32_t *) attrib_list,
+					       &error);
+   } else if (!direct) {
       gc = indirect_create_context_attribs(psc, cfg, share, num_attribs,
-              (const uint32_t *) attrib_list,
-              &dummy_err);
+                                           (const uint32_t *) attrib_list,
+                                           &error);
+   }
 #endif
+
+   if (gc == NULL) {
+      /* -1 isn't a legal XID, which is sort of the point, we've failed
+       * before we even got to XID allocation.
+       */
+      if (error == GLXBadContext || error == GLXBadFBConfig ||
+          error == GLXBadProfileARB)
+         __glXSendError(dpy, error, -1, 0, False);
+      else
+         __glXSendError(dpy, error, -1, 0, True);
+      return NULL;
    }
 
    xid = xcb_generate_id(c);
@@ -125,14 +139,14 @@ glXCreateContextAttribsARB(Display *dpy, GLXFBConfig config,
     */
    cookie =
       xcb_glx_create_context_attribs_arb_checked(c,
-						 xid,
-						 cfg ? cfg->fbconfigID : 0,
-						 screen,
-						 share_xid,
-						 gc ? gc->isDirect : direct,
-						 num_attribs,
-						 (const uint32_t *)
-						 attrib_list);
+                                                 xid,
+                                                 cfg ? cfg->fbconfigID : 0,
+                                                 screen,
+                                                 share_xid,
+                                                 gc ? gc->isDirect : direct,
+                                                 num_attribs,
+                                                 (const uint32_t *)
+                                                 attrib_list);
    err = xcb_request_check(c, cookie);
    if (err != NULL) {
       if (gc)
@@ -141,15 +155,6 @@ glXCreateContextAttribsARB(Display *dpy, GLXFBConfig config,
 
       __glXSendErrorForXcb(dpy, err);
       free(err);
-   } else if (!gc) {
-      /* the server thought the context description was okay, but we failed
-       * somehow on the client side. clean up the server resource and panic.
-       */
-      xcb_glx_destroy_context(c, xid);
-      /* increment dpy->request in order to give a unique serial number to the
-       * error */
-      XNoOp(dpy);
-      __glXSendError(dpy, GLXBadFBConfig, xid, 0, False);
    } else {
       gc->xid = xid;
       gc->share_xid = share_xid;

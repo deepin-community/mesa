@@ -27,6 +27,7 @@
 
 #include <vulkan/vulkan_core.h>
 #include "util/format/u_format.h"
+#include "util/u_math.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -87,6 +88,151 @@ vk_format_stencil_only(VkFormat format)
    assert(vk_format_has_stencil(format));
    return VK_FORMAT_S8_UINT;
 }
+
+void vk_component_mapping_to_pipe_swizzle(VkComponentMapping mapping,
+                                          unsigned char out_swizzle[4]);
+
+static inline bool
+vk_format_is_int(VkFormat format)
+{
+   return util_format_is_pure_integer(vk_format_to_pipe_format(format));
+}
+
+static inline bool
+vk_format_is_sint(VkFormat format)
+{
+   return util_format_is_pure_sint(vk_format_to_pipe_format(format));
+}
+
+static inline bool
+vk_format_is_uint(VkFormat format)
+{
+   return util_format_is_pure_uint(vk_format_to_pipe_format(format));
+}
+
+static inline bool
+vk_format_is_unorm(VkFormat format)
+{
+   return util_format_is_unorm(vk_format_to_pipe_format(format));
+}
+
+static inline bool
+vk_format_is_snorm(VkFormat format)
+{
+   return util_format_is_snorm(vk_format_to_pipe_format(format));
+}
+
+static inline bool
+vk_format_is_float(VkFormat format)
+{
+   return util_format_is_float(vk_format_to_pipe_format(format));
+}
+
+static inline bool
+vk_format_is_srgb(VkFormat format)
+{
+   return util_format_is_srgb(vk_format_to_pipe_format(format));
+}
+
+static inline unsigned
+vk_format_get_blocksize(VkFormat format)
+{
+   return util_format_get_blocksize(vk_format_to_pipe_format(format));
+}
+
+static inline unsigned
+vk_format_get_blockwidth(VkFormat format)
+{
+   return util_format_get_blockwidth(vk_format_to_pipe_format(format));
+}
+
+static inline unsigned
+vk_format_get_blockheight(VkFormat format)
+{
+   return util_format_get_blockheight(vk_format_to_pipe_format(format));
+}
+
+static inline bool
+vk_format_is_compressed(VkFormat format)
+{
+   /* this includes 4:2:2 formats, which are compressed formats for vulkan */
+   return vk_format_get_blockwidth(format) > 1;
+}
+
+static inline bool
+vk_format_is_block_compressed(VkFormat format)
+{
+   return util_format_is_compressed(vk_format_to_pipe_format(format));
+}
+
+static inline const struct util_format_description *
+vk_format_description(VkFormat format)
+{
+   return util_format_description(vk_format_to_pipe_format(format));
+}
+
+static inline unsigned
+vk_format_get_component_bits(VkFormat format, enum util_format_colorspace colorspace,
+                             unsigned component)
+{
+   return util_format_get_component_bits(vk_format_to_pipe_format(format),
+                                         colorspace,
+                                         component);
+}
+
+static inline unsigned
+vk_format_get_nr_components(VkFormat format)
+{
+   return util_format_get_nr_components(vk_format_to_pipe_format(format));
+}
+
+static inline bool
+vk_format_has_alpha(VkFormat format)
+{
+   return util_format_has_alpha(vk_format_to_pipe_format(format));
+}
+
+static inline unsigned
+vk_format_get_blocksizebits(VkFormat format)
+{
+   return util_format_get_blocksizebits(vk_format_to_pipe_format(format));
+}
+
+static inline unsigned
+vk_format_get_plane_count(VkFormat format)
+{
+   return util_format_get_num_planes(vk_format_to_pipe_format(format));
+}
+
+VkFormat
+vk_format_get_plane_format(VkFormat format, unsigned plane_id);
+
+VkFormat
+vk_format_get_aspect_format(VkFormat format, const VkImageAspectFlags aspect);
+
+struct vk_format_ycbcr_plane {
+   /* RGBA format for this plane */
+   VkFormat format;
+
+   /* Whether this plane contains chroma channels */
+   bool has_chroma;
+
+   /* For downscaling of YUV planes */
+   uint8_t denominator_scales[2];
+
+   /* How to map sampled ycbcr planes to a single 4 component element.
+    *
+    * We use uint8_t for compactness but it's actually VkComponentSwizzle.
+    */
+   uint8_t ycbcr_swizzle[4];
+};
+
+struct vk_format_ycbcr_info {
+   uint8_t n_planes;
+   struct vk_format_ycbcr_plane planes[3];
+};
+
+const struct vk_format_ycbcr_info *vk_format_get_ycbcr_info(VkFormat format);
 
 #ifdef __cplusplus
 }

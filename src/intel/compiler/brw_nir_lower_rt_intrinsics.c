@@ -48,6 +48,8 @@ static void
 lower_rt_intrinsics_impl(nir_function_impl *impl,
                          const struct intel_device_info *devinfo)
 {
+   bool progress = false;
+
    nir_builder build;
    nir_builder_init(&build, impl);
    nir_builder *b = &build;
@@ -140,47 +142,10 @@ lower_rt_intrinsics_impl(nir_function_impl *impl,
             if (stage == MESA_SHADER_COMPUTE)
                break;
 
-            assert(intrin->dest.is_ssa);
-            assert(intrin->src[0].is_ssa);
+            sysval = brw_nir_load_global_const(b, intrin,
+                        nir_load_btd_global_arg_addr_intel(b),
+                        BRW_RT_PUSH_CONST_OFFSET);
 
-            unsigned bit_size = intrin->dest.ssa.bit_size;
-            assert(bit_size >= 8 && bit_size % 8 == 0);
-            unsigned byte_size = bit_size / 8;
-
-            if (nir_src_is_const(intrin->src[0])) {
-               uint64_t offset = BRW_RT_PUSH_CONST_OFFSET +
-                                 nir_intrinsic_base(intrin) +
-                                 nir_src_as_uint(intrin->src[0]);
-
-               /* Things should be component-aligned. */
-               assert(offset % byte_size == 0);
-
-               unsigned suboffset = offset % 64;
-               uint64_t aligned_offset = offset - suboffset;
-
-               /* Load two just in case we go over a 64B boundary */
-               nir_ssa_def *data[2];
-               for (unsigned i = 0; i < 2; i++) {
-                  nir_ssa_def *addr =
-                     nir_iadd_imm(b, nir_load_btd_global_arg_addr_intel(b),
-                                     aligned_offset + i * 64);
-                  data[i] = nir_load_global_const_block_intel(b, 16, addr,
-                                                              nir_imm_true(b));
-               }
-
-               sysval = nir_extract_bits(b, data, 2, suboffset * 8,
-                                         intrin->num_components, bit_size);
-            } else {
-               nir_ssa_def *offset32 =
-                  nir_iadd_imm(b, intrin->src[0].ssa,
-                                  BRW_RT_PUSH_CONST_OFFSET +
-                                  nir_intrinsic_base(intrin));
-               nir_ssa_def *addr =
-                  nir_iadd(b, nir_load_btd_global_arg_addr_intel(b),
-                              nir_u2u64(b, offset32));
-               sysval = nir_load_global_constant(b, addr, byte_size,
-                                                 intrin->num_components, bit_size);
-            }
             break;
          }
 
@@ -220,20 +185,11 @@ lower_rt_intrinsics_impl(nir_function_impl *impl,
                sysval = hit_in.t;
             break;
 
-         case nir_intrinsic_load_primitive_id: {
-            /* It's in dw[3] for procedural and dw[2] for quad
-             *
-             * TODO: We really need some helpers here.
-             */
-            nir_ssa_def *offset =
-               nir_bcsel(b, build_leaf_is_procedural(b, &hit_in),
-                            nir_iadd_imm(b, hit_in.prim_leaf_index, 12),
-                            nir_imm_int(b, 8));
-            sysval = nir_load_global(b, nir_iadd(b, hit_in.prim_leaf_ptr,
-                                                    nir_u2u64(b, offset)),
-                                     4, /* align */ 1, 32);
+         case nir_intrinsic_load_primitive_id:
+            sysval = brw_nir_rt_load_primitive_id_from_hit(b,
+                                                           build_leaf_is_procedural(b, &hit_in),
+                                                           &hit_in);
             break;
-         }
 
          case nir_intrinsic_load_instance_id: {
             struct brw_nir_rt_bvh_instance_leaf_defs leaf;
@@ -267,7 +223,19 @@ lower_rt_intrinsics_impl(nir_function_impl *impl,
          }
 
          case nir_intrinsic_load_ray_flags:
-            sysval = nir_u2u32(b, world_ray_in.ray_flags);
+            /* We need to fetch the original ray flags we stored in the
+             * leaf pointer, because the actual ray flags we get here
+             * will include any flags passed on the pipeline at creation
+             * time, and the spec for IncomingRayFlagsKHR says:
+             *   Setting pipeline flags on the raytracing pipeline must not
+             *   cause any corresponding flags to be set in variables with
+             *   this decoration.
+             */
+            sysval = nir_u2u32(b, world_ray_in.inst_leaf_ptr);
+            break;
+
+         case nir_intrinsic_load_cull_mask:
+            sysval = nir_u2u32(b, world_ray_in.ray_mask);
             break;
 
          case nir_intrinsic_load_ray_geometry_index: {
@@ -365,6 +333,8 @@ lower_rt_intrinsics_impl(nir_function_impl *impl,
             continue;
          }
 
+         progress = true;
+
          if (sysval) {
             nir_ssa_def_rewrite_uses(&intrin->dest.ssa,
                                      sysval);
@@ -373,8 +343,11 @@ lower_rt_intrinsics_impl(nir_function_impl *impl,
       }
    }
 
-   nir_metadata_preserve(impl, nir_metadata_block_index |
-                               nir_metadata_dominance);
+   nir_metadata_preserve(impl,
+                         progress ?
+                         nir_metadata_none :
+                         (nir_metadata_block_index |
+                          nir_metadata_dominance));
 }
 
 /** Lower ray-tracing system values and intrinsics

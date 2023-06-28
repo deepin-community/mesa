@@ -1,28 +1,27 @@
 /*
- * Copyright © 2007-2019 Advanced Micro Devices, Inc.
- * All Rights Reserved.
- *
- * Permission is hereby granted, free of charge, to any person obtaining
- * a copy of this software and associated documentation files (the
- * "Software"), to deal in the Software without restriction, including
- * without limitation the rights to use, copy, modify, merge, publish,
- * distribute, sub license, and/or sell copies of the Software, and to
- * permit persons to whom the Software is furnished to do so, subject to
- * the following conditions:
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
- * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NON-INFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT HOLDERS, AUTHORS
- * AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
- * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE.
- *
- * The above copyright notice and this permission notice (including the
- * next paragraph) shall be included in all copies or substantial portions
- * of the Software.
- */
+************************************************************************************************************************
+*
+*  Copyright (C) 2007-2022 Advanced Micro Devices, Inc.  All rights reserved.
+*
+* Permission is hereby granted, free of charge, to any person obtaining a
+* copy of this software and associated documentation files (the "Software"),
+* to deal in the Software without restriction, including without limitation
+* the rights to use, copy, modify, merge, publish, distribute, sublicense,
+* and/or sell copies of the Software, and to permit persons to whom the
+* Software is furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in
+* all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+* THE COPYRIGHT HOLDER(S) OR AUTHOR(S) BE LIABLE FOR ANY CLAIM, DAMAGES OR
+* OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+* ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+* OTHER DEALINGS IN THE SOFTWARE
+*
+***********************************************************************************************************************/
 
 /**
 ************************************************************************************************************************
@@ -32,6 +31,7 @@
 */
 
 #include "gfx10addrlib.h"
+#include "addrcommon.h"
 #include "gfx10_gb_reg.h"
 
 #include "amdgpu_asic_addr.h"
@@ -66,46 +66,46 @@ namespace V2
 
 const SwizzleModeFlags Gfx10Lib::SwizzleModeTable[ADDR_SW_MAX_TYPE] =
 {//Linear 256B  4KB  64KB   Var    Z    Std   Disp  Rot   XOR    T     RtOpt Reserved
-    {1,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}, // ADDR_SW_LINEAR
-    {0,    1,    0,    0,    0,    0,    1,    0,    0,    0,    0,    0,    0}, // ADDR_SW_256B_S
-    {0,    1,    0,    0,    0,    0,    0,    1,    0,    0,    0,    0,    0}, // ADDR_SW_256B_D
-    {0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}, // Reserved
+    {{1,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}}, // ADDR_SW_LINEAR
+    {{0,    1,    0,    0,    0,    0,    1,    0,    0,    0,    0,    0,    0}}, // ADDR_SW_256B_S
+    {{0,    1,    0,    0,    0,    0,    0,    1,    0,    0,    0,    0,    0}}, // ADDR_SW_256B_D
+    {{0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}}, // Reserved
 
-    {0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}, // Reserved
-    {0,    0,    1,    0,    0,    0,    1,    0,    0,    0,    0,    0,    0}, // ADDR_SW_4KB_S
-    {0,    0,    1,    0,    0,    0,    0,    1,    0,    0,    0,    0,    0}, // ADDR_SW_4KB_D
-    {0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}, // Reserved
+    {{0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}}, // Reserved
+    {{0,    0,    1,    0,    0,    0,    1,    0,    0,    0,    0,    0,    0}}, // ADDR_SW_4KB_S
+    {{0,    0,    1,    0,    0,    0,    0,    1,    0,    0,    0,    0,    0}}, // ADDR_SW_4KB_D
+    {{0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}}, // Reserved
 
-    {0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}, // Reserved
-    {0,    0,    0,    1,    0,    0,    1,    0,    0,    0,    0,    0,    0}, // ADDR_SW_64KB_S
-    {0,    0,    0,    1,    0,    0,    0,    1,    0,    0,    0,    0,    0}, // ADDR_SW_64KB_D
-    {0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}, // Reserved
+    {{0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}}, // Reserved
+    {{0,    0,    0,    1,    0,    0,    1,    0,    0,    0,    0,    0,    0}}, // ADDR_SW_64KB_S
+    {{0,    0,    0,    1,    0,    0,    0,    1,    0,    0,    0,    0,    0}}, // ADDR_SW_64KB_D
+    {{0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}}, // Reserved
 
-    {0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}, // Reserved
-    {0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}, // Reserved
-    {0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}, // Reserved
-    {0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}, // Reserved
+    {{0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}}, // Reserved
+    {{0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}}, // Reserved
+    {{0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}}, // Reserved
+    {{0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}}, // Reserved
 
-    {0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}, // Reserved
-    {0,    0,    0,    1,    0,    0,    1,    0,    0,    1,    1,    0,    0}, // ADDR_SW_64KB_S_T
-    {0,    0,    0,    1,    0,    0,    0,    1,    0,    1,    1,    0,    0}, // ADDR_SW_64KB_D_T
-    {0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}, // Reserved
+    {{0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}}, // Reserved
+    {{0,    0,    0,    1,    0,    0,    1,    0,    0,    1,    1,    0,    0}}, // ADDR_SW_64KB_S_T
+    {{0,    0,    0,    1,    0,    0,    0,    1,    0,    1,    1,    0,    0}}, // ADDR_SW_64KB_D_T
+    {{0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}}, // Reserved
 
-    {0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}, // Reserved
-    {0,    0,    1,    0,    0,    0,    1,    0,    0,    1,    0,    0,    0}, // ADDR_SW_4KB_S_X
-    {0,    0,    1,    0,    0,    0,    0,    1,    0,    1,    0,    0,    0}, // ADDR_SW_4KB_D_X
-    {0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}, // Reserved
+    {{0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}}, // Reserved
+    {{0,    0,    1,    0,    0,    0,    1,    0,    0,    1,    0,    0,    0}}, // ADDR_SW_4KB_S_X
+    {{0,    0,    1,    0,    0,    0,    0,    1,    0,    1,    0,    0,    0}}, // ADDR_SW_4KB_D_X
+    {{0,    0,    1,    0,    0,    0,    0,    0,    0,    1,    0,    1,    0}}, // ADDR_SW_4KB_R_X
 
-    {0,    0,    0,    1,    0,    1,    0,    0,    0,    1,    0,    0,    0}, // ADDR_SW_64KB_Z_X
-    {0,    0,    0,    1,    0,    0,    1,    0,    0,    1,    0,    0,    0}, // ADDR_SW_64KB_S_X
-    {0,    0,    0,    1,    0,    0,    0,    1,    0,    1,    0,    0,    0}, // ADDR_SW_64KB_D_X
-    {0,    0,    0,    1,    0,    0,    0,    0,    0,    1,    0,    1,    0}, // ADDR_SW_64KB_R_X
+    {{0,    0,    0,    1,    0,    1,    0,    0,    0,    1,    0,    0,    0}}, // ADDR_SW_64KB_Z_X
+    {{0,    0,    0,    1,    0,    0,    1,    0,    0,    1,    0,    0,    0}}, // ADDR_SW_64KB_S_X
+    {{0,    0,    0,    1,    0,    0,    0,    1,    0,    1,    0,    0,    0}}, // ADDR_SW_64KB_D_X
+    {{0,    0,    0,    1,    0,    0,    0,    0,    0,    1,    0,    1,    0}}, // ADDR_SW_64KB_R_X
 
-    {0,    0,    0,    0,    1,    1,    0,    0,    0,    1,    0,    0,    0}, // ADDR_SW_VAR_Z_X
-    {0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}, // Reserved
-    {0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}, // Reserved
-    {0,    0,    0,    0,    1,    0,    0,    0,    0,    1,    0,    1,    0}, // ADDR_SW_VAR_R_X
-    {1,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}, // ADDR_SW_LINEAR_GENERAL
+    {{0,    0,    0,    0,    1,    1,    0,    0,    0,    1,    0,    0,    0}}, // ADDR_SW_VAR_Z_X
+    {{0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}}, // Reserved
+    {{0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}}, // Reserved
+    {{0,    0,    0,    0,    1,    0,    0,    0,    0,    1,    0,    1,    0}}, // ADDR_SW_VAR_R_X
+    {{1,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0}}, // ADDR_SW_LINEAR_GENERAL
 };
 
 const Dim3d Gfx10Lib::Block256_3d[] = {{8, 4, 8}, {4, 4, 8}, {4, 4, 4}, {4, 2, 4}, {2, 2, 4}};
@@ -129,6 +129,7 @@ Gfx10Lib::Gfx10Lib(const Client* pClient)
     m_numSaLog2(0),
     m_colorBaseIndex(0),
     m_xmaskBaseIndex(0),
+    m_htileBaseIndex(0),
     m_dccBaseIndex(0)
 {
     memset(&m_settings, 0, sizeof(m_settings));
@@ -611,7 +612,6 @@ ADDR_E_RETURNCODE Gfx10Lib::HwlComputeCmaskAddrFromCoord(
             (pIn->swizzleMode == ADDR_SW_VAR_Z_X) ? GFX10_CMASK_VAR_RBPLUS_PATIDX :
             (m_settings.supportRbPlus ? GFX10_CMASK_64K_RBPLUS_PATIDX : GFX10_CMASK_64K_PATIDX);
 
-
         const UINT_32  blkSizeLog2  = Log2(output.metaBlkWidth) + Log2(output.metaBlkHeight) - 7;
         const UINT_32  blkMask      = (1 << blkSizeLog2) - 1;
         const UINT_32  blkOffset    = ComputeOffsetFromSwizzlePattern(GFX10_CMASK_SW_PATTERN[patIdxTable[index]],
@@ -677,9 +677,8 @@ ADDR_E_RETURNCODE Gfx10Lib::HwlComputeHtileAddrFromCoord(
         {
             const UINT_32  numSampleLog2 = Log2(pIn->numSamples);
             const UINT_32  pipeMask      = (1 << m_pipesLog2) - 1;
-            const UINT_32  index         = m_xmaskBaseIndex + numSampleLog2;
+            const UINT_32  index         = m_htileBaseIndex + numSampleLog2;
             const UINT_8*  patIdxTable   = m_settings.supportRbPlus ? GFX10_HTILE_RBPLUS_PATIDX : GFX10_HTILE_PATIDX;
-
 
             const UINT_32  blkSizeLog2   = Log2(output.metaBlkWidth) + Log2(output.metaBlkHeight) - 4;
             const UINT_32  blkMask       = (1 << blkSizeLog2) - 1;
@@ -951,9 +950,11 @@ BOOL_32 Gfx10Lib::HwlInitGlobalParams(
 
     {
         // Skip unaligned case
-        m_xmaskBaseIndex += MaxNumOfAA;
+        m_xmaskBaseIndex += MaxNumOfBppCMask;
+        m_htileBaseIndex += MaxNumOfAA;
 
-        m_xmaskBaseIndex += m_pipesLog2 * MaxNumOfAA;
+        m_xmaskBaseIndex += m_pipesLog2 * MaxNumOfBppCMask;
+        m_htileBaseIndex += m_pipesLog2 * MaxNumOfAA;
         m_colorBaseIndex += m_pipesLog2 * MaxNumOfBpp;
 
         if (m_settings.supportRbPlus)
@@ -969,7 +970,8 @@ BOOL_32 Gfx10Lib::HwlInitGlobalParams(
             if (m_numPkrLog2 >= 2)
             {
                 m_colorBaseIndex += (2 * m_numPkrLog2 - 2) * MaxNumOfBpp;
-                m_xmaskBaseIndex += (m_numPkrLog2 - 1) * 3 * MaxNumOfAA;
+                m_xmaskBaseIndex += (m_numPkrLog2 - 1) * 3 * MaxNumOfBppCMask;
+                m_htileBaseIndex += (m_numPkrLog2 - 1) * 3 * MaxNumOfAA;
             }
         }
         else
@@ -979,9 +981,8 @@ BOOL_32 Gfx10Lib::HwlInitGlobalParams(
                                         1;
 
             ADDR_C_ASSERT(sizeof(GFX10_HTILE_PATIDX) / sizeof(GFX10_HTILE_PATIDX[0]) == (numPipeType + 1) * MaxNumOfAA);
-
-            ADDR_C_ASSERT(sizeof(GFX10_HTILE_PATIDX) / sizeof(GFX10_HTILE_PATIDX[0]) ==
-                          sizeof(GFX10_CMASK_64K_PATIDX) / sizeof(GFX10_CMASK_64K_PATIDX[0]));
+            ADDR_C_ASSERT(sizeof(GFX10_CMASK_64K_PATIDX) / sizeof(GFX10_CMASK_64K_PATIDX[0]) ==
+                          (numPipeType + 1) * MaxNumOfBppCMask);
         }
     }
 
@@ -991,7 +992,6 @@ BOOL_32 Gfx10Lib::HwlInitGlobalParams(
         // corresponding SW_64KB_* mode
         m_blockVarSizeLog2 = m_pipesLog2 + 14;
     }
-
 
     if (valid)
     {
@@ -1039,25 +1039,25 @@ ChipFamily Gfx10Lib::HwlConvertChipFamily(
                 m_settings.isDcn20 = 1;
             }
 
-            if (ASICREV_IS_SIENNA_CICHLID(chipRevision))
+            if (ASICREV_IS_NAVI21_M(chipRevision))
             {
                 m_settings.supportRbPlus   = 1;
                 m_settings.dccUnsup3DSwDis = 0;
             }
 
-            if (ASICREV_IS_NAVY_FLOUNDER(chipRevision))
+            if (ASICREV_IS_NAVI22_P(chipRevision))
             {
                 m_settings.supportRbPlus   = 1;
                 m_settings.dccUnsup3DSwDis = 0;
             }
 
-            if (ASICREV_IS_DIMGREY_CAVEFISH(chipRevision))
+            if (ASICREV_IS_NAVI23_P(chipRevision))
             {
                 m_settings.supportRbPlus   = 1;
                 m_settings.dccUnsup3DSwDis = 0;
             }
 
-            if (ASICREV_IS_BEIGE_GOBY(chipRevision))
+            if (ASICREV_IS_NAVI24_P(chipRevision))
             {
                 m_settings.supportRbPlus   = 1;
                 m_settings.dccUnsup3DSwDis = 0;
@@ -1074,11 +1074,10 @@ ChipFamily Gfx10Lib::HwlConvertChipFamily(
             {
                 ADDR_ASSERT(!"Unknown chip revision");
             }
-
             break;
 
-        case FAMILY_YC:
-            if (ASICREV_IS_YELLOW_CARP(chipRevision))
+        case FAMILY_RMB:
+            if (ASICREV_IS_REMBRANDT(chipRevision))
             {
                 m_settings.supportRbPlus   = 1;
                 m_settings.dccUnsup3DSwDis = 0;
@@ -1087,9 +1086,25 @@ ChipFamily Gfx10Lib::HwlConvertChipFamily(
             {
                 ADDR_ASSERT(!"Unknown chip revision");
             }
-
             break;
-
+        case FAMILY_RPL:
+            if (ASICREV_IS_RAPHAEL(chipRevision))
+            {
+                m_settings.supportRbPlus   = 1;
+                m_settings.dccUnsup3DSwDis = 0;
+            }
+            break;
+        case FAMILY_MDN:
+            if (ASICREV_IS_MENDOCINO(chipRevision))
+            {
+                m_settings.supportRbPlus   = 1;
+                m_settings.dccUnsup3DSwDis = 0;
+            }
+            else
+            {
+                ADDR_ASSERT(!"Unknown chip revision");
+            }
+            break;
         default:
             ADDR_ASSERT(!"Unknown chip family");
             break;
@@ -1449,13 +1464,15 @@ VOID Gfx10Lib::ConvertSwizzlePatternToEquation(
     ADDR_EQUATION*         pEquation) ///< [out] equation converted from swizzle pattern
     const
 {
-    ADDR_BIT_SETTING fullSwizzlePattern[20];
+    // Get full swizzle pattern and store it as an ADDR_BIT_SETTING list
+    ADDR_BIT_SETTING fullSwizzlePattern[ADDR_MAX_EQUATION_BIT];
     GetSwizzlePatternFromPatternInfo(pPatInfo, fullSwizzlePattern);
 
     const ADDR_BIT_SETTING* pSwizzle      = fullSwizzlePattern;
     const UINT_32           blockSizeLog2 = GetBlockSizeLog2(swMode);
-
+    memset(pEquation, 0, sizeof(ADDR_EQUATION));
     pEquation->numBits            = blockSizeLog2;
+    pEquation->numBitComponents   = pPatInfo->maxItemCount;
     pEquation->stackedDepthSlices = FALSE;
 
     for (UINT_32 i = 0; i < elemLog2; i++)
@@ -1467,6 +1484,7 @@ VOID Gfx10Lib::ConvertSwizzlePatternToEquation(
 
     if (IsXor(swMode) == FALSE)
     {
+        // Use simplified logic when we only have one bit-component
         for (UINT_32 i = elemLog2; i < blockSizeLog2; i++)
         {
             ADDR_ASSERT(IsPow2(pSwizzle[i].value));
@@ -1496,475 +1514,87 @@ VOID Gfx10Lib::ConvertSwizzlePatternToEquation(
                 pEquation->addr[i].valid   = 1;
                 pEquation->addr[i].index   = Log2(pSwizzle[i].z);
             }
-
-            pEquation->xor1[i].value = 0;
-            pEquation->xor2[i].value = 0;
         }
-    }
-    else if (IsThin(rsrcType, swMode))
-    {
-        Dim3d dim;
-        ComputeThinBlockDimension(&dim.w, &dim.h, &dim.d, 8u << elemLog2, 0, rsrcType, swMode);
-
-        const UINT_32 blkXLog2 = Log2(dim.w);
-        const UINT_32 blkYLog2 = Log2(dim.h);
-        const UINT_32 blkXMask = dim.w - 1;
-        const UINT_32 blkYMask = dim.h - 1;
-
-        ADDR_BIT_SETTING swizzle[ADDR_MAX_EQUATION_BIT] = {};
-        UINT_32          xMask = 0;
-        UINT_32          yMask = 0;
-        UINT_32          bMask = (1 << elemLog2) - 1;
-
-        for (UINT_32 i = elemLog2; i < blockSizeLog2; i++)
-        {
-            if (IsPow2(pSwizzle[i].value))
-            {
-                if (pSwizzle[i].x != 0)
-                {
-                    ADDR_ASSERT((xMask & pSwizzle[i].x) == 0);
-                    xMask |= pSwizzle[i].x;
-
-                    const UINT_32 xLog2 = Log2(pSwizzle[i].x);
-
-                    ADDR_ASSERT(xLog2 < blkXLog2);
-
-                    pEquation->addr[i].channel = 0;
-                    pEquation->addr[i].valid   = 1;
-                    pEquation->addr[i].index   = xLog2 + elemLog2;
-                }
-                else
-                {
-                    ADDR_ASSERT(pSwizzle[i].y != 0);
-                    ADDR_ASSERT((yMask & pSwizzle[i].y) == 0);
-                    yMask |= pSwizzle[i].y;
-
-                    pEquation->addr[i].channel = 1;
-                    pEquation->addr[i].valid   = 1;
-                    pEquation->addr[i].index   = Log2(pSwizzle[i].y);
-
-                    ADDR_ASSERT(pEquation->addr[i].index < blkYLog2);
-                }
-
-                swizzle[i].value = 0;
-                bMask |= 1 << i;
-            }
-            else
-            {
-                if (pSwizzle[i].z != 0)
-                {
-                    ADDR_ASSERT(IsPow2(static_cast<UINT_32>(pSwizzle[i].z)));
-
-                    pEquation->xor2[i].channel = 2;
-                    pEquation->xor2[i].valid   = 1;
-                    pEquation->xor2[i].index   = Log2(pSwizzle[i].z);
-                }
-
-                swizzle[i].x = pSwizzle[i].x;
-                swizzle[i].y = pSwizzle[i].y;
-                swizzle[i].z = swizzle[i].s = 0;
-
-                ADDR_ASSERT(IsPow2(swizzle[i].value) == FALSE);
-
-                const UINT_32 xHi = swizzle[i].x & (~blkXMask);
-
-                if (xHi != 0)
-                {
-                    ADDR_ASSERT(IsPow2(xHi));
-                    ADDR_ASSERT(pEquation->xor1[i].value == 0);
-
-                    pEquation->xor1[i].channel = 0;
-                    pEquation->xor1[i].valid   = 1;
-                    pEquation->xor1[i].index   = Log2(xHi) + elemLog2;
-
-                    swizzle[i].x &= blkXMask;
-                }
-
-                const UINT_32 yHi = swizzle[i].y & (~blkYMask);
-
-                if (yHi != 0)
-                {
-                    ADDR_ASSERT(IsPow2(yHi));
-
-                    if (xHi == 0)
-                    {
-                        ADDR_ASSERT(pEquation->xor1[i].value == 0);
-                        pEquation->xor1[i].channel = 1;
-                        pEquation->xor1[i].valid   = 1;
-                        pEquation->xor1[i].index   = Log2(yHi);
-                    }
-                    else
-                    {
-                        ADDR_ASSERT(pEquation->xor2[i].value == 0);
-                        pEquation->xor2[i].channel = 1;
-                        pEquation->xor2[i].valid   = 1;
-                        pEquation->xor2[i].index   = Log2(yHi);
-                    }
-
-                    swizzle[i].y &= blkYMask;
-                }
-
-                if (swizzle[i].value == 0)
-                {
-                    bMask |= 1 << i;
-                }
-            }
-        }
-
-        const UINT_32 pipeIntMask = (1 << m_pipeInterleaveLog2) - 1;
-        const UINT_32 blockMask   = (1 << blockSizeLog2) - 1;
-
-        ADDR_ASSERT((bMask & pipeIntMask) == pipeIntMask);
-
-        while (bMask != blockMask)
-        {
-            for (UINT_32 i = m_pipeInterleaveLog2; i < blockSizeLog2; i++)
-            {
-                if ((bMask & (1 << i)) == 0)
-                {
-                    if (IsPow2(swizzle[i].value))
-                    {
-                        if (swizzle[i].x != 0)
-                        {
-                            ADDR_ASSERT((xMask & swizzle[i].x) == 0);
-                            xMask |= swizzle[i].x;
-
-                            const UINT_32 xLog2 = Log2(swizzle[i].x);
-
-                            ADDR_ASSERT(xLog2 < blkXLog2);
-
-                            pEquation->addr[i].channel = 0;
-                            pEquation->addr[i].valid   = 1;
-                            pEquation->addr[i].index   = xLog2 + elemLog2;
-                        }
-                        else
-                        {
-                            ADDR_ASSERT(swizzle[i].y != 0);
-                            ADDR_ASSERT((yMask & swizzle[i].y) == 0);
-                            yMask |= swizzle[i].y;
-
-                            pEquation->addr[i].channel = 1;
-                            pEquation->addr[i].valid   = 1;
-                            pEquation->addr[i].index   = Log2(swizzle[i].y);
-
-                            ADDR_ASSERT(pEquation->addr[i].index < blkYLog2);
-                        }
-
-                        swizzle[i].value = 0;
-                        bMask |= 1 << i;
-                    }
-                    else
-                    {
-                        const UINT_32 x = swizzle[i].x & xMask;
-                        const UINT_32 y = swizzle[i].y & yMask;
-
-                        if (x != 0)
-                        {
-                            ADDR_ASSERT(IsPow2(x));
-
-                            if (pEquation->xor1[i].value == 0)
-                            {
-                                pEquation->xor1[i].channel = 0;
-                                pEquation->xor1[i].valid   = 1;
-                                pEquation->xor1[i].index   = Log2(x) + elemLog2;
-                            }
-                            else
-                            {
-                                ADDR_ASSERT(pEquation->xor2[i].value == 0);
-                                pEquation->xor2[i].channel = 0;
-                                pEquation->xor2[i].valid   = 1;
-                                pEquation->xor2[i].index   = Log2(x) + elemLog2;
-                            }
-                        }
-
-                        if (y != 0)
-                        {
-                            ADDR_ASSERT(IsPow2(y));
-
-                            if (pEquation->xor1[i].value == 0)
-                            {
-                                pEquation->xor1[i].channel = 1;
-                                pEquation->xor1[i].valid   = 1;
-                                pEquation->xor1[i].index   = Log2(y);
-                            }
-                            else
-                            {
-                                ADDR_ASSERT(pEquation->xor2[i].value == 0);
-                                pEquation->xor2[i].channel = 1;
-                                pEquation->xor2[i].valid   = 1;
-                                pEquation->xor2[i].index   = Log2(y);
-                            }
-                        }
-
-                        swizzle[i].x &= ~x;
-                        swizzle[i].y &= ~y;
-                    }
-                }
-            }
-        }
-
-        ADDR_ASSERT((xMask == blkXMask) && (yMask == blkYMask));
     }
     else
     {
-        const UINT_32 blkXLog2 = (blockSizeLog2 == 12) ? Block4K_Log2_3d[elemLog2].w : Block64K_Log2_3d[elemLog2].w;
-        const UINT_32 blkYLog2 = (blockSizeLog2 == 12) ? Block4K_Log2_3d[elemLog2].h : Block64K_Log2_3d[elemLog2].h;
-        const UINT_32 blkZLog2 = (blockSizeLog2 == 12) ? Block4K_Log2_3d[elemLog2].d : Block64K_Log2_3d[elemLog2].d;
-        const UINT_32 blkXMask = (1 << blkXLog2) - 1;
-        const UINT_32 blkYMask = (1 << blkYLog2) - 1;
-        const UINT_32 blkZMask = (1 << blkZLog2) - 1;
+        Dim3d dim;
+        ComputeBlockDimension(&dim.w, &dim.h, &dim.d, 8u << elemLog2, rsrcType, swMode);
+
+        const UINT_32 blkXLog2 = Log2(dim.w);
+        const UINT_32 blkYLog2 = Log2(dim.h);
+        const UINT_32 blkZLog2 = Log2(dim.d);
+        const UINT_32 blkXMask = dim.w - 1;
+        const UINT_32 blkYMask = dim.h - 1;
+        const UINT_32 blkZMask = dim.d - 1;
 
         ADDR_BIT_SETTING swizzle[ADDR_MAX_EQUATION_BIT] = {};
+        memcpy(&swizzle, pSwizzle, sizeof(swizzle));
         UINT_32          xMask = 0;
         UINT_32          yMask = 0;
         UINT_32          zMask = 0;
-        UINT_32          bMask = (1 << elemLog2) - 1;
 
         for (UINT_32 i = elemLog2; i < blockSizeLog2; i++)
         {
-            if (IsPow2(pSwizzle[i].value))
+            for (UINT_32 bitComp = 0; bitComp < ADDR_MAX_EQUATION_COMP; bitComp++)
             {
-                if (pSwizzle[i].x != 0)
+                if (swizzle[i].value == 0)
                 {
-                    ADDR_ASSERT((xMask & pSwizzle[i].x) == 0);
-                    xMask |= pSwizzle[i].x;
-
-                    const UINT_32 xLog2 = Log2(pSwizzle[i].x);
-
-                    ADDR_ASSERT(xLog2 < blkXLog2);
-
-                    pEquation->addr[i].channel = 0;
-                    pEquation->addr[i].valid   = 1;
-                    pEquation->addr[i].index   = xLog2 + elemLog2;
+                    ADDR_ASSERT(bitComp != 0); // Bits above element size must have at least one addr-bit
+                    ADDR_ASSERT(bitComp <= pPatInfo->maxItemCount);
+                    break;
                 }
-                else if (pSwizzle[i].y != 0)
+
+                if (swizzle[i].x != 0)
                 {
-                    ADDR_ASSERT((yMask & pSwizzle[i].y) == 0);
-                    yMask |= pSwizzle[i].y;
+                    const UINT_32 xLog2 = BitScanForward(swizzle[i].x);
+                    swizzle[i].x = UnsetLeastBit(swizzle[i].x);
+                    xMask |= (1 << xLog2);
 
-                    pEquation->addr[i].channel = 1;
-                    pEquation->addr[i].valid   = 1;
-                    pEquation->addr[i].index   = Log2(pSwizzle[i].y);
+                    pEquation->comps[bitComp][i].channel = 0;
+                    pEquation->comps[bitComp][i].valid   = 1;
+                    pEquation->comps[bitComp][i].index   = xLog2 + elemLog2;
+                }
+                else if (swizzle[i].y != 0)
+                {
+                    const UINT_32 yLog2 = BitScanForward(swizzle[i].y);
+                    swizzle[i].y = UnsetLeastBit(swizzle[i].y);
+                    yMask |= (1 << yLog2);
 
-                    ADDR_ASSERT(pEquation->addr[i].index < blkYLog2);
+                    pEquation->comps[bitComp][i].channel = 1;
+                    pEquation->comps[bitComp][i].valid   = 1;
+                    pEquation->comps[bitComp][i].index   = yLog2;
+                }
+                else if (swizzle[i].z != 0)
+                {
+                    const UINT_32 zLog2 = BitScanForward(swizzle[i].z);
+                    swizzle[i].z = UnsetLeastBit(swizzle[i].z);
+                    zMask |= (1 << zLog2);
+
+                    pEquation->comps[bitComp][i].channel = 2;
+                    pEquation->comps[bitComp][i].valid   = 1;
+                    pEquation->comps[bitComp][i].index   = zLog2;
                 }
                 else
                 {
-                    ADDR_ASSERT(pSwizzle[i].z != 0);
-                    ADDR_ASSERT((zMask & pSwizzle[i].z) == 0);
-                    zMask |= pSwizzle[i].z;
-
-                    pEquation->addr[i].channel = 2;
-                    pEquation->addr[i].valid   = 1;
-                    pEquation->addr[i].index   = Log2(pSwizzle[i].z);
-
-                    ADDR_ASSERT(pEquation->addr[i].index < blkZLog2);
-                }
-
-                swizzle[i].value = 0;
-                bMask |= 1 << i;
-            }
-            else
-            {
-                swizzle[i].x = pSwizzle[i].x;
-                swizzle[i].y = pSwizzle[i].y;
-                swizzle[i].z = pSwizzle[i].z;
-                swizzle[i].s = 0;
-
-                ADDR_ASSERT(IsPow2(swizzle[i].value) == FALSE);
-
-                const UINT_32 xHi = swizzle[i].x & (~blkXMask);
-                const UINT_32 yHi = swizzle[i].y & (~blkYMask);
-                const UINT_32 zHi = swizzle[i].z & (~blkZMask);
-
-                ADDR_ASSERT((xHi == 0) || (yHi== 0) || (zHi == 0));
-
-                if (xHi != 0)
-                {
-                    ADDR_ASSERT(IsPow2(xHi));
-                    ADDR_ASSERT(pEquation->xor1[i].value == 0);
-
-                    pEquation->xor1[i].channel = 0;
-                    pEquation->xor1[i].valid   = 1;
-                    pEquation->xor1[i].index   = Log2(xHi) + elemLog2;
-
-                    swizzle[i].x &= blkXMask;
-                }
-
-                if (yHi != 0)
-                {
-                    ADDR_ASSERT(IsPow2(yHi));
-
-                    if (pEquation->xor1[i].value == 0)
-                    {
-                        pEquation->xor1[i].channel = 1;
-                        pEquation->xor1[i].valid   = 1;
-                        pEquation->xor1[i].index   = Log2(yHi);
-                    }
-                    else
-                    {
-                        ADDR_ASSERT(pEquation->xor2[i].value == 0);
-                        pEquation->xor2[i].channel = 1;
-                        pEquation->xor2[i].valid   = 1;
-                        pEquation->xor2[i].index   = Log2(yHi);
-                    }
-
-                    swizzle[i].y &= blkYMask;
-                }
-
-                if (zHi != 0)
-                {
-                    ADDR_ASSERT(IsPow2(zHi));
-
-                    if (pEquation->xor1[i].value == 0)
-                    {
-                        pEquation->xor1[i].channel = 2;
-                        pEquation->xor1[i].valid   = 1;
-                        pEquation->xor1[i].index   = Log2(zHi);
-                    }
-                    else
-                    {
-                        ADDR_ASSERT(pEquation->xor2[i].value == 0);
-                        pEquation->xor2[i].channel = 2;
-                        pEquation->xor2[i].valid   = 1;
-                        pEquation->xor2[i].index   = Log2(zHi);
-                    }
-
-                    swizzle[i].z &= blkZMask;
-                }
-
-                if (swizzle[i].value == 0)
-                {
-                    bMask |= 1 << i;
+                    // This function doesn't handle MSAA (must update block dims, here, and consumers)
+                    ADDR_ASSERT_ALWAYS();
                 }
             }
+            ADDR_ASSERT(swizzle[i].value == 0); // We missed an xor? Are there too many?
         }
 
-        const UINT_32 pipeIntMask = (1 << m_pipeInterleaveLog2) - 1;
-        const UINT_32 blockMask   = (1 << blockSizeLog2) - 1;
-
-        ADDR_ASSERT((bMask & pipeIntMask) == pipeIntMask);
-
-        while (bMask != blockMask)
-        {
-            for (UINT_32 i = m_pipeInterleaveLog2; i < blockSizeLog2; i++)
-            {
-                if ((bMask & (1 << i)) == 0)
-                {
-                    if (IsPow2(swizzle[i].value))
-                    {
-                        if (swizzle[i].x != 0)
-                        {
-                            ADDR_ASSERT((xMask & swizzle[i].x) == 0);
-                            xMask |= swizzle[i].x;
-
-                            const UINT_32 xLog2 = Log2(swizzle[i].x);
-
-                            ADDR_ASSERT(xLog2 < blkXLog2);
-
-                            pEquation->addr[i].channel = 0;
-                            pEquation->addr[i].valid   = 1;
-                            pEquation->addr[i].index   = xLog2 + elemLog2;
-                        }
-                        else if (swizzle[i].y != 0)
-                        {
-                            ADDR_ASSERT((yMask & swizzle[i].y) == 0);
-                            yMask |= swizzle[i].y;
-
-                            pEquation->addr[i].channel = 1;
-                            pEquation->addr[i].valid   = 1;
-                            pEquation->addr[i].index   = Log2(swizzle[i].y);
-
-                            ADDR_ASSERT(pEquation->addr[i].index < blkYLog2);
-                        }
-                        else
-                        {
-                            ADDR_ASSERT(swizzle[i].z != 0);
-                            ADDR_ASSERT((zMask & swizzle[i].z) == 0);
-                            zMask |= swizzle[i].z;
-
-                            pEquation->addr[i].channel = 2;
-                            pEquation->addr[i].valid   = 1;
-                            pEquation->addr[i].index   = Log2(swizzle[i].z);
-
-                            ADDR_ASSERT(pEquation->addr[i].index < blkZLog2);
-                        }
-
-                        swizzle[i].value = 0;
-                        bMask |= 1 << i;
-                    }
-                    else
-                    {
-                        const UINT_32 x = swizzle[i].x & xMask;
-                        const UINT_32 y = swizzle[i].y & yMask;
-                        const UINT_32 z = swizzle[i].z & zMask;
-
-                        if (x != 0)
-                        {
-                            ADDR_ASSERT(IsPow2(x));
-
-                            if (pEquation->xor1[i].value == 0)
-                            {
-                                pEquation->xor1[i].channel = 0;
-                                pEquation->xor1[i].valid   = 1;
-                                pEquation->xor1[i].index   = Log2(x) + elemLog2;
-                            }
-                            else
-                            {
-                                ADDR_ASSERT(pEquation->xor2[i].value == 0);
-                                pEquation->xor2[i].channel = 0;
-                                pEquation->xor2[i].valid   = 1;
-                                pEquation->xor2[i].index   = Log2(x) + elemLog2;
-                            }
-                        }
-
-                        if (y != 0)
-                        {
-                            ADDR_ASSERT(IsPow2(y));
-
-                            if (pEquation->xor1[i].value == 0)
-                            {
-                                pEquation->xor1[i].channel = 1;
-                                pEquation->xor1[i].valid   = 1;
-                                pEquation->xor1[i].index   = Log2(y);
-                            }
-                            else
-                            {
-                                ADDR_ASSERT(pEquation->xor2[i].value == 0);
-                                pEquation->xor2[i].channel = 1;
-                                pEquation->xor2[i].valid   = 1;
-                                pEquation->xor2[i].index   = Log2(y);
-                            }
-                        }
-
-                        if (z != 0)
-                        {
-                            ADDR_ASSERT(IsPow2(z));
-
-                            if (pEquation->xor1[i].value == 0)
-                            {
-                                pEquation->xor1[i].channel = 2;
-                                pEquation->xor1[i].valid   = 1;
-                                pEquation->xor1[i].index   = Log2(z);
-                            }
-                            else
-                            {
-                                ADDR_ASSERT(pEquation->xor2[i].value == 0);
-                                pEquation->xor2[i].channel = 2;
-                                pEquation->xor2[i].valid   = 1;
-                                pEquation->xor2[i].index   = Log2(z);
-                            }
-                        }
-
-                        swizzle[i].x &= ~x;
-                        swizzle[i].y &= ~y;
-                        swizzle[i].z &= ~z;
-                    }
-                }
-            }
-        }
-
-        ADDR_ASSERT((xMask == blkXMask) && (yMask == blkYMask) && (zMask == blkZMask));
+        // We missed an address bit for coords inside the block?
+        // That means two coords will land on the same addr, which is bad.
+        ADDR_ASSERT(((xMask & blkXMask) == blkXMask) &&
+                    ((yMask & blkYMask) == blkYMask) &&
+                    ((zMask & blkZMask) == blkZMask));
+        // We're sourcing from outside our block? That won't fly for PRTs, which need to be movable.
+        // Non-xor modes can also be used for 2D PRTs but they're handled in the simplified logic above.
+        ADDR_ASSERT((IsPrt(swMode) == false) ||
+                    ((xMask == blkXMask) &&
+                     (yMask == blkYMask) &&
+                     (zMask == blkZMask)));
     }
 }
 
@@ -1983,46 +1613,44 @@ VOID Gfx10Lib::InitEquationTable()
 {
     memset(m_equationTable, 0, sizeof(m_equationTable));
 
+    // Iterate through resourceTypes, up to MaxRsrcType where a "resourceType" refers to AddrResourceType (1D/2D/3D)
+    // resources. This starts with rsrcTypeIdx = 0, however there is an offset added that will start us off at
+    // computing 2D resources.
     for (UINT_32 rsrcTypeIdx = 0; rsrcTypeIdx < MaxRsrcType; rsrcTypeIdx++)
     {
+        // Add offset. Start iterating from ADDR_RSRC_TEX_2D
         const AddrResourceType rsrcType = static_cast<AddrResourceType>(rsrcTypeIdx + ADDR_RSRC_TEX_2D);
 
+        // Iterate through the maximum number of swizzlemodes a type can hold
         for (UINT_32 swModeIdx = 0; swModeIdx < MaxSwModeType; swModeIdx++)
         {
             const AddrSwizzleMode swMode = static_cast<AddrSwizzleMode>(swModeIdx);
 
+            // Iterate through the different bits-per-pixel settings (8bpp/16bpp/32bpp/64bpp/128bpp)
             for (UINT_32 elemLog2 = 0; elemLog2 < MaxElementBytesLog2; elemLog2++)
             {
                 UINT_32                equationIndex = ADDR_INVALID_EQUATION_INDEX;
+                // May or may not return a ADDR_SW_PATINFO for a completely different swizzle mode, essentially
+                // overwriting the choice.
                 const ADDR_SW_PATINFO* pPatInfo      = GetSwizzlePatternInfo(swMode, rsrcType, elemLog2, 1);
 
                 if (pPatInfo != NULL)
                 {
                     ADDR_ASSERT(IsValidSwMode(swMode));
+                    ADDR_EQUATION equation = {};
 
-                    if (pPatInfo->maxItemCount <= 3)
-                    {
-                        ADDR_EQUATION equation = {};
+                    // Passing in pPatInfo to get the addr equation
+                    ConvertSwizzlePatternToEquation(elemLog2, rsrcType, swMode, pPatInfo, &equation);
 
-                        ConvertSwizzlePatternToEquation(elemLog2, rsrcType, swMode, pPatInfo, &equation);
-
-                        equationIndex = m_numEquations;
-                        ADDR_ASSERT(equationIndex < EquationTableSize);
-
-                        m_equationTable[equationIndex] = equation;
-
-                        m_numEquations++;
-                    }
-                    else
-                    {
-                        // We only see "ill" equation from 64/128 BPE + 3D resource + SW_64KB_D_X under RB+ case
-                        ADDR_ASSERT((elemLog2 == 3) || (elemLog2 == 4));
-                        ADDR_ASSERT(rsrcTypeIdx == 1);
-                        ADDR_ASSERT(swMode == ADDR_SW_64KB_D_X);
-                        ADDR_ASSERT(m_settings.supportRbPlus == 1);
-                    }
+                    equationIndex = m_numEquations;
+                    ADDR_ASSERT(equationIndex < EquationTableSize);
+                    // Updates m_equationTable[m_numEquations] to be the addr equation for this PatInfo
+                    m_equationTable[equationIndex] = equation;
+                    // Increment m_numEquations
+                    m_numEquations++;
                 }
-
+                // equationIndex, which is used to look up equations in m_equationTable, will be cached for every
+                // iteration in this nested for-loop
                 m_equationLookupTable[rsrcTypeIdx][swModeIdx][elemLog2] = equationIndex;
             }
         }
@@ -2307,15 +1935,15 @@ ADDR_E_RETURNCODE Gfx10Lib::HwlComputeNonBlockCompressedView(
 {
     ADDR_E_RETURNCODE returnCode = ADDR_OK;
 
-    if (pIn->resourceType != ADDR_RSRC_TEX_2D)
+    if (IsThin(pIn->resourceType, pIn->swizzleMode) == FALSE)
     {
-        // Only 2D resource can have a NonBC view...
+        // Only thin swizzle mode can have a NonBC view...
         returnCode = ADDR_INVALIDPARAMS;
     }
-    else if ((pIn->format != ADDR_FMT_ASTC_8x8) &&
+    else if (((pIn->format < ADDR_FMT_ASTC_4x4) || (pIn->format > ADDR_FMT_ETC2_128BPP)) &&
              ((pIn->format < ADDR_FMT_BC1) || (pIn->format > ADDR_FMT_BC7)))
     {
-        // Only support BC1~BC7 or ASTC_8x8 for now...
+        // Only support BC1~BC7, ASTC, or ETC2 for now...
         returnCode = ADDR_NOTSUPPORTED;
     }
     else
@@ -2328,14 +1956,15 @@ ADDR_E_RETURNCODE Gfx10Lib::HwlComputeNonBlockCompressedView(
         infoIn.swizzleMode  = pIn->swizzleMode;
         infoIn.resourceType = pIn->resourceType;
         infoIn.bpp          = bpp;
-        infoIn.width        = PowTwoAlign(pIn->width, bcWidth) / bcWidth;
-        infoIn.height       = PowTwoAlign(pIn->height, bcHeight) / bcHeight;
+        infoIn.width        = RoundUpQuotient(pIn->width, bcWidth);
+        infoIn.height       = RoundUpQuotient(pIn->height, bcHeight);
         infoIn.numSlices    = pIn->numSlices;
         infoIn.numMipLevels = pIn->numMipLevels;
         infoIn.numSamples   = 1;
         infoIn.numFrags     = 1;
 
         ADDR2_MIP_INFO mipInfo[MaxMipLevels] = {};
+        ADDR_ASSERT(pIn->numMipLevels <= MaxMipLevels);
 
         ADDR2_COMPUTE_SURFACE_INFO_OUTPUT infoOut = {};
         infoOut.pMipInfo = mipInfo;
@@ -2381,8 +2010,8 @@ ADDR_E_RETURNCODE Gfx10Lib::HwlComputeNonBlockCompressedView(
             pOut->pipeBankXor = slicePbXorOut.pipeBankXor;
 
             const BOOL_32 inTail           = tiled && (pIn->mipId >= infoOut.firstMipIdInTail) ? TRUE : FALSE;
-            const UINT_32 requestMipWidth  = PowTwoAlign(Max(pIn->width >> pIn->mipId, 1u), bcWidth) / bcWidth;
-            const UINT_32 requestMipHeight = PowTwoAlign(Max(pIn->height >> pIn->mipId, 1u), bcHeight) / bcHeight;
+            const UINT_32 requestMipWidth  = RoundUpQuotient(Max(pIn->width >> pIn->mipId, 1u), bcWidth);
+            const UINT_32 requestMipHeight = RoundUpQuotient(Max(pIn->height >> pIn->mipId, 1u), bcHeight);
 
             if (inTail)
             {
@@ -2432,10 +2061,8 @@ ADDR_E_RETURNCODE Gfx10Lib::HwlComputeNonBlockCompressedView(
                 pOut->mipId        = 1;
                 pOut->numMipLevels = 2;
 
-                const UINT_32 upperMipWidth  =
-                    PowTwoAlign(Max(pIn->width >> (pIn->mipId - 1), 1u), bcWidth) / bcWidth;
-                const UINT_32 upperMipHeight =
-                    PowTwoAlign(Max(pIn->height >> (pIn->mipId - 1), 1u), bcHeight) / bcHeight;
+                const UINT_32 upperMipWidth  = RoundUpQuotient(Max(pIn->width >> (pIn->mipId - 1), 1u), bcWidth);
+                const UINT_32 upperMipHeight = RoundUpQuotient(Max(pIn->height >> (pIn->mipId - 1), 1u), bcHeight);
 
                 const BOOL_32 needToAvoidInTail =
                     tiled && (requestMipWidth <= infoOut.blockWidth / 2) && (requestMipHeight <= infoOut.blockHeight) ?
@@ -2510,7 +2137,6 @@ BOOL_32 Gfx10Lib::ValidateNonSwModeParams(
     const BOOL_32             tex2d    = IsTex2d(rsrcType);
     const BOOL_32             tex1d    = IsTex1d(rsrcType);
     const BOOL_32             stereo   = flags.qbStereo;
-
 
     // Resource type check
     if (tex1d)
@@ -2640,7 +2266,6 @@ BOOL_32 Gfx10Lib::ValidateSwModeParams(
             ADDR_ASSERT_ALWAYS();
             valid = FALSE;
         }
-
     }
     else if (tex3d)
     {
@@ -2749,7 +2374,7 @@ ADDR_E_RETURNCODE Gfx10Lib::HwlComputeSurfaceInfoSanityCheck(
 *   Gfx10Lib::HwlGetPreferredSurfaceSetting
 *
 *   @brief
-*       Internal function to get suggested surface information for cliet to use
+*       Internal function to get suggested surface information for client to use
 *
 *   @return
 *       ADDR_E_RETURNCODE
@@ -2818,7 +2443,7 @@ ADDR_E_RETURNCODE Gfx10Lib::HwlGetPreferredSurfaceSetting(
                     padSize[i] = PowTwoAlign(padSize[i], sizeAlignInElement);
                 }
 
-                if (BlockTypeWithinMemoryBudget(padSize[0],
+                if (Addr2BlockTypeWithinMemoryBudget(padSize[0],
                                                 padSize[1],
                                                 ratioLow,
                                                 ratioHi,
@@ -2956,7 +2581,6 @@ ADDR_E_RETURNCODE Gfx10Lib::HwlGetPreferredSurfaceSetting(
 
                 case ADDR_RSRC_TEX_2D:
                     allowedSwModeSet.value &= pIn->flags.prt ? Gfx10Rsrc2dPrtSwModeMask : Gfx10Rsrc2dSwModeMask;
-
                     break;
 
                 case ADDR_RSRC_TEX_3D:
@@ -3052,7 +2676,9 @@ ADDR_E_RETURNCODE Gfx10Lib::HwlGetPreferredSurfaceSetting(
 
                 if (pIn->flags.needEquation)
                 {
-                    FilterInvalidEqSwizzleMode(allowedSwModeSet, pIn->resourceType, Log2(bpp >> 3));
+                    UINT_32 components = pIn->flags.allowExtEquation ?  ADDR_MAX_EQUATION_COMP :
+                                                                        ADDR_MAX_LEGACY_EQUATION_COMP;
+                    FilterInvalidEqSwizzleMode(allowedSwModeSet, pIn->resourceType, Log2(bpp >> 3), components);
                 }
 
                 if (allowedSwModeSet.value == Gfx10LinearSwModeMask)
@@ -3071,11 +2697,13 @@ ADDR_E_RETURNCODE Gfx10Lib::HwlGetPreferredSurfaceSetting(
                         allowedSwModeSet.swLinear = 0;
                     }
 
+                    // A bitfield where each bit represents a block type. Each swizzle mode maps to a block.
                     ADDR2_BLOCK_SET allowedBlockSet = GetAllowedBlockSet(allowedSwModeSet, pOut->resourceType);
 
                     // Determine block size if there are 2 or more block type candidates
                     if (IsPow2(allowedBlockSet.value) == FALSE)
                     {
+                        // Tracks a valid SwizzleMode for each valid block type
                         AddrSwizzleMode swMode[AddrBlockMaxTiledType] = {};
 
                         swMode[AddrBlockLinear] = ADDR_SW_LINEAR;
@@ -3098,19 +2726,21 @@ ADDR_E_RETURNCODE Gfx10Lib::HwlGetPreferredSurfaceSetting(
                             swMode[AddrBlockThin64KB] = ADDR_SW_64KB_S;
                         }
 
+                        // Tracks the size of each valid swizzle mode's surface in bytes
                         UINT_64 padSize[AddrBlockMaxTiledType] = {};
 
                         const UINT_32 ratioLow           = computeMinSize ? 1 : (pIn->flags.opt4space ? 3 : 2);
                         const UINT_32 ratioHi            = computeMinSize ? 1 : (pIn->flags.opt4space ? 2 : 1);
                         const UINT_64 sizeAlignInElement = Max(NextPow2(pIn->minSizeAlign) / (bpp >> 3), 1u);
-                        UINT_32       minSizeBlk         = AddrBlockMicro;
-                        UINT_64       minSize            = 0;
+                        UINT_32       minSizeBlk         = AddrBlockMicro; // Tracks the most optimal block to use
+                        UINT_64       minSize            = 0;              // Tracks the minimum acceptable block type
 
                         ADDR2_COMPUTE_SURFACE_INFO_OUTPUT localOut = {};
 
+                        // Iterate through all block types
                         for (UINT_32 i = AddrBlockLinear; i < AddrBlockMaxTiledType; i++)
                         {
-                            if (IsBlockTypeAvaiable(allowedBlockSet, static_cast<AddrBlockType>(i)))
+                            if (Addr2IsBlockTypeAvailable(allowedBlockSet, static_cast<::AddrBlockType>(i)))
                             {
                                 localIn.swizzleMode = swMode[i];
 
@@ -3134,7 +2764,8 @@ ADDR_E_RETURNCODE Gfx10Lib::HwlGetPreferredSurfaceSetting(
                                     }
                                     else
                                     {
-                                        if (BlockTypeWithinMemoryBudget(
+                                        // Checks if the block type is within the memory budget but favors larger blocks
+                                        if (Addr2BlockTypeWithinMemoryBudget(
                                                 minSize,
                                                 padSize[i],
                                                 ratioLow,
@@ -3183,9 +2814,9 @@ ADDR_E_RETURNCODE Gfx10Lib::HwlGetPreferredSurfaceSetting(
                             for (UINT_32 i = AddrBlockMicro; i < AddrBlockMaxTiledType; i++)
                             {
                                 if ((i != minSizeBlk) &&
-                                    IsBlockTypeAvaiable(allowedBlockSet, static_cast<AddrBlockType>(i)))
+                                    Addr2IsBlockTypeAvailable(allowedBlockSet, static_cast<::AddrBlockType>(i)))
                                 {
-                                    if (BlockTypeWithinMemoryBudget(
+                                    if (Addr2BlockTypeWithinMemoryBudget(
                                             minSize,
                                             padSize[i],
                                             0,
@@ -3522,7 +3153,6 @@ ADDR_E_RETURNCODE Gfx10Lib::HwlComputeSurfaceInfoTiled(
     return ret;
 }
 
-
 /**
 ************************************************************************************************************************
 *   Gfx10Lib::ComputeSurfaceInfoMicroTiled
@@ -3676,6 +3306,7 @@ ADDR_E_RETURNCODE Gfx10Lib::ComputeSurfaceInfoMacroTiled(
                 UINT_64       mipSize[MaxMipLevels];
                 UINT_64       mipSliceSize[MaxMipLevels];
 
+                ADDR_ASSERT(pIn->numMipLevels <= MaxMipLevels);
                 Dim3d fixedTailMaxDim = tailMaxDim;
 
                 if (m_settings.dsMipmapHtileFix && IsZOrderSwizzle(pIn->swizzleMode) && (index <= 1))
@@ -3892,54 +3523,23 @@ UINT_32 Gfx10Lib::ComputeOffsetFromEquation(
     {
         UINT_32 v = 0;
 
-        if (pEq->addr[i].valid)
+        for (UINT_32 c = 0; c < pEq->numBitComponents; c++)
         {
-            if (pEq->addr[i].channel == 0)
+            if (pEq->comps[c][i].valid)
             {
-                v ^= (x >> pEq->addr[i].index) & 1;
-            }
-            else if (pEq->addr[i].channel == 1)
-            {
-                v ^= (y >> pEq->addr[i].index) & 1;
-            }
-            else
-            {
-                ADDR_ASSERT(pEq->addr[i].channel == 2);
-                v ^= (z >> pEq->addr[i].index) & 1;
-            }
-        }
-
-        if (pEq->xor1[i].valid)
-        {
-            if (pEq->xor1[i].channel == 0)
-            {
-                v ^= (x >> pEq->xor1[i].index) & 1;
-            }
-            else if (pEq->xor1[i].channel == 1)
-            {
-                v ^= (y >> pEq->xor1[i].index) & 1;
-            }
-            else
-            {
-                ADDR_ASSERT(pEq->xor1[i].channel == 2);
-                v ^= (z >> pEq->xor1[i].index) & 1;
-            }
-        }
-
-        if (pEq->xor2[i].valid)
-        {
-            if (pEq->xor2[i].channel == 0)
-            {
-                v ^= (x >> pEq->xor2[i].index) & 1;
-            }
-            else if (pEq->xor2[i].channel == 1)
-            {
-                v ^= (y >> pEq->xor2[i].index) & 1;
-            }
-            else
-            {
-                ADDR_ASSERT(pEq->xor2[i].channel == 2);
-                v ^= (z >> pEq->xor2[i].index) & 1;
+                if (pEq->comps[c][i].channel == 0)
+                {
+                    v ^= (x >> pEq->comps[c][i].index) & 1;
+                }
+                else if (pEq->comps[c][i].channel == 1)
+                {
+                    v ^= (y >> pEq->comps[c][i].index) & 1;
+                }
+                else
+                {
+                    ADDR_ASSERT(pEq->comps[c][i].channel == 2);
+                    v ^= (z >> pEq->comps[c][i].index) & 1;
+                }
             }
         }
 
@@ -4068,6 +3668,8 @@ const ADDR_SW_PATINFO* Gfx10Lib::GetSwizzlePatternInfo(
     UINT_32          numFrag            ///< Number of fragment
     ) const
 {
+    // Now elemLog2 is going to be used to access the correct index insode of the pPatInfo array so we will start from
+    // the right location
     const UINT_32          index       = IsXor(swizzleMode) ? (m_colorBaseIndex + elemLog2) : elemLog2;
     const ADDR_SW_PATINFO* patInfo     = NULL;
     const UINT_32          swizzleMask = 1 << swizzleMode;
@@ -4130,8 +3732,15 @@ const ADDR_SW_PATINFO* Gfx10Lib::GetSwizzlePatternInfo(
             {
                 if (IsRtOptSwizzle(swizzleMode))
                 {
-                    patInfo = m_settings.supportRbPlus ?
-                              GFX10_SW_64K_R_X_1xaa_RBPLUS_PATINFO : GFX10_SW_64K_R_X_1xaa_PATINFO;
+                    if (swizzleMode == ADDR_SW_4KB_R_X)
+                    {
+                        patInfo = NULL;
+                    }
+                    else
+                    {
+                        patInfo = m_settings.supportRbPlus ?
+                                  GFX10_SW_64K_R_X_1xaa_RBPLUS_PATINFO : GFX10_SW_64K_R_X_1xaa_PATINFO;
+                    }
                 }
                 else if (IsZOrderSwizzle(swizzleMode))
                 {
@@ -4224,6 +3833,10 @@ const ADDR_SW_PATINFO* Gfx10Lib::GetSwizzlePatternInfo(
                         {
                             patInfo = m_settings.supportRbPlus ?
                                       GFX10_SW_4K_D_RBPLUS_PATINFO : GFX10_SW_4K_D_PATINFO;
+                        }
+                        else if (swizzleMode == ADDR_SW_4KB_R_X)
+                        {
+                            patInfo = NULL;
                         }
                         else
                         {
@@ -4329,7 +3942,6 @@ const ADDR_SW_PATINFO* Gfx10Lib::GetSwizzlePatternInfo(
     return (patInfo != NULL) ? &patInfo[index] : NULL;
 }
 
-
 /**
 ************************************************************************************************************************
 *   Gfx10Lib::ComputeSurfaceAddrFromCoordMicroTiled
@@ -4349,6 +3961,7 @@ ADDR_E_RETURNCODE Gfx10Lib::ComputeSurfaceAddrFromCoordMicroTiled(
     ADDR2_COMPUTE_SURFACE_INFO_INPUT  localIn  = {};
     ADDR2_COMPUTE_SURFACE_INFO_OUTPUT localOut = {};
     ADDR2_MIP_INFO                    mipInfo[MaxMipLevels];
+    ADDR_ASSERT(pIn->numMipLevels <= MaxMipLevels);
 
     localIn.swizzleMode  = pIn->swizzleMode;
     localIn.flags        = pIn->flags;
@@ -4415,6 +4028,7 @@ ADDR_E_RETURNCODE Gfx10Lib::ComputeSurfaceAddrFromCoordMacroTiled(
     ADDR2_COMPUTE_SURFACE_INFO_INPUT  localIn  = {};
     ADDR2_COMPUTE_SURFACE_INFO_OUTPUT localOut = {};
     ADDR2_MIP_INFO                    mipInfo[MaxMipLevels];
+    ADDR_ASSERT(pIn->numMipLevels <= MaxMipLevels);
 
     localIn.swizzleMode  = pIn->swizzleMode;
     localIn.flags        = pIn->flags;

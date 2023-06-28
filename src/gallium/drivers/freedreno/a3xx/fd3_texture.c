@@ -92,7 +92,7 @@ fd3_sampler_state_create(struct pipe_context *pctx,
 
    so->needs_border = false;
    so->texsamp0 =
-      COND(!cso->normalized_coords, A3XX_TEX_SAMP_0_UNNORM_COORDS) |
+      COND(cso->unnormalized_coords, A3XX_TEX_SAMP_0_UNNORM_COORDS) |
       COND(!cso->seamless_cube_map, A3XX_TEX_SAMP_0_CUBEMAPSEAMLESSFILTOFF) |
       COND(miplinear, A3XX_TEX_SAMP_0_MIPFILTER_LINEAR) |
       A3XX_TEX_SAMP_0_XY_MAG(tex_filter(cso->mag_img_filter, aniso)) |
@@ -116,8 +116,8 @@ fd3_sampler_state_create(struct pipe_context *pctx,
        * LOD clamp so the HW can decide between min and mag filtering of
        * level 0.
        */
-      so->texsamp1 |= A3XX_TEX_SAMP_1_MIN_LOD(MIN2(cso->min_lod, 0.125)) |
-                      A3XX_TEX_SAMP_1_MAX_LOD(MIN2(cso->max_lod, 0.125));
+      so->texsamp1 |= A3XX_TEX_SAMP_1_MIN_LOD(MIN2(cso->min_lod, 0.125f)) |
+                      A3XX_TEX_SAMP_1_MAX_LOD(MIN2(cso->max_lod, 0.125f));
    }
 
    return so;
@@ -128,7 +128,7 @@ tex_type(unsigned target)
 {
    switch (target) {
    default:
-      assert(0);
+      unreachable("Unsupported target");
    case PIPE_BUFFER:
    case PIPE_TEXTURE_1D:
    case PIPE_TEXTURE_1D_ARRAY:

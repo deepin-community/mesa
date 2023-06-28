@@ -20,6 +20,8 @@
 # SOFTWARE.
 
 files_panfrost = files(
+  'pan_disk_cache.c',
+  'pan_fence.c',
   'pan_helpers.c',
   'pan_public.h',
   'pan_screen.c',
@@ -29,10 +31,11 @@ files_panfrost = files(
   'pan_context.c',
   'pan_blit.c',
   'pan_job.c',
-  'pan_assemble.c',
-  'pan_compute.c',
+  'pan_shader.c',
   'pan_mempool.c',
   'pan_mempool.h',
+  'pan_nir_remove_fragcolor_stores.c',
+  'pan_nir_lower_sysvals.c',
 )
 
 panfrost_includes = [
@@ -50,7 +53,7 @@ compile_args_panfrost = [
   '-Wno-pointer-arith'
 ]
 
-panfrost_versions = ['4', '5', '6', '7']
+panfrost_versions = ['4', '5', '6', '7', '9']
 libpanfrost_versions = []
 
 foreach ver : panfrost_versions

@@ -19,7 +19,7 @@ SHA256 checksum
 
 ::
 
-    TBD.
+    77104fd4a93bce69da3b0982f8ee88ba7c4fb98cfc491a669894339cdcd4a67d  mesa-21.3.4.tar.xz
 
 
 New features
@@ -104,7 +104,7 @@ Ian Romanick (1):
 
 - i965: Disable EXT_texture_integer on Gfx4 and Gfx5
 
-Jason Ekstrand (1):
+Faith Ekstrand (1):
 
 - Revert "anv: Stop doing too much per-sample shading"
 

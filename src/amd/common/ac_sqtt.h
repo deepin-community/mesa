@@ -30,7 +30,6 @@
 #include <stdbool.h>
 
 #include <assert.h>
-#include "c11_compat.h"
 #include "ac_rgp.h"
 
 struct radeon_cmdbuf;
@@ -49,6 +48,13 @@ struct ac_thread_trace_data {
    struct rgp_code_object rgp_code_object;
    struct rgp_loader_events rgp_loader_events;
    struct rgp_pso_correlation rgp_pso_correlation;
+
+   struct rgp_queue_info rgp_queue_info;
+   struct rgp_queue_event rgp_queue_event;
+
+   struct rgp_clock_calibration rgp_clock_calibration;
+
+   struct hash_table_u64 *pipeline_bos;
 };
 
 #define SQTT_BUFFER_ALIGN_SHIFT 12
@@ -69,10 +75,12 @@ struct ac_thread_trace_se {
    uint32_t compute_unit;
 };
 
+#define SQTT_MAX_TRACES 6
+
 struct ac_thread_trace {
    struct ac_thread_trace_data *data;
    uint32_t num_traces;
-   struct ac_thread_trace_se traces[4];
+   struct ac_thread_trace_se traces[SQTT_MAX_TRACES];
 };
 
 uint64_t
@@ -285,6 +293,14 @@ enum rgp_sqtt_marker_event_type
    EventInternalUnknown = 26,
    EventCmdDrawIndirectCount = 27,
    EventCmdDrawIndexedIndirectCount = 28,
+   /* gap */
+   EventCmdTraceRaysKHR = 30,
+   EventCmdTraceRaysIndirectKHR = 31,
+   EventCmdBuildAccelerationStructuresKHR = 32,
+   EventCmdBuildAccelerationStructuresIndirectKHR = 33,
+   EventCmdCopyAccelerationStructureKHR = 34,
+   EventCmdCopyAccelerationStructureToMemoryKHR = 35,
+   EventCmdCopyMemoryToAccelerationStructureKHR = 36,
    EventInvalid = 0xffffffff
 };
 
@@ -492,5 +508,7 @@ bool ac_sqtt_add_pso_correlation(struct ac_thread_trace_data *thread_trace_data,
 bool ac_sqtt_add_code_object_loader_event(struct ac_thread_trace_data *thread_trace_data,
                                           uint64_t pipeline_hash,
                                           uint64_t base_address);
+
+bool ac_check_profile_state(const struct radeon_info *info);
 
 #endif

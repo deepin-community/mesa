@@ -245,6 +245,7 @@ v3d_rcl_emit_loads(struct v3d_job *job, struct v3d_cl *cl, int layer)
         if ((loads_pending & PIPE_CLEAR_DEPTHSTENCIL) &&
             (V3D_VERSION >= 40 ||
              (job->zsbuf && job->zsbuf->texture->nr_samples > 1))) {
+                assert(!job->early_zs_clear);
                 struct pipe_surface *src = job->bbuf ? job->bbuf : job->zsbuf;
                 struct v3d_resource *rsc = v3d_resource(src->texture);
 
@@ -345,6 +346,7 @@ v3d_rcl_emit_stores(struct v3d_job *job, struct v3d_cl *cl, int layer)
 
         if (job->store & PIPE_CLEAR_DEPTHSTENCIL && job->zsbuf &&
             !(V3D_VERSION < 40 && job->zsbuf->texture->nr_samples <= 1)) {
+                assert(!job->early_zs_clear);
                 struct v3d_resource *rsc = v3d_resource(job->zsbuf->texture);
                 if (rsc->separate_stencil) {
                         if (job->store & PIPE_CLEAR_DEPTH) {
@@ -418,7 +420,7 @@ v3d_rcl_emit_stores(struct v3d_job *job, struct v3d_cl *cl, int layer)
          */
         if (job->clear) {
                 cl_emit(cl, CLEAR_TILE_BUFFERS, clear) {
-                        clear.clear_z_stencil_buffer = true;
+                        clear.clear_z_stencil_buffer = !job->early_zs_clear;
                         clear.clear_all_render_targets = true;
                 }
         }
@@ -561,6 +563,23 @@ supertile_in_job_scissors(struct v3d_job *job,
    return false;
 }
 
+#if V3D_VERSION >= 40
+static inline bool
+do_double_initial_tile_clear(const struct v3d_job *job)
+{
+        /* Our rendering code emits an initial clear per layer, unlike the
+         * Vulkan driver, which only executes a single initial clear for all
+         * layers. This is because in GL we don't use the
+         * 'clear_buffer_being_stored' bit when storing tiles, so each layer
+         * needs the iniital clear. This is also why this helper, unlike the
+         * Vulkan version, doesn't check the layer count to decide if double
+         * clear for double buffer mode is required.
+         */
+        return job->double_buffer &&
+               (job->draw_tiles_x > 1 || job->draw_tiles_y > 1);
+}
+#endif
+
 static void
 emit_render_layer(struct v3d_job *job, uint32_t layer)
 {
@@ -638,9 +657,9 @@ emit_render_layer(struct v3d_job *job, uint32_t layer)
                 cl_emit(&job->rcl, STORE_TILE_BUFFER_GENERAL, store) {
                         store.buffer_to_store = NONE;
                 }
-                if (i == 0) {
+                if (i == 0 || do_double_initial_tile_clear(job)) {
                         cl_emit(&job->rcl, CLEAR_TILE_BUFFERS, clear) {
-                                clear.clear_z_stencil_buffer = true;
+                                clear.clear_z_stencil_buffer = !job->early_zs_clear;
                                 clear.clear_all_render_targets = true;
                         }
                 }
@@ -709,30 +728,45 @@ v3dX(emit_rcl)(struct v3d_job *job)
                 }
 #endif /* V3D_VERSION >= 40 */
 
-                /* XXX: Early D/S clear */
-
-                switch (job->first_ez_state) {
-                case V3D_EZ_UNDECIDED:
-                case V3D_EZ_LT_LE:
-                        config.early_z_disable = false;
-                        config.early_z_test_and_update_direction =
-                                EARLY_Z_DIRECTION_LT_LE;
-                        break;
-                case V3D_EZ_GT_GE:
-                        config.early_z_disable = false;
-                        config.early_z_test_and_update_direction =
-                                EARLY_Z_DIRECTION_GT_GE;
-                        break;
-                case V3D_EZ_DISABLED:
+                if (job->decided_global_ez_enable) {
+                        switch (job->first_ez_state) {
+                        case V3D_EZ_UNDECIDED:
+                        case V3D_EZ_LT_LE:
+                                config.early_z_disable = false;
+                                config.early_z_test_and_update_direction =
+                                        EARLY_Z_DIRECTION_LT_LE;
+                                break;
+                        case V3D_EZ_GT_GE:
+                                config.early_z_disable = false;
+                                config.early_z_test_and_update_direction =
+                                        EARLY_Z_DIRECTION_GT_GE;
+                                break;
+                        case V3D_EZ_DISABLED:
+                                config.early_z_disable = true;
+                        }
+                } else {
+                        assert(job->draw_calls_queued == 0);
                         config.early_z_disable = true;
                 }
+
+#if V3D_VERSION >= 40
+                assert(job->zsbuf || config.early_z_disable);
+
+                job->early_zs_clear = (job->clear & PIPE_CLEAR_DEPTHSTENCIL) &&
+                        !(job->load & PIPE_CLEAR_DEPTHSTENCIL) &&
+                        !(job->store & PIPE_CLEAR_DEPTHSTENCIL);
+
+                config.early_depth_stencil_clear = job->early_zs_clear;
+#endif /* V3D_VERSION >= 40 */
 
                 config.image_width_pixels = job->draw_width;
                 config.image_height_pixels = job->draw_height;
 
                 config.number_of_render_targets = MAX2(job->nr_cbufs, 1);
 
+                assert(!job->msaa || !job->double_buffer);
                 config.multisample_mode_4x = job->msaa;
+                config.double_buffer_in_non_ms_mode = job->double_buffer;
 
                 config.maximum_bpp_of_all_render_targets = job->internal_bpp;
         }
@@ -830,7 +864,7 @@ v3dX(emit_rcl)(struct v3d_job *job)
 #endif
 
 #if V3D_VERSION < 40
-        /* TODO: Don't bother emitting if we don't load/clear Z/S. */
+        /* FIXME: Don't bother emitting if we don't load/clear Z/S. */
         if (job->zsbuf) {
                 struct pipe_surface *psurf = job->zsbuf;
                 struct v3d_surface *surf = v3d_surface(psurf);

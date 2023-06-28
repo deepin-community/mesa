@@ -25,41 +25,45 @@
 #include "nir_builder.h"
 
 static const struct glsl_type *
-get_sampler_type_for_image(const struct glsl_type *type)
+get_texture_type_for_image(const struct glsl_type *type)
 {
    if (glsl_type_is_array(type)) {
       const struct glsl_type *elem_type =
-         get_sampler_type_for_image(glsl_get_array_element(type));
+         get_texture_type_for_image(glsl_get_array_element(type));
       return glsl_array_type(elem_type, glsl_get_length(type), 0 /*explicit size*/);
    }
 
    assert((glsl_type_is_image(type)));
-   return glsl_sampler_type(glsl_get_sampler_dim(type), false,
+   return glsl_texture_type(glsl_get_sampler_dim(type),
                             glsl_sampler_type_is_array(type),
                             glsl_get_sampler_result_type(type));
 }
 
-static void
-replace_image_type_with_sampler(nir_deref_instr *deref)
+static bool
+replace_image_type_with_texture(nir_deref_instr *deref)
 {
    const struct glsl_type *type = deref->type;
 
    /* If we've already chased up the deref chain this far from a different intrinsic, we're done */
-   if (glsl_type_is_sampler(glsl_without_array(type)))
-      return;
+   if (!glsl_type_is_image(glsl_without_array(type)))
+      return false;
 
-   deref->type = get_sampler_type_for_image(type);
+   deref->type = get_texture_type_for_image(type);
+   deref->modes = nir_var_uniform;
    if (deref->deref_type == nir_deref_type_var) {
       type = deref->var->type;
-      if (!glsl_type_is_sampler(glsl_without_array(type))) {
-         deref->var->type = get_sampler_type_for_image(type);
+      if (glsl_type_is_image(glsl_without_array(type))) {
+         deref->var->type = get_texture_type_for_image(type);
+         deref->var->data.mode = nir_var_uniform;
          memset(&deref->var->data.sampler, 0, sizeof(deref->var->data.sampler));
       }
    } else {
       nir_deref_instr *parent = nir_deref_instr_parent(deref);
       if (parent)
-         replace_image_type_with_sampler(parent);
+         replace_image_type_with_texture(parent);
    }
+
+   return true;
 }
 
 struct readonly_image_lower_options {
@@ -67,12 +71,9 @@ struct readonly_image_lower_options {
 };
 
 static bool
-is_readonly_image_op(const nir_instr *instr, const void *context)
+lower_readonly_image_instr_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin,
+                                     const struct readonly_image_lower_options *options)
 {
-   struct readonly_image_lower_options *options = (struct readonly_image_lower_options *)context;
-   if (instr->type != nir_instr_type_intrinsic)
-      return false;
-   nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
    if (intrin->intrinsic != nir_intrinsic_image_deref_load &&
        intrin->intrinsic != nir_intrinsic_image_deref_size)
       return false;
@@ -91,19 +92,12 @@ is_readonly_image_op(const nir_instr *instr, const void *context)
    if (options->per_variable) {
       if (var)
          access = var->data.access;
-   } else
+   } else {
       access = nir_intrinsic_access(intrin);
-   if (access & ACCESS_NON_WRITEABLE)
-      return true;
+   }
+   if (!(access & ACCESS_NON_WRITEABLE))
+      return false;
 
-   return false;
-}
-
-static nir_ssa_def *
-lower_readonly_image_op(nir_builder *b, nir_instr *instr, void *context)
-{
-   struct readonly_image_lower_options *options = (struct readonly_image_lower_options *)context;
-   nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
    unsigned num_srcs;
    nir_texop texop;
    switch (intrin->intrinsic) {
@@ -116,10 +110,10 @@ lower_readonly_image_op(nir_builder *b, nir_instr *instr, void *context)
       num_srcs = 2;
       break;
    default:
-      unreachable("Filtered above");
+      unreachable("Unsupported intrinsic");
    }
 
-   nir_deref_instr *deref = nir_src_as_deref(intrin->src[0]);
+   b->cursor = nir_before_instr(&intrin->instr);
 
    nir_tex_instr *tex = nir_tex_instr_create(b->shader, num_srcs);
    tex->op = texop;
@@ -135,21 +129,20 @@ lower_readonly_image_op(nir_builder *b, nir_instr *instr, void *context)
 
    tex->src[0].src_type = nir_tex_src_texture_deref;
    tex->src[0].src = nir_src_for_ssa(&deref->dest.ssa);
-         
+
    if (options->per_variable) {
       assert(nir_deref_instr_get_variable(deref));
-      replace_image_type_with_sampler(deref);
+      replace_image_type_with_texture(deref);
    }
 
-   tex->coord_components = coord_components;
    switch (intrin->intrinsic) {
    case nir_intrinsic_image_deref_load: {
       assert(intrin->src[1].is_ssa);
       nir_ssa_def *coord =
-         nir_channels(b, intrin->src[1].ssa,
-                      (1 << tex->coord_components) - 1);
+         nir_trim_vector(b, intrin->src[1].ssa, coord_components);
       tex->src[1].src_type = nir_tex_src_coord;
       tex->src[1].src = nir_src_for_ssa(coord);
+      tex->coord_components = coord_components;
 
       assert(intrin->src[3].is_ssa);
       nir_ssa_def *lod = intrin->src[3].ssa;
@@ -183,32 +176,63 @@ lower_readonly_image_op(nir_builder *b, nir_instr *instr, void *context)
 
    nir_builder_instr_insert(b, &tex->instr);
 
-   nir_ssa_def *res = &tex->dest.ssa;
-   if (res->num_components != intrin->dest.ssa.num_components) {
-      unsigned num_components = intrin->dest.ssa.num_components;
-      res = nir_channels(b, res, (1 << num_components) - 1);
+   nir_ssa_def *res = nir_trim_vector(b, &tex->dest.ssa,
+                                      intrin->dest.ssa.num_components);
+
+   nir_ssa_def_rewrite_uses(&intrin->dest.ssa, res);
+   nir_instr_remove(&intrin->instr);
+
+   return true;
+}
+
+static bool
+lower_readonly_image_instr_tex(nir_builder *b, nir_tex_instr *tex,
+                               const struct readonly_image_lower_options *options)
+{
+   int deref_idx = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
+   if (deref_idx == -1)
+      return false;
+
+   nir_deref_instr *deref = nir_src_as_deref(tex->src[deref_idx].src);
+   if (options->per_variable) {
+      assert(nir_deref_instr_get_variable(deref));
+      return replace_image_type_with_texture(deref);
    }
 
-   return res;
+   return false;
+}
+
+static bool
+lower_readonly_image_instr(nir_builder *b, nir_instr *instr, void *context)
+{
+   struct readonly_image_lower_options *options = (struct readonly_image_lower_options *)context;
+
+   switch (instr->type) {
+   case nir_instr_type_intrinsic:
+      return lower_readonly_image_instr_intrinsic(b, nir_instr_as_intrinsic(instr), options);
+   case nir_instr_type_tex:
+      return lower_readonly_image_instr_tex(b, nir_instr_as_tex(instr), options);
+   default:
+      return false;
+   }
 }
 
 /** Lowers image ops to texture ops for read-only images
-  * 
-  * If per_variable is set:
-  * - Variable access is used to indicate read-only instead of intrinsic access
-  * - Variable/deref types will be changed from image types to sampler types
-  * 
-  * per_variable should not be set for OpenCL, because all image types will be void-returning,
-  * and there is no corresponding valid sampler type, and it will collide with the "bare" sampler type.
-  */
+ *
+ * If per_variable is set:
+ * - Variable access is used to indicate read-only instead of intrinsic access
+ * - Variable/deref types will be changed from image types to sampler types
+ *
+ * per_variable should not be set for OpenCL, because all image types will be
+ * void-returning, and there is no corresponding valid sampler type, and it
+ * will collide with the "bare" sampler type.
+ */
 bool
 nir_lower_readonly_images_to_tex(nir_shader *shader, bool per_variable)
 {
-   assert(shader->info.stage != MESA_SHADER_KERNEL || !per_variable);
-
    struct readonly_image_lower_options options = { per_variable };
-   return nir_shader_lower_instructions(shader,
-                                        is_readonly_image_op,
-                                        lower_readonly_image_op,
-                                        &options);
+   return nir_shader_instructions_pass(shader, lower_readonly_image_instr,
+                                       nir_metadata_block_index |
+                                       nir_metadata_dominance,
+                                       &options);
 }

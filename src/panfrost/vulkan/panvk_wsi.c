@@ -42,12 +42,11 @@ panvk_wsi_init(struct panvk_physical_device *physical_device)
 {
    VkResult result;
 
-   result = wsi_device_init(&physical_device->wsi_device,
-                            panvk_physical_device_to_handle(physical_device),
-                            panvk_wsi_proc_addr,
-                            &physical_device->instance->vk.alloc,
-                            physical_device->master_fd, NULL,
-                            false);
+   result = wsi_device_init(
+      &physical_device->wsi_device,
+      panvk_physical_device_to_handle(physical_device), panvk_wsi_proc_addr,
+      &physical_device->instance->vk.alloc, physical_device->master_fd, NULL,
+      &(struct wsi_device_options){.sw_device = false});
    if (result != VK_SUCCESS)
       return result;
 
@@ -64,27 +63,4 @@ panvk_wsi_finish(struct panvk_physical_device *physical_device)
    physical_device->vk.wsi_device = NULL;
    wsi_device_finish(&physical_device->wsi_device,
                      &physical_device->instance->vk.alloc);
-}
-
-VkResult
-panvk_AcquireNextImage2KHR(VkDevice _device,
-                           const VkAcquireNextImageInfoKHR *pAcquireInfo,
-                           uint32_t *pImageIndex)
-{
-   VK_FROM_HANDLE(panvk_device, device, _device);
-   VK_FROM_HANDLE(panvk_fence, fence, pAcquireInfo->fence);
-   VK_FROM_HANDLE(panvk_semaphore, sem, pAcquireInfo->semaphore);
-   struct panvk_physical_device *pdevice = device->physical_device;
-
-   VkResult result =
-      wsi_common_acquire_next_image2(&pdevice->wsi_device, _device,
-                                     pAcquireInfo, pImageIndex);
-
-   /* signal fence/semaphore - image is available immediately */
-   if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) {
-      panvk_signal_syncobjs(device, fence ? &fence->syncobj : NULL,
-                            sem ? &sem->syncobj : NULL);
-   }
-
-   return result;
 }

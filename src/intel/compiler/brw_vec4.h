@@ -72,7 +72,6 @@ public:
                 const nir_shader *shader,
 		void *mem_ctx,
                 bool no_spills,
-                int shader_time_index,
                 bool debug_enabled);
 
    dst_reg dst_null_f()
@@ -114,8 +113,6 @@ public:
    brw_analysis<brw::vec4_live_variables, backend_shader> live_analysis;
    brw_analysis<brw::performance, vec4_visitor> performance_analysis;
 
-   bool need_all_constants_in_pull_buffer;
-
    /* Regs for vertex results.  Generated at ir_variable visiting time
     * for the ir->location's used.
     */
@@ -123,8 +120,6 @@ public:
    unsigned output_num_components[VARYING_SLOT_TESS_MAX][4];
    const char *output_reg_annotation[VARYING_SLOT_TESS_MAX];
    int uniforms;
-
-   src_reg shader_start_time;
 
    bool run();
    void fail(const char *msg, ...);
@@ -137,10 +132,7 @@ public:
    int choose_spill_reg(struct ra_graph *g);
    void spill_reg(unsigned spill_reg);
    void move_grf_array_access_to_scratch();
-   void move_uniform_array_access_to_pull_constants();
-   void move_push_constants_to_pull_constants();
    void split_uniform_registers();
-   void pack_uniform_registers();
    void setup_push_ranges();
    virtual void invalidate_analysis(brw::analysis_dependency_class c);
    void split_virtual_grfs();
@@ -222,6 +214,7 @@ public:
    EMIT1(FBH)
    EMIT1(FBL)
    EMIT1(CBIT)
+   EMIT1(LZD)
    EMIT3(MAD)
    EMIT2(ADDC)
    EMIT2(SUBB)
@@ -257,32 +250,13 @@ public:
    void emit_pack_unorm_4x8(const dst_reg &dst, const src_reg &src0);
    void emit_pack_snorm_4x8(const dst_reg &dst, const src_reg &src0);
 
-   void emit_texture(ir_texture_opcode op,
-                     dst_reg dest,
-                     int dest_components,
-                     src_reg coordinate,
-                     int coord_components,
-                     src_reg shadow_comparator,
-                     src_reg lod, src_reg lod2,
-                     src_reg sample_index,
-                     uint32_t constant_offset,
-                     src_reg offset_value,
-                     src_reg mcs,
-                     uint32_t surface, src_reg surface_reg,
-                     src_reg sampler_reg);
-
    src_reg emit_mcs_fetch(const glsl_type *coordinate_type, src_reg coordinate,
                           src_reg surface);
-   void emit_gfx6_gather_wa(uint8_t wa, dst_reg dst);
 
    void emit_ndc_computation();
    void emit_psiz_and_flags(dst_reg reg);
    vec4_instruction *emit_generic_urb_slot(dst_reg reg, int varying, int comp);
    virtual void emit_urb_slot(dst_reg reg, int varying);
-
-   void emit_shader_time_begin();
-   void emit_shader_time_end();
-   void emit_shader_time_write(int shader_time_subindex, src_reg value);
 
    src_reg get_scratch_offset(bblock_t *block, vec4_instruction *inst,
 			      src_reg *reladdr, int reg_offset);
@@ -292,11 +266,6 @@ public:
 			  int base_offset);
    void emit_scratch_write(bblock_t *block, vec4_instruction *inst,
 			   int base_offset);
-   void emit_pull_constant_load(bblock_t *block, vec4_instruction *inst,
-				dst_reg dst,
-				src_reg orig_src,
-                                int base_offset,
-                                src_reg indirect);
    void emit_pull_constant_load_reg(dst_reg dst,
                                     src_reg surf_index,
                                     src_reg offset,
@@ -307,14 +276,14 @@ public:
 
    void resolve_ud_negate(src_reg *reg);
 
+   void emit_shader_float_controls_execution_mode();
+
    bool lower_minmax();
 
    src_reg get_timestamp();
 
    void dump_instruction(const backend_instruction *inst) const;
    void dump_instruction(const backend_instruction *inst, FILE *file) const;
-
-   bool is_high_sampler(src_reg sampler);
 
    bool optimize_predicate(nir_alu_instr *instr, enum brw_predicate *predicate);
 
@@ -376,8 +345,6 @@ private:
     * If true, then register allocation should fail instead of spilling.
     */
    const bool no_spills;
-
-   int shader_time_index;
 
    unsigned last_scratch; /**< measured in 32-byte (register size) units */
 };

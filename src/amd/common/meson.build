@@ -25,12 +25,15 @@ amd_json_files = [
   '../registers/gfx8.json',
   '../registers/gfx81.json',
   '../registers/gfx9.json',
+  '../registers/gfx940.json',
   '../registers/gfx10.json',
   '../registers/gfx103.json',
+  '../registers/gfx11.json',
 
   # Manually written:
   '../registers/pkt3.json',
   '../registers/gfx10-rsrc.json',
+  '../registers/gfx11-rsrc.json',
   '../registers/registers-manually-defined.json',
 ]
 
@@ -54,7 +57,7 @@ gfx10_format_table_c = custom_target(
   'gfx10_format_table.c',
   input : files(
     'gfx10_format_table.py',
-    '../../util/format/u_format.csv', '../registers/gfx10-rsrc.json'
+    '../../util/format/u_format.csv', '../registers/gfx10-rsrc.json', '../registers/gfx11-rsrc.json'
   ),
   output : 'gfx10_format_table.c',
   command : [prog_python, '@INPUT@'],
@@ -65,38 +68,51 @@ gfx10_format_table_c = custom_target(
 amd_common_files = files(
   'ac_binary.c',
   'ac_binary.h',
-  'ac_exp_param.h',
   'ac_shader_args.c',
   'ac_shader_args.h',
   'ac_shader_util.c',
   'ac_shader_util.h',
   'ac_gpu_info.c',
   'ac_gpu_info.h',
-  'ac_rtld.c',
-  'ac_rtld.h',
   'ac_surface.c',
   'ac_surface.h',
   'ac_debug.c',
   'ac_debug.h',
   'ac_shadowed_regs.c',
   'ac_shadowed_regs.h',
+  'ac_spm.c',
+  'ac_spm.h',
   'ac_sqtt.c',
   'ac_sqtt.h',
   'ac_rgp.c',
   'ac_rgp.h',
   'ac_msgpack.c',
   'ac_msgpack.h',
-  'ac_rgp_elf_object_pack.c',
   'ac_nir.c',
   'ac_nir.h',
+  'ac_nir_opt_outputs.c',
   'ac_nir_cull.c',
   'ac_nir_lower_esgs_io_to_mem.c',
+  'ac_nir_lower_global_access.c',
+  'ac_nir_lower_image_opcodes_cdna.c',
+  'ac_nir_lower_resinfo.c',
+  'ac_nir_lower_subdword_loads.c',
+  'ac_nir_lower_taskmesh_io_to_mem.c',
   'ac_nir_lower_tess_io_to_mem.c',
   'ac_nir_lower_ngg.c',
+  'ac_nir_lower_ps.c',
   'amd_family.c',
   'ac_perfcounter.c',
   'ac_perfcounter.h',
 )
+
+if dep_elf.found()
+  amd_common_files += files(
+    'ac_rtld.c',
+    'ac_rtld.h',
+    'ac_rgp_elf_object_pack.c',
+  )
+endif
 
 libamd_common = static_library(
   'amd_common',
@@ -109,6 +125,7 @@ libamd_common = static_library(
     idep_mesautil, idep_nir_headers, idep_nir
   ],
   gnu_symbol_visibility : 'hidden',
+  c_args : ['-DADDR_FASTCALL=']
 )
 
 idep_amdgfxregs_h = declare_dependency(sources : [amdgfxregs_h])

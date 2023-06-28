@@ -41,6 +41,7 @@
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
 #include "cso_cache/cso_context.h"
+#include "main/context.h"
 
 
 static GLuint
@@ -221,7 +222,7 @@ st_update_rasterizer(struct st_context *st)
 
       raster->point_quad_rasterization = 1;
 
-      raster->point_tri_clip = st->ctx->API == API_OPENGLES2;
+      raster->point_tri_clip = _mesa_is_gles2(st->ctx);
    }
 
    /* ST_NEW_VERTEX_PROGRAM
@@ -287,8 +288,7 @@ st_update_rasterizer(struct st_context *st)
       raster->tile_raster_order_increasing_y = ctx->TileRasterOrderIncreasingY;
    }
 
-   if (st->edgeflag_culls_prims) {
-      /* All edge flags are FALSE. Cull the affected faces. */
+   if (ctx->Array._PolygonModeAlwaysCulls) {
       if (raster->fill_front != PIPE_POLYGON_MODE_FILL)
          raster->cull_face |= PIPE_FACE_FRONT;
       if (raster->fill_back != PIPE_POLYGON_MODE_FILL)
@@ -296,11 +296,12 @@ st_update_rasterizer(struct st_context *st)
    }
 
    /* _NEW_TRANSFORM */
-   raster->depth_clip_near = st->clamp_frag_depth_in_shader ||
-                             !ctx->Transform.DepthClampNear;
-   raster->depth_clip_far = st->clamp_frag_depth_in_shader ||
-                            !ctx->Transform.DepthClampFar;
+   raster->depth_clip_near = !ctx->Transform.DepthClampNear;
+   raster->depth_clip_far = !ctx->Transform.DepthClampFar;
    raster->depth_clamp = !raster->depth_clip_far;
+   /* this should be different for GL vs GLES but without NV_depth_buffer_float
+      it doesn't matter, and likely virgl would need fixes to deal with it. */
+   raster->unclamped_fragment_depth_values = false;
    raster->clip_plane_enable = ctx->Transform.ClipPlanesEnabled;
    raster->clip_halfz = (ctx->Transform.ClipDepthMode == GL_ZERO_TO_ONE);
 

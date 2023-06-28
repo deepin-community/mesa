@@ -24,6 +24,10 @@
 #ifndef INTEL_GEM_H
 #define INTEL_GEM_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "drm-uapi/i915_drm.h"
 
 #include <assert.h>
@@ -33,6 +37,11 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+
+#include "intel_engine.h"
+#include "util/macros.h"
+
+#define RCS_TIMESTAMP 0x2358
 
 static inline uint64_t
 intel_canonical_address(uint64_t v)
@@ -63,7 +72,7 @@ intel_48b_address(uint64_t v)
 }
 
 /**
- * Call ioctl, restarting if it is interupted
+ * Call ioctl, restarting if it is interrupted
  */
 static inline int
 intel_ioctl(int fd, unsigned long request, void *arg)
@@ -122,8 +131,11 @@ intel_i915_query(int fd, uint64_t query_id, void *buffer,
  * The caller is responsible for freeing the returned pointer.
  */
 static inline void *
-intel_i915_query_alloc(int fd, uint64_t query_id)
+intel_i915_query_alloc(int fd, uint64_t query_id, int32_t *query_length)
 {
+   if (query_length)
+      *query_length = 0;
+
    int32_t length = 0;
    int ret = intel_i915_query(fd, query_id, NULL, &length);
    if (ret < 0)
@@ -141,9 +153,61 @@ intel_i915_query_alloc(int fd, uint64_t query_id)
       return NULL;
    }
 
+   if (query_length)
+      *query_length = length;
+
    return data;
 }
 
 bool intel_gem_supports_syncobj_wait(int fd);
+
+bool
+intel_gem_read_render_timestamp(int fd, enum intel_kmd_type kmd_type,
+                                uint64_t *value);
+bool intel_gem_can_render_on_fd(int fd, enum intel_kmd_type kmd_type);
+
+/* Functions only used by i915 */
+bool intel_gem_create_context(int fd, uint32_t *context_id);
+bool intel_gem_destroy_context(int fd, uint32_t context_id);
+bool
+intel_gem_create_context_engines(int fd,
+                                 const struct intel_query_engine_info *info,
+                                 int num_engines, enum intel_engine_class *engine_classes,
+                                 uint32_t *context_id);
+bool
+intel_gem_set_context_param(int fd, uint32_t context, uint32_t param,
+                            uint64_t value);
+bool
+intel_gem_get_context_param(int fd, uint32_t context, uint32_t param,
+                            uint64_t *value);
+bool intel_gem_get_param(int fd, uint32_t param, int *value);
+
+#ifdef __cplusplus
+}
+#endif
+
+enum intel_gem_create_context_flags {
+   INTEL_GEM_CREATE_CONTEXT_EXT_RECOVERABLE_FLAG = BITFIELD_BIT(0),
+   INTEL_GEM_CREATE_CONTEXT_EXT_PROTECTED_FLAG   = BITFIELD_BIT(1),
+};
+bool intel_gem_create_context_ext(int fd, enum intel_gem_create_context_flags flags,
+                                  uint32_t *ctx_id);
+bool intel_gem_supports_protected_context(int fd,
+                                          enum intel_kmd_type kmd_type);
+
+static inline void
+intel_gem_add_ext(__u64 *ptr, uint32_t ext_name,
+                  struct i915_user_extension *ext)
+{
+   __u64 *iter = ptr;
+
+   while (*iter != 0) {
+      iter = (__u64 *) &((struct i915_user_extension *)(uintptr_t)*iter)->next_extension;
+   }
+
+   ext->name = ext_name;
+
+   *iter = (uintptr_t) ext;
+}
 
 #endif /* INTEL_GEM_H */

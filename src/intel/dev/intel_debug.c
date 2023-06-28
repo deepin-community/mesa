@@ -36,36 +36,33 @@
 #include "dev/intel_debug.h"
 #include "git_sha1.h"
 #include "util/macros.h"
-#include "util/debug.h"
+#include "util/u_debug.h"
+#include "util/u_math.h"
 #include "c11/threads.h"
 
 uint64_t intel_debug = 0;
 
+#define DEBUG_NO16                (1ull << 16)
+#define DEBUG_NO8                 (1ull << 20)
+#define DEBUG_NO32                (1ull << 39)
+
 static const struct debug_control debug_control[] = {
    { "tex",         DEBUG_TEXTURE},
-   { "state",       DEBUG_STATE},
    { "blit",        DEBUG_BLIT},
-   { "mip",         DEBUG_MIPTREE},
    { "fall",        DEBUG_PERF},
    { "perf",        DEBUG_PERF},
    { "perfmon",     DEBUG_PERFMON},
    { "bat",         DEBUG_BATCH},
-   { "pix",         DEBUG_PIXEL},
    { "buf",         DEBUG_BUFMGR},
-   { "fbo",         DEBUG_FBO},
    { "fs",          DEBUG_WM },
    { "gs",          DEBUG_GS},
    { "sync",        DEBUG_SYNC},
-   { "prim",        DEBUG_PRIMS },
-   { "vert",        DEBUG_VERTS },
-   { "dri",         DEBUG_DRI },
    { "sf",          DEBUG_SF },
    { "submit",      DEBUG_SUBMIT },
    { "wm",          DEBUG_WM },
    { "urb",         DEBUG_URB },
    { "vs",          DEBUG_VS },
    { "clip",        DEBUG_CLIP },
-   { "shader_time", DEBUG_SHADER_TIME },
    { "no16",        DEBUG_NO16 },
    { "blorp",       DEBUG_BLORP },
    { "nodualobj",   DEBUG_NO_DUAL_OBJECT_GS },
@@ -84,21 +81,48 @@ static const struct debug_control debug_control[] = {
    { "tes",         DEBUG_TES },
    { "l3",          DEBUG_L3 },
    { "do32",        DEBUG_DO32 },
-   { "norbc",       DEBUG_NO_RBC },
+   { "norbc",       DEBUG_NO_CCS },
+   { "noccs",       DEBUG_NO_CCS },
    { "nohiz",       DEBUG_NO_HIZ },
    { "color",       DEBUG_COLOR },
    { "reemit",      DEBUG_REEMIT },
    { "soft64",      DEBUG_SOFT64 },
-   { "tcs8",        DEBUG_TCS_EIGHT_PATCH },
    { "bt",          DEBUG_BT },
    { "pc",          DEBUG_PIPE_CONTROL },
    { "nofc",        DEBUG_NO_FAST_CLEAR },
    { "no32",        DEBUG_NO32 },
    { "shaders",     DEBUG_WM | DEBUG_VS | DEBUG_TCS |
                     DEBUG_TES | DEBUG_GS | DEBUG_CS |
-                    DEBUG_RT },
+                    DEBUG_RT | DEBUG_TASK | DEBUG_MESH },
    { "rt",          DEBUG_RT },
+   { "task",        DEBUG_TASK },
+   { "mesh",        DEBUG_MESH },
+   { "stall",       DEBUG_STALL },
+   { "capture-all", DEBUG_CAPTURE_ALL },
+   { "perf-symbol-names", DEBUG_PERF_SYMBOL_NAMES },
+   { "swsb-stall",  DEBUG_SWSB_STALL },
    { NULL,    0 }
+};
+
+uint64_t intel_simd = 0;
+
+static const struct debug_control simd_control[] = {
+   { "fs8",    DEBUG_FS_SIMD8 },
+   { "fs16",   DEBUG_FS_SIMD16 },
+   { "fs32",   DEBUG_FS_SIMD32 },
+   { "cs8",    DEBUG_CS_SIMD8 },
+   { "cs16",   DEBUG_CS_SIMD16 },
+   { "cs32",   DEBUG_CS_SIMD32 },
+   { "ts8",    DEBUG_TS_SIMD8 },
+   { "ts16",   DEBUG_TS_SIMD16 },
+   { "ts32",   DEBUG_TS_SIMD32 },
+   { "ms8",    DEBUG_MS_SIMD8 },
+   { "ms16",   DEBUG_MS_SIMD16 },
+   { "ms32",   DEBUG_MS_SIMD32 },
+   { "rt8",    DEBUG_RT_SIMD8 },
+   { "rt16",   DEBUG_RT_SIMD16 },
+   { "rt32",   DEBUG_RT_SIMD32 },
+   { NULL,     0 }
 };
 
 uint64_t
@@ -111,6 +135,10 @@ intel_debug_flag_for_shader_stage(gl_shader_stage stage)
       [MESA_SHADER_GEOMETRY] = DEBUG_GS,
       [MESA_SHADER_FRAGMENT] = DEBUG_WM,
       [MESA_SHADER_COMPUTE] = DEBUG_CS,
+      [MESA_SHADER_KERNEL] = DEBUG_CS,
+
+      [MESA_SHADER_TASK]         = DEBUG_TASK,
+      [MESA_SHADER_MESH]         = DEBUG_MESH,
 
       [MESA_SHADER_RAYGEN]       = DEBUG_RT,
       [MESA_SHADER_ANY_HIT]      = DEBUG_RT,
@@ -122,10 +150,57 @@ intel_debug_flag_for_shader_stage(gl_shader_stage stage)
    return flags[stage];
 }
 
+#define DEBUG_FS_SIMD  (DEBUG_FS_SIMD8  | DEBUG_FS_SIMD16  | DEBUG_FS_SIMD32)
+#define DEBUG_CS_SIMD  (DEBUG_CS_SIMD8  | DEBUG_CS_SIMD16  | DEBUG_CS_SIMD32)
+#define DEBUG_TS_SIMD  (DEBUG_TS_SIMD8  | DEBUG_TS_SIMD16  | DEBUG_TS_SIMD32)
+#define DEBUG_MS_SIMD  (DEBUG_MS_SIMD8  | DEBUG_MS_SIMD16  | DEBUG_MS_SIMD32)
+#define DEBUG_RT_SIMD  (DEBUG_RT_SIMD8  | DEBUG_RT_SIMD16  | DEBUG_RT_SIMD32)
+
+#define DEBUG_SIMD8_ALL \
+   (DEBUG_FS_SIMD8  | \
+    DEBUG_CS_SIMD8  | \
+    DEBUG_TS_SIMD8  | \
+    DEBUG_MS_SIMD8  | \
+    DEBUG_RT_SIMD8)
+
+#define DEBUG_SIMD16_ALL \
+   (DEBUG_FS_SIMD16 | \
+    DEBUG_CS_SIMD16 | \
+    DEBUG_TS_SIMD16 | \
+    DEBUG_MS_SIMD16 | \
+    DEBUG_RT_SIMD16)
+
+#define DEBUG_SIMD32_ALL \
+   (DEBUG_FS_SIMD32 | \
+    DEBUG_CS_SIMD32 | \
+    DEBUG_TS_SIMD32 | \
+    DEBUG_MS_SIMD32 | \
+    DEBUG_RT_SIMD32)
+
 static void
 brw_process_intel_debug_variable_once(void)
 {
    intel_debug = parse_debug_string(getenv("INTEL_DEBUG"), debug_control);
+   intel_simd = parse_debug_string(getenv("INTEL_SIMD_DEBUG"), simd_control);
+
+   if (!(intel_simd & DEBUG_FS_SIMD))
+      intel_simd |=   DEBUG_FS_SIMD;
+   if (!(intel_simd & DEBUG_CS_SIMD))
+      intel_simd |=   DEBUG_CS_SIMD;
+   if (!(intel_simd & DEBUG_TS_SIMD))
+      intel_simd |=   DEBUG_TS_SIMD;
+   if (!(intel_simd & DEBUG_MS_SIMD))
+      intel_simd |=   DEBUG_MS_SIMD;
+   if (!(intel_simd & DEBUG_RT_SIMD))
+      intel_simd |=   DEBUG_RT_SIMD;
+
+   if (intel_debug & DEBUG_NO8)
+      intel_simd &= ~DEBUG_SIMD8_ALL;
+   if (intel_debug & DEBUG_NO16)
+      intel_simd &= ~DEBUG_SIMD16_ALL;
+   if (intel_debug & DEBUG_NO32)
+      intel_simd &= ~DEBUG_SIMD32_ALL;
+   intel_debug &= ~(DEBUG_NO8 | DEBUG_NO16 | DEBUG_NO32);
 }
 
 void
@@ -211,6 +286,16 @@ intel_debug_write_identifiers(void *_output,
    };
    memcpy(output, &end, sizeof(end));
    output += sizeof(end);
+
+   assert(output < output_end);
+
+   /* Add at least a full aligned uint64_t of zero padding at the end
+    * to make the identifiers easier to spot.
+    */
+   const unsigned unpadded_len = output - _output;
+   const unsigned padding = ALIGN(unpadded_len + 8, 8) - unpadded_len;
+   memset(output, 0, padding);
+   output += padding;
 
    assert(output < output_end);
 

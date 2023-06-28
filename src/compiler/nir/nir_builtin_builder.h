@@ -54,17 +54,28 @@ nir_ssa_def *
 nir_get_texture_size(nir_builder *b, nir_tex_instr *tex);
 
 static inline nir_ssa_def *
+nir_fisnan(nir_builder *b, nir_ssa_def *x)
+{
+   bool old_exact = b->exact;
+   b->exact = true;
+   nir_ssa_def *res = nir_fneu(b, x, x);
+   b->exact = old_exact;
+   return res;
+}
+
+static inline nir_ssa_def *
 nir_nan_check2(nir_builder *b, nir_ssa_def *x, nir_ssa_def *y, nir_ssa_def *res)
 {
-   return nir_bcsel(b, nir_fneu(b, x, x), x, nir_bcsel(b, nir_fneu(b, y, y), y, res));
+   return nir_bcsel(b, nir_fisnan(b, x), x, nir_bcsel(b, nir_fisnan(b, y), y, res));
 }
 
 static inline nir_ssa_def *
 nir_fmax_abs_vec_comp(nir_builder *b, nir_ssa_def *vec)
 {
-   nir_ssa_def *res = nir_channel(b, vec, 0);
+   nir_ssa_def *abs = nir_fabs(b, vec);
+   nir_ssa_def *res = nir_channel(b, abs, 0);
    for (unsigned i = 1; i < vec->num_components; ++i)
-      res = nir_fmax(b, res, nir_fabs(b, nir_channel(b, vec, i)));
+      res = nir_fmax(b, res, nir_channel(b, abs, i));
    return res;
 }
 
@@ -236,8 +247,9 @@ static inline nir_ssa_def *
 nir_clz_u(nir_builder *b, nir_ssa_def *a)
 {
    nir_ssa_def *val;
-   val = nir_isub(b, nir_imm_intN_t(b, a->bit_size - 1, 32), nir_ufind_msb(b, a));
-   return nir_u2u(b, val, a->bit_size);
+   val = nir_isub(b, nir_imm_intN_t(b, a->bit_size - 1, 32),
+                  nir_ufind_msb(b, nir_u2uN(b, a, MAX2(a->bit_size, 32))));
+   return nir_u2uN(b, val, a->bit_size);
 }
 
 static inline nir_ssa_def *
@@ -247,7 +259,7 @@ nir_ctz_u(nir_builder *b, nir_ssa_def *a)
 
    return nir_bcsel(b, cond,
                     nir_imm_intN_t(b, a->bit_size, a->bit_size),
-                    nir_u2u(b, nir_find_lsb(b, a), a->bit_size));
+                    nir_u2uN(b, nir_find_lsb(b, a), a->bit_size));
 }
 
 #ifdef __cplusplus

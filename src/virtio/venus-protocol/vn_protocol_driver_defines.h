@@ -12,8 +12,6 @@
 #include <string.h>
 #include <vulkan/vulkan.h>
 
-#include "vn_protocol_driver_cs.h"
-
 #define VN_SUBMIT_LOCAL_CMD_SIZE 256
 
 /* VkStructureType */
@@ -21,6 +19,9 @@
 #define VK_STRUCTURE_TYPE_MEMORY_RESOURCE_PROPERTIES_MESA ((VkStructureType)1000384001)
 #define VK_STRUCTURE_TYPE_IMPORT_MEMORY_RESOURCE_INFO_MESA ((VkStructureType)1000384002)
 #define VK_STRUCTURE_TYPE_MEMORY_RESOURCE_ALLOCATION_SIZE_PROPERTIES_100000_MESA ((VkStructureType)1000384003)
+#define VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_RESOURCE_INFO_100000_MESA ((VkStructureType)1000384004)
+#define VK_STRUCTURE_TYPE_DEVICE_QUEUE_TIMELINE_INFO_MESA ((VkStructureType)1000384005)
+#define VK_STRUCTURE_TYPE_RING_MONITOR_INFO_MESA ((VkStructureType)1000384006)
 
 typedef enum VkCommandTypeEXT {
     VK_COMMAND_TYPE_vkCreateInstance_EXT = 0,
@@ -243,6 +244,80 @@ typedef enum VkCommandTypeEXT {
     VK_COMMAND_TYPE_vkGetBufferOpaqueCaptureAddressKHR_EXT = 176,
     VK_COMMAND_TYPE_vkGetDeviceMemoryOpaqueCaptureAddress_EXT = 177,
     VK_COMMAND_TYPE_vkGetDeviceMemoryOpaqueCaptureAddressKHR_EXT = 177,
+    VK_COMMAND_TYPE_vkGetPhysicalDeviceToolProperties_EXT = 196,
+    VK_COMMAND_TYPE_vkGetPhysicalDeviceToolPropertiesEXT_EXT = 196,
+    VK_COMMAND_TYPE_vkCreatePrivateDataSlot_EXT = 197,
+    VK_COMMAND_TYPE_vkCreatePrivateDataSlotEXT_EXT = 197,
+    VK_COMMAND_TYPE_vkDestroyPrivateDataSlot_EXT = 198,
+    VK_COMMAND_TYPE_vkDestroyPrivateDataSlotEXT_EXT = 198,
+    VK_COMMAND_TYPE_vkSetPrivateData_EXT = 199,
+    VK_COMMAND_TYPE_vkSetPrivateDataEXT_EXT = 199,
+    VK_COMMAND_TYPE_vkGetPrivateData_EXT = 200,
+    VK_COMMAND_TYPE_vkGetPrivateDataEXT_EXT = 200,
+    VK_COMMAND_TYPE_vkCmdSetEvent2_EXT = 201,
+    VK_COMMAND_TYPE_vkCmdSetEvent2KHR_EXT = 201,
+    VK_COMMAND_TYPE_vkCmdResetEvent2_EXT = 202,
+    VK_COMMAND_TYPE_vkCmdResetEvent2KHR_EXT = 202,
+    VK_COMMAND_TYPE_vkCmdWaitEvents2_EXT = 203,
+    VK_COMMAND_TYPE_vkCmdWaitEvents2KHR_EXT = 203,
+    VK_COMMAND_TYPE_vkCmdPipelineBarrier2_EXT = 204,
+    VK_COMMAND_TYPE_vkCmdPipelineBarrier2KHR_EXT = 204,
+    VK_COMMAND_TYPE_vkCmdWriteTimestamp2_EXT = 205,
+    VK_COMMAND_TYPE_vkCmdWriteTimestamp2KHR_EXT = 205,
+    VK_COMMAND_TYPE_vkQueueSubmit2_EXT = 206,
+    VK_COMMAND_TYPE_vkQueueSubmit2KHR_EXT = 206,
+    VK_COMMAND_TYPE_vkCmdCopyBuffer2_EXT = 207,
+    VK_COMMAND_TYPE_vkCmdCopyBuffer2KHR_EXT = 207,
+    VK_COMMAND_TYPE_vkCmdCopyImage2_EXT = 208,
+    VK_COMMAND_TYPE_vkCmdCopyImage2KHR_EXT = 208,
+    VK_COMMAND_TYPE_vkCmdCopyBufferToImage2_EXT = 209,
+    VK_COMMAND_TYPE_vkCmdCopyBufferToImage2KHR_EXT = 209,
+    VK_COMMAND_TYPE_vkCmdCopyImageToBuffer2_EXT = 210,
+    VK_COMMAND_TYPE_vkCmdCopyImageToBuffer2KHR_EXT = 210,
+    VK_COMMAND_TYPE_vkCmdBlitImage2_EXT = 211,
+    VK_COMMAND_TYPE_vkCmdBlitImage2KHR_EXT = 211,
+    VK_COMMAND_TYPE_vkCmdResolveImage2_EXT = 212,
+    VK_COMMAND_TYPE_vkCmdResolveImage2KHR_EXT = 212,
+    VK_COMMAND_TYPE_vkCmdBeginRendering_EXT = 213,
+    VK_COMMAND_TYPE_vkCmdBeginRenderingKHR_EXT = 213,
+    VK_COMMAND_TYPE_vkCmdEndRendering_EXT = 214,
+    VK_COMMAND_TYPE_vkCmdEndRenderingKHR_EXT = 214,
+    VK_COMMAND_TYPE_vkCmdSetCullMode_EXT = 215,
+    VK_COMMAND_TYPE_vkCmdSetCullModeEXT_EXT = 215,
+    VK_COMMAND_TYPE_vkCmdSetFrontFace_EXT = 216,
+    VK_COMMAND_TYPE_vkCmdSetFrontFaceEXT_EXT = 216,
+    VK_COMMAND_TYPE_vkCmdSetPrimitiveTopology_EXT = 217,
+    VK_COMMAND_TYPE_vkCmdSetPrimitiveTopologyEXT_EXT = 217,
+    VK_COMMAND_TYPE_vkCmdSetViewportWithCount_EXT = 218,
+    VK_COMMAND_TYPE_vkCmdSetViewportWithCountEXT_EXT = 218,
+    VK_COMMAND_TYPE_vkCmdSetScissorWithCount_EXT = 219,
+    VK_COMMAND_TYPE_vkCmdSetScissorWithCountEXT_EXT = 219,
+    VK_COMMAND_TYPE_vkCmdBindVertexBuffers2_EXT = 220,
+    VK_COMMAND_TYPE_vkCmdBindVertexBuffers2EXT_EXT = 220,
+    VK_COMMAND_TYPE_vkCmdSetDepthTestEnable_EXT = 221,
+    VK_COMMAND_TYPE_vkCmdSetDepthTestEnableEXT_EXT = 221,
+    VK_COMMAND_TYPE_vkCmdSetDepthWriteEnable_EXT = 222,
+    VK_COMMAND_TYPE_vkCmdSetDepthWriteEnableEXT_EXT = 222,
+    VK_COMMAND_TYPE_vkCmdSetDepthCompareOp_EXT = 223,
+    VK_COMMAND_TYPE_vkCmdSetDepthCompareOpEXT_EXT = 223,
+    VK_COMMAND_TYPE_vkCmdSetDepthBoundsTestEnable_EXT = 224,
+    VK_COMMAND_TYPE_vkCmdSetDepthBoundsTestEnableEXT_EXT = 224,
+    VK_COMMAND_TYPE_vkCmdSetStencilTestEnable_EXT = 225,
+    VK_COMMAND_TYPE_vkCmdSetStencilTestEnableEXT_EXT = 225,
+    VK_COMMAND_TYPE_vkCmdSetStencilOp_EXT = 226,
+    VK_COMMAND_TYPE_vkCmdSetStencilOpEXT_EXT = 226,
+    VK_COMMAND_TYPE_vkCmdSetRasterizerDiscardEnable_EXT = 227,
+    VK_COMMAND_TYPE_vkCmdSetRasterizerDiscardEnableEXT_EXT = 227,
+    VK_COMMAND_TYPE_vkCmdSetDepthBiasEnable_EXT = 228,
+    VK_COMMAND_TYPE_vkCmdSetDepthBiasEnableEXT_EXT = 228,
+    VK_COMMAND_TYPE_vkCmdSetPrimitiveRestartEnable_EXT = 229,
+    VK_COMMAND_TYPE_vkCmdSetPrimitiveRestartEnableEXT_EXT = 229,
+    VK_COMMAND_TYPE_vkGetDeviceBufferMemoryRequirements_EXT = 230,
+    VK_COMMAND_TYPE_vkGetDeviceBufferMemoryRequirementsKHR_EXT = 230,
+    VK_COMMAND_TYPE_vkGetDeviceImageMemoryRequirements_EXT = 231,
+    VK_COMMAND_TYPE_vkGetDeviceImageMemoryRequirementsKHR_EXT = 231,
+    VK_COMMAND_TYPE_vkGetDeviceImageSparseMemoryRequirements_EXT = 232,
+    VK_COMMAND_TYPE_vkGetDeviceImageSparseMemoryRequirementsKHR_EXT = 232,
     VK_COMMAND_TYPE_vkCmdBindTransformFeedbackBuffersEXT_EXT = 181,
     VK_COMMAND_TYPE_vkCmdBeginTransformFeedbackEXT_EXT = 182,
     VK_COMMAND_TYPE_vkCmdEndTransformFeedbackEXT_EXT = 183,
@@ -251,7 +326,22 @@ typedef enum VkCommandTypeEXT {
     VK_COMMAND_TYPE_vkCmdDrawIndirectByteCountEXT_EXT = 186,
     VK_COMMAND_TYPE_vkGetMemoryFdKHR_EXT = 193,
     VK_COMMAND_TYPE_vkGetMemoryFdPropertiesKHR_EXT = 194,
+    VK_COMMAND_TYPE_vkImportSemaphoreFdKHR_EXT = 242,
+    VK_COMMAND_TYPE_vkGetSemaphoreFdKHR_EXT = 243,
+    VK_COMMAND_TYPE_vkCmdPushDescriptorSetKHR_EXT = 249,
+    VK_COMMAND_TYPE_vkCmdPushDescriptorSetWithTemplateKHR_EXT = 250,
+    VK_COMMAND_TYPE_vkCmdBeginConditionalRenderingEXT_EXT = 240,
+    VK_COMMAND_TYPE_vkCmdEndConditionalRenderingEXT_EXT = 241,
+    VK_COMMAND_TYPE_vkImportFenceFdKHR_EXT = 238,
+    VK_COMMAND_TYPE_vkGetFenceFdKHR_EXT = 239,
     VK_COMMAND_TYPE_vkGetImageDrmFormatModifierPropertiesEXT_EXT = 187,
+    VK_COMMAND_TYPE_vkGetPhysicalDeviceCalibrateableTimeDomainsEXT_EXT = 235,
+    VK_COMMAND_TYPE_vkGetCalibratedTimestampsEXT_EXT = 236,
+    VK_COMMAND_TYPE_vkCmdSetLineStippleEXT_EXT = 237,
+    VK_COMMAND_TYPE_vkCmdSetPatchControlPointsEXT_EXT = 233,
+    VK_COMMAND_TYPE_vkCmdSetLogicOpEXT_EXT = 234,
+    VK_COMMAND_TYPE_vkCmdDrawMultiEXT_EXT = 247,
+    VK_COMMAND_TYPE_vkCmdDrawMultiIndexedEXT_EXT = 248,
     VK_COMMAND_TYPE_vkSetReplyCommandStreamMESA_EXT = 178,
     VK_COMMAND_TYPE_vkSeekReplyCommandStreamMESA_EXT = 179,
     VK_COMMAND_TYPE_vkExecuteCommandStreamsMESA_EXT = 180,
@@ -260,12 +350,25 @@ typedef enum VkCommandTypeEXT {
     VK_COMMAND_TYPE_vkNotifyRingMESA_EXT = 190,
     VK_COMMAND_TYPE_vkWriteRingExtraMESA_EXT = 191,
     VK_COMMAND_TYPE_vkGetMemoryResourcePropertiesMESA_EXT = 192,
+    VK_COMMAND_TYPE_vkResetFenceResource100000MESA_EXT = 244,
+    VK_COMMAND_TYPE_vkWaitSemaphoreResource100000MESA_EXT = 245,
+    VK_COMMAND_TYPE_vkImportSemaphoreResource100000MESA_EXT = 246,
+    VK_COMMAND_TYPE_vkSubmitVirtqueueSeqno100000MESA_EXT = 251,
+    VK_COMMAND_TYPE_vkWaitVirtqueueSeqno100000MESA_EXT = 252,
+    VK_COMMAND_TYPE_vkWaitRingSeqno100000MESA_EXT = 253,
     VK_COMMAND_TYPE_vkGetVenusExperimentalFeatureData100000MESA_EXT = 195,
 } VkCommandTypeEXT;
 
 typedef enum VkCommandFlagBitsEXT {
     VK_COMMAND_GENERATE_REPLY_BIT_EXT = 0x00000001,
 } VkCommandFlagBitsEXT;
+
+typedef enum VkRingStatusFlagBitsMESA {
+    VK_RING_STATUS_NONE_MESA = 0,
+    VK_RING_STATUS_IDLE_BIT_MESA = 0x00000001,
+    VK_RING_STATUS_FATAL_BIT_MESA = 0x00000002,
+    VK_RING_STATUS_ALIVE_BIT_MESA = 0x00000004,
+} VkRingStatusFlagBitsMESA;
 
 typedef VkFlags VkCommandFlagsEXT;
 
@@ -274,6 +377,8 @@ typedef VkFlags VkCommandStreamExecutionFlagsMESA;
 typedef VkFlags VkRingCreateFlagsMESA;
 
 typedef VkFlags VkRingNotifyFlagsMESA;
+
+typedef VkFlags VkRingStatusFlagsMESA;
 
 typedef struct VkCommandStreamDescriptionMESA {
     uint32_t resourceId;
@@ -303,6 +408,12 @@ typedef struct VkRingCreateInfoMESA {
     size_t extraSize;
 } VkRingCreateInfoMESA;
 
+typedef struct VkRingMonitorInfoMESA {
+    VkStructureType sType;
+    const void* pNext;
+    uint32_t maxReportingPeriodMicroseconds;
+} VkRingMonitorInfoMESA;
+
 typedef struct VkMemoryResourcePropertiesMESA {
     VkStructureType sType;
     void* pNext;
@@ -319,6 +430,9 @@ typedef struct VkVenusExperimentalFeatures100000MESA {
     VkBool32 memoryResourceAllocationSize;
     VkBool32 globalFencing;
     VkBool32 largeRing;
+    VkBool32 syncFdFencing;
+    VkBool32 asyncRoundtrip;
+    VkBool32 ringMonitoring;
 } VkVenusExperimentalFeatures100000MESA;
 
 typedef struct VkMemoryResourceAllocationSizeProperties100000MESA {
@@ -326,5 +440,18 @@ typedef struct VkMemoryResourceAllocationSizeProperties100000MESA {
     void* pNext;
     uint64_t allocationSize;
 } VkMemoryResourceAllocationSizeProperties100000MESA;
+
+typedef struct VkImportSemaphoreResourceInfo100000MESA {
+    VkStructureType sType;
+    const void* pNext;
+    VkSemaphore semaphore;
+    uint32_t resourceId;
+} VkImportSemaphoreResourceInfo100000MESA;
+
+typedef struct VkDeviceQueueTimelineInfoMESA {
+    VkStructureType sType;
+    const void* pNext;
+    uint32_t ringIdx;
+} VkDeviceQueueTimelineInfoMESA;
 
 #endif /* VN_PROTOCOL_DRIVER_DEFINES_H */

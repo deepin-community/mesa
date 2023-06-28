@@ -30,7 +30,7 @@
 
 
 #include "pipe/p_screen.h"
-#include "os/os_thread.h"
+#include "util/u_thread.h"
 #include "util/u_threaded_context.h"
 
 #ifdef __cplusplus
@@ -44,6 +44,12 @@ extern "C" {
  * contents can be dumped before being used by the pipe context.
  */
 #define TRACE_FLAG_USER_BUFFER  (1 << 31)
+
+static inline const char *
+tr_util_pipe_shader_type_name(gl_shader_stage stage)
+{
+   return gl_shader_stage_name(stage);
+}
 
 
 struct trace_screen
@@ -59,6 +65,8 @@ struct trace_screen
 struct trace_screen *
 trace_screen(struct pipe_screen *screen);
 
+struct pipe_screen *
+trace_screen_unwrap(struct pipe_screen *_screen);
 
 #ifdef __cplusplus
 }
