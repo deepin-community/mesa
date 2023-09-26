@@ -30,6 +30,7 @@
 #include "util/set.h"
 #include "util/u_drm.h"
 #include "util/u_inlines.h"
+#include "util/u_sample_positions.h"
 #include "util/u_string.h"
 #include "util/u_surface.h"
 #include "util/u_transfer.h"
@@ -1103,6 +1104,7 @@ static bool
 fd_resource_get_handle(struct pipe_screen *pscreen, struct pipe_context *pctx,
                        struct pipe_resource *prsc, struct winsys_handle *handle,
                        unsigned usage)
+   assert_dt
 {
    struct fd_resource *rsc = fd_resource(prsc);
 
@@ -1115,8 +1117,38 @@ fd_resource_get_handle(struct pipe_screen *pscreen, struct pipe_context *pctx,
 
    DBG("%" PRSC_FMT ", modifier=%" PRIx64, PRSC_ARGS(prsc), handle->modifier);
 
-   return fd_screen_bo_get_handle(pscreen, rsc->bo, rsc->scanout,
-                                  fd_resource_pitch(rsc, 0), handle);
+   bool ret = fd_screen_bo_get_handle(pscreen, rsc->bo, rsc->scanout,
+                                      fd_resource_pitch(rsc, 0), handle);
+
+   if (!ret && !(prsc->bind & PIPE_BIND_SHARED)) {
+
+      pctx = threaded_context_unwrap_sync(pctx);
+
+      struct fd_context *ctx = pctx ?
+            fd_context(pctx) : fd_screen_aux_context_get(pscreen);
+
+      /* Since gl is horrible, we can end up getting asked to export a handle
+       * for a rsc which was not originally allocated in a way that can be
+       * exported (for ex, sub-allocation or in the case of virtgpu we need
+       * to tell the kernel at allocation time that the buffer can be shared)
+       *
+       * If we get into this scenario we can try to reallocate.
+       */
+
+      prsc->bind |= PIPE_BIND_SHARED;
+
+      ret = fd_try_shadow_resource(ctx, rsc, 0, NULL, handle->modifier);
+
+      if (!pctx)
+         fd_screen_aux_context_put(pscreen);
+
+      if (!ret)
+         return false;
+
+      return fd_resource_get_handle(pscreen, pctx, prsc, handle, usage);
+   }
+
+   return ret;
 }
 
 /* special case to resize query buf after allocated.. */
@@ -1741,47 +1773,6 @@ fd_resource_screen_init(struct pipe_screen *pscreen)
 }
 
 static void
-fd_get_sample_position(struct pipe_context *context, unsigned sample_count,
-                       unsigned sample_index, float *pos_out)
-{
-   /* The following is copied from nouveau/nv50 except for position
-    * values, which are taken from blob driver */
-   static const uint8_t pos1[1][2] = {{0x8, 0x8}};
-   static const uint8_t pos2[2][2] = {{0xc, 0xc}, {0x4, 0x4}};
-   static const uint8_t pos4[4][2] = {{0x6, 0x2},
-                                      {0xe, 0x6},
-                                      {0x2, 0xa},
-                                      {0xa, 0xe}};
-   /* TODO needs to be verified on supported hw */
-   static const uint8_t pos8[8][2] = {{0x9, 0x5}, {0x7, 0xb}, {0xd, 0x9},
-                                      {0x5, 0x3}, {0x3, 0xd}, {0x1, 0x7},
-                                      {0xb, 0xf}, {0xf, 0x1}};
-
-   const uint8_t(*ptr)[2];
-
-   switch (sample_count) {
-   case 1:
-      ptr = pos1;
-      break;
-   case 2:
-      ptr = pos2;
-      break;
-   case 4:
-      ptr = pos4;
-      break;
-   case 8:
-      ptr = pos8;
-      break;
-   default:
-      assert(0);
-      return;
-   }
-
-   pos_out[0] = ptr[sample_index][0] / 16.0f;
-   pos_out[1] = ptr[sample_index][1] / 16.0f;
-}
-
-static void
 fd_blit_pipe(struct pipe_context *pctx,
              const struct pipe_blit_info *blit_info) in_dt
 {
@@ -1805,5 +1796,5 @@ fd_resource_context_init(struct pipe_context *pctx)
    pctx->blit = fd_blit_pipe;
    pctx->flush_resource = fd_flush_resource;
    pctx->invalidate_resource = fd_invalidate_resource;
-   pctx->get_sample_position = fd_get_sample_position;
+   pctx->get_sample_position = u_default_get_sample_position;
 }

@@ -998,6 +998,7 @@ do {                                                            \
       (Current).last_line    = YYRHSLOC(Rhs, N).last_line;      \
       (Current).last_column  = YYRHSLOC(Rhs, N).last_column;    \
       (Current).path         = YYRHSLOC(Rhs, N).path;           \
+      (Current).source       = YYRHSLOC(Rhs, N).source;         \
    }                                                            \
    else                                                         \
    {                                                            \
@@ -1005,9 +1006,9 @@ do {                                                            \
          YYRHSLOC(Rhs, 0).last_line;                            \
       (Current).first_column = (Current).last_column =          \
          YYRHSLOC(Rhs, 0).last_column;                          \
-      (Current).path = YYRHSLOC(Rhs, 0).path;                   \
+      (Current).path         = YYRHSLOC(Rhs, 0).path;           \
+      (Current).source       = YYRHSLOC(Rhs, 0).source;         \
    }                                                            \
-   (Current).source = 0;                                        \
 } while (0)
 
 /**
@@ -1041,6 +1042,44 @@ extern bool _mesa_glsl_process_extension(const char *name, YYLTYPE *name_locp,
                                          const char *behavior,
                                          YYLTYPE *behavior_locp,
                                          _mesa_glsl_parse_state *state);
+
+
+/**
+ * \brief Can \c from be implicitly converted to \c desired
+ *
+ * \return True if the types are identical or if \c from type can be converted
+ *         to \c desired according to Section 4.1.10 of the GLSL spec.
+ *
+ * \verbatim
+ * From page 25 (31 of the pdf) of the GLSL 1.50 spec, Section 4.1.10
+ * Implicit Conversions:
+ *
+ *     In some situations, an expression and its type will be implicitly
+ *     converted to a different type. The following table shows all allowed
+ *     implicit conversions:
+ *
+ *     Type of expression | Can be implicitly converted to
+ *     --------------------------------------------------
+ *     int                  float
+ *     uint
+ *
+ *     ivec2                vec2
+ *     uvec2
+ *
+ *     ivec3                vec3
+ *     uvec3
+ *
+ *     ivec4                vec4
+ *     uvec4
+ *
+ *     There are no implicit array or structure conversions. For example,
+ *     an array of int cannot be implicitly converted to an array of float.
+ *     There are no implicit conversions between signed and unsigned
+ *     integers.
+ * \endverbatim
+ */
+extern bool _mesa_glsl_can_implicitly_convert(const glsl_type *from, const glsl_type *desired,
+                                              _mesa_glsl_parse_state *state);
 
 #endif /* __cplusplus */
 

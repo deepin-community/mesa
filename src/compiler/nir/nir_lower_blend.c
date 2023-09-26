@@ -329,7 +329,7 @@ nir_blend_logicop(
 
    nir_const_value mask[4];
    for (int i = 0; i < 4; ++i)
-      mask[i] = nir_const_value_for_int(BITFIELD_MASK(bits[i]), 32);
+      mask[i] = nir_const_value_for_uint(BITFIELD_MASK(bits[i]), 32);
 
    nir_ssa_def *out = nir_logicop_func(b, options->logicop_func, src, dst,
                                        nir_build_imm(b, 4, 32, mask));
@@ -514,6 +514,12 @@ nir_lower_blend_instr(nir_builder *b, nir_instr *instr, void *data)
     * source colour is already written.
     */
    b->cursor = nir_after_block(instr->block);
+
+   /* Don't bother copying the destination to the source for disabled RTs */
+   if (options->rt[rt].colormask == 0) {
+      nir_instr_remove(instr);
+      return true;
+   }
 
    /* Grab the input color.  We always want 4 channels during blend.  Dead
     * code will clean up any channels we don't need.

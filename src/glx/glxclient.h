@@ -127,6 +127,7 @@ struct __GLXDRIdrawableRec
    struct glx_screen *psc;
    GLenum textureTarget;
    GLenum textureFormat;        /* EXT_texture_from_pixmap support */
+   unsigned long eventMask;
    int refcount;
 };
 
@@ -239,7 +240,7 @@ struct glx_context
      * in the buffer to be filled.  \c limit is described above in the buffer
      * slop discussion.
      *
-     * Commands that require large amounts of data to be transfered will
+     * Commands that require large amounts of data to be transferred will
      * also use this buffer to hold a header that describes the large
      * command.
      *
@@ -438,7 +439,7 @@ glx_context_init(struct glx_context *gc,
 
 /**
  * This implementation uses a smaller threshold for switching
- * to the RenderLarge protocol than the protcol requires so that
+ * to the RenderLarge protocol than the protocol requires so that
  * large copies don't occur.
  */
 #define __GLX_RENDER_CMD_SIZE_LIMIT 4096

@@ -652,7 +652,7 @@ unsigned dri2GetSwapEventType(Display* dpy, XID drawable)
       struct glx_display *glx_dpy = __glXInitialize(dpy);
       __GLXDRIdrawable *pdraw;
       pdraw = dri2GetGlxDrawableFromXDrawableId(dpy, drawable);
-      if (!pdraw)
+      if (!pdraw || !(pdraw->eventMask & GLX_BUFFER_SWAP_COMPLETE_INTEL_MASK))
          return 0;
       return glx_dpy->codes.first_event + GLX_BufferSwapComplete;
 }
@@ -812,7 +812,7 @@ driIsThreadSafe(void *loaderPrivate)
    /* Check Xlib is running in thread safe mode
     *
     * 'lock_fns' is the XLockDisplay function pointer of the X11 display 'dpy'.
-    * It wll be NULL if XInitThreads wasn't called.
+    * It will be NULL if XInitThreads wasn't called.
     */
    return pcp->psc->dpy->lock_fns != NULL;
 }
