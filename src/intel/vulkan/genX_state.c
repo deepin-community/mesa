@@ -179,22 +179,54 @@ init_common_queue_state(struct anv_queue *queue, struct anv_batch *batch)
    device->l3_config = cfg;
 #endif
 
+#if GFX_VERx10 == 125
+   /* Even though L3 partial write merging is supposed to be enabled
+    * by default on Gfx12.5 according to the hardware spec, i915
+    * appears to accidentally clear the enables during context
+    * initialization, so make sure to enable them here since partial
+    * write merging has a large impact on rendering performance.
+    */
+   anv_batch_write_reg(batch, GENX(L3SQCREG5), reg) {
+      reg.L3CachePartialWriteMergeTimerInitialValue = 0x7f;
+      reg.CompressiblePartialWriteMergeEnable = true;
+      reg.CoherentPartialWriteMergeEnable = true;
+      reg.CrossTilePartialWriteMergeEnable = true;
+   }
+#endif
+
+#if GFX_VERx10 == 125
+   /* Wa_14014427904 - We need additional invalidate/flush when
+    * emitting NP state commands with ATS-M in compute mode.
+    */
+   if (intel_device_info_is_atsm(device->info) &&
+       queue->family->engine_class == INTEL_ENGINE_CLASS_COMPUTE) {
+      genX(batch_emit_pipe_control)
+         (batch, device->info,
+          ANV_PIPE_CS_STALL_BIT |
+          ANV_PIPE_STATE_CACHE_INVALIDATE_BIT |
+          ANV_PIPE_CONSTANT_CACHE_INVALIDATE_BIT |
+          ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT |
+          ANV_PIPE_TEXTURE_CACHE_INVALIDATE_BIT |
+          ANV_PIPE_INSTRUCTION_CACHE_INVALIDATE_BIT |
+          ANV_PIPE_HDC_PIPELINE_FLUSH_BIT);
+      }
+#endif
+
    /* Emit STATE_BASE_ADDRESS on Gfx12+ because we set a default CPS_STATE and
     * those are relative to STATE_BASE_ADDRESS::DynamicStateBaseAddress.
     */
 #if GFX_VER >= 12
 
 #if GFX_VERx10 >= 125
-   anv_batch_emit(batch, GENX(PIPE_CONTROL), pc) {
-      /* Wa_14016407139:
-       *
-       * "On Surface state base address modification, for 3D workloads, SW must
-       *  always program PIPE_CONTROL either with CS Stall or PS sync stall. In
-       *  both the cases set Render Target Cache Flush Enable".
-       */
-      pc.RenderTargetCacheFlushEnable = true;
-      pc.CommandStreamerStallEnable = true;
-   }
+   /* Wa_14016407139:
+    *
+    * "On Surface state base address modification, for 3D workloads, SW must
+    *  always program PIPE_CONTROL either with CS Stall or PS sync stall. In
+    *  both the cases set Render Target Cache Flush Enable".
+    */
+   genX(batch_emit_pipe_control)
+      (batch, device->info, ANV_PIPE_CS_STALL_BIT |
+                            ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT);
 #endif
 
    /* GEN:BUG:1607854226:
@@ -213,13 +245,17 @@ init_common_queue_state(struct anv_queue *queue, struct anv_batch *batch)
       sba.StatelessDataPortAccessMOCS = mocs;
 
       sba.SurfaceStateBaseAddress =
-         (struct anv_address) { .offset = INTERNAL_SURFACE_STATE_POOL_MIN_ADDRESS };
+         (struct anv_address) { .offset =
+         device->physical->va.internal_surface_state_pool.addr,
+      };
       sba.SurfaceStateMOCS = mocs;
       sba.SurfaceStateBaseAddressModifyEnable = true;
 
       sba.DynamicStateBaseAddress =
-         (struct anv_address) { .offset = DYNAMIC_STATE_POOL_MIN_ADDRESS };
-      sba.DynamicStateBufferSize = DYNAMIC_STATE_POOL_SIZE / 4096;
+         (struct anv_address) { .offset =
+         device->physical->va.dynamic_state_pool.addr,
+      };
+      sba.DynamicStateBufferSize = device->physical->va.dynamic_state_pool.size / 4096;
       sba.DynamicStateMOCS = mocs;
       sba.DynamicStateBaseAddressModifyEnable = true;
       sba.DynamicStateBufferSizeModifyEnable = true;
@@ -231,22 +267,47 @@ init_common_queue_state(struct anv_queue *queue, struct anv_batch *batch)
       sba.IndirectObjectBufferSizeModifyEnable = true;
 
       sba.InstructionBaseAddress =
-         (struct anv_address) { .offset = INSTRUCTION_STATE_POOL_MIN_ADDRESS };
-      sba.InstructionBufferSize = INSTRUCTION_STATE_POOL_SIZE / 4096;
+         (struct anv_address) { .offset =
+         device->physical->va.instruction_state_pool.addr,
+      };
+      sba.InstructionBufferSize = device->physical->va.instruction_state_pool.size / 4096;
       sba.InstructionMOCS = mocs;
       sba.InstructionBaseAddressModifyEnable = true;
       sba.InstructionBuffersizeModifyEnable = true;
 
-      sba.BindlessSurfaceStateBaseAddress =
-         (struct anv_address) { .offset = BINDLESS_SURFACE_STATE_POOL_MIN_ADDRESS };
-      sba.BindlessSurfaceStateSize = (1 << 20) - 1;
-      sba.BindlessSurfaceStateMOCS = mocs;
-      sba.BindlessSurfaceStateBaseAddressModifyEnable = true;
+      if (device->physical->indirect_descriptors) {
+         sba.BindlessSurfaceStateBaseAddress =
+            (struct anv_address) { .offset =
+            device->physical->va.bindless_surface_state_pool.addr,
+         };
+         sba.BindlessSurfaceStateSize =
+            anv_physical_device_bindless_heap_size(device->physical) / ANV_SURFACE_STATE_SIZE - 1;
+         sba.BindlessSurfaceStateMOCS = mocs;
+         sba.BindlessSurfaceStateBaseAddressModifyEnable = true;
 
-      sba.BindlessSamplerStateBaseAddress = (struct anv_address) { NULL, 0 };
-      sba.BindlessSamplerStateMOCS = mocs;
-      sba.BindlessSamplerStateBaseAddressModifyEnable = true;
-      sba.BindlessSamplerStateBufferSize = 0;
+         sba.BindlessSamplerStateBaseAddress = (struct anv_address) { NULL, 0 };
+         sba.BindlessSamplerStateMOCS = mocs;
+         sba.BindlessSamplerStateBaseAddressModifyEnable = true;
+         sba.BindlessSamplerStateBufferSize = 0;
+      } else {
+         /* Bindless Surface State & Bindless Sampler State are aligned to the
+          * same heap
+          */
+         sba.BindlessSurfaceStateBaseAddress =
+            sba.BindlessSamplerStateBaseAddress =
+            (struct anv_address) { .offset = device->physical->va.binding_table_pool.addr, };
+         sba.BindlessSurfaceStateSize =
+            (device->physical->va.binding_table_pool.size +
+             device->physical->va.internal_surface_state_pool.size +
+             device->physical->va.descriptor_pool.size) - 1;
+         sba.BindlessSamplerStateBufferSize =
+            (device->physical->va.binding_table_pool.size +
+             device->physical->va.internal_surface_state_pool.size +
+             device->physical->va.descriptor_pool.size) / 4096 - 1;
+         sba.BindlessSurfaceStateMOCS = sba.BindlessSamplerStateMOCS = mocs;
+         sba.BindlessSurfaceStateBaseAddressModifyEnable =
+            sba.BindlessSamplerStateBaseAddressModifyEnable = true;
+      }
 
 #if GFX_VERx10 >= 125
       sba.L1CacheControl = L1CC_WB;
@@ -282,6 +343,7 @@ static VkResult
 init_render_queue_state(struct anv_queue *queue)
 {
    struct anv_device *device = queue->device;
+   UNUSED const struct intel_device_info *devinfo = queue->device->info;
    uint32_t cmds[128];
    struct anv_batch batch = {
       .start = cmds,
@@ -420,10 +482,39 @@ init_render_queue_state(struct anv_queue *queue)
       reg.HZDepthTestLEGEOptimizationDisable = true;
       reg.HZDepthTestLEGEOptimizationDisableMask = true;
    }
+#endif
 
-   /* Wa_1508744258
-    *
-    *    Disable RHWO by setting 0x7010[14] by default except during resolve
+#if GFX_VER == 12
+   anv_batch_write_reg(&batch, GENX(FF_MODE2), reg) {
+      /* On Alchemist, the FF_MODE2 docs for the GS timer say:
+       *
+       *    "The timer value must be set to 224."
+       *
+       * and Wa_16011163337 indicates this is the case for all Gfx12 parts,
+       * and that this is necessary to avoid hanging the HS/DS units.  It
+       * also clarifies that 224 is literally 0xE0 in the bits, not 7*32=224.
+       *
+       * The HS timer docs also have the same quote for Alchemist.  I am
+       * unaware of a reason it needs to be set to 224 on Tigerlake, but
+       * we do so for consistency if nothing else.
+       *
+       * For the TDS timer value, the docs say:
+       *
+       *    "For best performance, a value of 4 should be programmed."
+       *
+       * i915 also sets it this way on Tigerlake due to workarounds.
+       *
+       * The default VS timer appears to be 0, so we leave it at that.
+       */
+      reg.GSTimerValue  = 224;
+      reg.HSTimerValue  = 224;
+      reg.TDSTimerValue = 4;
+      reg.VSTimerValue  = 0;
+   }
+#endif
+
+#if INTEL_NEEDS_WA_1508744258
+   /*    Disable RHWO by setting 0x7010[14] by default except during resolve
     *    pass.
     *
     * We implement global disabling of the optimization here and we toggle it
@@ -470,11 +561,10 @@ init_render_queue_state(struct anv_queue *queue)
     *
     * This is only safe on kernels with context isolation support.
     */
-   if (device->physical->info.has_context_isolation) {
-      anv_batch_write_reg(&batch, GENX(CS_DEBUG_MODE2), csdm2) {
-         csdm2.CONSTANT_BUFFERAddressOffsetDisable = true;
-         csdm2.CONSTANT_BUFFERAddressOffsetDisableMask = true;
-      }
+   assert(device->physical->info.has_context_isolation);
+   anv_batch_write_reg(&batch, GENX(CS_DEBUG_MODE2), csdm2) {
+      csdm2.CONSTANT_BUFFERAddressOffsetDisable = true;
+      csdm2.CONSTANT_BUFFERAddressOffsetDisableMask = true;
    }
 
    init_common_queue_state(queue, &batch);
@@ -494,6 +584,25 @@ init_render_queue_state(struct anv_queue *queue)
    }
 #endif
 
+#if GFX_VERx10 >= 125
+   anv_batch_emit(&batch, GENX(3DSTATE_MESH_CONTROL), zero);
+   anv_batch_emit(&batch, GENX(3DSTATE_TASK_CONTROL), zero);
+   genX(batch_emit_pipe_control_write)(&batch, device->info, NoWrite,
+                                       ANV_NULL_ADDRESS,
+                                       0,
+                                       ANV_PIPE_FLUSH_BITS | ANV_PIPE_INVALIDATE_BITS);
+   genX(emit_pipeline_select)(&batch, GPGPU);
+   anv_batch_emit(&batch, GENX(CFE_STATE), cfe) {
+      cfe.MaximumNumberofThreads =
+         devinfo->max_cs_threads * devinfo->subslice_total;
+   }
+   genX(batch_emit_pipe_control_write)(&batch, device->info, NoWrite,
+                                       ANV_NULL_ADDRESS,
+                                       0,
+                                       ANV_PIPE_FLUSH_BITS | ANV_PIPE_INVALIDATE_BITS);
+   genX(emit_pipeline_select)(&batch, _3D);
+#endif
+
    anv_batch_emit(&batch, GENX(MI_BATCH_BUFFER_END), bbe);
 
    assert(batch.next <= batch.end);
@@ -505,6 +614,7 @@ static VkResult
 init_compute_queue_state(struct anv_queue *queue)
 {
    struct anv_batch batch;
+   UNUSED const struct intel_device_info *devinfo = queue->device->info;
 
    uint32_t cmds[64];
    batch.start = batch.next = cmds;
@@ -512,7 +622,32 @@ init_compute_queue_state(struct anv_queue *queue)
 
    genX(emit_pipeline_select)(&batch, GPGPU);
 
+#if GFX_VER == 12
+   if (queue->device->info->has_aux_map) {
+      uint64_t aux_base_addr =
+         intel_aux_map_get_base(queue->device->aux_map_ctx);
+      assert(aux_base_addr % (32 * 1024) == 0);
+      anv_batch_emit(&batch, GENX(MI_LOAD_REGISTER_IMM), lri) {
+         lri.RegisterOffset = GENX(COMPCS0_AUX_TABLE_BASE_ADDR_num);
+         lri.DataDWord = aux_base_addr & 0xffffffff;
+      }
+      anv_batch_emit(&batch, GENX(MI_LOAD_REGISTER_IMM), lri) {
+         lri.RegisterOffset = GENX(COMPCS0_AUX_TABLE_BASE_ADDR_num) + 4;
+         lri.DataDWord = aux_base_addr >> 32;
+      }
+   }
+#else
+   assert(!queue->device->info->has_aux_map);
+#endif
+
    init_common_queue_state(queue, &batch);
+
+#if GFX_VERx10 >= 125
+   anv_batch_emit(&batch, GENX(CFE_STATE), cfe) {
+      cfe.MaximumNumberofThreads =
+         devinfo->max_cs_threads * devinfo->subslice_total;
+   }
+#endif
 
    anv_batch_emit(&batch, GENX(MI_BATCH_BUFFER_END), bbe);
 
@@ -529,6 +664,8 @@ genX(init_physical_device_state)(ASSERTED struct anv_physical_device *pdevice)
    genX(grl_load_rt_uuid)(pdevice->rt_uuid);
    pdevice->max_grl_scratch_size = genX(grl_max_scratch_size)();
 #endif
+
+   pdevice->cmd_emit_timestamp = genX(cmd_emit_timestamp);
 }
 
 VkResult
@@ -1067,9 +1204,8 @@ genX(apply_task_urb_workaround)(struct anv_cmd_buffer *cmd_buffer)
    anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_URB_ALLOC_TASK), zero);
 
    /* Issue 'nullprim' to commit the state. */
-   anv_batch_emit(&cmd_buffer->batch, GENX(PIPE_CONTROL), pc) {
-      pc.PostSyncOperation = WriteImmediateData;
-      pc.Address = cmd_buffer->device->workaround_address;
-   }
+   genX(batch_emit_pipe_control_write)
+      (&cmd_buffer->batch, cmd_buffer->device->info,
+       WriteImmediateData, cmd_buffer->device->workaround_address, 0, 0);
 #endif
 }
