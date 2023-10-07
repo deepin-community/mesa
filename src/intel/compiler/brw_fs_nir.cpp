@@ -3480,6 +3480,45 @@ fs_visitor::nir_emit_fs_intrinsic(const fs_builder &bld,
       unsigned comp = nir_intrinsic_component(instr);
       unsigned num_components = instr->num_components;
 
+      const struct brw_wm_prog_key *wm_key = (brw_wm_prog_key*) this->key;
+
+      if (wm_key->mesh_input == BRW_SOMETIMES) {
+         assert(devinfo->verx10 >= 125);
+         /* The FS payload gives us the viewport and layer clamped to valid
+          * ranges, but the spec for gl_ViewportIndex and gl_Layer includes
+          * the language:
+          *   the fragment stage will read the same value written by the
+          *   geometry stage, even if that value is out of range.
+          *
+          * Which is why these are normally passed as regular attributes.
+          * This isn't tested anywhere except some GL-only piglit tests
+          * though, so for the case where the FS may be used against either a
+          * traditional pipeline or a mesh one, where the position of these
+          * will change depending on the previous stage, read them from the
+          * payload to simplify things until the requisite magic is in place.
+          */
+         if (base == VARYING_SLOT_LAYER || base == VARYING_SLOT_VIEWPORT) {
+            assert(num_components == 1);
+            fs_reg g1(retype(brw_vec1_grf(1, 1), BRW_REGISTER_TYPE_UD));
+
+            unsigned mask, shift_count;
+            if (base == VARYING_SLOT_LAYER) {
+               shift_count = 16;
+               mask = 0x7ff << shift_count;
+            } else {
+               shift_count = 27;
+               mask = 0xf << shift_count;
+            }
+
+            fs_reg vp_or_layer = bld.vgrf(BRW_REGISTER_TYPE_UD);
+            bld.AND(vp_or_layer, g1, brw_imm_ud(mask));
+            fs_reg shifted_value = bld.vgrf(BRW_REGISTER_TYPE_UD);
+            bld.SHR(shifted_value, vp_or_layer, brw_imm_ud(shift_count));
+            bld.MOV(offset(dest, bld, 0), retype(shifted_value, dest.type));
+            break;
+         }
+      }
+
       /* TODO(mesh): Multiview. Verify and handle these special cases for Mesh. */
 
       /* Special case fields in the VUE header */
@@ -3492,7 +3531,7 @@ fs_visitor::nir_emit_fs_intrinsic(const fs_builder &bld,
          assert(base != VARYING_SLOT_PRIMITIVE_INDICES);
          for (unsigned int i = 0; i < num_components; i++) {
             bld.MOV(offset(dest, bld, i),
-                    retype(component(per_primitive_reg(base), comp + i), dest.type));
+                    retype(per_primitive_reg(base, comp + i), dest.type));
          }
       } else {
          for (unsigned int i = 0; i < num_components; i++) {
@@ -4943,6 +4982,8 @@ fs_visitor::nir_emit_intrinsic(const fs_builder &bld, nir_intrinsic_instr *instr
          const unsigned ubo_block =
             brw_nir_ubo_surface_index_get_push_block(instr->src[0]);
          const unsigned offset_256b = load_offset / 32;
+         const unsigned end_256b =
+            DIV_ROUND_UP(load_offset + type_size * instr->num_components, 32);
 
          /* See if we've selected this as a push constant candidate */
          fs_reg push_reg;
@@ -4950,7 +4991,7 @@ fs_visitor::nir_emit_intrinsic(const fs_builder &bld, nir_intrinsic_instr *instr
             const struct brw_ubo_range *range = &prog_data->ubo_ranges[i];
             if (range->block == ubo_block &&
                 offset_256b >= range->start &&
-                offset_256b < range->start + range->length) {
+                end_256b <= range->start + range->length) {
 
                push_reg = fs_reg(UNIFORM, UBO_START + i, dest.type);
                push_reg.offset = load_offset - 32 * range->start;
