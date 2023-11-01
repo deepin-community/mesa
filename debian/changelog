@@ -1,3 +1,9 @@
+mesa (23.2.1-1deepin1) UNRELEASED; urgency=medium
+
+  * Import orcjit llvmpipe patch
+
+ -- Chang Yang <yangchang@deepin.org>  Wed, 18 Oct 2023 18:09:10 +0800
+
 mesa (23.2.1-1) unstable; urgency=medium
 
   * New upstream release.
