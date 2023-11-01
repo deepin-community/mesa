@@ -72,10 +72,10 @@ else
   endif
 
   # Only enable amd on riscv64, swrast needs CPU JIT support which doesn't work properly yet
-  ifneq (,$(filter $(DEB_HOST_ARCH), riscv64))
-	VULKAN_DRIVERS += amd
-	confflags_GALLIUM += -Ddraw-use-llvm=false
-  endif
+  #ifneq (,$(filter $(DEB_HOST_ARCH), riscv64))
+  #	VULKAN_DRIVERS += amd
+  #	confflags_GALLIUM += -Ddraw-use-llvm=false
+  #endif
 
   ifeq ($(DEB_HOST_ARCH_OS), linux)
 	confflags_DRI3 = -Ddri3=enabled
@@ -133,12 +133,12 @@ else
 	GALLIUM_DRIVERS += radeonsi zink
 
 	# Only enable amd on riscv64, swrast needs CPU JIT support which doesn't work properly yet
-	ifneq (,$(filter $(DEB_HOST_ARCH), riscv64))
-		VULKAN_DRIVERS += amd
-		confflags_GALLIUM += -Ddraw-use-llvm=false
-	else
+	#ifneq (,$(filter $(DEB_HOST_ARCH), riscv64))
+	#	VULKAN_DRIVERS += amd
+	#	confflags_GALLIUM += -Ddraw-use-llvm=false
+	#else
 		VULKAN_DRIVERS += amd swrast
-	endif
+	#endif
 
 	VULKAN_LAYERS += device-select intel-nullhw overlay
 	confflags_GALLIUM += -Dllvm=enabled
