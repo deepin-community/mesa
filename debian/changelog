@@ -1,3 +1,9 @@
+mesa (23.3.3-3deepin1) unstable; urgency=medium
+
+  * build-depends llvm-16.
+
+ -- LiChengGang <lichenggang@uniontech.com>  Wed, 24 Jan 2024 16:55:20 +0800
+
 mesa (23.3.3-3) unstable; urgency=medium
 
   * rules: Drop mips64el from RUSTICL_ARCHS too, which would pull llvm-
