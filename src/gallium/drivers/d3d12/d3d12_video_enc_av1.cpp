@@ -101,17 +101,38 @@ d3d12_video_encoder_update_current_rate_control_av1(struct d3d12_video_encoder *
                picture->rc[0].max_qp;
          }
 
+#if ((D3D12_SDK_VERSION >= 611) && (D3D12_PREVIEW_SDK_VERSION >= 712))
+         if (picture->quality_modes.level > 0) {
+            pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Flags |=
+               D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_QUALITY_VS_SPEED;
+            pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Flags |=
+               D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_EXTENSION1_SUPPORT;
+
+            // Convert between D3D12 definition and PIPE definition
+            // D3D12: QualityVsSpeed must be in the range [0, D3D12_FEATURE_DATA_VIDEO_ENCODER_SUPPORT1.MaxQualityVsSpeed]
+            // The lower the value, the fastest the encode operation
+            // PIPE: The quality level range can be queried through the VAConfigAttribEncQualityRange attribute. 
+            // A lower value means higher quality, and a value of 1 represents the highest quality. 
+            // The quality level setting is used as a trade-off between quality and speed/power 
+            // consumption, with higher quality corresponds to lower speed and higher power consumption.
+
+            pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_VBR1.QualityVsSpeed =
+               pD3D12Enc->max_quality_levels - picture->quality_modes.level;
+         }
+#endif
+
       } break;
       case PIPE_H2645_ENC_RATE_CONTROL_METHOD_QUALITY_VARIABLE:
       {
          pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Mode = D3D12_VIDEO_ENCODER_RATE_CONTROL_MODE_QVBR;
-         pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_QVBR1.TargetAvgBitRate =
+         pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_QVBR.TargetAvgBitRate =
             picture->rc[0].target_bitrate;
-         pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_QVBR1.PeakBitRate =
+         pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_QVBR.PeakBitRate =
             picture->rc[0].peak_bitrate;
-         pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_QVBR1.ConstantQualityTarget =
+         pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_QVBR.ConstantQualityTarget =
             picture->rc[0].vbr_quality_factor;
 
+#if ((D3D12_SDK_VERSION >= 611) && (D3D12_PREVIEW_SDK_VERSION >= 712))
          if (D3D12_VIDEO_ENC_CBR_FORCE_VBV_EQUAL_BITRATE) {
             debug_printf("[d3d12_video_encoder_av1] d3d12_video_encoder_update_current_rate_control_av1 "
                          "D3D12_VIDEO_ENC_CBR_FORCE_VBV_EQUAL_BITRATE environment variable is set, "
@@ -121,7 +142,7 @@ d3d12_video_encoder_update_current_rate_control_av1(struct d3d12_video_encoder *
             pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Flags |=
                D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_VBV_SIZES;
             pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Flags |=
-               D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_EXTENDED_QVBR1_SUPPORT;
+               D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_EXTENSION1_SUPPORT;
             pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_QVBR1.VBVCapacity =
                pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_QVBR1.TargetAvgBitRate;
             pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_QVBR1.InitialVBVFullness =
@@ -135,23 +156,23 @@ d3d12_video_encoder_update_current_rate_control_av1(struct d3d12_video_encoder *
             pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Flags |=
                D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_VBV_SIZES;
             pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Flags |=
-               D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_EXTENDED_QVBR1_SUPPORT;
+               D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_EXTENSION1_SUPPORT;
             pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_QVBR1.VBVCapacity =
                picture->rc[0].vbv_buffer_size;
             pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_QVBR1.InitialVBVFullness =
                picture->rc[0].vbv_buf_initial_size;
          }
-
+#endif
          if (picture->rc[0].max_au_size > 0) {
             pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Flags |=
                D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_MAX_FRAME_SIZE;
-            pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_QVBR1.MaxFrameBitSize =
+            pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_QVBR.MaxFrameBitSize =
                picture->rc[0].max_au_size;
 
             debug_printf(
                "[d3d12_video_encoder_av1] d3d12_video_encoder_update_current_rate_control_av1 "
                "Upper layer requested explicit MaxFrameBitSize: %" PRIu64 "\n",
-               pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_QVBR1.MaxFrameBitSize);
+               pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_QVBR.MaxFrameBitSize);
          }
 
          if (picture->rc[0].app_requested_qp_range) {
@@ -161,11 +182,31 @@ d3d12_video_encoder_update_current_rate_control_av1(struct d3d12_video_encoder *
                          picture->rc[0].max_qp);
             pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Flags |=
                D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_QP_RANGE;
-            pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_QVBR1.MinQP =
+            pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_QVBR.MinQP =
                picture->rc[0].min_qp;
-            pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_QVBR1.MaxQP =
+            pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_QVBR.MaxQP =
                picture->rc[0].max_qp;
          }
+
+#if ((D3D12_SDK_VERSION >= 611) && (D3D12_PREVIEW_SDK_VERSION >= 712))
+         if (picture->quality_modes.level > 0) {
+            pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Flags |=
+               D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_QUALITY_VS_SPEED;
+            pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Flags |=
+               D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_EXTENSION1_SUPPORT;
+
+            // Convert between D3D12 definition and PIPE definition
+            // D3D12: QualityVsSpeed must be in the range [0, D3D12_FEATURE_DATA_VIDEO_ENCODER_SUPPORT1.MaxQualityVsSpeed]
+            // The lower the value, the fastest the encode operation
+            // PIPE: The quality level range can be queried through the VAConfigAttribEncQualityRange attribute. 
+            // A lower value means higher quality, and a value of 1 represents the highest quality. 
+            // The quality level setting is used as a trade-off between quality and speed/power 
+            // consumption, with higher quality corresponds to lower speed and higher power consumption.
+
+            pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_QVBR1.QualityVsSpeed =
+               pD3D12Enc->max_quality_levels - picture->quality_modes.level;
+         }
+#endif
 
       } break;
       case PIPE_H2645_ENC_RATE_CONTROL_METHOD_CONSTANT_SKIP:
@@ -231,6 +272,26 @@ d3d12_video_encoder_update_current_rate_control_av1(struct d3d12_video_encoder *
                picture->rc[0].max_qp;
          }
 
+#if ((D3D12_SDK_VERSION >= 611) && (D3D12_PREVIEW_SDK_VERSION >= 712))
+         if (picture->quality_modes.level > 0) {
+            pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Flags |=
+               D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_QUALITY_VS_SPEED;
+            pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Flags |=
+               D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_EXTENSION1_SUPPORT;
+
+            // Convert between D3D12 definition and PIPE definition
+            // D3D12: QualityVsSpeed must be in the range [0, D3D12_FEATURE_DATA_VIDEO_ENCODER_SUPPORT1.MaxQualityVsSpeed]
+            // The lower the value, the fastest the encode operation
+            // PIPE: The quality level range can be queried through the VAConfigAttribEncQualityRange attribute. 
+            // A lower value means higher quality, and a value of 1 represents the highest quality. 
+            // The quality level setting is used as a trade-off between quality and speed/power 
+            // consumption, with higher quality corresponds to lower speed and higher power consumption.
+
+            pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_CBR1.QualityVsSpeed =
+               pD3D12Enc->max_quality_levels - picture->quality_modes.level;
+         }
+#endif
+
       } break;
       case PIPE_H2645_ENC_RATE_CONTROL_METHOD_DISABLE:
       {
@@ -243,6 +304,25 @@ d3d12_video_encoder_update_current_rate_control_av1(struct d3d12_video_encoder *
          pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_CQP
             .ConstantQP_InterPredictedFrame_BiDirectionalRef =
             picture->rc[0].app_requested_initial_qp ? picture->rc[0].qp : 0;
+
+#if ((D3D12_SDK_VERSION >= 611) && (D3D12_PREVIEW_SDK_VERSION >= 712))
+         if (picture->quality_modes.level > 0) {
+            pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Flags |=
+               D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_QUALITY_VS_SPEED;
+            pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Flags |=
+               D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_EXTENSION1_SUPPORT;
+            // Convert between D3D12 definition and PIPE definition
+            // D3D12: QualityVsSpeed must be in the range [0, D3D12_FEATURE_DATA_VIDEO_ENCODER_SUPPORT1.MaxQualityVsSpeed]
+            // The lower the value, the fastest the encode operation
+            // PIPE: The quality level range can be queried through the VAConfigAttribEncQualityRange attribute. 
+            // A lower value means higher quality, and a value of 1 represents the highest quality. 
+            // The quality level setting is used as a trade-off between quality and speed/power 
+            // consumption, with higher quality corresponds to lower speed and higher power consumption.
+
+            pD3D12Enc->m_currentEncodeConfig.m_encoderRateControlDesc.m_Config.m_Configuration_CQP1.QualityVsSpeed =
+               pD3D12Enc->max_quality_levels - picture->quality_modes.level;
+         }
+#endif
       } break;
       default:
       {
@@ -1229,6 +1309,23 @@ d3d12_video_encoder_update_current_frame_pic_params_info_av1(struct d3d12_video_
    picParams.pAV1PicData->InterpolationFilter =
       static_cast<D3D12_VIDEO_ENCODER_AV1_INTERPOLATION_FILTERS>(pAV1Pic->interpolation_filter);
 
+   // Workaround for apps sending interpolation_filter values not supported even when reporting
+   // them in pipe_av1_enc_cap_features_ext1.interpolation_filter. If D3D12 driver doesn't support
+   // requested InterpolationFilter, fallback to the first supported by D3D12 driver
+   if ( (pD3D12Enc->m_currentEncodeCapabilities.m_encoderCodecSpecificConfigCaps.m_AV1CodecCaps.SupportedInterpolationFilters &
+      (1 << picParams.pAV1PicData->InterpolationFilter)) == 0 ) { /* See definition of D3D12_VIDEO_ENCODER_AV1_INTERPOLATION_FILTERS_FLAGS */
+      debug_printf("[d3d12_video_encoder_update_current_frame_pic_params_info_av1] Requested interpolation_filter"
+                   " not supported in pipe_av1_enc_cap_features_ext1.interpolation_filter"
+                   ", auto selecting from D3D12 SupportedInterpolationFilters...");
+      for(uint8_t i = D3D12_VIDEO_ENCODER_AV1_INTERPOLATION_FILTERS_EIGHTTAP; i <= D3D12_VIDEO_ENCODER_AV1_INTERPOLATION_FILTERS_SWITCHABLE; i++) {
+         if ((pD3D12Enc->m_currentEncodeCapabilities.m_encoderCodecSpecificConfigCaps.m_AV1CodecCaps.SupportedInterpolationFilters &
+             (1 << i)) /* See definition of D3D12_VIDEO_ENCODER_AV1_INTERPOLATION_FILTERS_FLAGS */ != 0) {
+            picParams.pAV1PicData->InterpolationFilter = static_cast<D3D12_VIDEO_ENCODER_AV1_INTERPOLATION_FILTERS>(i);
+            break;
+         }
+      }
+   }
+
    // D3D12_VIDEO_ENCODER_AV1_RESTORATION_CONFIG FrameRestorationConfig;
    // AV1 spec matches w/D3D12 FrameRestorationType enum definition
 
@@ -1262,6 +1359,22 @@ d3d12_video_encoder_update_current_frame_pic_params_info_av1(struct d3d12_video_
    // D3D12_VIDEO_ENCODER_AV1_TX_MODE TxMode;
    // AV1 spec matches w/D3D12 enum definition
    picParams.pAV1PicData->TxMode = static_cast<D3D12_VIDEO_ENCODER_AV1_TX_MODE>(pAV1Pic->tx_mode);
+
+   // Workaround for mismatch between VAAPI/D3D12 and TxMode support for all/some frame types
+   // If D3D12 driver doesn't support requested TxMode, fallback to the first supported by D3D12
+   // driver for the requested frame type
+   if ((pD3D12Enc->m_currentEncodeCapabilities.m_encoderCodecSpecificConfigCaps.m_AV1CodecCaps.SupportedTxModes[picParams.pAV1PicData->FrameType] &
+      (1 << picParams.pAV1PicData->TxMode)) == 0) /* See definition of D3D12_VIDEO_ENCODER_AV1_TX_MODE_FLAGS */ {
+      debug_printf("[d3d12_video_encoder_update_current_frame_pic_params_info_av1] Requested tx_mode not supported"
+                     ", auto selecting from D3D12 SupportedTxModes for current frame type...");
+      for(uint8_t i = D3D12_VIDEO_ENCODER_AV1_TX_MODE_ONLY4x4; i <= D3D12_VIDEO_ENCODER_AV1_TX_MODE_SELECT; i++) {
+         if ((pD3D12Enc->m_currentEncodeCapabilities.m_encoderCodecSpecificConfigCaps.m_AV1CodecCaps.SupportedTxModes[picParams.pAV1PicData->FrameType] &
+             (1 << i)) /* See definition of D3D12_VIDEO_ENCODER_AV1_TX_MODE_FLAGS */ != 0) {
+            picParams.pAV1PicData->TxMode = static_cast<D3D12_VIDEO_ENCODER_AV1_TX_MODE>(i);
+            break;
+         }
+      }
+   }
 
    // UINT SuperResDenominator;
    picParams.pAV1PicData->SuperResDenominator = pAV1Pic->superres_scale_denominator;
@@ -2076,7 +2189,7 @@ d3d12_video_encoder_build_post_encode_codec_bitstream_av1(struct d3d12_video_enc
          writtenTemporalDelimBytes                      // Bytes Written AFTER placingPositionStart arg above
       );
       assert(pD3D12Enc->m_BitstreamHeadersBuffer.size() == writtenTemporalDelimBytes);
-      debug_printf("Written OBU_TEMPORAL_DELIMITER bytes: %" PRIu64 "\n", writtenTemporalDelimBytes);
+      debug_printf("Written OBU_TEMPORAL_DELIMITER bytes: %" PRIu64 "\n", static_cast<uint64_t>(writtenTemporalDelimBytes));
    }
 
    size_t writtenSequenceBytes = 0;
@@ -2095,7 +2208,7 @@ d3d12_video_encoder_build_post_encode_codec_bitstream_av1(struct d3d12_video_enc
          writtenSequenceBytes   // Bytes Written AFTER placingPositionStart arg above
       );
       assert(pD3D12Enc->m_BitstreamHeadersBuffer.size() == (writtenSequenceBytes + writtenTemporalDelimBytes));
-      debug_printf("Written OBU_SEQUENCE_HEADER bytes: %" PRIu64 "\n", writtenSequenceBytes);
+      debug_printf("Written OBU_SEQUENCE_HEADER bytes: %" PRIu64 "\n", static_cast<uint64_t>(writtenSequenceBytes));
    }
 
    // Only supported bitstream format is with obu_size for now.
@@ -2141,14 +2254,14 @@ d3d12_video_encoder_build_post_encode_codec_bitstream_av1(struct d3d12_video_enc
          writtenFrameBytes               // Bytes Written AFTER placingPositionStart arg above
       );
 
-      debug_printf("Written OBU_FRAME bytes: %" PRIu64 "\n", writtenFrameBytes);
+      debug_printf("Written OBU_FRAME bytes: %" PRIu64 "\n", static_cast<uint64_t>(writtenFrameBytes));
 
       assert(pD3D12Enc->m_BitstreamHeadersBuffer.size() ==
              (writtenSequenceBytes + writtenTemporalDelimBytes + writtenFrameBytes));
 
       debug_printf("Uploading %" PRIu64
                    " bytes from OBU sequence and/or picture headers to comp_bit_destination %p at offset 0\n",
-                   pD3D12Enc->m_BitstreamHeadersBuffer.size(),
+                   static_cast<uint64_t>(pD3D12Enc->m_BitstreamHeadersBuffer.size()),
                    associatedMetadata.comp_bit_destination);
 
       // Upload headers to the finalized compressed bitstream buffer
@@ -2217,13 +2330,13 @@ d3d12_video_encoder_build_post_encode_codec_bitstream_av1(struct d3d12_video_enc
                                                writtenFrameBytes   // Bytes Written AFTER placingPositionStart arg above
       );
 
-      debug_printf("Written OBU_FRAME_HEADER bytes: %" PRIu64 "\n", writtenFrameBytes);
+      debug_printf("Written OBU_FRAME_HEADER bytes: %" PRIu64 "\n", static_cast<uint64_t>(writtenFrameBytes));
 
       assert(pD3D12Enc->m_BitstreamHeadersBuffer.size() ==
              (writtenSequenceBytes + writtenTemporalDelimBytes + writtenFrameBytes));
 
       debug_printf("Uploading %" PRIu64 " bytes from OBU headers to comp_bit_destination %p at offset 0\n",
-                   pD3D12Enc->m_BitstreamHeadersBuffer.size(),
+                   static_cast<uint64_t>(pD3D12Enc->m_BitstreamHeadersBuffer.size()),
                    associatedMetadata.comp_bit_destination);
 
       // Upload headers to the finalized compressed bitstream buffer
@@ -2248,7 +2361,7 @@ d3d12_video_encoder_build_post_encode_codec_bitstream_av1(struct d3d12_video_enc
          debug_printf("Uploading tile group %d to comp_bit_destination %p at offset %" PRIu64 "\n",
                       tg_idx,
                       associatedMetadata.comp_bit_destination,
-                      comp_bitstream_offset);
+                      static_cast<uint64_t>(comp_bitstream_offset));
 
          size_t tile_group_obu_size = 0;
          size_t decode_tile_elements_size = 0;
@@ -2274,9 +2387,9 @@ d3d12_video_encoder_build_post_encode_codec_bitstream_av1(struct d3d12_video_enc
 
          debug_printf("Written %" PRIu64 " bytes for OBU_TILE_GROUP open_bitstream_unit() prefix with obu_header() and "
                       "obu_size to staging_bitstream_buffer %p at offset %" PRIu64 "\n",
-                      writtenTileObuPrefixBytes,
+                      static_cast<uint64_t>(writtenTileObuPrefixBytes),
                       associatedMetadata.m_StagingBitstreamConstruction.data(),
-                      staging_bitstream_buffer_offset);
+                      static_cast<uint64_t>(staging_bitstream_buffer_offset));
 
          writtenTileBytes += writtenTileObuPrefixBytes;
 
@@ -2291,10 +2404,10 @@ d3d12_video_encoder_build_post_encode_codec_bitstream_av1(struct d3d12_video_enc
 
          debug_printf("Uploading %" PRIu64 " bytes for OBU_TILE_GROUP open_bitstream_unit() prefix with obu_header() "
                       "and obu_size: %" PRIu64 " to comp_bit_destination %p at offset %" PRIu64 "\n",
-                      writtenTileObuPrefixBytes,
-                      tile_group_obu_size,
+                      static_cast<uint64_t>(writtenTileObuPrefixBytes),
+                      static_cast<uint64_t>(tile_group_obu_size),
                       associatedMetadata.comp_bit_destination,
-                      comp_bitstream_offset);
+                      static_cast<uint64_t>(comp_bitstream_offset));
 
          staging_bitstream_buffer_offset += writtenTileObuPrefixBytes;
 
@@ -2404,7 +2517,7 @@ d3d12_video_encoder_build_post_encode_codec_bitstream_av1(struct d3d12_video_enc
             // Add current pending frame being processed in the loop
             extra_show_existing_frame_payload_bytes += writtenTemporalDelimBytes;
 
-            debug_printf("Written OBU_TEMPORAL_DELIMITER bytes: %" PRIu64 "\n", writtenTemporalDelimBytes);
+            debug_printf("Written OBU_TEMPORAL_DELIMITER bytes: %" PRIu64 "\n", static_cast<uint64_t>(writtenTemporalDelimBytes));
 
             size_t writtenShowExistingFrameBytes = 0;
             av1_pic_header_t showExistingPicHdr = {};
@@ -2448,7 +2561,7 @@ d3d12_video_encoder_build_post_encode_codec_bitstream_av1(struct d3d12_video_enc
                          "in current frame ref_frame_idx[%" PRIu32 "]) bytes: %" PRIu64 "\n",
                          *pendingFrameIt /*PictureIndex*/,
                          showExistingPicHdr.frame_to_show_map_idx,
-                         writtenShowExistingFrameBytes);
+                         static_cast<uint64_t>(writtenShowExistingFrameBytes));
 
             // Remove it from the list of pending frames
             pendingFrameIt =
@@ -2515,7 +2628,7 @@ upload_tile_group_obu(struct d3d12_video_encoder *pD3D12Enc,
                 tileGroup.tg_start,
                 tileGroup.tg_end,
                 comp_bit_destination,
-                comp_bit_destination_offset);
+                static_cast<uint64_t>(comp_bit_destination_offset));
 
    debug_printf("[Tile group start %d to end %d] Using staging_bitstream_buffer %p at offset %" PRIu64
                 " to write the tile_obu_group() prefix syntax: tile_start_and_end_present_flag, tg_start, tg_end and "
@@ -2523,7 +2636,7 @@ upload_tile_group_obu(struct d3d12_video_encoder *pD3D12Enc,
                 tileGroup.tg_start,
                 tileGroup.tg_end,
                 staging_bitstream_buffer.data(),
-                staging_bitstream_buffer_offset);
+                static_cast<uint64_t>(staging_bitstream_buffer_offset));
 
    // Reserve space upfront in the scratch storage
    // Do not modify anything before staging_bitstream_buffer_offset
@@ -2560,9 +2673,9 @@ upload_tile_group_obu(struct d3d12_video_encoder *pD3D12Enc,
                 " for tile_obu_group() prefix syntax: tile_start_and_end_present_flag, tg_start, tg_end\n",
                 tileGroup.tg_start,
                 tileGroup.tg_end,
-                bitstream_tile_group_obu_bytes,
+                static_cast<uint64_t>(bitstream_tile_group_obu_bytes),
                 staging_bitstream_buffer.data(),
-                staging_bitstream_buffer_offset);
+                static_cast<uint64_t>(staging_bitstream_buffer_offset));
 
 
    // Save this to compare the final written destination byte size against the expected tile_group_obu_size
@@ -2586,11 +2699,11 @@ upload_tile_group_obu(struct d3d12_video_encoder *pD3D12Enc,
                    " to comp_bit_destination %p at offset %" PRIu64 "\n",
                    tileGroup.tg_start,
                    tileGroup.tg_end,
-                   bitstream_tile_group_obu_bytes,
+                   static_cast<uint64_t>(bitstream_tile_group_obu_bytes),
                    staging_bitstream_buffer.data(),
-                   staging_bitstream_buffer_offset,
+                   static_cast<uint64_t>(staging_bitstream_buffer_offset),
                    comp_bit_destination,
-                   comp_bit_destination_offset);
+                   static_cast<uint64_t>(comp_bit_destination_offset));
 
       comp_bit_destination_offset += bitstream_tile_group_obu_bytes;
       written_bytes_to_staging_bitstream_buffer += bitstream_tile_group_obu_bytes;
@@ -2616,9 +2729,9 @@ upload_tile_group_obu(struct d3d12_video_encoder *pD3D12Enc,
                       tileGroup.tg_start,
                       tileGroup.tg_end,
                       TileIdx,
-                      TileSizeBytes,
+                      static_cast<uint64_t>(TileSizeBytes),
                       staging_bitstream_buffer.data(),
-                      (written_bytes_to_staging_bitstream_buffer + staging_bitstream_buffer_offset));
+                      static_cast<uint64_t>(written_bytes_to_staging_bitstream_buffer + staging_bitstream_buffer_offset));
 
          // Upload current tile_size_minus_1
          // Note: The buffer_subdata is queued in pD3D12Enc->base.context but doesn't execute immediately
@@ -2638,11 +2751,11 @@ upload_tile_group_obu(struct d3d12_video_encoder *pD3D12Enc,
                       tileGroup.tg_start,
                       tileGroup.tg_end,
                       TileIdx,
-                      TileSizeBytes,
+                      static_cast<uint64_t>(TileSizeBytes),
                       staging_bitstream_buffer.data(),
-                      (written_bytes_to_staging_bitstream_buffer + staging_bitstream_buffer_offset),
+                      static_cast<uint64_t>(written_bytes_to_staging_bitstream_buffer + staging_bitstream_buffer_offset),
                       comp_bit_destination,
-                      comp_bit_destination_offset);
+                      static_cast<uint64_t>(comp_bit_destination_offset));
 
          comp_bit_destination_offset += TileSizeBytes;
          written_bytes_to_staging_bitstream_buffer += TileSizeBytes;
@@ -2675,11 +2788,11 @@ upload_tile_group_obu(struct d3d12_video_encoder *pD3D12Enc,
                    tileGroup.tg_start,
                    tileGroup.tg_end,
                    TileIdx,
-                   tile_size,
+                   static_cast<uint64_t>(tile_size),
                    src_driver_bitstream,
-                   src_buf_tile_position,
+                   static_cast<uint64_t>(src_buf_tile_position),
                    comp_bit_destination,
-                   comp_bit_destination_offset);
+                   static_cast<uint64_t>(comp_bit_destination_offset));
 
       comp_bit_destination_offset += tile_size;
    }

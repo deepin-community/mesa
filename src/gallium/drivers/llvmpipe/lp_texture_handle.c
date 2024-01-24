@@ -202,6 +202,7 @@ llvmpipe_sampler_matrix_destroy(struct llvmpipe_context *ctx)
 
 static void *
 compile_function(struct llvmpipe_context *ctx, struct gallivm_state *gallivm, LLVMValueRef function,
+                 bool needs_caching,
                  uint8_t cache_key[SHA1_DIGEST_LENGTH])
 {
    gallivm_verify_function(gallivm, function);
@@ -209,7 +210,7 @@ compile_function(struct llvmpipe_context *ctx, struct gallivm_state *gallivm, LL
 
    void *function_ptr = func_to_pointer(gallivm_jit_function(gallivm, function));
 
-   if (!gallivm->cache->data_size)
+   if (needs_caching)
       lp_disk_cache_insert_shader(llvmpipe_screen(ctx->pipe.screen), gallivm->cache, cache_key);
 
    gallivm_free_ir(gallivm);
@@ -251,10 +252,12 @@ compile_image_function(struct llvmpipe_context *ctx, struct lp_static_texture_st
    _mesa_sha1_update(&hash_ctx, image_function_base_hash, strlen(image_function_base_hash));
    _mesa_sha1_update(&hash_ctx, texture, sizeof(*texture));
    _mesa_sha1_update(&hash_ctx, &op, sizeof(op));
+   _mesa_sha1_update(&hash_ctx, &ms, sizeof(ms));
    _mesa_sha1_final(&hash_ctx, cache_key);
 
    struct lp_cached_code cached = { 0 };
    lp_disk_cache_find_shader(llvmpipe_screen(ctx->pipe.screen), &cached, cache_key);
+   bool needs_caching = !cached.data_size;
 
    struct gallivm_state *gallivm = gallivm_create("sample_function", ctx->context, &cached);
 
@@ -333,7 +336,7 @@ compile_image_function(struct llvmpipe_context *ctx, struct lp_static_texture_st
 
    free(image_soa);
 
-   return compile_function(ctx, gallivm, function, cache_key);
+   return compile_function(ctx, gallivm, function, needs_caching, cache_key);
 }
 
 static void *
@@ -342,11 +345,12 @@ compile_sample_function(struct llvmpipe_context *ctx, struct lp_static_texture_s
 {
    enum lp_sampler_lod_control lod_control = (sample_key & LP_SAMPLER_LOD_CONTROL_MASK) >> LP_SAMPLER_LOD_CONTROL_SHIFT;
 
+   bool supported = true;
    if (texture->format != PIPE_FORMAT_NONE) {
       enum lp_sampler_op_type op_type = (sample_key & LP_SAMPLER_OP_TYPE_MASK) >> LP_SAMPLER_OP_TYPE_SHIFT;
       if (op_type != LP_SAMPLER_OP_LODQ)
          if ((sampler->compare_mode == PIPE_TEX_COMPARE_NONE) == !!(sample_key & LP_SAMPLER_SHADOW))
-            return NULL;
+            supported = false;
 
       /* Skip integer formats which would cause a type mismatch in the compare function. */
       const struct util_format_description *desc = util_format_description(texture->format);
@@ -357,18 +361,19 @@ compile_sample_function(struct llvmpipe_context *ctx, struct lp_static_texture_s
       };
       texel_type = lp_build_texel_type(texel_type, desc);
       if ((sample_key & LP_SAMPLER_SHADOW) && !texel_type.floating)
-         return NULL;
+         supported = false;
 
       if (texture_dims(texture->target) != 2 && op_type == LP_SAMPLER_OP_GATHER)
-         return NULL;
+         supported = false;
 
       if (op_type != LP_SAMPLER_OP_FETCH) {
          if (!sampler->normalized_coords) {
-            if (texture->target != PIPE_TEXTURE_1D && texture->target != PIPE_TEXTURE_2D)
-               return NULL;
+            if (texture->target != PIPE_TEXTURE_1D && texture->target != PIPE_TEXTURE_2D &&
+                texture->target != PIPE_TEXTURE_1D_ARRAY && texture->target != PIPE_TEXTURE_2D_ARRAY)
+               supported = false;
 
             if (!texture->level_zero_only)
-               return NULL;
+               supported = false;
          }
       }
 
@@ -376,19 +381,22 @@ compile_sample_function(struct llvmpipe_context *ctx, struct lp_static_texture_s
           (sampler->min_img_filter == PIPE_TEX_FILTER_LINEAR ||
            sampler->min_mip_filter == PIPE_TEX_MIPFILTER_LINEAR ||
            sampler->mag_img_filter == PIPE_TEX_FILTER_LINEAR))
-         return NULL;
+         supported = false;
 
       if (sampler->aniso) {
          if (texture_dims(texture->target) != 2)
-            return NULL;
+            supported = false;
 
          if (util_format_is_pure_integer(texture->format))
-            return NULL;
+            supported = false;
       }
+
+      if (util_format_get_num_planes(texture->format) > 1)
+         return NULL;
 
       uint32_t bind = op_type == LP_SAMPLER_OP_FETCH ? PIPE_BIND_CONSTANT_BUFFER : PIPE_BIND_SAMPLER_VIEW;
       if (!ctx->pipe.screen->is_format_supported(ctx->pipe.screen, texture->format, texture->target, 0, 0, bind))
-         return NULL;
+         supported = false;
    }
 
    uint8_t cache_key[SHA1_DIGEST_LENGTH];
@@ -402,6 +410,7 @@ compile_sample_function(struct llvmpipe_context *ctx, struct lp_static_texture_s
 
    struct lp_cached_code cached = { 0 };
    lp_disk_cache_find_shader(llvmpipe_screen(ctx->pipe.screen), &cached, cache_key);
+   bool needs_caching = !cached.data_size;
 
    struct gallivm_state *gallivm = gallivm_create("sample_function", ctx->context, &cached);
 
@@ -460,9 +469,13 @@ compile_sample_function(struct llvmpipe_context *ctx, struct lp_static_texture_s
    LLVMPositionBuilderAtEnd(gallivm->builder, block);
 
    LLVMValueRef texel_out[4] = { 0 };
-   lp_build_sample_soa_code(gallivm, texture, sampler, lp_build_sampler_soa_dynamic_state(sampler_soa),
-                            type, sample_key, 0, 0, cs.jit_resources_type, NULL, cs.jit_cs_thread_data_type,
-                            NULL, coords, offsets, NULL, lod, ms_index, aniso_filter_table, texel_out);
+   if (supported) {
+      lp_build_sample_soa_code(gallivm, texture, sampler, lp_build_sampler_soa_dynamic_state(sampler_soa),
+                               type, sample_key, 0, 0, cs.jit_resources_type, NULL, cs.jit_cs_thread_data_type,
+                               NULL, coords, offsets, NULL, lod, ms_index, aniso_filter_table, texel_out);
+   } else {
+      lp_build_sample_nop(gallivm, lp_build_texel_type(type, util_format_description(texture->format)), coords, texel_out);
+   }
 
    LLVMBuildAggregateRet(gallivm->builder, texel_out, 4);
 
@@ -471,7 +484,7 @@ compile_sample_function(struct llvmpipe_context *ctx, struct lp_static_texture_s
 
    free(sampler_soa);
 
-   return compile_function(ctx, gallivm, function, cache_key);
+   return compile_function(ctx, gallivm, function, needs_caching, cache_key);
 }
 
 static void *
@@ -487,6 +500,7 @@ compile_size_function(struct llvmpipe_context *ctx, struct lp_static_texture_sta
 
    struct lp_cached_code cached = { 0 };
    lp_disk_cache_find_shader(llvmpipe_screen(ctx->pipe.screen), &cached, cache_key);
+   bool needs_caching = !cached.data_size;
 
    struct gallivm_state *gallivm = gallivm_create("sample_function", ctx->context, &cached);
 
@@ -551,7 +565,7 @@ compile_size_function(struct llvmpipe_context *ctx, struct lp_static_texture_sta
 
    free(sampler_soa);
 
-   return compile_function(ctx, gallivm, function, cache_key);
+   return compile_function(ctx, gallivm, function, needs_caching, cache_key);
 }
 
 static void

@@ -792,7 +792,7 @@ dzn_physical_device_create(struct vk_instance *instance,
 
    VkResult result =
       vk_physical_device_init(&pdev->vk, instance,
-                              NULL, NULL, /* We set up extensions later */
+                              NULL, NULL, NULL, /* We set up extensions later */
                               &dispatch_table);
    if (result != VK_SUCCESS) {
       vk_free(&instance->alloc, pdev);
@@ -2806,7 +2806,7 @@ dzn_device_memory_create(struct dzn_device *device,
       if (!device->dev13)
          goto cleanup;
 
-      if (FAILED(ID3D12Device13_OpenExistingHeapFromAddress1(device->dev13, host_pointer, heap_desc.SizeInBytes, &IID_ID3D12Heap, &mem->heap)))
+      if (FAILED(ID3D12Device13_OpenExistingHeapFromAddress1(device->dev13, host_pointer, heap_desc.SizeInBytes, &IID_ID3D12Heap, (void**)&mem->heap)))
          goto cleanup;
 
       D3D12_HEAP_DESC desc = dzn_ID3D12Heap_GetDesc(mem->heap);
@@ -3920,7 +3920,7 @@ dzn_GetMemoryHostPointerPropertiesEXT(VkDevice _device,
       return VK_ERROR_FEATURE_NOT_PRESENT;
 
    ID3D12Heap *heap;
-   if (FAILED(ID3D12Device13_OpenExistingHeapFromAddress1(device->dev13, pHostPointer, 1, &IID_ID3D12Heap, &heap)))
+   if (FAILED(ID3D12Device13_OpenExistingHeapFromAddress1(device->dev13, pHostPointer, 1, &IID_ID3D12Heap, (void **)&heap)))
       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
 
    struct dzn_physical_device *pdev = container_of(device->vk.physical, struct dzn_physical_device, vk);

@@ -64,7 +64,7 @@ struct spirv_to_nir_options {
    /* Initial value for shader_info::float_controls_execution_mode,
     * indicates hardware requirements rather than shader author intent
     */
-   uint16_t float_controls_execution_mode;
+   uint32_t float_controls_execution_mode;
 
    /* Initial subgroup size.  This may be overwritten for CL kernels */
    enum gl_subgroup_size subgroup_size;
@@ -116,12 +116,17 @@ struct spirv_to_nir_options {
 
    /* Force texture sampling to be non-uniform. */
    bool force_tex_non_uniform;
+   /* Force SSBO accesses to be non-uniform. */
+   bool force_ssbo_non_uniform;
 
    /* In Debug Builds, instead of emitting an OS break on failure, just return NULL from
     * spirv_to_nir().  This is useful for the unit tests that want to report a test failed
     * but continue executing other tests.
     */
    bool skip_os_break_in_debug_build;
+
+   /* Shader index provided by VkPipelineShaderStageNodeCreateInfoAMDX */
+   uint32_t shader_index;
 };
 
 enum spirv_verify_result {
