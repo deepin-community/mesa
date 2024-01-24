@@ -1,8 +1,144 @@
-mesa (23.2.1-1deepin1) UNRELEASED; urgency=medium
+mesa (23.3.3-3) unstable; urgency=medium
 
-  * Import orcjit llvmpipe patch
+  * rules: Drop mips64el from RUSTICL_ARCHS too, which would pull llvm-
+    spirv-17. (Closes: #1060779)
 
- -- Chang Yang <yangchang@deepin.org>  Wed, 18 Oct 2023 18:09:10 +0800
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 18 Jan 2024 09:55:40 +0200
+
+mesa (23.3.3-2) unstable; urgency=medium
+
+  * rules: Drop virtio from armel again, regression due to cleanup.
+    (Closes: #1060849)
+  * rules: Drop mips64el from LLVM_ARCHS, as llvm-17-dev is still not
+    available. (Closes: #1060779)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Tue, 16 Jan 2024 14:00:26 +0200
+
+mesa (23.3.3-1) unstable; urgency=medium
+
+  * New upstream release.
+  * patches, rules: Revert riscv64 back to plain softpipe swrast, drop
+    orcjit patch. (Closes: #1060376)
+  * patches: Drop d3d12 reverts, upstream.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 11 Jan 2024 10:10:19 +0200
+
+mesa (23.3.2-2) unstable; urgency=medium
+
+  * patches: Revert two commits on d3d12 that regressed at least swrast.
+    (Closes: #1059971, #1060017)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 05 Jan 2024 11:07:26 +0200
+
+mesa (23.3.2-1) unstable; urgency=medium
+
+  [ Timo Aaltonen ]
+  * New upstream release.
+  * patches: Refreshed, and dropped an upstreamed patch.
+
+  [ Tao Chen ]
+  * Add Loongarch support
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Wed, 03 Jan 2024 15:19:43 +0200
+
+mesa (23.3.1-4) unstable; urgency=medium
+
+  * patches: Fix a regression in crocus. (Closes: #1059015)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Sat, 23 Dec 2023 12:08:05 +0200
+
+mesa (23.3.1-3) unstable; urgency=medium
+
+  * llvmpipe-add-orcjit.diff: Fix to actually build with llvm-17.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Sat, 16 Dec 2023 13:34:32 +0200
+
+mesa (23.3.1-2) unstable; urgency=medium
+
+  * llvmpipe-add-orcjit.diff: Add support for ORCJIT. (Closes: #1058759)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 15 Dec 2023 20:59:48 +0200
+
+mesa (23.3.1-1) unstable; urgency=medium
+
+  * New upstream release.
+  * patches: Drop upstreamed zink patch.
+  * patches: Disable zink fallback loading, breaks gtk4 build/tests.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 14 Dec 2023 13:17:25 +0200
+
+mesa (23.3.0-2) experimental; urgency=medium
+
+  * control: Add libvulkan1 to libgl1-mesa-dri Depends where zink is
+    built, since it's loading libvulkan.so.1 directly instead of linking
+    to it.
+  * 0001-zink-initialize-drm_fd-to-1.patch: Fix GDM startup with the X11
+    backend.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 08 Dec 2023 09:23:13 +0200
+
+mesa (23.3.0-1) experimental; urgency=medium
+
+  * New upstream release.
+  * rules: Drop checking for linux, now that kfreebsd support got
+    dropped.
+  * rules: Drop a duplicate special case for VULKAN_DRIVERS, and move
+    virtio enabling to the correct place.
+  * rules: LLVM supports JIT on riscv64 now, attempt to enable llvmpipe
+    on it.
+  * rules: Sort default config entries and fix indentation.
+  * rules: Drop WSL_ARCHS, as it's used only once.
+  * rules: Merge two checks for x86 archs.
+  * rules: Handle EGL_PLATFORMS like other lists.
+  * rules: Drop powerpc from wine archs.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 01 Dec 2023 11:39:26 +0200
+
+mesa (23.3.0~rc5-1) experimental; urgency=medium
+
+  [ Timo Aaltonen ]
+  * New upstream release candidate.
+  * rules: Fix mangling of the upstream version in clean target to work
+    with upstream rc's.
+
+  [ Fabio Pedretti ]
+  * control, rules: Bump llvm to 17.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Wed, 29 Nov 2023 18:24:29 +0200
+
+mesa (23.3.0~rc4-1) experimental; urgency=medium
+
+  [ Fabio Pedretti ]
+  * remove double space
+  * use a variable for WSL archs
+
+  [ Timo Aaltonen ]
+  * New upstream release candidate.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Sun, 19 Nov 2023 20:28:57 +0200
+
+mesa (23.3.0~rc3-1) experimental; urgency=medium
+
+  * New upstream release candidate.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Tue, 14 Nov 2023 12:02:45 +0200
+
+mesa (23.3.0~rc2-1) experimental; urgency=medium
+
+  * New upstream release candidate.
+  * control, rules: Drop kfreebsd.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 02 Nov 2023 15:59:11 +0200
+
+mesa (23.3.0~rc1-1) experimental; urgency=medium
+
+  * New upstream release candidate.
+  * fix-clover-build-without-spirv.diff: Dropped, upstream.
+  * mesa-common-dev.docs: Updated.
+  * libglx-mesa0.symbols: Updated.
+  * control: Drop python3-minimal from -vulkan-drivers Depends.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 26 Oct 2023 14:28:22 +0300
 
 mesa (23.2.1-1) unstable; urgency=medium
 

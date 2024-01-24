@@ -1,7 +1,5 @@
 07_gallium-fix-build-failure-on-powerpcspe.diff
 path_max.diff
 src_glx_dri_common.h.diff
-fix-clover-build-without-spirv.diff
-00-add-llvm-orcjit.patch 	
-01-add-orcjit-riscv.patch
-02-llvmpipe-linkage.patch
+0001-Revert-egl-add-automatic-zink-fallback-loading-betwe.patch
+0002-Revert-glx-add-automatic-zink-fallback-loading-betwe.patch
