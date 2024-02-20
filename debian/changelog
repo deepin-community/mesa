@@ -1,3 +1,9 @@
+mesa (23.3.3-3deepin2) unstable; urgency=medium
+
+  * add orcjit support for RISC-V and Loongarch
+
+ -- Chang Yang <yangchang@deepin.org>  Tue, 20 Feb 2024 10:20:33 +0800
+
 mesa (23.3.3-3deepin1) unstable; urgency=medium
 
   * build-depends llvm-16.
