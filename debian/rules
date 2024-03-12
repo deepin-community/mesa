@@ -13,7 +13,7 @@ DEB_HOST_ARCH_OS   ?= $(shell dpkg-architecture -qDEB_HOST_ARCH_OS)
 DEB_HOST_ARCH_CPU  ?= $(shell dpkg-architecture -qDEB_HOST_ARCH_CPU)
 
 # for finding the correct llvm-config when meson doesn't know about it yet
-LLVM_VERSION = 16
+LLVM_VERSION = 17
 export PATH:=/usr/lib/llvm-$(LLVM_VERSION)/bin/:$(PATH)
 
 export DEB_BUILD_MAINT_OPTIONS=optimize=-lto
@@ -106,9 +106,10 @@ else
   ifneq (,$(filter $(DEB_HOST_ARCH), $(LLVM_ARCHS)))
 	GALLIUM_DRIVERS += radeonsi zink
 
-	# Enable orcjit on riscv64
+	# Only enable amd on riscv64, swrast needs CPU JIT support which doesn't work properly yet
 	ifneq (,$(filter $(DEB_HOST_ARCH), riscv64))
-		confflags_GALLIUM += -Dllvm-orcjit=true
+		VULKAN_DRIVERS += amd
+		confflags_GALLIUM += -Ddraw-use-llvm=false
 	else
 	  # drop virtio from armel, it doesn't build
 	  ifneq (,$(filter $(DEB_HOST_ARCH), armel))
@@ -137,7 +138,7 @@ else
 
   ifeq (,$(filter pkg.mesa.nolibva,$(DEB_BUILD_PROFILES)))
 	confflags_GALLIUM += -Dgallium-va=enabled
-	confflags_GALLIUM += -Dvideo-codecs="vc1dec, h264dec, h264enc, h265dec, h265enc"
+	confflags_GALLIUM += -Dvideo-codecs="all"
   endif
 endif
 
@@ -265,9 +266,6 @@ override_dh_install:
 		install -m 644 debian/local/control debian/$$p/usr/share/bug/$$p && \
 		install -m 755 debian/local/script  debian/$$p/usr/share/bug/$$p; \
 	done
-
-override_dh_missing:
-	dh_missing --fail-missing
 
 override_dh_makeshlibs:
 	dh_makeshlibs -a -- -c4

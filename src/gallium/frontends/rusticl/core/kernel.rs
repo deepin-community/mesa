@@ -317,7 +317,7 @@ where
     res
 }
 
-fn opt_nir(nir: &mut NirShader, dev: &Device) {
+fn opt_nir(nir: &mut NirShader, dev: &Device, has_explicit_types: bool) {
     let nir_options = unsafe {
         &*dev
             .screen
@@ -342,7 +342,9 @@ fn opt_nir(nir: &mut NirShader, dev: &Device) {
         }
 
         progress |= nir_pass!(nir, nir_opt_deref);
-        progress |= nir_pass!(nir, nir_opt_memcpy);
+        if has_explicit_types {
+            progress |= nir_pass!(nir, nir_opt_memcpy);
+        }
         progress |= nir_pass!(nir, nir_opt_dce);
         progress |= nir_pass!(nir, nir_opt_undef);
         progress |= nir_pass!(nir, nir_opt_constant_folding);
@@ -356,8 +358,7 @@ fn opt_nir(nir: &mut NirShader, dev: &Device) {
         progress |= nir_pass!(
             nir,
             nir_opt_if,
-            nir_opt_if_options::nir_opt_if_aggressive_last_continue
-                | nir_opt_if_options::nir_opt_if_optimize_phi_true_false,
+            nir_opt_if_options::nir_opt_if_optimize_phi_true_false,
         );
         progress |= nir_pass!(nir, nir_opt_dead_cf);
         progress |= nir_pass!(nir, nir_opt_remove_phis);
@@ -452,11 +453,10 @@ fn lower_and_optimize_nir(
     printf_opts.max_buffer_size = dev.printf_buffer_size() as u32;
     nir_pass!(nir, nir_lower_printf, &printf_opts);
 
-    opt_nir(nir, dev);
+    opt_nir(nir, dev, false);
 
     let mut args = KernelArg::from_spirv_nir(args, nir);
     let mut internal_args = Vec::new();
-    nir_pass!(nir, nir_lower_memcpy);
 
     let dv_opts = nir_remove_dead_variables_options {
         can_remove_var: Some(can_remove_var),
@@ -544,7 +544,7 @@ fn lower_and_optimize_nir(
         internal_args.push(InternalKernelArg {
             kind: InternalKernelArgType::ConstantBuffer,
             offset: 0,
-            size: 8,
+            size: (dev.address_bits() / 8) as usize,
         });
         lower_state.const_buf_loc = args.len() + internal_args.len() - 1;
         nir.add_var(
@@ -558,7 +558,7 @@ fn lower_and_optimize_nir(
         internal_args.push(InternalKernelArg {
             kind: InternalKernelArgType::PrintfBuffer,
             offset: 0,
-            size: 8,
+            size: (dev.address_bits() / 8) as usize,
         });
         lower_state.printf_buf_loc = args.len() + internal_args.len() - 1;
         nir.add_var(
@@ -627,7 +627,8 @@ fn lower_and_optimize_nir(
         Some(glsl_get_cl_type_size_align),
     );
 
-    opt_nir(nir, dev);
+    opt_nir(nir, dev, true);
+    nir_pass!(nir, nir_lower_memcpy);
 
     nir_pass!(
         nir,
@@ -656,7 +657,7 @@ fn lower_and_optimize_nir(
 
     nir_pass!(nir, nir_lower_convert_alu_types, None);
 
-    opt_nir(nir, dev);
+    opt_nir(nir, dev, true);
 
     /* before passing it into drivers, assign locations as drivers might remove nir_variables or
      * other things we depend on
@@ -1012,7 +1013,11 @@ impl Kernel {
                     let buf = Arc::new(
                         q.device
                             .screen
-                            .resource_create_buffer(printf_size, ResourceType::Staging)
+                            .resource_create_buffer(
+                                printf_size,
+                                ResourceType::Staging,
+                                PIPE_BIND_GLOBAL,
+                            )
                             .unwrap(),
                     );
 
@@ -1082,7 +1087,7 @@ impl Kernel {
             ctx.set_sampler_views(&mut sviews);
             ctx.set_shader_images(&iviews);
             ctx.set_global_binding(resources.as_slice(), &mut globals);
-            ctx.set_constant_buffer(0, &input);
+            ctx.update_cb0(&input);
 
             ctx.launch_grid(work_dim, block, grid, variable_local_size as u32);
 
@@ -1107,6 +1112,7 @@ impl Kernel {
                         RWFlags::RD,
                         ResourceMapType::Normal,
                     )
+                    .ok_or(CL_OUT_OF_RESOURCES)?
                     .with_ctx(ctx);
                 let mut buf: &[u8] =
                     unsafe { slice::from_raw_parts(tx.ptr().cast(), printf_size as usize) };

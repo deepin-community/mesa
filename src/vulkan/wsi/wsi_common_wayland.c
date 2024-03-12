@@ -996,6 +996,9 @@ wsi_GetPhysicalDeviceWaylandPresentationSupportKHR(VkPhysicalDevice physicalDevi
    struct wsi_wayland *wsi =
       (struct wsi_wayland *)wsi_device->wsi[VK_ICD_WSI_PLATFORM_WAYLAND];
 
+   if (!(wsi_device->queue_supports_blit & BITFIELD64_BIT(queueFamilyIndex)))
+      return false;
+
    struct wsi_wl_display display;
    VkResult ret = wsi_wl_display_init(wsi, &display, wl_display, false,
                                       wsi_device->sw);
@@ -1084,13 +1087,7 @@ wsi_wl_surface_get_capabilities(VkIcdSurfaceBase *surface,
       VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR |
       VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
 
-   caps->supportedUsageFlags =
-      VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-      VK_IMAGE_USAGE_SAMPLED_BIT |
-      VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-      VK_IMAGE_USAGE_STORAGE_BIT |
-      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-      VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+   caps->supportedUsageFlags = wsi_caps_get_image_usage();
 
    VK_FROM_HANDLE(vk_physical_device, pdevice, wsi_device->pdevice);
    if (pdevice->supported_extensions.EXT_attachment_feedback_loop_layout)
@@ -2215,6 +2212,9 @@ wsi_wl_swapchain_chain_free(struct wsi_wl_swapchain *chain,
       pthread_mutex_destroy(&chain->present_ids.lock);
    }
 
+   if (chain->present_ids.queue)
+      wl_event_queue_destroy(chain->present_ids.queue);
+
    vk_free(pAllocator, (void *)chain->drm_modifiers);
 
    wsi_swapchain_finish(&chain->base);
@@ -2262,7 +2262,8 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
     */
    if (wsi_wl_surface->chain &&
        wsi_swapchain_to_handle(&wsi_wl_surface->chain->base) != pCreateInfo->oldSwapchain) {
-      return VK_ERROR_NATIVE_WINDOW_IN_USE_KHR;
+      result = VK_ERROR_NATIVE_WINDOW_IN_USE_KHR;
+      goto fail;
    }
    if (pCreateInfo->oldSwapchain) {
       VK_FROM_HANDLE(wsi_wl_swapchain, old_chain, pCreateInfo->oldSwapchain);
@@ -2376,16 +2377,20 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
       uint64_t *drm_modifiers_copy =
          vk_alloc(pAllocator, sizeof(*drm_modifiers) * num_drm_modifiers, 8,
                   VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
-      if (!drm_modifiers_copy)
-         goto fail;
+      if (!drm_modifiers_copy) {
+         result = VK_ERROR_OUT_OF_HOST_MEMORY;
+         goto fail_free_wl_chain;
+      }
 
       typed_memcpy(drm_modifiers_copy, drm_modifiers, num_drm_modifiers);
       chain->drm_modifiers = drm_modifiers_copy;
    }
 
    if (chain->wsi_wl_surface->display->wp_presentation_notwrapped) {
-      if (!wsi_init_pthread_cond_monotonic(&chain->present_ids.list_advanced))
-         goto fail;
+      if (!wsi_init_pthread_cond_monotonic(&chain->present_ids.list_advanced)) {
+         result = VK_ERROR_OUT_OF_HOST_MEMORY;
+         goto fail_free_wl_chain;
+      }
       pthread_mutex_init(&chain->present_ids.lock, NULL);
 
       wl_list_init(&chain->present_ids.outstanding_list);
@@ -2403,7 +2408,7 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
       result = wsi_wl_image_init(chain, &chain->images[i],
                                  pCreateInfo, pAllocator);
       if (result != VK_SUCCESS)
-         goto fail_image_init;
+         goto fail_free_wl_images;
       chain->images[i].busy = false;
    }
 
@@ -2411,14 +2416,15 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
 
    return VK_SUCCESS;
 
-fail_image_init:
+fail_free_wl_images:
    wsi_wl_swapchain_images_free(chain);
-
+fail_free_wl_chain:
    wsi_wl_swapchain_chain_free(chain, pAllocator);
 fail:
    vk_free(pAllocator, chain);
    wsi_wl_surface->chain = NULL;
 
+   assert(result != VK_SUCCESS);
    return result;
 }
 

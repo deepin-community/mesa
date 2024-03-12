@@ -586,6 +586,7 @@ enum virgl_formats {
 #define VIRGL_CAP_V2_DRAW_PARAMETERS      (1 << 14)
 #define VIRGL_CAP_V2_GROUP_VOTE           (1 << 15)
 #define VIRGL_CAP_V2_MIRROR_CLAMP_TO_EDGE (1 << 16)
+#define VIRGL_CAP_V2_MIRROR_CLAMP         (1 << 17)
 
 /* virgl bind flags - these are compatible with mesa 10.5 gallium.
  * but are fixed, no other should be passed to virgl either.
@@ -767,6 +768,8 @@ struct virgl_caps_v2 {
         uint32_t num_video_caps;
         struct virgl_video_caps video_caps[32];
         uint32_t max_uniform_block_size;
+        uint32_t max_tcs_outputs;
+        uint32_t max_tes_outputs;
 };
 
 union virgl_caps {

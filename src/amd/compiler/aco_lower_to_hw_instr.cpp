@@ -1100,8 +1100,11 @@ emit_bpermute_readlane(Program* program, aco_ptr<Instruction>& instr, Builder& b
     */
    for (unsigned n = 0; n < program->wave_size; ++n) {
       /* Activate the lane which has N for its source index */
-      bld.vopc(aco_opcode::v_cmpx_eq_u32, Definition(exec, bld.lm), clobber_vcc, Operand::c32(n),
-               index);
+      if (program->gfx_level >= GFX10)
+         bld.vopc(aco_opcode::v_cmpx_eq_u32, Definition(exec, bld.lm), Operand::c32(n), index);
+      else
+         bld.vopc(aco_opcode::v_cmpx_eq_u32, clobber_vcc, Definition(exec, bld.lm), Operand::c32(n),
+                  index);
       /* Read the data from lane N */
       bld.readlane(Definition(vcc, s1), input, Operand::c32(n));
       /* On the active lane, move the data we read from lane N to the destination VGPR */
@@ -1817,17 +1820,15 @@ handle_operands(std::map<PhysReg, copy_operation>& copy_map, lower_context* ctx,
       if (it->second.bytes > 8) {
          assert(!it->second.op.isConstant());
          assert(!it->second.def.regClass().is_subdword());
-         RegClass rc = RegClass(it->second.def.regClass().type(), it->second.def.size() - 2);
+         RegClass rc = it->second.def.regClass().resize(it->second.def.bytes() - 8);
          Definition hi_def = Definition(PhysReg{it->first + 2}, rc);
-         rc = RegClass(it->second.op.regClass().type(), it->second.op.size() - 2);
+         rc = it->second.op.regClass().resize(it->second.op.bytes() - 8);
          Operand hi_op = Operand(PhysReg{it->second.op.physReg() + 2}, rc);
          copy_operation copy = {hi_op, hi_def, it->second.bytes - 8};
          copy_map[hi_def.physReg()] = copy;
          assert(it->second.op.physReg().byte() == 0 && it->second.def.physReg().byte() == 0);
-         it->second.op = Operand(it->second.op.physReg(),
-                                 it->second.op.regClass().type() == RegType::sgpr ? s2 : v2);
-         it->second.def = Definition(it->second.def.physReg(),
-                                     it->second.def.regClass().type() == RegType::sgpr ? s2 : v2);
+         it->second.op = Operand(it->second.op.physReg(), it->second.op.regClass().resize(8));
+         it->second.def = Definition(it->second.def.physReg(), it->second.def.regClass().resize(8));
          it->second.bytes = 8;
       }
 
@@ -2472,7 +2473,7 @@ lower_to_hw_instr(Program* program)
                       * waitcnt insertion doesn't work in a discard early exit block.
                       */
                      if (program->gfx_level >= GFX10)
-                        bld.sopk(aco_opcode::s_waitcnt_vscnt, Definition(sgpr_null, s1), 0);
+                        bld.sopk(aco_opcode::s_waitcnt_vscnt, Operand(sgpr_null, s1), 0);
                      wait_imm pops_exit_wait_imm;
                      pops_exit_wait_imm.vm = 0;
                      if (program->has_smem_buffer_or_global_loads)
@@ -2924,6 +2925,11 @@ lower_to_hw_instr(Program* program)
                   } else if (inst->isSALU()) {
                      num_scalar++;
                   } else if (inst->isVALU() || inst->isVINTRP()) {
+                     if (instr->opcode == aco_opcode::v_writelane_b32 ||
+                         instr->opcode == aco_opcode::v_writelane_b32_e64) {
+                        /* writelane ignores exec, writing inactive lanes results in UB. */
+                        can_remove = false;
+                     }
                      num_vector++;
                      /* VALU which writes SGPRs are always executed on GFX10+ */
                      if (ctx.program->gfx_level >= GFX10) {
