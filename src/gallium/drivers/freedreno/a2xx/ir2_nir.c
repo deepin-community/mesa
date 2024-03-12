@@ -43,7 +43,6 @@ static const nir_shader_compiler_options options = {
    .lower_all_io_to_temps = true,
    .vertex_id_zero_based = true, /* its not implemented anyway */
    .lower_bitops = true,
-   .lower_rotate = true,
    .lower_vector_cmp = true,
    .lower_fdph = true,
    .has_fsub = true,
@@ -87,9 +86,9 @@ ir2_optimize_loop(nir_shader *s)
       progress |= OPT(s, nir_opt_algebraic);
       progress |= OPT(s, nir_opt_constant_folding);
       progress |= OPT(s, nir_opt_dead_cf);
-      if (OPT(s, nir_opt_trivial_continues)) {
+      if (OPT(s, nir_opt_loop)) {
          progress |= true;
-         /* If nir_opt_trivial_continues makes progress, then we need to clean
+         /* If nir_opt_loop makes progress, then we need to clean
           * things up if we want any hope of nir_opt_if or nir_opt_loop_unroll
           * to make progress.
           */
@@ -789,11 +788,11 @@ static void
 setup_input(struct ir2_context *ctx, nir_variable *in)
 {
    struct fd2_shader_stateobj *so = ctx->so;
-   ASSERTED unsigned array_len = MAX2(glsl_get_length(in->type), 1);
    unsigned n = in->data.driver_location;
    unsigned slot = in->data.location;
 
-   assert(array_len == 1);
+   assert(glsl_type_is_vector_or_scalar(in->type) ||
+          glsl_type_is_unsized_array(in->type));
 
    /* handle later */
    if (ctx->so->type == MESA_SHADER_VERTEX)

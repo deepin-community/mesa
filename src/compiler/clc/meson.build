@@ -118,14 +118,20 @@ _libmesaclc = static_library(
   'libmesaclc',
   files_libmesaclc,
   sources: _libmesaclc_sources,
-  include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_spirv],
+  include_directories : [inc_include, inc_src, inc_spirv],
   c_args : _libmesaclc_c_args,
   cpp_args : [_libmesaclc_cpp_args, _libmesaclc_c_args],
   dependencies: [idep_nir, dep_clang, dep_llvm, dep_llvmspirvlib,
-                 idep_mesautil, dep_spirv_tools]
+                 idep_mesautil, dep_spirv_tools, idep_vtn]
 )
+
+_idep_mesaclc_link_args = []
+if _shared_llvm
+  _idep_mesaclc_link_args += cc.get_supported_link_arguments('-fPIC')
+endif
 
 idep_mesaclc = declare_dependency(
   link_with : _libmesaclc,
   include_directories : include_directories('.'),
+  link_args : _idep_mesaclc_link_args,
 )

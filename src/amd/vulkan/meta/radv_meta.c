@@ -215,8 +215,8 @@ radv_meta_restore(const struct radv_meta_saved_state *state, struct radv_cmd_buf
       if (state->flags & RADV_META_SAVE_GRAPHICS_PIPELINE)
          stages |= VK_SHADER_STAGE_ALL_GRAPHICS;
 
-      radv_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer), VK_NULL_HANDLE, stages, 0, MAX_PUSH_CONSTANTS_SIZE,
-                            state->push_constants);
+      vk_common_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer), VK_NULL_HANDLE, stages, 0,
+                                 MAX_PUSH_CONSTANTS_SIZE, state->push_constants);
    }
 
    if (state->flags & RADV_META_SAVE_RENDER) {
@@ -296,7 +296,7 @@ meta_free(void *_device, void *data)
 static bool
 radv_builtin_cache_path(char *path)
 {
-   char *xdg_cache_home = getenv("XDG_CACHE_HOME");
+   char *xdg_cache_home = secure_getenv("XDG_CACHE_HOME");
    const char *suffix = "/radv_builtin_shaders";
    const char *suffix2 = "/.cache/radv_builtin_shaders";
    struct passwd pwd, *result;
