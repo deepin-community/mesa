@@ -1,3 +1,9 @@
+mesa (24.0.1-1deepin1) unstable; urgency=medium
+
+  * Add patch to support riscv
+
+ -- xiangzelong <xiangzelong@deepin.org>  Sat, 23 Mar 2024 22:50:48 +0800
+
 mesa (24.0.1-1) unstable; urgency=medium
 
   * New upstream release.
