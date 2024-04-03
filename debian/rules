@@ -107,7 +107,7 @@ else
 	GALLIUM_DRIVERS += radeonsi zink
 
 	# Enable orcjit on riscv64
-	ifneq (,$(filter $(DEB_HOST_ARCH), riscv64))
+	ifneq (,$(filter $(DEB_HOST_ARCH), riscv64 loong64))
 		VULKAN_DRIVERS += amd
 		confflags_GALLIUM += -Dllvm-orcjit=true
 	else
