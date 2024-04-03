@@ -3,3 +3,5 @@ path_max.diff
 src_glx_dri_common.h.diff
 clc-build-fix.diff
 0001-support-riscv.patch
+0002-add-loongarch-orcjit.patch
+0003-orcjit-shader-cache.patch
