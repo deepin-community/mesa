@@ -5,3 +5,4 @@ clc-build-fix.diff
 0001-support-riscv.patch
 0002-add-loongarch-orcjit.patch
 0003-orcjit-shader-cache.patch
+radeon-fix-gnome-shell-crash.diff
