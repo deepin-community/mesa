@@ -1,3 +1,9 @@
+mesa (24.0.1-1deepin3) unstable; urgency=medium
+
+  * Add radeon-fix-gnome-shell-crash.diff.
+
+ -- xiangzelong <xiangzelong@deepin.org>  Fri, 12 Apr 2024 16:46:54 +0800
+
 mesa (24.0.1-1deepin2) unstable; urgency=medium
 
   * add orcjit shader cache
