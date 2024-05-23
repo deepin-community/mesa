@@ -1,0 +1,46 @@
+.softpipe-test:
+  variables:
+    GPU_VERSION: softpipe
+    LIBGL_ALWAYS_SOFTWARE: "true"
+    FLAKES_CHANNEL: "#mesa-swrast-ci"
+    GALLIUM_DRIVER: "softpipe"
+
+.softpipe-deqp-test:
+  extends:
+    - .test-gl
+    - .deqp-test
+    - .softpipe-test
+    # this must be last to avoid breaking dependency rules
+    - .softpipe-rules
+  variables:
+    DEQP_EXPECTED_RENDERER: softpipe
+
+softpipe-deqp:
+  variables:
+    DEQP_SUITE: softpipe
+  parallel: 2
+  extends: .softpipe-deqp-test
+
+softpipe-asan-gles31:
+  variables:
+    GPU_VERSION: softpipe-asan
+    DEQP_FRACTION: 10
+    DEQP_VER: gles31
+    DEQP_RUNNER_OPTIONS: "--env LD_PRELOAD=libasan.so.6"
+  extends: .softpipe-deqp-test
+  needs:
+    - debian/x86_test-gl
+    - debian-testing-asan
+
+# We use "gpu" to skip running glslparser tests, with the assumption that
+# they're covered by the llvmpipe run.
+softpipe-piglit:
+  extends:
+    - .test-gl
+    - .piglit-test
+    - .softpipe-test
+    - .softpipe-rules
+  variables:
+    PIGLIT_PROFILES: gpu
+  script:
+    - LD_LIBRARY_PATH=`pwd`/install/lib xvfb-run install/piglit/piglit-runner.sh

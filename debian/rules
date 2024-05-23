@@ -1,0 +1,74 @@
+#!/usr/bin/make -f
+
+include /usr/share/dpkg/pkg-info.mk
+
+DEB_HOST_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
+DEB_HOST_ARCH      ?= $(shell dpkg-architecture -qDEB_HOST_ARCH)
+DEB_HOST_ARCH_OS   ?= $(shell dpkg-architecture -qDEB_HOST_ARCH_OS)
+DEB_HOST_ARCH_CPU  ?= $(shell dpkg-architecture -qDEB_HOST_ARCH_CPU)
+
+# for finding the correct llvm-config when meson doesn't know about it yet
+export PATH:=/usr/lib/llvm-17/bin/:$(PATH)
+
+export DEB_BUILD_MAINT_OPTIONS=optimize=-lto
+
+empty:=
+space := $(empty) $(empty)
+comma := ,
+
+confflags += \
+	-Dglvnd=true \
+	-Dshared-glapi=enabled \
+	-Dgallium-xvmc=disabled \
+	-Dgallium-omx=disabled \
+	-Db_ndebug=true \
+        -Ddri-drivers-path=/usr/lib/$(DEB_HOST_MULTIARCH)/pvr-dri \
+        -Dglvnd-vendor-name=pvr \
+        -Dgallium-drivers=pvr -Dvulkan-drivers=pvr \
+        -Dglx=disabled -Dllvm=disabled -Dgbm=enabled
+
+override_dh_clean:
+	rm -rf .pc
+	rm -rf build
+	rm -rf configure bin/config.guess bin/config.sub config.h.in
+	rm -rf $$(find -name Makefile.in)
+	rm -rf bin/install-sh bin/ltmain.sh
+	find -name '*.pyc' -delete
+	find -name '__pycache__' -delete
+	dh_clean
+
+override_dh_auto_configure:
+	$(buildflags) dh_auto_configure -- \
+		$(confflags)
+
+# some tests are expected to fail for now, drop this when upstream has
+# better cross-build testing in place and expected failures fixed
+override_dh_auto_test:
+	-dh_auto_test
+
+allpkg = $(shell dh_listpackages -a)
+
+override_dh_installchangelogs:
+	dh_installchangelogs -a
+
+override_dh_install:
+	# purge .la files
+	find debian/tmp/ -name '*.la' -exec rm '{}' ';'
+	ln -sfv pvr_gbm.so debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/gbm/starfive_gbm.so
+	mv debian/tmp/usr/share/glvnd/egl_vendor.d/50_pvr.json \
+		debian/tmp/usr/share/glvnd/egl_vendor.d/40_pvr.json
+
+	dh_install -a
+
+override_dh_makeshlibs:
+	dh_makeshlibs -a -- -c4
+
+%:
+	dh $@ --with quilt \
+		--builddirectory=build/ \
+		--buildsystem=meson
+
+# For maintainer use only, generate a tarball:
+gentarball:
+	git archive --format=tar upstream-experimental --prefix=$(DEB_SOURCE)-$(DEB_VERSION_UPSTREAM)/ \
+		| gzip -9 > ../$(DEB_SOURCE)_$(DEB_VERSION_UPSTREAM).orig.tar.gz

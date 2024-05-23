@@ -1,0 +1,21 @@
+dEQP-VK.glsl.builtin.precision.pow.highp.vec2,Fail
+dEQP-VK.glsl.texture_functions.query.texturequerylod.sampler2d_fixed_fragment,Fail
+
+# Memory leaks
+dEQP-VK.image.texel_view_compatible.graphic.extended.3d_image.texture_read.bc6h_ufloat_block.r32g32b32a32_uint,Fail
+dEQP-VK.renderpass.dedicated_allocation.formats.a8b8g8r8_unorm_pack32.input.dont_care.store.self_dep_clear_draw_use_input_aspect,Fail
+dEQP-VK.renderpass.dedicated_allocation.formats.d24_unorm_s8_uint.input.clear.dont_care.clear_draw_depth_read_only,Fail
+dEQP-VK.renderpass.dedicated_allocation.formats.r32_uint.input.load.store.clear_draw_use_input_aspect,Fail
+dEQP-VK.renderpass.suballocation.formats.d16_unorm.input.dont_care.dont_care.draw,Fail
+dEQP-VK.renderpass.suballocation.formats.r16g16b16a16_uint.input.load.store.clear_draw_use_input_aspect,Fail
+dEQP-VK.renderpass.suballocation.formats.r8g8b8a8_uint.input.dont_care.store.self_dep_clear_draw_use_input_aspect,Fail
+dEQP-VK.renderpass.suballocation.multisample.r8g8_uint.samples_4,Fail
+dEQP-VK.renderpass2.dedicated_allocation.formats.r16g16b16a16_unorm.input.load.store.clear_draw,Fail
+dEQP-VK.renderpass2.suballocation.formats.d32_sfloat.input.clear.dont_care.clear_draw,Fail
+dEQP-VK.renderpass2.suballocation.formats.r8g8_unorm.input.dont_care.dont_care.self_dep_clear_draw,Fail
+dEQP-VK.renderpass2.suballocation.multisample_resolve.r32g32b32a32_uint.max_attachments_8_samples_4,Fail
+dEQP-VK.synchronization.op.single_queue.event.write_image_compute_read_image_fragment.image_128x128_r16g16b16a16_uint,Fail
+dEQP-VK.synchronization.op.single_queue.timeline_semaphore.write_image_tess_control_read_image_vertex.image_128x128_r16g16b16a16_uint,Fail
+dEQP-VK.synchronization.timeline_semaphore.device_host.write_copy_buffer_to_image_read_image_fragment.image_128_r32_uint,Fail
+dEQP-VK.synchronization.timeline_semaphore.one_to_n.write_copy_image_to_buffer_read_ssbo_compute.buffer_262144,Fail
+dEQP-VK.synchronization.timeline_semaphore.wait_before_signal.write_copy_image_read_image_tess_control.image_64x64x8_r32_sfloat,Fail

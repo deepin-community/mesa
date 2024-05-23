@@ -1,0 +1,54 @@
+From a11f6c88069734c9db5612726aedfdf9e0060a37 Mon Sep 17 00:00:00 2001
+From: Brendan King <Brendan.King@imgtec.com>
+Date: Thu, 23 Nov 2017 15:50:21 +0000
+Subject: [PATCH 20/65] dri: use a supported API in driCreateNewContext
+
+Don't assume the screen supports OpenGL when creating a new context,
+use an API that the screen supports.
+---
+ src/gallium/frontends/dri/dri_util.c | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/frontends/dri/dri_util.c b/src/gallium/frontends/dri/dri_util.c
+index 1a5317df03d..879019a0919 100644
+--- a/src/gallium/frontends/dri/dri_util.c
++++ b/src/gallium/frontends/dri/dri_util.c
+@@ -48,6 +48,7 @@
+ #include "main/version.h"
+ #include "main/debug_output.h"
+ #include "main/errors.h"
++#include "util/bitscan.h"
+ 
+ driOptionDescription __dri2ConfigOptions[] = {
+       DRI_CONF_SECTION_DEBUG
+@@ -330,7 +331,11 @@ driCreateContextAttribs(__DRIscreen *screen, int api,
+ 	mesa_api = API_OPENGLES;
+ 	break;
+     case __DRI_API_GLES2:
++	ctx_config.major_version = 2;
++	mesa_api = API_OPENGLES2;
++	break;
+     case __DRI_API_GLES3:
++	ctx_config.major_version = 3;
+ 	mesa_api = API_OPENGLES2;
+ 	break;
+     case __DRI_API_OPENGL_CORE:
+@@ -500,7 +505,14 @@ static __DRIcontext *
+ driCreateNewContext(__DRIscreen *screen, const __DRIconfig *config,
+                     __DRIcontext *shared, void *data)
+ {
+-    return driCreateNewContextForAPI(screen, __DRI_API_OPENGL,
++    int apifs;
++
++    apifs = ffs(screen->api_mask);
++
++    if (!apifs)
++        return NULL;
++
++    return driCreateNewContextForAPI(screen, apifs - 1,
+                                      config, shared, data);
+ }
+ 
+-- 
+2.25.1
+

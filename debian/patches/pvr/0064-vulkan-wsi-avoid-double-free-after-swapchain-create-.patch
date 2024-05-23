@@ -1,0 +1,44 @@
+From dba0b3571752372c61cc601b050c5cef4be4fbf6 Mon Sep 17 00:00:00 2001
+From: Brendan King <Brendan.King@imgtec.com>
+Date: Wed, 6 Apr 2022 17:37:29 +0100
+Subject: [PATCH 64/65] vulkan/wsi: avoid double free after swapchain create
+ failure
+
+The problem was detected by Vulkan dEQP Wayland test case
+dEQP-VK.wsi.wayland.swapchain.simulate_oom.min_image_count.
+
+The problem appears to be due to wsi_destroy_image_info being called
+twice, once due to wsi_configure_image failing, and again as part of
+swapchain destruction in wsi_wl_swapchain_destroy.
+
+Avoid the problem by zeroing the pointers to freed memory in
+wsi_destroy_image_info, so that there is no harm in calling the
+function twice.
+---
+ src/vulkan/wsi/wsi_common.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/vulkan/wsi/wsi_common.c b/src/vulkan/wsi/wsi_common.c
+index f7db11c927a..6ccb755702c 100644
+--- a/src/vulkan/wsi/wsi_common.c
++++ b/src/vulkan/wsi/wsi_common.c
+@@ -471,9 +471,16 @@ wsi_destroy_image_info(const struct wsi_swapchain *chain,
+                        struct wsi_image_info *info)
+ {
+    vk_free(&chain->alloc, (void *)info->create.pQueueFamilyIndices);
++   info->create.pQueueFamilyIndices = NULL;
++
+    vk_free(&chain->alloc, (void *)info->format_list.pViewFormats);
++   info->format_list.pViewFormats = NULL;
++
+    vk_free(&chain->alloc, (void *)info->drm_mod_list.pDrmFormatModifiers);
++   info->drm_mod_list.pDrmFormatModifiers = NULL;
++
+    vk_free(&chain->alloc, info->modifier_props);
++   info->modifier_props = NULL;
+ }
+ 
+ VkResult
+-- 
+2.25.1
+

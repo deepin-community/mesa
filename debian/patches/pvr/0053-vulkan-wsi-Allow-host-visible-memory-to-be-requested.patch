@@ -1,0 +1,203 @@
+From 7c87fefe55ef6a7d623437f60e11c5f8c2298f7b Mon Sep 17 00:00:00 2001
+From: Brendan King <Brendan.King@imgtec.com>
+Date: Tue, 16 Feb 2021 20:17:32 +0000
+Subject: [PATCH 53/65] vulkan/wsi: Allow host visible memory to be requested
+
+Allow host visible memory to be explicitly requested when allocating
+native images.
+
+For a software driver on X11, we need to be able to map the memory on
+the host, in order to present the contents to the X Server.
+---
+ src/vulkan/wsi/wsi_common.c         |  3 ++-
+ src/vulkan/wsi/wsi_common_display.c |  2 +-
+ src/vulkan/wsi/wsi_common_drm.c     | 19 +++++++++++++++----
+ src/vulkan/wsi/wsi_common_private.h |  2 ++
+ src/vulkan/wsi/wsi_common_wayland.c |  2 +-
+ src/vulkan/wsi/wsi_common_win32.c   |  2 +-
+ src/vulkan/wsi/wsi_common_x11.c     |  2 +-
+ 7 files changed, 23 insertions(+), 9 deletions(-)
+
+diff --git a/src/vulkan/wsi/wsi_common.c b/src/vulkan/wsi/wsi_common.c
+index 91f0d80b1e5..ab676658f5c 100644
+--- a/src/vulkan/wsi/wsi_common.c
++++ b/src/vulkan/wsi/wsi_common.c
+@@ -464,6 +464,7 @@ wsi_destroy_image_info(const struct wsi_swapchain *chain,
+ VkResult
+ wsi_create_image(const struct wsi_swapchain *chain,
+                  const struct wsi_image_info *info,
++                 bool host_visible,
+                  struct wsi_image *image)
+ {
+    const struct wsi_device *wsi = chain->wsi;
+@@ -478,7 +479,7 @@ wsi_create_image(const struct wsi_swapchain *chain,
+    if (result != VK_SUCCESS)
+       goto fail;
+ 
+-   result = info->create_mem(chain, info, image);
++   result = info->create_mem(chain, info, host_visible, image);
+    if (result != VK_SUCCESS)
+       goto fail;
+ 
+diff --git a/src/vulkan/wsi/wsi_common_display.c b/src/vulkan/wsi/wsi_common_display.c
+index b0a5ba06c7b..2c7622630d5 100644
+--- a/src/vulkan/wsi/wsi_common_display.c
++++ b/src/vulkan/wsi/wsi_common_display.c
+@@ -1057,7 +1057,7 @@ wsi_display_image_init(VkDevice device_h,
+       return VK_ERROR_DEVICE_LOST;
+ 
+    VkResult result = wsi_create_image(&chain->base, &chain->base.image_info,
+-                                      &image->base);
++                                      false, &image->base);
+    if (result != VK_SUCCESS)
+       return result;
+ 
+diff --git a/src/vulkan/wsi/wsi_common_drm.c b/src/vulkan/wsi/wsi_common_drm.c
+index 0643a04a18b..b1c4b2625c2 100644
+--- a/src/vulkan/wsi/wsi_common_drm.c
++++ b/src/vulkan/wsi/wsi_common_drm.c
+@@ -91,6 +91,7 @@ wsi_device_matches_drm_fd(const struct wsi_device *wsi, int drm_fd)
+ static uint32_t
+ select_memory_type(const struct wsi_device *wsi,
+                    bool want_device_local,
++                   bool want_host_visible,
+                    uint32_t type_bits)
+ {
+    assert(type_bits);
+@@ -99,8 +100,10 @@ select_memory_type(const struct wsi_device *wsi,
+    for (uint32_t i = 0; i < wsi->memory_props.memoryTypeCount; i++) {
+        const VkMemoryType type = wsi->memory_props.memoryTypes[i];
+        bool local = type.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
++       bool host = type.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+ 
+-       if ((type_bits & (1 << i)) && local == want_device_local)
++       if ((type_bits & (1 << i)) && local == want_device_local &&
++            (!want_host_visible || host))
+          return i;
+        all_local &= local;
+    }
+@@ -108,6 +111,8 @@ select_memory_type(const struct wsi_device *wsi,
+    /* ignore want_device_local when all memory types are device-local */
+    if (all_local) {
+       assert(!want_device_local);
++      /* currently, host visibility is only needed with device local */
++      assert(!want_host_visible);
+       return ffs(type_bits) - 1;
+    }
+ 
+@@ -139,6 +144,7 @@ get_modifier_props(const struct wsi_image_info *info, uint64_t modifier)
+ static VkResult
+ wsi_create_native_image_mem(const struct wsi_swapchain *chain,
+                             const struct wsi_image_info *info,
++                            bool host_visible,
+                             struct wsi_image *image);
+ 
+ VkResult
+@@ -287,6 +293,7 @@ fail_oom:
+ static VkResult
+ wsi_create_native_image_mem(const struct wsi_swapchain *chain,
+                             const struct wsi_image_info *info,
++                            bool host_visible,
+                             struct wsi_image *image)
+ {
+    const struct wsi_device *wsi = chain->wsi;
+@@ -335,7 +342,8 @@ wsi_create_native_image_mem(const struct wsi_swapchain *chain,
+       .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+       .pNext = sw_host_ptr ? (void *)&host_ptr_info : (void *)&memory_dedicated_info,
+       .allocationSize = reqs.size,
+-      .memoryTypeIndex = select_memory_type(wsi, true, reqs.memoryTypeBits),
++      .memoryTypeIndex = select_memory_type(wsi, true, host_visible,
++                                            reqs.memoryTypeBits),
+    };
+    result = wsi->AllocateMemory(chain->device, &memory_info,
+                                 &chain->alloc, &image->memory);
+@@ -431,6 +439,7 @@ align_u32(uint32_t v, uint32_t a)
+ static VkResult
+ wsi_create_prime_image_mem(const struct wsi_swapchain *chain,
+                            const struct wsi_image_info *info,
++                           bool host_visible,
+                            struct wsi_image *image)
+ {
+    const struct wsi_device *wsi = chain->wsi;
+@@ -480,7 +489,8 @@ wsi_create_prime_image_mem(const struct wsi_swapchain *chain,
+       .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+       .pNext = &prime_memory_dedicated_info,
+       .allocationSize = linear_size,
+-      .memoryTypeIndex = select_memory_type(wsi, false, reqs.memoryTypeBits),
++      .memoryTypeIndex = select_memory_type(wsi, false, host_visible,
++                                            reqs.memoryTypeBits),
+    };
+    result = wsi->AllocateMemory(chain->device, &prime_memory_info,
+                                 &chain->alloc, &image->prime.memory);
+@@ -504,7 +514,8 @@ wsi_create_prime_image_mem(const struct wsi_swapchain *chain,
+       .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+       .pNext = &memory_dedicated_info,
+       .allocationSize = reqs.size,
+-      .memoryTypeIndex = select_memory_type(wsi, true, reqs.memoryTypeBits),
++      .memoryTypeIndex = select_memory_type(wsi, true, host_visible,
++                                            reqs.memoryTypeBits),
+    };
+    result = wsi->AllocateMemory(chain->device, &memory_info,
+                                 &chain->alloc, &image->memory);
+diff --git a/src/vulkan/wsi/wsi_common_private.h b/src/vulkan/wsi/wsi_common_private.h
+index b41cd16a96a..b5ffeb24bce 100644
+--- a/src/vulkan/wsi/wsi_common_private.h
++++ b/src/vulkan/wsi/wsi_common_private.h
+@@ -51,6 +51,7 @@ struct wsi_image_info {
+ 
+    VkResult (*create_mem)(const struct wsi_swapchain *chain,
+                           const struct wsi_image_info *info,
++                          bool host_visible,
+                           struct wsi_image *image);
+ 
+    VkResult (*finish_create)(const struct wsi_swapchain *chain,
+@@ -158,6 +159,7 @@ wsi_destroy_image_info(const struct wsi_swapchain *chain,
+ VkResult
+ wsi_create_image(const struct wsi_swapchain *chain,
+                  const struct wsi_image_info *info,
++                 bool host_visible,
+                  struct wsi_image *image);
+ void
+ wsi_destroy_image(const struct wsi_swapchain *chain,
+diff --git a/src/vulkan/wsi/wsi_common_wayland.c b/src/vulkan/wsi/wsi_common_wayland.c
+index b66a49560ea..c7fffae03fd 100644
+--- a/src/vulkan/wsi/wsi_common_wayland.c
++++ b/src/vulkan/wsi/wsi_common_wayland.c
+@@ -1148,7 +1148,7 @@ wsi_wl_image_init(struct wsi_wl_swapchain *chain,
+    VkResult result;
+ 
+    result = wsi_create_image(&chain->base, &chain->base.image_info,
+-                             &image->base);
++                             false, &image->base);
+    if (result != VK_SUCCESS)
+       return result;
+ 
+diff --git a/src/vulkan/wsi/wsi_common_win32.c b/src/vulkan/wsi/wsi_common_win32.c
+index 6cff2e05d83..9c4acd8d7c2 100644
+--- a/src/vulkan/wsi/wsi_common_win32.c
++++ b/src/vulkan/wsi/wsi_common_win32.c
+@@ -375,7 +375,7 @@ wsi_win32_image_init(VkDevice device_h,
+    struct wsi_win32_swapchain *chain = (struct wsi_win32_swapchain *) drv_chain;
+ 
+    VkResult result = wsi_create_image(&chain->base, &chain->base.image_info,
+-                                      &image->base);
++                                      false, &image->base);
+    if (result != VK_SUCCESS)
+       return result;
+ 
+diff --git a/src/vulkan/wsi/wsi_common_x11.c b/src/vulkan/wsi/wsi_common_x11.c
+index 4e7dc86336d..7cf9e5416fe 100644
+--- a/src/vulkan/wsi/wsi_common_x11.c
++++ b/src/vulkan/wsi/wsi_common_x11.c
+@@ -1520,7 +1520,7 @@ x11_image_init(VkDevice device_h, struct x11_swapchain *chain,
+    int fence_fd;
+ 
+    result = wsi_create_image(&chain->base, &chain->base.image_info,
+-                             &image->base);
++                             chain->base.wsi->sw, &image->base);
+    if (result != VK_SUCCESS)
+       return result;
+ 
+-- 
+2.25.1
+
