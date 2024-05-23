@@ -1,5 +1,6 @@
 *.csv eol=crlf
-* text=auto
+debian/patches/pvr/0024-dri-add-support-for-YUV-DRI-config-csv.patch binary
+text eol=auto
 *.jpg binary
 *.png binary
 *.gif binary

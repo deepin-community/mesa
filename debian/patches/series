@@ -26,6 +26,7 @@ pvr/0021-egl-wayland-add-pbuffer-support.patch
 pvr/0022-egl-eglBindAPI-workaround-for-dEQP-bug.patch
 pvr/0023-GL_EXT_multi_draw_indirect-entry-points.patch
 pvr/0024-dri-add-support-for-YUV-DRI-config.patch
+pvr/0024-dri-add-support-for-YUV-DRI-config-csv.patch
 pvr/0025-egl-add-support-for-EXT_yuv_surface.patch
 pvr/0026-dri-add-missing-__DRI_IMAGE_COMPONENTS-define-for-EG.patch
 pvr/0027-egl-wayland-expose-EXT_yuv_surface-support.patch

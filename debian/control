@@ -50,7 +50,7 @@ Vcs-Git: https://salsa.debian.org/xorg-team/lib/mesa.git
 Vcs-Browser: https://salsa.debian.org/xorg-team/lib/mesa
 Homepage: https://mesa3d.org/
 
-Package: libgl1-pvr-dri
+Package: libgl1-pvr-dri-ddk119
 Section: libs
 Architecture: linux-any
 Pre-Depends: ${misc:Pre-Depends}
@@ -58,45 +58,49 @@ Depends:
  libvulkan1,
  ${shlibs:Depends},
  ${misc:Depends}
+Provides: libgl1-pvr-dri
 Multi-Arch: same
 Description: free implementation of the OpenGL API -- DRI modules (PVR variant)
 
-Package: libegl-pvr0
+Package: libegl-pvr0-ddk119
 Section: libs
 Architecture: any
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
- libgbm1-pvr (= ${binary:Version}),
-Provides: libegl-vendor-pvr
+ libgbm1-pvr-ddk119 (= ${binary:Version}),
+Provides: libegl-vendor-pvr, libegl-pvr0
 Pre-Depends: ${misc:Pre-Depends}
 Multi-Arch: same
 Description: free implementation of the EGL API -- Mesa vendor library (PVR variant)
 
-Package: libglapi-pvr
+Package: libglapi-pvr-ddk119
 Section: libs
 Architecture: any
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
 Pre-Depends: ${misc:Pre-Depends}
+Provides: libglapi-pvr
 Multi-Arch: same
 Description: free implementation of the GL API -- shared library (PVR variant)
 
-Package: libgbm1-pvr
+Package: libgbm1-pvr-ddk119
 Section: libs
 Architecture: linux-any
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
 Pre-Depends: ${misc:Pre-Depends}
+Provides: libgbm1-pvr
 Multi-Arch: same
-Description: generic buffer management API -- runtime
+Description: generic buffer management API -- runtime (PVR variant)
 
-Package: pvr-vulkan-drivers
+Package: pvr-vulkan-drivers-ddk119
 Section: libs
 Architecture: linux-any
 Pre-Depends: ${misc:Pre-Depends}
+Provides: pvr-vulkan-drivers
 Depends:
  libvulkan1,
  python3:any,
