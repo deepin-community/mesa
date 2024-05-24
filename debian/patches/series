@@ -1,0 +1,12 @@
+0001-redirect-glapi.patch
+0002-change-LIBGL_ALWAYS_SOFTWARE-to-PVRGL_ALWAYS_SOFTWAR.patch
+0003-Revert-gbm-add-gbm_bo_blit.patch
+0004-gbm-backend-ize.patch
+0005-add-dri-aliases.patch
+0006-hardcode-supported-display-drivers.patch
+1001-zink-emit-consts-as-uint-only-on-IMG-proprietary-dri.patch
+1002-zink-use-lazy-descriptors-for-IMG-proprietary-driver.patch
+1003-zink-Do-not-use-demote-on-IMG-blobs.patch
+1004-zink-don-t-assert-geometryShader-for-IMG-proprietary.patch
+1005-zink-skip-empty-VkSubmitInfo-when-submitting.patch
+1006-zink-try-to-merge-two-VkSubmitInfo-s-for-Imagination.patch
