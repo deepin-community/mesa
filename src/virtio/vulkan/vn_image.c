@@ -46,19 +46,6 @@ vn_image_cache_debug_dump(struct vn_image_reqs_cache *cache)
    vn_log(NULL, "  skip %u\n", cache->debug.cache_skip_count);
 }
 
-static uint32_t
-vn_image_cache_key_hash_function(const void *key)
-{
-   return _mesa_hash_data(key, SHA1_DIGEST_LENGTH);
-}
-
-static bool
-vn_image_cache_key_equal_function(const void *void_a, const void *void_b)
-{
-   const struct vn_image_reqs_cache_entry *a = void_a, *b = void_b;
-   return memcmp(a, b, SHA1_DIGEST_LENGTH) == 0;
-}
-
 static bool
 vn_image_get_image_reqs_key(struct vn_device *dev,
                             const VkImageCreateInfo *create_info,
@@ -160,8 +147,8 @@ vn_image_reqs_cache_init(struct vn_device *dev)
    if (VN_PERF(NO_ASYNC_IMAGE_CREATE))
       return;
 
-   cache->ht = _mesa_hash_table_create(NULL, vn_image_cache_key_hash_function,
-                                       vn_image_cache_key_equal_function);
+   cache->ht = _mesa_hash_table_create(NULL, vn_cache_key_hash_function,
+                                       vn_cache_key_equal_function);
    if (!cache->ht)
       return;
 
@@ -231,8 +218,15 @@ vn_image_store_reqs_in_cache(struct vn_device *dev,
    assert(cache->ht);
 
    simple_mtx_lock(&cache->mutex);
-   uint32_t cache_entry_count = _mesa_hash_table_num_entries(cache->ht);
-   if (cache_entry_count == IMAGE_REQS_CACHE_MAX_ENTRIES) {
+
+   /* Check if entry was added before lock */
+   if (_mesa_hash_table_search(cache->ht, key)) {
+      simple_mtx_unlock(&cache->mutex);
+      return;
+   }
+
+   if (_mesa_hash_table_num_entries(cache->ht) ==
+       IMAGE_REQS_CACHE_MAX_ENTRIES) {
       /* Evict/use the last entry in the lru list for this new entry */
       cache_entry =
          list_last_entry(&cache->lru, struct vn_image_reqs_cache_entry, head);
@@ -242,11 +236,11 @@ vn_image_store_reqs_in_cache(struct vn_device *dev,
    } else {
       cache_entry = vk_zalloc(alloc, sizeof(*cache_entry), VN_DEFAULT_ALIGN,
                               VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (!cache_entry) {
+         simple_mtx_unlock(&cache->mutex);
+         return;
+      }
    }
-   simple_mtx_unlock(&cache->mutex);
-
-   if (!cache_entry)
-      return;
 
    for (uint32_t i = 0; i < plane_count; i++)
       cache_entry->requirements[i] = requirements[i];
@@ -254,12 +248,10 @@ vn_image_store_reqs_in_cache(struct vn_device *dev,
    memcpy(cache_entry->key, key, SHA1_DIGEST_LENGTH);
    cache_entry->plane_count = plane_count;
 
-   simple_mtx_lock(&cache->mutex);
-   if (!_mesa_hash_table_search(cache->ht, cache_entry->key)) {
-      _mesa_hash_table_insert(dev->image_reqs_cache.ht, cache_entry->key,
-                              cache_entry);
-      list_add(&cache_entry->head, &cache->lru);
-   }
+   _mesa_hash_table_insert(dev->image_reqs_cache.ht, cache_entry->key,
+                           cache_entry);
+   list_add(&cache_entry->head, &cache->lru);
+
    simple_mtx_unlock(&cache->mutex);
 }
 
@@ -448,7 +440,7 @@ vn_image_create(struct vn_device *dev,
    if (!img)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
-   vn_object_set_id(img, (uintptr_t)img, VK_OBJECT_TYPE_IMAGE);
+   vn_object_set_id(img, vn_get_next_obj_id(), VK_OBJECT_TYPE_IMAGE);
 
    VkResult result = vn_image_init(dev, create_info, img);
    if (result != VK_SUCCESS) {
@@ -482,7 +474,7 @@ vn_image_create_deferred(struct vn_device *dev,
    if (!img)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
-   vn_object_set_id(img, (uintptr_t)img, VK_OBJECT_TYPE_IMAGE);
+   vn_object_set_id(img, vn_get_next_obj_id(), VK_OBJECT_TYPE_IMAGE);
 
    VkResult result = vn_image_deferred_info_init(img, create_info, alloc);
    if (result != VK_SUCCESS) {
@@ -561,7 +553,6 @@ vn_CreateImage(VkDevice device,
                const VkAllocationCallbacks *pAllocator,
                VkImage *pImage)
 {
-   VN_TRACE_FUNC();
    struct vn_device *dev = vn_device_from_handle(device);
    const VkAllocationCallbacks *alloc =
       pAllocator ? pAllocator : &dev->base.base.alloc;
@@ -648,7 +639,6 @@ vn_DestroyImage(VkDevice device,
                 VkImage image,
                 const VkAllocationCallbacks *pAllocator)
 {
-   VN_TRACE_FUNC();
    struct vn_device *dev = vn_device_from_handle(device);
    struct vn_image *img = vn_image_from_handle(image);
    const VkAllocationCallbacks *alloc =
@@ -753,25 +743,17 @@ vn_BindImageMemory2(VkDevice device,
                     uint32_t bindInfoCount,
                     const VkBindImageMemoryInfo *pBindInfos)
 {
-   struct vn_device *dev = vn_device_from_handle(device);
-   const VkAllocationCallbacks *alloc = &dev->base.base.alloc;
+   STACK_ARRAY(VkBindImageMemoryInfo, bind_infos, bindInfoCount);
+   typed_memcpy(bind_infos, pBindInfos, bindInfoCount);
 
-   VkBindImageMemoryInfo *local_infos = NULL;
    for (uint32_t i = 0; i < bindInfoCount; i++) {
-      const VkBindImageMemoryInfo *info = &pBindInfos[i];
+      VkBindImageMemoryInfo *info = &bind_infos[i];
       struct vn_image *img = vn_image_from_handle(info->image);
       struct vn_device_memory *mem =
          vn_device_memory_from_handle(info->memory);
 
-      /* no bind info fixup needed */
-      if (mem && !mem->base_memory) {
-         if (img->wsi.is_wsi)
-            vn_image_bind_wsi_memory(img, mem);
-         continue;
-      }
-
       if (!mem) {
-#ifdef ANDROID
+#if DETECT_OS_ANDROID
          /* TODO handle VkNativeBufferANDROID when we bump up
           * VN_ANDROID_NATIVE_BUFFER_SPEC_VERSION
           */
@@ -786,37 +768,29 @@ vn_BindImageMemory2(VkDevice device,
             vn_image_from_handle(wsi_common_get_image(
                swapchain_info->swapchain, swapchain_info->imageIndex));
          mem = swapchain_img->wsi.memory;
+         info->memory = vn_device_memory_to_handle(mem);
 #endif
       }
+      assert(mem && info->memory != VK_NULL_HANDLE);
 
       if (img->wsi.is_wsi)
          vn_image_bind_wsi_memory(img, mem);
-
-      if (!local_infos) {
-         const size_t size = sizeof(*local_infos) * bindInfoCount;
-         local_infos = vk_alloc(alloc, size, VN_DEFAULT_ALIGN,
-                                VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);
-         if (!local_infos)
-            return vn_error(dev->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
-
-         memcpy(local_infos, pBindInfos, size);
-      }
 
       /* If mem is suballocated, mem->base_memory is non-NULL and we must
        * patch it in.  If VkBindImageMemorySwapchainInfoKHR is given, we've
        * looked mem up above and also need to patch it in.
        */
-      local_infos[i].memory = vn_device_memory_to_handle(
-         mem->base_memory ? mem->base_memory : mem);
-      local_infos[i].memoryOffset += mem->base_offset;
+      if (mem->base_memory) {
+         info->memory = vn_device_memory_to_handle(mem->base_memory);
+         info->memoryOffset += mem->base_offset;
+      }
    }
-   if (local_infos)
-      pBindInfos = local_infos;
 
+   struct vn_device *dev = vn_device_from_handle(device);
    vn_async_vkBindImageMemory2(dev->primary_ring, device, bindInfoCount,
-                               pBindInfos);
+                               bind_infos);
 
-   vk_free(alloc, local_infos);
+   STACK_ARRAY_FINISH(bind_infos);
 
    return VK_SUCCESS;
 }

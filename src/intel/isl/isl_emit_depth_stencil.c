@@ -63,6 +63,7 @@ static const uint8_t isl_encode_tiling[] = {
 #if GFX_VERx10 >= 125
    [ISL_TILING_4]          = TILE4,
    [ISL_TILING_64]         = TILE64,
+   [ISL_TILING_64_XE2]     = TILE64,
 #else
    [ISL_TILING_Y0]         = NONE,
    [ISL_TILING_SKL_Yf]     = TILEYF,
@@ -200,6 +201,9 @@ isl_genX(emit_depth_stencil_hiz_s)(const struct isl_device *dev, void *batch,
       db.ControlSurfaceEnable = db.DepthBufferCompressionEnable =
          isl_aux_usage_has_ccs(info->hiz_usage);
 #endif
+#if GFX_VER >= 12
+      db.NullPageCoherencyEnable = info->depth_surf->usage & ISL_SURF_USAGE_SPARSE_BIT;
+#endif
    }
 
 #if GFX_VER == 5 || GFX_VER == 6
@@ -270,6 +274,9 @@ isl_genX(emit_depth_stencil_hiz_s)(const struct isl_device *dev, void *batch,
 #if GFX_VER >= 8
       sb.SurfaceQPitch =
          isl_surf_get_array_pitch_el_rows(info->stencil_surf) >> 2;
+#endif
+#if GFX_VER >= 12
+      sb.NullPageCoherencyEnable = info->stencil_surf->usage & ISL_SURF_USAGE_SPARSE_BIT;
 #endif
    } else {
 #if GFX_VER >= 12
