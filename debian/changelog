@@ -1,20 +1,96 @@
-mesa (24.0.1-1deepin3) unstable; urgency=medium
+mesa (24.1.0-2) unstable; urgency=medium
 
-  * Add radeon-fix-gnome-shell-crash.diff.
+  * Upload to unstable.
+  * control: Add python3-pycparser to build-depends for armhf, arm64.
+    (Closes: #1071222)
 
- -- xiangzelong <xiangzelong@deepin.org>  Fri, 12 Apr 2024 16:46:54 +0800
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 31 May 2024 15:40:01 +0300
 
-mesa (24.0.1-1deepin2) unstable; urgency=medium
+mesa (24.1.0-1) experimental; urgency=medium
 
-  * add orcjit shader cache
+  * New upstream release.
 
- -- Chang Yang <yangchang@deepin.org>  Wed, 03 Apr 2024 09:55:39 +0800
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 23 May 2024 13:08:02 +0300
 
-mesa (24.0.1-1deepin1) unstable; urgency=medium
+mesa (24.1.0~rc3-1) experimental; urgency=medium
 
-  * Add patch to support riscv
+  * New upstream release candidate.
 
- -- xiangzelong <xiangzelong@deepin.org>  Sat, 23 Mar 2024 22:50:48 +0800
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 10 May 2024 10:30:26 +0300
+
+mesa (24.1.0~rc2-1) experimental; urgency=medium
+
+  * New upstream release candidate.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Sat, 04 May 2024 19:00:30 +0300
+
+mesa (24.1.0~rc1-1) experimental; urgency=medium
+
+  * New upstream release candidate.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 25 Apr 2024 09:02:09 +0300
+
+mesa (24.0.8-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 23 May 2024 12:57:58 +0300
+
+mesa (24.0.7-1) unstable; urgency=medium
+
+  * New upstream release.
+  * source: Switch to source format 3.0 (quilt), because upstream
+    provides only .xz tarballs. (Closes: #1036176)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 10 May 2024 10:18:58 +0300
+
+mesa (24.0.6-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 25 Apr 2024 08:39:42 +0300
+
+mesa (24.0.5-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 11 Apr 2024 13:13:09 +0300
+
+mesa (24.0.4-1) unstable; urgency=medium
+
+  [ Timo Aaltonen ]
+  * New upstream release.
+  * patches: Dropped upstreamed patches.
+
+  [ Fabio Pedretti ]
+  * control: libllvmspirvlib-*-dev is needed even with rusticl disabled
+    (Closes: #1061287)
+  * control: Bump meson build-dep
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 29 Mar 2024 17:59:50 +0200
+
+mesa (24.0.3-1) unstable; urgency=medium
+
+  [ Timo Aaltonen ]
+  * New upstream release. (Closes: #1065654)
+  * radeon-fix-gnome-shell-crash.diff: Fix a regression crashing
+    gnome-shell. (Closes: #1064123)
+  * fix-zink-logging.diff: Updated.
+  * control: Bump libdrm build-dep. (Closes: #1065304)
+
+  [ Fabio Pedretti ]
+  * patches: Drop patch for obsolete powerpcspe arch
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 15 Mar 2024 13:03:15 +0200
+
+mesa (24.0.2-1) unstable; urgency=medium
+
+  * New upstream release.
+  * clc-build-fix.diff: Dropped, upstream.
+  * fix-zink-logging.diff: Don't log to stderr when zink fails to load.
+    (Closes: #1064704)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 29 Feb 2024 09:22:00 +0200
 
 mesa (24.0.1-1) unstable; urgency=medium
 

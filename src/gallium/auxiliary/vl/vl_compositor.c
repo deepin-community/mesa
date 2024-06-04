@@ -148,13 +148,13 @@ init_pipe_state(struct vl_compositor *c)
    sampler.compare_mode = PIPE_TEX_COMPARE_NONE;
    sampler.compare_func = PIPE_FUNC_ALWAYS;
 
-   c->sampler_linear = c->pipe->create_sampler_state(c->pipe, &sampler);
-
-   sampler.min_img_filter = PIPE_TEX_FILTER_NEAREST;
-   sampler.mag_img_filter = PIPE_TEX_FILTER_NEAREST;
-   c->sampler_nearest = c->pipe->create_sampler_state(c->pipe, &sampler);
-
    if (c->pipe_gfx_supported) {
+           c->sampler_linear = c->pipe->create_sampler_state(c->pipe, &sampler);
+
+           sampler.min_img_filter = PIPE_TEX_FILTER_NEAREST;
+           sampler.mag_img_filter = PIPE_TEX_FILTER_NEAREST;
+           c->sampler_nearest = c->pipe->create_sampler_state(c->pipe, &sampler);
+
            memset(&blend, 0, sizeof blend);
            blend.independent_blend_enable = 0;
            blend.rt[0].blend_enable = 0;
@@ -228,8 +228,10 @@ static void cleanup_pipe_state(struct vl_compositor *c)
            c->pipe->delete_blend_state(c->pipe, c->blend_add);
            c->pipe->delete_rasterizer_state(c->pipe, c->rast);
    }
-   c->pipe->delete_sampler_state(c->pipe, c->sampler_linear);
-   c->pipe->delete_sampler_state(c->pipe, c->sampler_nearest);
+   if (c->sampler_linear)
+      c->pipe->delete_sampler_state(c->pipe, c->sampler_linear);
+   if (c->sampler_nearest)
+      c->pipe->delete_sampler_state(c->pipe, c->sampler_nearest);
 }
 
 static bool
@@ -259,7 +261,7 @@ init_buffers(struct vl_compositor *c)
            vertex_elems[1].vertex_buffer_index = 0;
            vertex_elems[1].src_format = PIPE_FORMAT_R32G32B32A32_FLOAT;
            vertex_elems[2].src_offset = sizeof(struct vertex2f) + sizeof(struct vertex4f);
-           vertex_elems[1].src_stride = VL_COMPOSITOR_VB_STRIDE;
+           vertex_elems[2].src_stride = VL_COMPOSITOR_VB_STRIDE;
            vertex_elems[2].instance_divisor = 0;
            vertex_elems[2].vertex_buffer_index = 0;
            vertex_elems[2].src_format = PIPE_FORMAT_R32G32B32A32_FLOAT;
