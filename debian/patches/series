@@ -68,3 +68,5 @@ glvnd/1001-redirect-glapi.patch
 glvnd/1002-change-LIBGL_ALWAYS_SOFTWARE-to-PVRGL_ALWAYS_SOFTWAR.patch
 glvnd/1003-Revert-gbm-add-gbm_bo_blit.patch
 glvnd/1004-gbm-backend-ize.patch
+
+9001-add-dri-alias.patch
