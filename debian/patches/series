@@ -1,2 +1,8 @@
 path_max.diff
 src_glx_dri_common.h.diff
+0001-Revert-meson-do-not-pull-in-clc-for-clover.patch
+0002-llvmpipe-make-unnamed-global-have-internal-linkage.patch
+0003-llvmpipe-add-an-implementation-with-llvm-orcjit.patch
+0004-llvmpipe-add-LoongArch-support-in-ORCJIT.patch
+0005-llvmpipe-append-partial-mask-to-partial-fs_variant-f.patch
+0006-llvmpipe-add-shader-cache-support-for-ORCJIT-impleme.patch
