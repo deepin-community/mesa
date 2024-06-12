@@ -1,3 +1,9 @@
+mesa (24.1.0-2deepin1) unstable; urgency=medium
+
+  * Rebase ORCJIT patches for LoongArch, RISC-V.
+
+ -- Mingcong Bai <baimingcong@uniontech.com>  Tue, 04 Jun 2024 10:59:40 +0800
+
 mesa (24.1.0-2) unstable; urgency=medium
 
   * Upload to unstable.
