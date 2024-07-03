@@ -1,7 +1,7 @@
-From 826cca5283cb77c44db0bdf09685ececb129f42a Mon Sep 17 00:00:00 2001
+From f05f41404c90f7f713dc25a3f39283d6dab2942f Mon Sep 17 00:00:00 2001
 From: Icenowy Zheng <uwu@icenowy.me>
 Date: Tue, 2 Apr 2024 21:36:21 +0800
-Subject: [PATCH 6/7] llvmpipe: add shader cache support for ORCJIT
+Subject: [PATCH 06/10] llvmpipe: add shader cache support for ORCJIT
  implementation
 
 Signed-off-by: Icenowy Zheng <uwu@icenowy.me>
@@ -14,7 +14,7 @@ Signed-off-by: Icenowy Zheng <uwu@icenowy.me>
  5 files changed, 125 insertions(+), 26 deletions(-)
 
 diff --git a/src/gallium/auxiliary/draw/draw_llvm.c b/src/gallium/auxiliary/draw/draw_llvm.c
-index 932edd818be..036567ffeeb 100644
+index 389ca50e1f5..2b2ce8ca853 100644
 --- a/src/gallium/auxiliary/draw/draw_llvm.c
 +++ b/src/gallium/auxiliary/draw/draw_llvm.c
 @@ -1675,8 +1675,16 @@ draw_llvm_generate(struct draw_llvm *llvm, struct draw_llvm_variant *variant)
@@ -35,7 +35,7 @@ index 932edd818be..036567ffeeb 100644
  
     context_ptr               = LLVMGetParam(variant_func, 0);
     resources_ptr             = LLVMGetParam(variant_func, 1);
-@@ -2410,8 +2418,17 @@ draw_gs_llvm_generate(struct draw_llvm *llvm,
+@@ -2411,8 +2419,17 @@ draw_gs_llvm_generate(struct draw_llvm *llvm,
        if (LLVMGetTypeKind(arg_types[i]) == LLVMPointerTypeKind)
           lp_add_function_attr(variant_func, i + 1, LP_FUNC_ATTR_NOALIAS);
  
@@ -54,7 +54,7 @@ index 932edd818be..036567ffeeb 100644
     context_ptr               = LLVMGetParam(variant_func, 0);
     resources_ptr             = LLVMGetParam(variant_func, 1);
     input_array               = LLVMGetParam(variant_func, 2);
-@@ -3017,8 +3034,17 @@ draw_tcs_llvm_generate(struct draw_llvm *llvm,
+@@ -3018,8 +3035,17 @@ draw_tcs_llvm_generate(struct draw_llvm *llvm,
        }
     }
  
@@ -73,7 +73,7 @@ index 932edd818be..036567ffeeb 100644
     resources_ptr               = LLVMGetParam(variant_func, 0);
     input_array               = LLVMGetParam(variant_func, 1);
     output_array              = LLVMGetParam(variant_func, 2);
-@@ -3591,8 +3617,17 @@ draw_tes_llvm_generate(struct draw_llvm *llvm,
+@@ -3592,8 +3618,17 @@ draw_tes_llvm_generate(struct draw_llvm *llvm,
        if (LLVMGetTypeKind(arg_types[i]) == LLVMPointerTypeKind)
           lp_add_function_attr(variant_func, i + 1, LP_FUNC_ATTR_NOALIAS);
  

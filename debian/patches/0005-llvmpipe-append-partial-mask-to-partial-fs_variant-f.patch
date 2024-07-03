@@ -1,8 +1,8 @@
-From 1ab1d4c092447b49491a4ec1d59b035a63a86398 Mon Sep 17 00:00:00 2001
+From 3a77b508058de4284f2c661c28d7987f7bc6ae46 Mon Sep 17 00:00:00 2001
 From: Icenowy Zheng <uwu@icenowy.me>
 Date: Fri, 1 Mar 2024 11:21:48 +0800
-Subject: [PATCH 5/7] llvmpipe: append partial mask to partial fs_variant func
- name
+Subject: [PATCH 05/10] llvmpipe: append partial mask to partial fs_variant
+ func name
 
 Signed-off-by: Icenowy Zheng <uwu@icenowy.me>
 ---

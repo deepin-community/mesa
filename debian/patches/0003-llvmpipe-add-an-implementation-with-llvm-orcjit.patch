@@ -1,7 +1,7 @@
-From 9b8fe4e0605a83dd17b0b716213a876a991ccaf1 Mon Sep 17 00:00:00 2001
+From 07b4aba94b1935eaddd28d4929354e0bfa8d9e9a Mon Sep 17 00:00:00 2001
 From: Yukari Chiba <i@0x7f.cc>
 Date: Fri, 3 Nov 2023 23:18:47 +0800
-Subject: [PATCH 3/7] llvmpipe: add an implementation with llvm orcjit
+Subject: [PATCH 03/10] llvmpipe: add an implementation with llvm orcjit
 
 Signed-off-by: Icenowy Zheng <uwu@icenowy.me>
 ---
@@ -103,7 +103,7 @@ index ef371dc1214..5bd480744c2 100644
  #endif
  
 diff --git a/src/gallium/auxiliary/draw/draw_llvm.c b/src/gallium/auxiliary/draw/draw_llvm.c
-index 36ff317c85d..932edd818be 100644
+index 5273814adfc..389ca50e1f5 100644
 --- a/src/gallium/auxiliary/draw/draw_llvm.c
 +++ b/src/gallium/auxiliary/draw/draw_llvm.c
 @@ -381,8 +381,13 @@ get_vertex_header_ptr_type(struct draw_llvm_variant *variant)
@@ -199,7 +199,7 @@ index 36ff317c85d..932edd818be 100644
  
     LLVMSetFunctionCallConv(variant_func, LLVMCCallConv);
     for (i = 0; i < num_arg_types; ++i)
-@@ -2249,6 +2285,11 @@ draw_llvm_destroy_variant(struct draw_llvm_variant *variant)
+@@ -2250,6 +2286,11 @@ draw_llvm_destroy_variant(struct draw_llvm_variant *variant)
     variant->shader->variants_cached--;
     list_del(&variant->list_item_global.list);
     llvm->nr_variants--;
@@ -211,7 +211,7 @@ index 36ff317c85d..932edd818be 100644
     FREE(variant);
  }
  
-@@ -2358,6 +2399,10 @@ draw_gs_llvm_generate(struct draw_llvm *llvm,
+@@ -2359,6 +2400,10 @@ draw_gs_llvm_generate(struct draw_llvm *llvm,
     variant_func = LLVMAddFunction(gallivm->module, func_name, func_type);
  
     variant->function = variant_func;
@@ -222,7 +222,7 @@ index 36ff317c85d..932edd818be 100644
  
     LLVMSetFunctionCallConv(variant_func, LLVMCCallConv);
  
-@@ -2524,7 +2569,11 @@ draw_gs_llvm_create_variant(struct draw_llvm *llvm,
+@@ -2525,7 +2570,11 @@ draw_gs_llvm_create_variant(struct draw_llvm *llvm,
        if (!cached.data_size)
           needs_caching = true;
     }
@@ -234,7 +234,7 @@ index 36ff317c85d..932edd818be 100644
  
     create_gs_jit_types(variant);
  
-@@ -2535,8 +2584,13 @@ draw_gs_llvm_create_variant(struct draw_llvm *llvm,
+@@ -2536,8 +2585,13 @@ draw_gs_llvm_create_variant(struct draw_llvm *llvm,
  
     gallivm_compile_module(variant->gallivm);
  
@@ -248,7 +248,7 @@ index 36ff317c85d..932edd818be 100644
  
     if (needs_caching)
        llvm->draw->disk_cache_insert_shader(llvm->draw->disk_cache_cookie,
-@@ -2569,6 +2623,10 @@ draw_gs_llvm_destroy_variant(struct draw_gs_llvm_variant *variant)
+@@ -2570,6 +2624,10 @@ draw_gs_llvm_destroy_variant(struct draw_gs_llvm_variant *variant)
     variant->shader->variants_cached--;
     list_del(&variant->list_item_global.list);
     llvm->nr_gs_variants--;
@@ -259,7 +259,7 @@ index 36ff317c85d..932edd818be 100644
     FREE(variant);
  }
  
-@@ -2942,6 +3000,10 @@ draw_tcs_llvm_generate(struct draw_llvm *llvm,
+@@ -2943,6 +3001,10 @@ draw_tcs_llvm_generate(struct draw_llvm *llvm,
     variant_coro = LLVMAddFunction(gallivm->module, func_name_coro, coro_func_type);
  
     variant->function = variant_func;
@@ -270,7 +270,7 @@ index 36ff317c85d..932edd818be 100644
     LLVMSetFunctionCallConv(variant_func, LLVMCCallConv);
  
     LLVMSetFunctionCallConv(variant_coro, LLVMCCallConv);
-@@ -3177,8 +3239,11 @@ draw_tcs_llvm_create_variant(struct draw_llvm *llvm,
+@@ -3178,8 +3240,11 @@ draw_tcs_llvm_create_variant(struct draw_llvm *llvm,
        if (!cached.data_size)
           needs_caching = true;
     }
@@ -283,7 +283,7 @@ index 36ff317c85d..932edd818be 100644
  
     create_tcs_jit_types(variant);
  
-@@ -3191,8 +3256,13 @@ draw_tcs_llvm_create_variant(struct draw_llvm *llvm,
+@@ -3192,8 +3257,13 @@ draw_tcs_llvm_create_variant(struct draw_llvm *llvm,
  
     gallivm_compile_module(variant->gallivm);
  
@@ -297,7 +297,7 @@ index 36ff317c85d..932edd818be 100644
  
     if (needs_caching)
        llvm->draw->disk_cache_insert_shader(llvm->draw->disk_cache_cookie,
-@@ -3225,6 +3295,10 @@ draw_tcs_llvm_destroy_variant(struct draw_tcs_llvm_variant *variant)
+@@ -3226,6 +3296,10 @@ draw_tcs_llvm_destroy_variant(struct draw_tcs_llvm_variant *variant)
     variant->shader->variants_cached--;
     list_del(&variant->list_item_global.list);
     llvm->nr_tcs_variants--;
@@ -308,7 +308,7 @@ index 36ff317c85d..932edd818be 100644
     FREE(variant);
  }
  
-@@ -3507,6 +3581,10 @@ draw_tes_llvm_generate(struct draw_llvm *llvm,
+@@ -3508,6 +3582,10 @@ draw_tes_llvm_generate(struct draw_llvm *llvm,
     variant_func = LLVMAddFunction(gallivm->module, func_name, func_type);
  
     variant->function = variant_func;
@@ -319,7 +319,7 @@ index 36ff317c85d..932edd818be 100644
     LLVMSetFunctionCallConv(variant_func, LLVMCCallConv);
  
     for (i = 0; i < ARRAY_SIZE(arg_types); ++i)
-@@ -3697,7 +3775,11 @@ draw_tes_llvm_create_variant(struct draw_llvm *llvm,
+@@ -3698,7 +3776,11 @@ draw_tes_llvm_create_variant(struct draw_llvm *llvm,
        if (!cached.data_size)
           needs_caching = true;
     }
@@ -331,7 +331,7 @@ index 36ff317c85d..932edd818be 100644
  
     create_tes_jit_types(variant);
  
-@@ -3713,8 +3795,13 @@ draw_tes_llvm_create_variant(struct draw_llvm *llvm,
+@@ -3714,8 +3796,13 @@ draw_tes_llvm_create_variant(struct draw_llvm *llvm,
  
     gallivm_compile_module(variant->gallivm);
  
@@ -345,7 +345,7 @@ index 36ff317c85d..932edd818be 100644
  
     if (needs_caching)
        llvm->draw->disk_cache_insert_shader(llvm->draw->disk_cache_cookie,
-@@ -3747,6 +3834,10 @@ draw_tes_llvm_destroy_variant(struct draw_tes_llvm_variant *variant)
+@@ -3748,6 +3835,10 @@ draw_tes_llvm_destroy_variant(struct draw_tes_llvm_variant *variant)
     variant->shader->variants_cached--;
     list_del(&variant->list_item_global.list);
     llvm->nr_tes_variants--;
@@ -1553,7 +1553,7 @@ index 00000000000..758a8bb61c5
 +#endif
 +}
 diff --git a/src/gallium/auxiliary/meson.build b/src/gallium/auxiliary/meson.build
-index cc9f592894b..a1242869edb 100644
+index 35ad5247b4c..1ef40c524bd 100644
 --- a/src/gallium/auxiliary/meson.build
 +++ b/src/gallium/auxiliary/meson.build
 @@ -346,7 +346,6 @@ if draw_with_llvm
@@ -2536,11 +2536,11 @@ index 7e53aa51928..8df52eaf86c 100644
     return success;
  }
 diff --git a/src/gallium/drivers/llvmpipe/lp_texture_handle.c b/src/gallium/drivers/llvmpipe/lp_texture_handle.c
-index 2e12fe6b8e8..be28789861e 100644
+index 2ff8229afdd..1239d14248d 100644
 --- a/src/gallium/drivers/llvmpipe/lp_texture_handle.c
 +++ b/src/gallium/drivers/llvmpipe/lp_texture_handle.c
-@@ -202,15 +202,27 @@ llvmpipe_sampler_matrix_destroy(struct llvmpipe_context *ctx)
-    util_dynarray_fini(&ctx->sampler_matrix.gallivms);
+@@ -216,15 +216,27 @@ get_llvm_context(struct llvmpipe_context *ctx)
+    return matrix->context;
  }
  
 +#if GALLIVM_USE_ORCJIT == 1
@@ -2567,7 +2567,7 @@ index 2e12fe6b8e8..be28789861e 100644
  
     if (needs_caching)
        lp_disk_cache_insert_shader(llvmpipe_screen(ctx->pipe.screen), gallivm->cache, cache_key);
-@@ -338,7 +350,11 @@ compile_image_function(struct llvmpipe_context *ctx, struct lp_static_texture_st
+@@ -352,7 +364,11 @@ compile_image_function(struct llvmpipe_context *ctx, struct lp_static_texture_st
  
     free(image_soa);
  
@@ -2579,7 +2579,7 @@ index 2e12fe6b8e8..be28789861e 100644
  }
  
  static void *
-@@ -486,7 +502,11 @@ compile_sample_function(struct llvmpipe_context *ctx, struct lp_static_texture_s
+@@ -500,7 +516,11 @@ compile_sample_function(struct llvmpipe_context *ctx, struct lp_static_texture_s
  
     free(sampler_soa);
  
@@ -2591,7 +2591,7 @@ index 2e12fe6b8e8..be28789861e 100644
  }
  
  static uint64_t
-@@ -714,7 +734,11 @@ compile_size_function(struct llvmpipe_context *ctx, struct lp_static_texture_sta
+@@ -728,7 +748,11 @@ compile_size_function(struct llvmpipe_context *ctx, struct lp_static_texture_sta
  
     free(sampler_soa);
  

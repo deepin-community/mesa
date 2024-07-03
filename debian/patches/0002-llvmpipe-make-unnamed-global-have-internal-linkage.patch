@@ -1,7 +1,7 @@
-From 9d73c8d57bc392b2251c73db86217788a2c06ee6 Mon Sep 17 00:00:00 2001
+From e03a88b8fc8603fb65c36ae0d4300d422a83beed Mon Sep 17 00:00:00 2001
 From: Yukari Chiba <i@0x7f.cc>
 Date: Fri, 3 Nov 2023 23:19:27 +0800
-Subject: [PATCH 2/7] llvmpipe: make unnamed global have internal linkage
+Subject: [PATCH 02/10] llvmpipe: make unnamed global have internal linkage
 
 ---
  src/gallium/drivers/llvmpipe/lp_state_fs.c | 1 +

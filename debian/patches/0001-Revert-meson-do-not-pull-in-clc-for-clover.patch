@@ -1,7 +1,7 @@
-From 78b7d788f5e981a4ea9eb5023ed9b11ce56c9034 Mon Sep 17 00:00:00 2001
+From 72f74a7e340d7d72ce153d84130b8ebdcab745b9 Mon Sep 17 00:00:00 2001
 From: Mingcong Bai <jeffbai@aosc.io>
 Date: Tue, 21 May 2024 22:34:50 +0800
-Subject: [PATCH 1/7] Revert "meson: do not pull in clc for clover"
+Subject: [PATCH 01/10] Revert "meson: do not pull in clc for clover"
 
 This reverts commit 815a6647eb1383e9dc704ffcc266d85f3b13338a.
 ---

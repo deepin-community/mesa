@@ -1,7 +1,7 @@
-From f4105cbc0cda46ad5392fcd9f7cf29a1cc2bcea2 Mon Sep 17 00:00:00 2001
+From 7dd3cbdb47ff63e9ac8df9a8d2649d22d1fb8545 Mon Sep 17 00:00:00 2001
 From: Icenowy Zheng <uwu@icenowy.me>
 Date: Fri, 3 Nov 2023 12:57:09 +0800
-Subject: [PATCH 4/7] llvmpipe: add LoongArch support in ORCJIT
+Subject: [PATCH 04/10] llvmpipe: add LoongArch support in ORCJIT
 
 Currently set CPU features based on softdev convention.
 
