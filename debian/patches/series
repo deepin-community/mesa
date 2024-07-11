@@ -1,0 +1,4 @@
+0001-redirect-glapi.patch
+0002-change-LIBGL_ALWAYS_SOFTWARE-to-PVRGL_ALWAYS_SOFTWAR.patch
+0003-Revert-gbm-add-gbm_bo_blit.patch
+0004-gbm-backend-ize.patch
