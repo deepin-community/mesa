@@ -1,3 +1,10 @@
+mesa (24.1.0-2deepin2) unstable; urgency=medium
+
+  * Disable LSX (-mlsx) on loong64, breaks mesa video codec
+ 
+
+ -- LiChengGang <lichenggang@uniontech.com>  Fri, 26 Jul 2024 14:33:21 +0800
+
 mesa (24.1.0-2deepin1) unstable; urgency=medium
 
   * Rebase ORCJIT patches for LoongArch, RISC-V.

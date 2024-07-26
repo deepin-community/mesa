@@ -6,6 +6,7 @@
 #export DH_VERBOSE=1
 
 include /usr/share/dpkg/pkg-info.mk
+include /usr/share/dpkg/architecture.mk
 
 DEB_HOST_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
 DEB_HOST_ARCH      ?= $(shell dpkg-architecture -qDEB_HOST_ARCH)
@@ -31,6 +32,23 @@ else
     buildflags = \
 	$(shell DEB_CFLAGS_MAINT_APPEND="-Wall -O1" DEB_CXXFLAGS_MAINT_APPEND="-Wall -O1" dpkg-buildflags --export=configure)
   endif
+endif
+
+ifeq ($(DEB_BUILD_ARCH),loong64)
+        # FIXME: -mlsx breaks mesa video codec
+	# GCC (with backported LSX/LASX support).
+        export DEB_CFLAGS_MAINT_STRIP = -mlsx
+		export DEB_CFLAGS_FOR_BUILD_MAINT_STRIP = -mlsx
+        export DEB_CXXFLAGS_MAINT_STRIP = -mlsx
+		export DEB_CXXFLAGS_FOR_BUILD_MAINT_STRIP = -mlsx
+		export DEB_FCFLAGS_MAINT_STRIP = -mlsx
+		export DEB_FCFLAGS_FOR_BUILD_MAINT_STRIP = -mlsx
+		export DEB_FFLAGS_MAINT_STRIP = -mlsx
+		export DEB_FFLAGS_FOR_BUILD_MAINT_STRIP = -mlsx
+		export DEB_OBJCFLAGS_MAINT_STRIP = -mlsx
+		export DEB_OBJCFLAGS_FOR_BUILD_MAINT_STRIP = -mlsx
+		export DEB_OBJCXXFLAGS_MAINT_STRIP = -mlsx
+		export DEB_OBJCXXFLAGS_FOR_BUILD_MAINT_STRIP = -mlsx
 endif
 
 EGL_PLATFORMS = x11
