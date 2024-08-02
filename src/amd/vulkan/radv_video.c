@@ -165,6 +165,7 @@ init_vcn_decoder(struct radv_physical_device *pdev)
    case VCN_2_5_0:
    case VCN_2_6_0:
    case VCN_3_0_0:
+   case VCN_3_0_2:
    case VCN_3_0_16:
    case VCN_3_0_33:
    case VCN_3_1_1:
@@ -812,7 +813,7 @@ radv_GetPhysicalDeviceVideoFormatPropertiesKHR(VkPhysicalDevice physicalDevice,
          p->componentMapping.b = VK_COMPONENT_SWIZZLE_IDENTITY;
          p->componentMapping.a = VK_COMPONENT_SWIZZLE_IDENTITY;
          p->imageCreateFlags = 0;
-         if (pVideoFormatInfo->imageUsage & VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR)
+         if (pVideoFormatInfo->imageUsage & (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR))
             p->imageCreateFlags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
          p->imageType = VK_IMAGE_TYPE_2D;
          p->imageTiling = VK_IMAGE_TILING_OPTIMAL;
@@ -832,7 +833,7 @@ radv_GetPhysicalDeviceVideoFormatPropertiesKHR(VkPhysicalDevice physicalDevice,
          p->componentMapping.b = VK_COMPONENT_SWIZZLE_IDENTITY;
          p->componentMapping.a = VK_COMPONENT_SWIZZLE_IDENTITY;
          p->imageCreateFlags = 0;
-         if (pVideoFormatInfo->imageUsage & VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR)
+         if (pVideoFormatInfo->imageUsage & (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR))
             p->imageCreateFlags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
          p->imageType = VK_IMAGE_TYPE_2D;
          p->imageTiling = VK_IMAGE_TILING_OPTIMAL;
@@ -2459,6 +2460,12 @@ rvcn_dec_message_decode(struct radv_cmd_buffer *cmd_buffer, struct radv_video_se
          : NULL;
    struct radv_image *dpb = dpb_update_required ? dpb_iv->image : img;
 
+   int dpb_array_idx = 0;
+   if (dpb_update_required) {
+      if (dpb_iv->vk.view_type == VK_IMAGE_VIEW_TYPE_2D_ARRAY)
+         dpb_array_idx = frame_info->pSetupReferenceSlot->pPictureResource->baseArrayLayer;
+   }
+
    decode->dpb_size = (vid->dpb_type != DPB_DYNAMIC_TIER_2) ? dpb->size : 0;
    decode->db_pitch = dpb->planes[0].surface.u.gfx9.surf_pitch;
    decode->db_aligned_height = dpb->planes[0].surface.u.gfx9.surf_height;
@@ -2473,6 +2480,8 @@ rvcn_dec_message_decode(struct radv_cmd_buffer *cmd_buffer, struct radv_video_se
    uint64_t addr;
    radv_cs_add_buffer(device->ws, cmd_buffer->cs, dpb->bindings[0].bo);
    addr = radv_buffer_get_va(dpb->bindings[0].bo) + dpb->bindings[0].offset;
+
+   addr += dpb_array_idx * (dpb->planes[0].surface.u.gfx9.surf_slice_size + dpb->planes[1].surface.u.gfx9.surf_slice_size);
    dynamic_dpb_t2->dpbCurrLo = addr;
    dynamic_dpb_t2->dpbCurrHi = addr >> 32;
 
@@ -2495,18 +2504,22 @@ rvcn_dec_message_decode(struct radv_cmd_buffer *cmd_buffer, struct radv_video_se
          radv_image_view_from_handle(frame_info->pReferenceSlots[i].pPictureResource->imageViewBinding);
       assert(f_dpb_iv != NULL);
       struct radv_image *dpb_img = f_dpb_iv->image;
+      int f_dpb_array_idx = 0;
+      if (f_dpb_iv->vk.view_type == VK_IMAGE_VIEW_TYPE_2D_ARRAY)
+         f_dpb_array_idx = frame_info->pReferenceSlots[i].pPictureResource->baseArrayLayer;
 
       radv_cs_add_buffer(device->ws, cmd_buffer->cs, dpb_img->bindings[0].bo);
       addr = radv_buffer_get_va(dpb_img->bindings[0].bo) + dpb_img->bindings[0].offset;
-
+      addr += f_dpb_array_idx * (dpb_img->planes[0].surface.u.gfx9.surf_slice_size + dpb_img->planes[1].surface.u.gfx9.surf_slice_size);
       dynamic_dpb_t2->dpbAddrLo[i] = addr;
       dynamic_dpb_t2->dpbAddrHi[i] = addr >> 32;
+
       ++dynamic_dpb_t2->dpbArraySize;
    }
 
    radv_cs_add_buffer(device->ws, cmd_buffer->cs, dpb->bindings[0].bo);
    addr = radv_buffer_get_va(dpb->bindings[0].bo) + dpb->bindings[0].offset;
-
+   addr += dpb_array_idx * (dpb->planes[0].surface.u.gfx9.surf_slice_size + dpb->planes[1].surface.u.gfx9.surf_slice_size);
    dynamic_dpb_t2->dpbCurrLo = addr;
    dynamic_dpb_t2->dpbCurrHi = addr >> 32;
 

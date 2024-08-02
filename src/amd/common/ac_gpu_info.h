@@ -120,6 +120,9 @@ struct radeon_info {
    bool sdma_supports_compression; /* Whether SDMA supports DCC and HTILE. */
    bool has_set_context_pairs_packed;
    bool has_set_sh_pairs_packed;
+   bool needs_llvm_wait_wa; /* True if the chip needs to workarounds based on s_waitcnt_deptr but
+                             * the LLVM version doesn't work with multiparts shaders.
+                             */
 
    /* conformant_trunc_coord is equal to TA_CNTL2.TRUNCATE_COORD_MODE, which exists since gfx11.
     *
@@ -209,7 +212,9 @@ struct radeon_info {
    uint32_t max_submitted_ibs[AMD_NUM_IP_TYPES];
    bool is_amdgpu;
    bool has_userptr;
+   bool has_syncobj;
    bool has_timeline_syncobj;
+   bool has_fence_to_handle;
    bool has_local_buffers;
    bool has_bo_metadata;
    bool has_eqaa_surface_allocator;
@@ -259,6 +264,7 @@ struct radeon_info {
    uint32_t wave64_vgpr_alloc_granularity;
    uint32_t max_scratch_waves;
    uint32_t attribute_ring_size_per_se;
+   bool has_scratch_base_registers;
 
    /* Render backends (color + depth blocks). */
    uint32_t r300_num_gb_pipes;

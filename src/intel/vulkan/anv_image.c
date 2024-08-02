@@ -251,6 +251,9 @@ anv_image_choose_isl_surf_usage(struct anv_physical_device *device,
                           VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT))
       isl_usage |= ISL_SURF_USAGE_2D_3D_COMPATIBLE_BIT;
 
+   if (vk_create_flags & VK_IMAGE_CREATE_PROTECTED_BIT)
+      isl_usage |= ISL_SURF_USAGE_PROTECTED_BIT;
+
    /* Even if we're only using it for transfer operations, clears to depth and
     * stencil images happen as depth and stencil so they need the right ISL
     * usage bits or else things will fall apart.
@@ -3237,6 +3240,9 @@ anv_image_fill_surface_state(struct anv_device *device,
    struct isl_view view = *view_in;
    view.usage |= view_usage;
 
+   /* Propagate the protection flag of the image to the view. */
+   view_usage |= surface->isl.usage & ISL_SURF_USAGE_PROTECTED_BIT;
+
    if (view_usage == ISL_SURF_USAGE_RENDER_TARGET_BIT)
       view.swizzle = anv_swizzle_for_render(view.swizzle);
 
@@ -3495,6 +3501,22 @@ anv_can_fast_clear_color_view(struct anv_device *device,
           anv_surf->isl.logical_level0_px.h <= 256)
          return false;
    }
+
+   /* Disable sRGB fast-clears for non-0/1 color values on Gfx9. For texturing
+    * and draw calls, HW expects the clear color to be in two different color
+    * spaces after sRGB fast-clears - sRGB in the former and linear in the
+    * latter. By limiting the allowable values to 0/1, both color space
+    * requirements are satisfied.
+    *
+    * Gfx11+ is fine as the fast clear generate 2 colors at the clear color
+    * address, raw & converted such that all fixed functions can find the
+    * value they need.
+    */
+   if (device->info->ver == 9 &&
+       isl_format_is_srgb(iview->planes[0].isl.format) &&
+       !isl_color_value_is_zero_one(clear_color,
+                                    iview->planes[0].isl.format))
+      return false;
 
    return true;
 }

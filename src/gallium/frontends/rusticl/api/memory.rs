@@ -21,6 +21,7 @@ use rusticl_proc_macros::cl_info_entrypoint;
 
 use std::alloc;
 use std::alloc::Layout;
+use std::cmp;
 use std::cmp::Ordering;
 use std::mem::{self, MaybeUninit};
 use std::os::raw::c_void;
@@ -274,12 +275,25 @@ fn create_buffer_with_properties(
         return Err(CL_INVALID_BUFFER_SIZE);
     }
 
-    // ... or if size is greater than CL_DEVICE_MAX_MEM_ALLOC_SIZE for all devices in context.
+    // ... or if size is greater than CL_DEVICE_MAX_MEM_ALLOC_SIZE for all devices in context,
     if checked_compare(size, Ordering::Greater, c.max_mem_alloc()) {
         return Err(CL_INVALID_BUFFER_SIZE);
     }
 
     validate_host_ptr(host_ptr, flags)?;
+
+    // or if CL_MEM_USE_HOST_PTR is set in flags and host_ptr is a pointer returned by clSVMAlloc
+    // and size is greater than the size passed to clSVMAlloc.
+    if let Some((svm_ptr, svm_layout)) = c.find_svm_alloc(host_ptr as usize) {
+        // SAFETY: they are part of the same allocation, and because host_ptr >= svm_ptr we can cast
+        // to usize.
+        let diff = unsafe { host_ptr.offset_from(svm_ptr) } as usize;
+
+        // technically we don't have to account for the offset, but it's almost for free.
+        if size > svm_layout - diff {
+            return Err(CL_INVALID_BUFFER_SIZE);
+        }
+    }
 
     let props = Properties::from_ptr_raw(properties);
     // CL_INVALID_PROPERTY if a property name in properties is not a supported property name, if
@@ -339,7 +353,7 @@ fn create_sub_buffer(
 
             // CL_INVALID_VALUE if the region specified by the cl_buffer_region structure passed in
             // buffer_create_info is out of bounds in buffer.
-            if region.origin + region.size > b.size {
+            if region.origin >= b.size || region.size > b.size - region.origin {
                 return Err(CL_INVALID_VALUE);
             }
 
@@ -512,7 +526,7 @@ fn validate_image_desc(
             desc.image_row_pitch = desc.image_width * elem_size;
         }
         if desc.image_slice_pitch == 0 {
-            desc.image_slice_pitch = desc.image_row_pitch * desc.image_height;
+            desc.image_slice_pitch = desc.image_row_pitch * cmp::max(1, desc.image_height);
         }
 
         if has_buf_parent && desc.image_type != CL_MEM_OBJECT_IMAGE1D_BUFFER {
@@ -533,8 +547,7 @@ fn validate_image_desc(
         }
 
         if dims == 3 || array {
-            let valid_slice_pitch =
-                desc.image_row_pitch * if dims == 1 { 1 } else { desc.image_height };
+            let valid_slice_pitch = desc.image_row_pitch * cmp::max(1, desc.image_height);
             if desc.image_slice_pitch == 0 {
                 desc.image_slice_pitch = valid_slice_pitch;
             } else if desc.image_slice_pitch < valid_slice_pitch
@@ -721,7 +734,11 @@ impl CLInfo<cl_image_info> for cl_mem {
             CL_IMAGE_NUM_MIP_LEVELS => cl_prop::<cl_uint>(mem.image_desc.num_mip_levels),
             CL_IMAGE_NUM_SAMPLES => cl_prop::<cl_uint>(mem.image_desc.num_samples),
             CL_IMAGE_ROW_PITCH => cl_prop::<usize>(mem.image_desc.image_row_pitch),
-            CL_IMAGE_SLICE_PITCH => cl_prop::<usize>(mem.image_desc.image_slice_pitch),
+            CL_IMAGE_SLICE_PITCH => cl_prop::<usize>(if mem.image_desc.dims() == 1 {
+                0
+            } else {
+                mem.image_desc.image_slice_pitch
+            }),
             CL_IMAGE_WIDTH => cl_prop::<usize>(mem.image_desc.image_width),
             _ => return Err(CL_INVALID_VALUE),
         })
@@ -1048,12 +1065,6 @@ fn enqueue_read_buffer(
         return Err(CL_INVALID_CONTEXT);
     }
 
-    // CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST if the read and write operations are blocking
-    // and the execution status of any of the events in event_wait_list is a negative integer value.
-    if block && evs.iter().any(|e| e.is_error()) {
-        return Err(CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST);
-    }
-
     // CL_INVALID_OPERATION if clEnqueueReadBuffer is called on buffer which has been created with
     // CL_MEM_HOST_WRITE_ONLY or CL_MEM_HOST_NO_ACCESS.
     if bit_check(b.flags, CL_MEM_HOST_WRITE_ONLY | CL_MEM_HOST_NO_ACCESS) {
@@ -1101,12 +1112,6 @@ fn enqueue_write_buffer(
     // CL_INVALID_CONTEXT if the context associated with command_queue and buffer are not the same
     if b.context != q.context {
         return Err(CL_INVALID_CONTEXT);
-    }
-
-    // CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST if the read and write operations are blocking
-    // and the execution status of any of the events in event_wait_list is a negative integer value.
-    if block && evs.iter().any(|e| e.is_error()) {
-        return Err(CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST);
     }
 
     // CL_INVALID_OPERATION if clEnqueueWriteBuffer is called on buffer which has been created with
@@ -1215,12 +1220,6 @@ fn enqueue_read_buffer_rect(
     // with CL_MEM_HOST_WRITE_ONLY or CL_MEM_HOST_NO_ACCESS.
     if bit_check(buf.flags, CL_MEM_HOST_WRITE_ONLY | CL_MEM_HOST_NO_ACCESS) {
         return Err(CL_INVALID_OPERATION);
-    }
-
-    // CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST if the read and write operations are blocking
-    // and the execution status of any of the events in event_wait_list is a negative integer value.
-    if block && evs.iter().any(|e| e.is_error()) {
-        return Err(CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST);
     }
 
     // CL_INVALID_VALUE if buffer_origin, host_origin, or region is NULL.
@@ -1340,12 +1339,6 @@ fn enqueue_write_buffer_rect(
     // with CL_MEM_HOST_READ_ONLY or CL_MEM_HOST_NO_ACCESS.
     if bit_check(buf.flags, CL_MEM_HOST_READ_ONLY | CL_MEM_HOST_NO_ACCESS) {
         return Err(CL_INVALID_OPERATION);
-    }
-
-    // CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST if the read and write operations are blocking
-    // and the execution status of any of the events in event_wait_list is a negative integer value.
-    if block && evs.iter().any(|e| e.is_error()) {
-        return Err(CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST);
     }
 
     // CL_INVALID_VALUE if buffer_origin, host_origin, or region is NULL.
@@ -1653,14 +1646,8 @@ fn enqueue_map_buffer(
 
     // CL_INVALID_VALUE if region being mapped given by (offset, size) is out of bounds or if size
     // is 0
-    if offset + size > b.size || size == 0 {
+    if offset >= b.size || size > b.size - offset || size == 0 {
         return Err(CL_INVALID_VALUE);
-    }
-
-    // CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST if the map operation is blocking and the
-    // execution status of any of the events in event_wait_list is a negative integer value.
-    if block && evs.iter().any(|e| e.is_error()) {
-        return Err(CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST);
     }
 
     // CL_INVALID_CONTEXT if context associated with command_queue and buffer are not the same
@@ -1668,14 +1655,20 @@ fn enqueue_map_buffer(
         return Err(CL_INVALID_CONTEXT);
     }
 
-    let ptr = b.map(q.device, offset)?;
+    let ptr = b.map(size, offset, map_flags != CL_MAP_READ.into())?;
     create_and_queue(
         q,
         CL_COMMAND_MAP_BUFFER,
         evs,
         event,
         block,
-        Box::new(move |q, ctx| b.sync_shadow(q, ctx, ptr)),
+        Box::new(move |q, ctx| {
+            if map_flags != CL_MAP_WRITE_INVALIDATE_REGION.into() {
+                b.sync_map(q, ctx, ptr)
+            } else {
+                Ok(())
+            }
+        }),
     )?;
 
     Ok(ptr.as_ptr())
@@ -1763,7 +1756,6 @@ fn enqueue_read_image(
     //• CL_INVALID_IMAGE_SIZE if image dimensions (image width, height, specified or compute row and/or slice pitch) for image are not supported by device associated with queue.
     //• CL_IMAGE_FORMAT_NOT_SUPPORTED if image format (image channel order and data type) for image are not supported by device associated with queue.
     //• CL_INVALID_OPERATION if the device associated with command_queue does not support images (i.e. CL_DEVICE_IMAGE_SUPPORT specified in the Device Queries table is CL_FALSE).
-    //• CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST if the read and write operations are blocking and the execution status of any of the events in event_wait_list is a negative integer value.
 }
 
 #[cl_entrypoint]
@@ -1843,7 +1835,6 @@ fn enqueue_write_image(
     //• CL_INVALID_IMAGE_SIZE if image dimensions (image width, height, specified or compute row and/or slice pitch) for image are not supported by device associated with queue.
     //• CL_IMAGE_FORMAT_NOT_SUPPORTED if image format (image channel order and data type) for image are not supported by device associated with queue.
     //• CL_INVALID_OPERATION if the device associated with command_queue does not support images (i.e. CL_DEVICE_IMAGE_SUPPORT specified in the Device Queries table is CL_FALSE).
-    //• CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST if the read and write operations are blocking and the execution status of any of the events in event_wait_list is a negative integer value.
 }
 
 #[cl_entrypoint]
@@ -2124,29 +2115,33 @@ fn enqueue_map_image(
     };
 
     let ptr = i.map(
-        q.device,
-        &origin,
+        origin,
+        region,
         unsafe { image_row_pitch.as_mut().unwrap() },
         image_slice_pitch,
+        map_flags != CL_MAP_READ.into(),
     )?;
 
-    // SAFETY: it's required that applications do not cause data races
-    let sync_ptr = unsafe { MutMemoryPtr::from_ptr(ptr) };
     create_and_queue(
         q,
         CL_COMMAND_MAP_IMAGE,
         evs,
         event,
         block,
-        Box::new(move |q, ctx| i.sync_shadow(q, ctx, sync_ptr)),
+        Box::new(move |q, ctx| {
+            if map_flags != CL_MAP_WRITE_INVALIDATE_REGION.into() {
+                i.sync_map(q, ctx, ptr)
+            } else {
+                Ok(())
+            }
+        }),
     )?;
 
-    Ok(ptr)
+    Ok(ptr.as_ptr())
 
     //• CL_INVALID_IMAGE_SIZE if image dimensions (image width, height, specified or compute row and/or slice pitch) for image are not supported by device associated with queue.
     //• CL_IMAGE_FORMAT_NOT_SUPPORTED if image format (image channel order and data type) for image are not supported by device associated with queue.
     //• CL_MAP_FAILURE if there is a failure to map the requested region into the host address space. This error cannot occur for image objects created with CL_MEM_USE_HOST_PTR or CL_MEM_ALLOC_HOST_PTR.
-    //• CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST if the map operation is blocking and the execution status of any of the events in event_wait_list is a negative integer value.
     //• CL_INVALID_OPERATION if the device associated with command_queue does not support images (i.e. CL_DEVICE_IMAGE_SUPPORT specified in the Device Queries table is CL_FALSE).
     //• CL_INVALID_OPERATION if mapping would lead to overlapping regions being mapped for writing.
 }
@@ -2912,16 +2907,16 @@ fn enqueue_svm_migrate_mem(
     // CL_INVALID_VALUE if sizes[i] is non-zero range [svm_pointers[i], svm_pointers[i]+sizes[i]) is
     // not contained within an existing clSVMAlloc allocation.
     for (ptr, size) in svm_pointers.iter_mut().zip(&mut sizes) {
-        if let Some((alloc, layout)) = q.context.find_svm_alloc(*ptr) {
+        if let Some((alloc, alloc_size)) = q.context.find_svm_alloc(*ptr) {
             let ptr_addr = *ptr;
             let alloc_addr = alloc as usize;
 
             // if the offset + size is bigger than the allocation we are out of bounds
-            if (ptr_addr - alloc_addr) + *size <= layout.size() {
+            if (ptr_addr - alloc_addr) + *size <= alloc_size {
                 // if the size is 0, the entire allocation should be migrated
                 if *size == 0 {
                     *ptr = alloc as usize;
-                    *size = layout.size();
+                    *size = alloc_size;
                 }
                 continue;
             }

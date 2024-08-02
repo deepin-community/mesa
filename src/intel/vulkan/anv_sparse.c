@@ -308,9 +308,9 @@ trtt_make_page_table_bo(struct anv_device *device, struct anv_bo **bo)
    struct anv_trtt *trtt = &device->trtt;
 
    result = anv_device_alloc_bo(device, "trtt-page-table",
-                                ANV_TRTT_PAGE_TABLE_BO_SIZE |
+                                ANV_TRTT_PAGE_TABLE_BO_SIZE,
                                 ANV_BO_ALLOC_INTERNAL,
-                                0, 0, bo);
+                                0 /* explicit_address */, bo);
    if (result != VK_SUCCESS)
       return result;
 
@@ -515,6 +515,7 @@ anv_sparse_bind_trtt(struct anv_device *device,
 
    /* TR-TT submission needs a queue even when the API entry point doesn't
     * give one, such as resource creation. */
+   assert(trtt->queue != NULL);
    if (!sparse_submit->queue)
       sparse_submit->queue = trtt->queue;
 

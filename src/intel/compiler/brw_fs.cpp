@@ -1230,6 +1230,9 @@ fs_visitor::assign_curb_setup()
    }
 
    prog_data->curb_read_length = uniform_push_length + ubo_push_length;
+   if (stage == MESA_SHADER_FRAGMENT &&
+       ((struct brw_wm_prog_key *)key)->null_push_constant_tbimr_workaround)
+      prog_data->curb_read_length = MAX2(1, prog_data->curb_read_length);
 
    uint64_t used = 0;
    bool is_compute = gl_shader_stage_is_compute(stage);
@@ -2472,8 +2475,8 @@ brw_instruction_name(const struct brw_isa_info *isa, enum opcode op)
       return "btd_spawn_logical";
    case SHADER_OPCODE_BTD_RETIRE_LOGICAL:
       return "btd_retire_logical";
-   case SHADER_OPCODE_READ_SR_REG:
-      return "read_sr_reg";
+   case SHADER_OPCODE_READ_ARCH_REG:
+      return "read_arch_reg";
    }
 
    unreachable("not reached");

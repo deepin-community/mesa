@@ -143,9 +143,6 @@ impl PipeContext {
                     .map(|i| ((origin[i] + [0, y, z][i]) * pitch[i]) as u32)
                     .sum();
 
-                // SAFETY: clear_buffer arguments are specified
-                // in bytes, so pattern.len() dimension value
-                // should be multiplied by pixel_size
                 unsafe {
                     self.pipe.as_ref().clear_buffer.unwrap()(
                         self.pipe.as_ptr(),
@@ -153,7 +150,7 @@ impl PipeContext {
                         offset,
                         (region[0] * pixel_size) as u32,
                         pattern.as_ptr().cast(),
-                        (pattern.len() * pixel_size) as i32,
+                        pixel_size as i32,
                     )
                 };
             }
@@ -418,7 +415,9 @@ impl PipeContext {
         }
     }
 
-    pub fn set_constant_buffer_stream(&self, idx: u32, data: &[u8]) {
+    /// returns false when failing to allocate GPU memory.
+    #[must_use]
+    pub fn set_constant_buffer_stream(&self, idx: u32, data: &[u8]) -> bool {
         let mut cb = pipe_constant_buffer {
             buffer: ptr::null_mut(),
             buffer_offset: 0,
@@ -439,13 +438,19 @@ impl PipeContext {
             );
             u_upload_unmap(stream);
 
+            if cb.buffer.is_null() {
+                return false;
+            }
+
             self.pipe.as_ref().set_constant_buffer.unwrap()(
                 self.pipe.as_ptr(),
                 pipe_shader_type::PIPE_SHADER_COMPUTE,
                 idx,
-                false,
+                true,
                 &cb,
             );
+
+            true
         }
     }
 

@@ -335,7 +335,6 @@ if with_aco_tests and not with_amd_vk
 endif
 
 with_microsoft_clc = get_option('microsoft-clc').enabled()
-with_clc = with_microsoft_clc or with_intel_clc or with_gallium_asahi
 with_spirv_to_dxil = get_option('spirv-to-dxil')
 
 if host_machine.system() == 'darwin'
@@ -563,9 +562,7 @@ if with_vulkan_icd_dir == ''
   with_vulkan_icd_dir = join_paths(get_option('datadir'), 'vulkan/icd.d')
 endif
 
-# GNU/Hurd includes egl_dri2, without drm.
-with_dri2 = (with_dri or with_any_vk) and (with_dri_platform == 'drm' or with_dri_platform == 'apple' or
-  host_machine.system() == 'gnu')
+with_dri2 = (with_dri or with_any_vk) and (with_dri_platform == 'drm' or with_dri_platform == 'apple')
 with_dri3 = get_option('dri3').disable_auto_if(not (system_has_kms_drm and with_dri2)).allowed()
 
 if with_any_vk and (with_platform_x11 and not with_dri3)
@@ -842,9 +839,10 @@ if with_gallium_rusticl
 
   add_languages('rust', required: true)
   rustc = meson.get_compiler('rust')
-
-  with_clc = true
 endif
+
+with_clover_spirv = with_gallium_opencl and get_option('opencl-spirv')
+with_clc = with_microsoft_clc or with_intel_clc or with_gallium_asahi or with_gallium_rusticl or with_clover_spirv
 
 dep_clc = null_dep
 if with_gallium_opencl or with_clc
@@ -1696,8 +1694,7 @@ with_gallium_drisw_kms = false
 if system_has_kms_drm
   dep_libdrm = dependency(
     'libdrm', version : '>=' + _drm_ver,
-    # GNU/Hurd includes egl_dri2, without drm.
-    required : (with_dri2 and host_machine.system() != 'gnu') or with_dri3
+    required : with_dri2 or with_dri3
   )
 else
   # We should prevent libdrm from being available when the target doesn't have it to avoid transitive
@@ -1828,8 +1825,7 @@ endif
 pre_args += '-DLLVM_AVAILABLE=' + (with_llvm ? '1' : '0')
 pre_args += '-DDRAW_LLVM_AVAILABLE=' + (with_llvm and draw_with_llvm ? '1' : '0')
 
-with_opencl_spirv = (_opencl != 'disabled' and get_option('opencl-spirv')) or with_clc
-if with_opencl_spirv
+if with_clover_spirv or with_clc
   chosen_llvm_version_array = dep_llvm.version().split('.')
   chosen_llvm_version_major = chosen_llvm_version_array[0].to_int()
   chosen_llvm_version_minor = chosen_llvm_version_array[1].to_int()
@@ -2080,11 +2076,11 @@ with_dri3_modifiers = false
 with_dri3_explicit_sync = false
 with_xcb_keysyms = false
 if with_platform_x11
+  dep_xcb = dependency('xcb')
+  dep_xcb_xrandr = dependency('xcb-randr')
   if with_glx == 'xlib'
     dep_x11 = dependency('x11')
     dep_xext = dependency('xext')
-    dep_xcb = dependency('xcb')
-    dep_xcb_xrandr = dependency('xcb-randr')
   elif with_glx == 'dri'
     dep_x11 = dependency('x11')
     dep_xext = dependency('xext')

@@ -92,6 +92,7 @@ static const driOptionDescription anv_dri_options[] = {
       DRI_CONF_SHADER_SPILLING_RATE(0)
       DRI_CONF_OPT_B(intel_tbimr, true, "Enable TBIMR tiled rendering")
       DRI_CONF_ANV_COMPRESSION_CONTROL_ENABLED(false)
+      DRI_CONF_ANV_FAKE_NONLOCAL_MEMORY(false)
    DRI_CONF_SECTION_END
 
    DRI_CONF_SECTION_DEBUG
@@ -1945,6 +1946,31 @@ anv_physical_device_init_heaps(struct anv_physical_device *device, int fd)
    if (result != VK_SUCCESS)
       return result;
 
+   /* Some games (e.g., Total War: WARHAMMER III) sometimes seem to expect to
+    * find memory types both with and without
+    * VK_MEMORY_TYPE_PROPERTY_DEVICE_LOCAL_BIT. So here we duplicate all our
+    * memory types just to make these games happy.
+    * This behavior is not spec-compliant as we still only have one heap that
+    * is now inconsistent with some of the memory types, but the game doesn't
+    * seem to care about it.
+    */
+   if (device->instance->anv_fake_nonlocal_memory &&
+       !anv_physical_device_has_vram(device)) {
+      const uint32_t base_types_count = device->memory.type_count;
+      for (int i = 0; i < base_types_count; i++) {
+         if (!(device->memory.types[i].propertyFlags &
+               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+            continue;
+
+         struct anv_memory_type *new_type =
+            &device->memory.types[device->memory.type_count++];
+         *new_type = device->memory.types[i];
+
+         device->memory.types[i].propertyFlags &=
+            ~VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+      }
+   }
+
    /* Replicate all non protected memory types for descriptor buffers because
     * we want to identify memory allocations to place them in the right memory
     * heap.
@@ -1973,6 +1999,8 @@ anv_physical_device_init_heaps(struct anv_physical_device *device, int fd)
       *new_type = device->memory.types[i];
       new_type->descriptor_buffer = true;
    }
+
+   assert(device->memory.type_count <= VK_MAX_MEMORY_TYPES);
 
    for (unsigned i = 0; i < device->memory.type_count; i++) {
       VkMemoryPropertyFlags props = device->memory.types[i].propertyFlags;
@@ -2645,6 +2673,8 @@ anv_init_dri_options(struct anv_instance *instance)
             driQueryOptionb(&instance->dri_options, "anv_external_memory_implicit_sync");
     instance->compression_control_enabled =
        driQueryOptionb(&instance->dri_options, "compression_control_enabled");
+    instance->anv_fake_nonlocal_memory =
+            driQueryOptionb(&instance->dri_options, "anv_fake_nonlocal_memory");
 }
 
 VkResult anv_CreateInstance(
@@ -3768,7 +3798,8 @@ VkResult anv_CreateDevice(
    isl_null_fill_state(&device->isl_dev, &device->host_null_surface_state,
                        .size = isl_extent3d(1, 1, 1) /* This shouldn't matter */);
 
-   anv_scratch_pool_init(device, &device->scratch_pool);
+   anv_scratch_pool_init(device, &device->scratch_pool, false);
+   anv_scratch_pool_init(device, &device->protected_scratch_pool, true);
 
    /* TODO(RT): Do we want some sort of data structure for this? */
    memset(device->rt_scratch_bos, 0, sizeof(device->rt_scratch_bos));
@@ -3913,6 +3944,7 @@ VkResult anv_CreateDevice(
       anv_device_release_bo(device, device->btd_fifo_bo);
  fail_trivial_batch_bo_and_scratch_pool:
    anv_scratch_pool_finish(device, &device->scratch_pool);
+   anv_scratch_pool_finish(device, &device->protected_scratch_pool);
  fail_trivial_batch:
    anv_device_release_bo(device, device->trivial_batch_bo);
  fail_ray_query_bo:
@@ -4060,6 +4092,7 @@ void anv_DestroyDevice(
    }
 
    anv_scratch_pool_finish(device, &device->scratch_pool);
+   anv_scratch_pool_finish(device, &device->protected_scratch_pool);
 
    if (device->vk.enabled_extensions.KHR_ray_query) {
       for (unsigned i = 0; i < ARRAY_SIZE(device->ray_query_shadow_bos); i++) {

@@ -283,7 +283,9 @@ kopper_CreateSwapchain(struct zink_screen *screen, struct kopper_displaytarget *
       cswap->scci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
       cswap->scci.queueFamilyIndexCount = 0;
       cswap->scci.pQueueFamilyIndices = NULL;
-      cswap->scci.compositeAlpha = has_alpha ? VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR : VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+      cswap->scci.compositeAlpha = has_alpha && !cdt->info.present_opaque
+                                   ? VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR
+                                   : VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
       cswap->scci.clipped = VK_TRUE;
    }
    cswap->scci.presentMode = cdt->present_mode;
@@ -789,7 +791,7 @@ out:
       struct pipe_resource *pres = &cpi->res->base.b;
       pipe_resource_reference(&pres, NULL);
    }
-   slab_free_st(&screen->present_mempool, cpi);
+   free(cpi);
 }
 
 void
@@ -804,7 +806,7 @@ zink_kopper_present_queue(struct zink_screen *screen, struct zink_resource *res,
    if (cdt->swapchain->last_present != UINT32_MAX)
       prune_old_swapchains(screen, cdt, false);
 
-   struct zink_kopper_present_info *cpi = slab_alloc_st(&screen->present_mempool);
+   struct zink_kopper_present_info *cpi = malloc(sizeof(struct zink_kopper_present_info));
    if (!cpi) {
       mesa_loge("ZINK: failed to allocate cpi!");
       return;

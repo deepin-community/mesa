@@ -66,16 +66,18 @@ genX(cmd_buffer_ensure_cfe_state)(struct anv_cmd_buffer *cmd_buffer,
 
       uint32_t scratch_surf = 0xffffffff;
       if (total_scratch > 0) {
+         struct anv_scratch_pool *scratch_pool =
+            (cmd_buffer->vk.pool->flags & VK_COMMAND_POOL_CREATE_PROTECTED_BIT) ?
+            &cmd_buffer->device->protected_scratch_pool :
+            &cmd_buffer->device->scratch_pool;
          struct anv_bo *scratch_bo =
-               anv_scratch_pool_alloc(cmd_buffer->device,
-                                      &cmd_buffer->device->scratch_pool,
+               anv_scratch_pool_alloc(cmd_buffer->device, scratch_pool,
                                       MESA_SHADER_COMPUTE,
                                       total_scratch);
          anv_reloc_list_add_bo(cmd_buffer->batch.relocs,
                                scratch_bo);
          scratch_surf =
-            anv_scratch_pool_get_surf(cmd_buffer->device,
-                                      &cmd_buffer->device->scratch_pool,
+            anv_scratch_pool_get_surf(cmd_buffer->device, scratch_pool,
                                       total_scratch);
          cfe.ScratchSpaceBuffer = scratch_surf >> 4;
       }
@@ -310,6 +312,11 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
       .MessageSIMD              = dispatch_size,
       .IndirectDataStartAddress = comp_state->push_data.offset,
       .IndirectDataLength       = comp_state->push_data.alloc_size,
+      .GenerateLocalID          = prog_data->generate_local_id != 0,
+      .EmitLocal                = prog_data->generate_local_id,
+      .WalkOrder                = prog_data->walk_order,
+      .TileLayout               = prog_data->walk_order == INTEL_WALK_ORDER_YXZ ?
+                                  TileY32bpe : Linear,
       .LocalXMaximum            = prog_data->local_size[0] - 1,
       .LocalYMaximum            = prog_data->local_size[1] - 1,
       .LocalZMaximum            = prog_data->local_size[2] - 1,
