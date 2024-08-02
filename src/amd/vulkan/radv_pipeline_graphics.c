@@ -1421,7 +1421,7 @@ radv_link_tcs(const struct radv_device *device, struct radv_shader_stage *tcs_st
 
    /* Count the number of per-vertex output slots we need to reserve for the TCS and TES. */
    const uint64_t nir_mask = tcs_stage->nir->info.outputs_written & tes_stage->nir->info.inputs_read &
-                             ~(VARYING_SLOT_TESS_LEVEL_OUTER | VARYING_SLOT_TESS_LEVEL_INNER);
+                             ~(VARYING_BIT_TESS_LEVEL_OUTER | VARYING_BIT_TESS_LEVEL_INNER);
    const uint64_t io_mask = radv_gather_unlinked_io_mask(nir_mask);
    const unsigned num_reserved_outputs = util_last_bit64(io_mask);
 
@@ -1889,15 +1889,20 @@ radv_generate_graphics_state_key(const struct radv_device *device, const struct 
    }
 
    if (device->vk.enabled_features.smoothLines) {
+      key.dynamic_line_rast_mode = BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_RS_LINE_MODE);
+      if (state->rs && state->rs->line.mode == VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH_KHR) {
+         /* If the primitive type is dynamic, we may need to disable line smoothing dynamically. */
+         key.dynamic_line_rast_mode |= BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_IA_PRIMITIVE_TOPOLOGY);
+         key.dynamic_line_rast_mode |= BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_RS_POLYGON_MODE);
+      }
       /* For GPL, when the fragment shader is compiled without any pre-rasterization information,
        * ensure the line rasterization mode is considered dynamic because we can't know if it's
        * going to draw lines or not.
        */
-      if (BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_RS_LINE_MODE) ||
-          ((lib_flags & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT) &&
-           !(lib_flags & VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT))) {
-         key.dynamic_line_rast_mode = true;
-      } else {
+      key.dynamic_line_rast_mode |= !!(lib_flags & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT) &&
+                                    !(lib_flags & VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT);
+
+      if (!key.dynamic_line_rast_mode) {
          key.rs.line_smooth_enabled =
             state->rs && state->rs->line.mode == VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH_KHR;
       }
@@ -2618,7 +2623,7 @@ radv_graphics_pipeline_compile(struct radv_graphics_pipeline *pipeline, const Vk
    struct radv_shader_binary *gs_copy_binary = NULL;
    bool keep_executable_info = radv_pipeline_capture_shaders(device, pipeline->base.create_flags);
    bool keep_statistic_info = radv_pipeline_capture_shader_stats(device, pipeline->base.create_flags);
-   struct radv_shader_stage stages[MESA_VULKAN_SHADER_STAGES];
+   struct radv_shader_stage *stages = malloc(sizeof(struct radv_shader_stage) * MESA_VULKAN_SHADER_STAGES);
    const VkPipelineCreationFeedbackCreateInfo *creation_feedback =
       vk_find_struct_const(pCreateInfo->pNext, PIPELINE_CREATION_FEEDBACK_CREATE_INFO);
    VkPipelineCreationFeedback pipeline_feedback = {
@@ -2629,6 +2634,9 @@ radv_graphics_pipeline_compile(struct radv_graphics_pipeline *pipeline, const Vk
    const bool retain_shaders =
       !!(pipeline->base.create_flags & VK_PIPELINE_CREATE_2_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT);
    struct radv_retained_shaders *retained_shaders = NULL;
+
+   if (!stages)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
 
    int64_t pipeline_start = os_time_get_nano();
 
@@ -2688,8 +2696,10 @@ radv_graphics_pipeline_compile(struct radv_graphics_pipeline *pipeline, const Vk
 
          gfx_pipeline_lib->stages = radv_copy_shader_stage_create_info(device, pCreateInfo->stageCount,
                                                                        pCreateInfo->pStages, gfx_pipeline_lib->mem_ctx);
-         if (!gfx_pipeline_lib->stages)
+         if (!gfx_pipeline_lib->stages) {
+            free(stages);
             return VK_ERROR_OUT_OF_HOST_MEMORY;
+         }
 
          gfx_pipeline_lib->stage_count = pCreateInfo->stageCount;
 
@@ -2703,8 +2713,10 @@ radv_graphics_pipeline_compile(struct radv_graphics_pipeline *pipeline, const Vk
       goto done;
    }
 
-   if (pipeline->base.create_flags & VK_PIPELINE_CREATE_2_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_KHR)
+   if (pipeline->base.create_flags & VK_PIPELINE_CREATE_2_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_KHR) {
+      free(stages);
       return VK_PIPELINE_COMPILE_REQUIRED;
+   }
 
    if (retain_shaders) {
       struct radv_graphics_lib_pipeline *gfx_pipeline_lib = radv_pipeline_to_graphics_lib(&pipeline->base);
@@ -2772,6 +2784,7 @@ done:
       }
    }
 
+   free(stages);
    return result;
 }
 

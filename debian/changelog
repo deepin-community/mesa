@@ -1,8 +1,53 @@
-mesa (24.1.0-2deepin1) unstable; urgency=medium
+mesa (24.1.5-1) unstable; urgency=medium
 
-  * Rebase ORCJIT patches for LoongArch, RISC-V.
+  * New upstream release.
+  * control, rules: Enable NVK, bump rustc build-dependency. (Closes:
+    #1075858)
+  * control: Add rustfmt to build-depends.
+  * rules: Update clean target.
 
- -- Mingcong Bai <baimingcong@uniontech.com>  Tue, 04 Jun 2024 10:59:40 +0800
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 01 Aug 2024 10:16:13 +0300
+
+mesa (24.1.3-2) unstable; urgency=medium
+
+  [ Christopher Obbard ]
+  * mesa-teflon-delegate: Fix library installation path
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 05 Jul 2024 15:53:39 +0300
+
+mesa (24.1.3-1) unstable; urgency=medium
+
+  [ Christopher Obbard ]
+  * Package TensorFlow Lite delegate as libteflon (Closes: #1070788)
+
+  [ Timo Aaltonen ]
+  * New upstream release.
+    - dri: Go back to hard-coded list of RGBA formats (Closes: #1072971)
+  * mesa-common-dev.docs: Updated.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 04 Jul 2024 12:49:04 +0300
+
+mesa (24.1.2-1) unstable; urgency=medium
+
+  * New upstream release.
+  * control: Bump build-deps on directx-headers-dev, libvdpau-dev,
+    wayland-protocols.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 27 Jun 2024 15:23:32 +0300
+
+mesa (24.1.1-2) unstable; urgency=medium
+
+  * rules, control: Revert back to llvm 17. (Closes: #1072941)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Mon, 10 Jun 2024 19:59:35 +0300
+
+mesa (24.1.1-1) unstable; urgency=medium
+
+  * New upstream release.
+  * control: Bump build-depends on meson for rusticl.
+  * rules, control: Bump llvm to 18. (Closes: #1072901)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Mon, 10 Jun 2024 14:39:17 +0300
 
 mesa (24.1.0-2) unstable; urgency=medium
 

@@ -239,7 +239,9 @@ isl_genX(surf_fill_state_s)(const struct isl_device *dev, void *state,
    /* They may only specify one of the above bits at a time */
    assert(__builtin_popcount(_base_usage) == 1);
    /* The only other allowed bit is ISL_SURF_USAGE_CUBE_BIT */
-   assert((info->view->usage & ~ISL_SURF_USAGE_CUBE_BIT) == _base_usage);
+   assert((info->view->usage & ~(ISL_SURF_USAGE_CUBE_BIT |
+                                 ISL_SURF_USAGE_PROTECTED_BIT)) ==
+          _base_usage);
 #endif
 
    if (info->surf->dim == ISL_SURF_DIM_3D) {
@@ -578,8 +580,10 @@ isl_genX(surf_fill_state_s)(const struct isl_device *dev, void *state,
    s.ResourceMinLOD = info->view->min_lod_clamp;
 
 #if GFX_VERx10 >= 200
-   s.EnableSamplerRoutetoLSC = isl_format_support_sampler_route_to_lsc(info->view->format);
-   s.EnableSamplerRoutetoLSC &= (s.SurfaceType == SURFTYPE_2D);
+   s.EnableSamplerRoutetoLSC =
+      isl_format_support_sampler_route_to_lsc(info->view->format);
+   s.EnableSamplerRoutetoLSC &= (s.SurfaceType == SURFTYPE_2D &&
+                                 info->view->array_len == 1);
 
 /* Wa_14018471104:
  * For APIs that use ResourceMinLod, do the following: (remains same as before)

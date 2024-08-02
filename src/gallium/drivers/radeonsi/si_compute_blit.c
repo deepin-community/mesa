@@ -506,9 +506,9 @@ void si_copy_buffer(struct si_context *sctx, struct pipe_resource *dst, struct p
 }
 
 void si_compute_shorten_ubyte_buffer(struct si_context *sctx, struct pipe_resource *dst, struct pipe_resource *src,
-                                     uint64_t dst_offset, uint64_t src_offset, unsigned size, unsigned flags)
+                                     uint64_t dst_offset, uint64_t src_offset, unsigned count, unsigned flags)
 {
-   if (!size)
+   if (!count)
       return;
 
    if (!sctx->cs_ubyte_to_ushort)
@@ -525,19 +525,19 @@ void si_compute_shorten_ubyte_buffer(struct si_context *sctx, struct pipe_resour
    info.block[0] = si_determine_wave_size(sctx->screen, NULL);
    info.block[1] = 1;
    info.block[2] = 1;
-   info.grid[0] = DIV_ROUND_UP(size, info.block[0]);
+   info.grid[0] = DIV_ROUND_UP(count, info.block[0]);
    info.grid[1] = 1;
    info.grid[2] = 1;
-   info.last_block[0] = size % info.block[0];
+   info.last_block[0] = count % info.block[0];
 
    struct pipe_shader_buffer sb[2] = {};
    sb[0].buffer = dst;
    sb[0].buffer_offset = dst_offset;
-   sb[0].buffer_size = dst->width0;
+   sb[0].buffer_size = count * 2;
 
    sb[1].buffer = src;
    sb[1].buffer_offset = src_offset;
-   sb[1].buffer_size = src->width0;
+   sb[1].buffer_size = count;
 
    si_launch_grid_internal_ssbos(sctx, &info, sctx->cs_ubyte_to_ushort, flags, coher,
                                  2, sb, 0x1);
@@ -1029,10 +1029,19 @@ void si_compute_clear_render_target(struct pipe_context *ctx, struct pipe_surfac
 {
    struct si_context *sctx = (struct si_context *)ctx;
    unsigned num_layers = dstsurf->u.tex.last_layer - dstsurf->u.tex.first_layer + 1;
-   unsigned data[4 + sizeof(color->ui)] = {dstx, dsty, dstsurf->u.tex.first_layer, 0};
+   unsigned access = 0;
+   enum pipe_format format = util_format_linear(dstsurf->format);
 
    if (width == 0 || height == 0)
       return;
+
+   if (util_format_is_subsampled_422(dstsurf->texture->format)) {
+      access |= SI_IMAGE_ACCESS_BLOCK_FORMAT_AS_UINT;
+      format = PIPE_FORMAT_R32_UINT;
+      dstx = util_format_get_nblocksx(dstsurf->texture->format, dstx);
+   }
+
+   unsigned data[4 + sizeof(color->ui)] = {dstx, dsty, dstsurf->u.tex.first_layer, 0};
 
    if (util_format_is_srgb(dstsurf->format)) {
       union pipe_color_union color_srgb;
@@ -1054,8 +1063,8 @@ void si_compute_clear_render_target(struct pipe_context *ctx, struct pipe_surfac
 
    struct pipe_image_view image = {0};
    image.resource = dstsurf->texture;
-   image.shader_access = image.access = PIPE_IMAGE_ACCESS_WRITE;
-   image.format = util_format_linear(dstsurf->format);
+   image.shader_access = image.access = PIPE_IMAGE_ACCESS_WRITE | access;
+   image.format = format;
    image.u.tex.level = dstsurf->u.tex.level;
    image.u.tex.first_layer = 0; /* 3D images ignore first_layer (BASE_ARRAY) */
    image.u.tex.last_layer = dstsurf->u.tex.last_layer;

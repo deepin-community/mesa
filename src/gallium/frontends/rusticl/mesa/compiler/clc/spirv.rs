@@ -224,8 +224,10 @@ impl SPIRVBin {
 
     fn kernel_infos(&self) -> &[clc_kernel_info] {
         match self.info {
-            None => &[],
-            Some(info) => unsafe { slice::from_raw_parts(info.kernels, info.num_kernels as usize) },
+            Some(info) if info.num_kernels > 0 => unsafe {
+                slice::from_raw_parts(info.kernels, info.num_kernels as usize)
+            },
+            _ => &[],
         }
     }
 
@@ -285,17 +287,19 @@ impl SPIRVBin {
 
     pub fn args(&self, name: &str) -> Vec<SPIRVKernelArg> {
         match self.kernel_info(name) {
-            None => Vec::new(),
-            Some(info) => unsafe { slice::from_raw_parts(info.args, info.num_args) }
-                .iter()
-                .map(|a| SPIRVKernelArg {
-                    name: c_string_to_string(a.name),
-                    type_name: c_string_to_string(a.type_name),
-                    access_qualifier: clc_kernel_arg_access_qualifier(a.access_qualifier),
-                    address_qualifier: a.address_qualifier,
-                    type_qualifier: clc_kernel_arg_type_qualifier(a.type_qualifier),
-                })
-                .collect(),
+            Some(info) if info.num_args > 0 => {
+                unsafe { slice::from_raw_parts(info.args, info.num_args) }
+                    .iter()
+                    .map(|a| SPIRVKernelArg {
+                        name: c_string_to_string(a.name),
+                        type_name: c_string_to_string(a.type_name),
+                        access_qualifier: clc_kernel_arg_access_qualifier(a.access_qualifier),
+                        address_qualifier: a.address_qualifier,
+                        type_qualifier: clc_kernel_arg_type_qualifier(a.type_qualifier),
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -432,6 +436,10 @@ impl SPIRVBin {
 
     pub fn spec_constant(&self, spec_id: u32) -> Option<clc_spec_constant_type> {
         let info = self.info?;
+        if info.num_spec_constants == 0 {
+            return None;
+        }
+
         let spec_constants =
             unsafe { slice::from_raw_parts(info.spec_constants, info.num_spec_constants as usize) };
 

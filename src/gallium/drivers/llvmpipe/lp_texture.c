@@ -664,7 +664,13 @@ llvmpipe_resource_from_handle(struct pipe_screen *_screen,
 #ifdef HAVE_LINUX_UDMABUF_H
       struct llvmpipe_memory_fd_alloc *alloc;
       uint64_t size;
-      if(_screen->import_memory_fd(_screen, whandle->handle, (struct pipe_memory_allocation**)&alloc, &size, true)) {
+      /* Not all winsys implement displaytarget_create_mapped so we need to check
+       * that is available (not null).
+       */
+      if (winsys->displaytarget_create_mapped &&
+          _screen->import_memory_fd(_screen, whandle->handle,
+                                    (struct pipe_memory_allocation**)&alloc,
+                                    &size, true)) {
          data = alloc->data;
          lpr->dt = winsys->displaytarget_create_mapped(winsys, template->bind,
                                                        template->format, template->width0, template->height0,
@@ -1448,10 +1454,10 @@ llvmpipe_resource_get_param(struct pipe_screen *screen,
 static void
 llvmpipe_query_dmabuf_modifiers(struct pipe_screen *pscreen, enum pipe_format format, int max, uint64_t *modifiers, unsigned int *external_only, int *count)
 {
-   if (max) {
-      *count = 1;
+   *count = 1;
+
+   if (max)
       *modifiers = DRM_FORMAT_MOD_LINEAR;
-   }
 }
 
 static bool

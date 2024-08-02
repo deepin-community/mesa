@@ -558,7 +558,8 @@ VkResult genX(GetQueryPoolResults)(
          while (statistics) {
             UNUSED uint32_t stat = u_bit_scan(&statistics);
             if (write_results) {
-               uint64_t result = slot[idx * 2 + 2] - slot[idx * 2 + 1];
+               /* If a query is not available but VK_QUERY_RESULT_PARTIAL_BIT is set, write 0. */
+               uint64_t result = available ? slot[idx * 2 + 2] - slot[idx * 2 + 1] : 0;
                cpu_write_query_result(pData, flags, idx, result);
             }
             idx++;
@@ -569,11 +570,17 @@ VkResult genX(GetQueryPoolResults)(
 
       case VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT: {
          uint64_t *slot = query_slot(pool, firstQuery + i);
-         if (write_results)
-            cpu_write_query_result(pData, flags, idx, slot[2] - slot[1]);
+         if (write_results) {
+            /* If a query is not available but VK_QUERY_RESULT_PARTIAL_BIT is set, write 0. */
+            uint64_t result = available ? slot[2] - slot[1] : 0;
+            cpu_write_query_result(pData, flags, idx, result);
+         }
          idx++;
-         if (write_results)
-            cpu_write_query_result(pData, flags, idx, slot[4] - slot[3]);
+         if (write_results) {
+            /* If a query is not available but VK_QUERY_RESULT_PARTIAL_BIT is set, write 0. */
+            uint64_t result = available ? slot[4] - slot[3] : 0;
+            cpu_write_query_result(pData, flags, idx, result);
+         }
          idx++;
          break;
       }
@@ -782,15 +789,18 @@ void genX(CmdResetQueryPool)(
    ANV_FROM_HANDLE(anv_query_pool, pool, queryPool);
    struct anv_physical_device *pdevice = cmd_buffer->device->physical;
 
-   /* Shader clearing is only possible on render/compute */
+   /* Shader clearing is only possible on render/compute when not in protected
+    * mode.
+    */
    if (anv_cmd_buffer_is_render_or_compute_queue(cmd_buffer) &&
+       (cmd_buffer->vk.pool->flags & VK_COMMAND_POOL_CREATE_PROTECTED_BIT) != 0 &&
        queryCount >= pdevice->instance->query_clear_with_blorp_threshold) {
       trace_intel_begin_query_clear_blorp(&cmd_buffer->trace);
 
       anv_cmd_buffer_fill_area(cmd_buffer,
                                anv_query_address(pool, firstQuery),
                                queryCount * pool->stride,
-                               0);
+                               0, false);
 
       /* The pending clearing writes are in compute if we're in gpgpu mode on
        * the render engine or on the compute engine.
@@ -1263,6 +1273,26 @@ void genX(CmdEndQueryIndexedEXT)(
                                    ANV_PIPE_CS_STALL_BIT |
                                    ANV_PIPE_STALL_AT_SCOREBOARD_BIT);
       emit_xfb_query(&b, index, anv_address_add(query_addr, 16));
+#if GFX_VER == 11
+      /* Running the following CTS pattern on ICL will likely report a failure :
+       *
+       * dEQP-VK.transform_feedback.primitives_generated_query.get.queue_reset.32bit.geom.*
+       *
+       * If you dump the returned values in genX(GetQueryPoolResults)(), you
+       * will notice that the last 64bit value is 0 and rereading the value
+       * once more will return a non-zero value. This seems to indicate that
+       * the memory writes are not ordered somehow... Otherwise the
+       * availability write below would ensure the previous writes above have
+       * completed.
+       *
+       * So as a workaround, we stall CS to make sure the previous writes have
+       * landed before emitting the availability.
+       */
+      genx_batch_emit_pipe_control(&cmd_buffer->batch,
+                                   cmd_buffer->device->info,
+                                   cmd_buffer->state.current_pipeline,
+                                   ANV_PIPE_CS_STALL_BIT);
+#endif
       emit_query_mi_availability(&b, query_addr, true);
       break;
 

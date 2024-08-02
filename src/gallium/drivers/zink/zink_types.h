@@ -1315,6 +1315,7 @@ struct zink_resource {
    union {
       struct {
          struct util_range valid_buffer_range;
+         struct util_range *real_buffer_range; //only set on tc replace_buffer src
          uint32_t vbo_bind_mask : PIPE_MAX_ATTRIBS;
          uint8_t ubo_bind_count[2];
          uint8_t ssbo_bind_count[2];
@@ -1415,7 +1416,7 @@ struct zink_screen {
    bool is_cpu;
    bool abort_on_hang;
    bool frame_marker_emitted;
-   bool implicitly_loaded;
+   bool driver_name_is_inferred;
    uint64_t curr_batch; //the current batch id
    uint32_t last_finished;
    VkSemaphore sem;
@@ -1442,7 +1443,6 @@ struct zink_screen {
    bool device_lost;
    int drm_fd;
 
-   struct slab_mempool present_mempool;
    struct slab_parent_pool transfer_pool;
    struct disk_cache *disk_cache;
    struct util_queue cache_put_thread;
