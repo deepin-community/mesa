@@ -1299,3 +1299,4 @@ libGLX_mesa.so.0 libglx-mesa0
  glWindowPos3sARB@Base 0
  glWindowPos3sv@Base 0
  glWindowPos3svARB@Base 0
+ zx_print_driver_map_list@Base 23.1.2-1deepin1
