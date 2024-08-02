@@ -1,3 +1,9 @@
+mesa (24.1.0-2deepin2) unstable; urgency=medium
+
+  * Actually enable OrcJIT for loong64, riscv64 (oops).
+
+ -- Mingcong Bai <baimingcong@uniontech.com>  Fri, 02 Aug 2024 15:41:07 +0800
+
 mesa (24.1.0-2deepin1) unstable; urgency=medium
 
   * Rebase ORCJIT patches for LoongArch, RISC-V.
