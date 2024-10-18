@@ -45,7 +45,7 @@ index db242b8f8f4..bf3cc4d7d67 100644
 +   while(driver_map[i].driver)
 +   {
 +       printf("vendor_id: %x, driver: %s\n", driver_map[i].vendor_id, driver_map[i].driver);
-+       i;
++       i++;
 +   }
 +}
 +
