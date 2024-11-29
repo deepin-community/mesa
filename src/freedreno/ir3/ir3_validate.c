@@ -1,31 +1,15 @@
 /*
  * Copyright © 2020 Google, Inc.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include <stdlib.h>
 
 #include "util/ralloc.h"
 
+#include "instr-a3xx.h"
 #include "ir3.h"
+#include "ir3_compiler.h"
 
 struct ir3_validate_ctx {
    struct ir3 *ir;
@@ -69,6 +53,15 @@ reg_class_flags(struct ir3_register *reg)
 }
 
 static void
+validate_reg(struct ir3_validate_ctx *ctx, struct ir3_register *reg)
+{
+   if ((reg->flags & IR3_REG_SHARED) && reg->num != INVALID_REG) {
+      validate_assert(ctx, reg->num >= SHARED_REG_START);
+      validate_assert(ctx, reg->num - SHARED_REG_START < SHARED_REG_SIZE);
+   }
+}
+
+static void
 validate_src(struct ir3_validate_ctx *ctx, struct ir3_instruction *instr,
              struct ir3_register *reg)
 {
@@ -92,6 +85,8 @@ validate_src(struct ir3_validate_ctx *ctx, struct ir3_instruction *instr,
 
    if (reg->tied) {
       validate_assert(ctx, reg->tied->tied == reg);
+      validate_assert(ctx, reg_class_flags(reg) == reg_class_flags(reg->tied));
+      validate_assert(ctx, !(reg->flags & (IR3_REG_CONST | IR3_REG_IMMED)));
       bool found = false;
       foreach_dst (dst, instr) {
          if (dst == reg->tied) {
@@ -102,6 +97,8 @@ validate_src(struct ir3_validate_ctx *ctx, struct ir3_instruction *instr,
       validate_assert(ctx,
                       found && "tied register not in the same instruction");
    }
+
+   validate_reg(ctx, reg);
 }
 
 /* phi sources are logically read at the end of the predecessor basic block,
@@ -160,16 +157,53 @@ validate_dst(struct ir3_validate_ctx *ctx, struct ir3_instruction *instr,
 
    if (reg->flags & IR3_REG_RELATIV)
       validate_assert(ctx, instr->address);
+
+   validate_reg(ctx, reg);
 }
 
 #define validate_reg_size(ctx, reg, type)                                      \
    validate_assert(                                                            \
       ctx, (type_size(type) <= 16) == !!((reg)->flags & IR3_REG_HALF))
 
+static bool
+block_contains(struct ir3_block *block, struct ir3_instruction *instr)
+{
+   foreach_instr (block_instr, &block->instr_list) {
+      if (block_instr == instr)
+         return true;
+   }
+
+   return false;
+}
+
+static void
+validate_rpt(struct ir3_validate_ctx *ctx, struct ir3_instruction *instr)
+{
+   if (ir3_instr_is_first_rpt(instr)) {
+      /* All instructions in a repeat group should be in the same block as the
+       * first one.
+       */
+      foreach_instr_rpt (rpt, instr) {
+         validate_assert(ctx, rpt->block == instr->block);
+
+         /* Validate that the block actually contains the repeat. This would
+          * fail if, for example, list_delinit is called instead of
+          * ir3_instr_remove.
+          */
+         validate_assert(ctx, block_contains(instr->block, rpt));
+      }
+   } else if (instr->repeat) {
+      validate_assert(ctx, ir3_supports_rpt(ctx->ir->compiler, instr->opc));
+      validate_assert(ctx, !instr->nop);
+   }
+}
+
 static void
 validate_instr(struct ir3_validate_ctx *ctx, struct ir3_instruction *instr)
 {
    struct ir3_register *last_reg = NULL;
+
+   validate_rpt(ctx, instr);
 
    foreach_src_n (reg, n, instr) {
       if (reg->flags & IR3_REG_RELATIV)
@@ -214,6 +248,10 @@ validate_instr(struct ir3_validate_ctx *ctx, struct ir3_instruction *instr)
                                  (reg->flags & IR3_REG_HALF));
       }
 
+      if (is_scalar_alu(instr, ctx->ir->compiler) && reg != instr->address)
+         validate_assert(ctx, reg->flags & (IR3_REG_SHARED | IR3_REG_IMMED |
+                                            IR3_REG_CONST));
+
       last_reg = reg;
    }
 
@@ -224,6 +262,12 @@ validate_instr(struct ir3_validate_ctx *ctx, struct ir3_instruction *instr)
    }
 
    _mesa_set_add(ctx->defs, instr);
+
+   if ((opc_cat(instr->opc) == 2 || opc_cat(instr->opc) == 3 ||
+        opc_cat(instr->opc) == 4)) {
+      validate_assert(ctx, !(instr->dsts[0]->flags & IR3_REG_SHARED) ||
+                      ctx->ir->compiler->has_scalar_alu);
+   }
 
    /* Check that src/dst types match the register types, and for
     * instructions that have different opcodes depending on type,
@@ -304,6 +348,15 @@ validate_instr(struct ir3_validate_ctx *ctx, struct ir3_instruction *instr)
 
       break;
    case 3:
+      switch (instr->opc) {
+      case OPC_MAD_S24:
+      case OPC_MAD_U24:
+         validate_assert(ctx, !(instr->dsts[0]->flags & IR3_REG_HALF));
+         validate_assert(ctx, !(instr->srcs[0]->flags & IR3_REG_HALF));
+         break;
+      default:
+         break;
+      }
       /* Validate that cat3 opc matches the src type.  We've already checked
        * that all the src regs are same type
        */
@@ -328,7 +381,8 @@ validate_instr(struct ir3_validate_ctx *ctx, struct ir3_instruction *instr)
       switch (instr->opc) {
       case OPC_RESINFO:
       case OPC_RESFMT:
-         validate_reg_size(ctx, instr->dsts[0], instr->cat6.type);
+         if (instr->dsts_count > 0)
+            validate_reg_size(ctx, instr->dsts[0], instr->cat6.type);
          validate_reg_size(ctx, instr->srcs[0], instr->cat6.type);
          break;
       case OPC_L2G:
@@ -360,7 +414,7 @@ validate_instr(struct ir3_validate_ctx *ctx, struct ir3_instruction *instr)
       case OPC_STIB:
          validate_assert(ctx, !(instr->srcs[0]->flags & IR3_REG_HALF));
          validate_assert(ctx, !(instr->srcs[1]->flags & IR3_REG_HALF));
-         validate_reg_size(ctx, instr->srcs[2], instr->cat6.type);
+         validate_reg_size(ctx, instr->srcs[3], instr->cat6.type);
          break;
       case OPC_GETFIBERID:
       case OPC_GETSPID:
@@ -372,9 +426,59 @@ validate_instr(struct ir3_validate_ctx *ctx, struct ir3_instruction *instr)
          validate_reg_size(ctx, instr->srcs[0], instr->cat6.type);
          validate_assert(ctx, !(instr->srcs[1]->flags & IR3_REG_HALF));
          break;
+      case OPC_PUSH_CONSTS_LOAD_MACRO:
+         break;
+      case OPC_LDC:
+         validate_assert(ctx, !(instr->srcs[0]->flags & IR3_REG_HALF));
+         validate_assert(ctx, !(instr->srcs[1]->flags & IR3_REG_HALF));
+         validate_assert(ctx, !!(instr->dsts[0]->flags & IR3_REG_SHARED) ==
+                              !!(instr->flags & IR3_INSTR_U));
+         break;
       case OPC_LDC_K:
          validate_assert(ctx, !(instr->srcs[0]->flags & IR3_REG_HALF));
          validate_assert(ctx, !(instr->srcs[1]->flags & IR3_REG_HALF));
+         break;
+      case OPC_LDP:
+         validate_assert(ctx, !(instr->srcs[0]->flags & IR3_REG_HALF));
+         validate_assert(ctx, !(instr->srcs[1]->flags & IR3_REG_HALF));
+         validate_assert(ctx, !(instr->srcs[2]->flags & IR3_REG_HALF));
+         validate_reg_size(ctx, instr->dsts[0], instr->cat6.type);
+	 break;
+      case OPC_ATOMIC_B_CMPXCHG:
+         if (instr->cat6.type == TYPE_ATOMIC_U64) {
+            validate_assert(ctx, !(instr->dsts[0]->flags & IR3_REG_HALF));
+            validate_assert(ctx, instr->dsts[0]->wrmask == 0x3f);
+         } else {
+            validate_reg_size(ctx, instr->dsts[0], instr->cat6.type);
+         }
+         validate_assert(ctx, !(instr->srcs[0]->flags & IR3_REG_HALF));
+         validate_assert(ctx, !(instr->srcs[1]->flags & IR3_REG_HALF));
+         break;
+      case OPC_ATOMIC_B_XCHG:
+         if (instr->cat6.type == TYPE_ATOMIC_U64) {
+            validate_assert(ctx, !(instr->dsts[0]->flags & IR3_REG_HALF));
+            validate_assert(ctx, instr->dsts[0]->wrmask == 0xf);
+         } else {
+            validate_reg_size(ctx, instr->dsts[0], instr->cat6.type);
+         }
+         validate_assert(ctx, !(instr->srcs[0]->flags & IR3_REG_HALF));
+         validate_assert(ctx, !(instr->srcs[1]->flags & IR3_REG_HALF));
+         break;
+      case OPC_ATOMIC_G_CMPXCHG:
+      case OPC_ATOMIC_G_XCHG:
+         if (instr->cat6.type == TYPE_ATOMIC_U64) {
+            validate_assert(ctx, !(instr->dsts[0]->flags & IR3_REG_HALF));
+            validate_assert(ctx, instr->dsts[0]->wrmask == 0x3);
+         } else {
+            validate_reg_size(ctx, instr->dsts[0], instr->cat6.type);
+         }
+         validate_assert(ctx, !(instr->srcs[0]->flags & IR3_REG_HALF));
+         validate_assert(ctx, !(instr->srcs[1]->flags & IR3_REG_HALF));
+         break;
+      case OPC_SHFL:
+         validate_reg_size(ctx, instr->srcs[0], instr->cat6.type);
+         validate_assert(ctx, !(instr->srcs[1]->flags & IR3_REG_HALF));
+         validate_reg_size(ctx, instr->dsts[0], instr->cat6.type);
          break;
       default:
          validate_reg_size(ctx, instr->dsts[0], instr->cat6.type);
@@ -387,8 +491,14 @@ validate_instr(struct ir3_validate_ctx *ctx, struct ir3_instruction *instr)
 
    if (instr->opc == OPC_META_PARALLEL_COPY) {
       foreach_src_n (src, n, instr) {
-         validate_assert(ctx, reg_class_flags(src) ==
-                         reg_class_flags(instr->dsts[n]));
+         validate_assert(ctx, (src->flags & IR3_REG_HALF) ==
+                         (instr->dsts[n]->flags & IR3_REG_HALF));
+         if (instr->dsts[n]->flags & IR3_REG_SHARED) {
+            validate_assert(ctx, src->flags & (IR3_REG_SHARED | IR3_REG_CONST |
+                                               IR3_REG_IMMED));
+         } else {
+            validate_assert(ctx, !(src->flags & IR3_REG_SHARED));
+         }
       }
    }
 }
@@ -432,8 +542,8 @@ ir3_validate(struct ir3 *ir)
 
       struct ir3_instruction *prev = NULL;
       foreach_instr (instr, &block->instr_list) {
-         validate_assert(ctx, instr->block == block);
          ctx->current_instr = instr;
+         validate_assert(ctx, instr->block == block);
          if (instr->opc == OPC_META_PHI) {
             /* phis must be the first in the block */
             validate_assert(ctx, prev == NULL || prev->opc == OPC_META_PHI);

@@ -85,18 +85,22 @@ radv_create_buffer(struct radv_device *device, const VkBufferCreateInfo *pCreate
    buffer->bo_va = 0;
    buffer->range = 0;
 
+   uint64_t replay_address = 0;
+   const VkBufferOpaqueCaptureAddressCreateInfo *replay_info =
+      vk_find_struct_const(pCreateInfo->pNext, BUFFER_OPAQUE_CAPTURE_ADDRESS_CREATE_INFO);
+   if (replay_info && replay_info->opaqueCaptureAddress)
+      replay_address = replay_info->opaqueCaptureAddress;
+
+   if (pCreateInfo->flags & VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT)
+      buffer->bo_va = replay_address;
+
    if (pCreateInfo->flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT) {
       enum radeon_bo_flag flags = RADEON_FLAG_VIRTUAL;
       if (pCreateInfo->flags & VK_BUFFER_CREATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT)
          flags |= RADEON_FLAG_REPLAYABLE;
-      if (pCreateInfo->usage & VK_BUFFER_USAGE_2_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT)
+      if (buffer->vk.usage &
+          (VK_BUFFER_USAGE_2_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT | VK_BUFFER_USAGE_2_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT))
          flags |= RADEON_FLAG_32BIT;
-
-      uint64_t replay_address = 0;
-      const VkBufferOpaqueCaptureAddressCreateInfo *replay_info =
-         vk_find_struct_const(pCreateInfo->pNext, BUFFER_OPAQUE_CAPTURE_ADDRESS_CREATE_INFO);
-      if (replay_info && replay_info->opaqueCaptureAddress)
-         replay_address = replay_info->opaqueCaptureAddress;
 
       VkResult result = radv_bo_create(device, &buffer->vk.base, align64(buffer->vk.size, 4096), 4096, 0, flags,
                                        RADV_BO_PRIORITY_VIRTUAL, replay_address, is_internal, &buffer->bo);
@@ -104,6 +108,8 @@ radv_create_buffer(struct radv_device *device, const VkBufferCreateInfo *pCreate
          radv_destroy_buffer(device, pAllocator, buffer);
          return vk_error(device, result);
       }
+
+      buffer->bo_va = radv_buffer_get_va(buffer->bo);
    }
 
    *pBuffer = radv_buffer_to_handle(buffer);
@@ -188,23 +194,11 @@ radv_get_buffer_memory_requirements(struct radv_device *device, VkDeviceSize siz
    pMemoryRequirements->memoryRequirements.memoryTypeBits =
       ((1u << pdev->memory_properties.memoryTypeCount) - 1u) & ~pdev->memory_types_32bit;
 
-   /* Allow 32-bit address-space for DGC usage, as this buffer will contain
-    * cmd buffer upload buffers, and those get passed to shaders through 32-bit
-    * pointers.
-    *
-    * We only allow it with this usage set, to "protect" the 32-bit address space
-    * from being overused. The actual requirement is done as part of
-    * vkGetGeneratedCommandsMemoryRequirementsNV. (we have to make sure their
-    * intersection is non-zero at least)
-    */
-   if ((usage & VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT_KHR) && radv_uses_device_generated_commands(device))
-      pMemoryRequirements->memoryRequirements.memoryTypeBits |= pdev->memory_types_32bit;
-
    /* Force 32-bit address-space for descriptor buffers usage because they are passed to shaders
     * through 32-bit pointers.
     */
-   if (usage &
-       (VK_BUFFER_USAGE_2_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT | VK_BUFFER_USAGE_2_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT))
+   if (usage & (VK_BUFFER_USAGE_2_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
+                VK_BUFFER_USAGE_2_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT | VK_BUFFER_USAGE_2_PREPROCESS_BUFFER_BIT_EXT))
       pMemoryRequirements->memoryRequirements.memoryTypeBits = pdev->memory_types_32bit;
 
    if (flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT)
@@ -258,14 +252,14 @@ VKAPI_ATTR VkDeviceAddress VKAPI_CALL
 radv_GetBufferDeviceAddress(VkDevice device, const VkBufferDeviceAddressInfo *pInfo)
 {
    VK_FROM_HANDLE(radv_buffer, buffer, pInfo->buffer);
-   return radv_buffer_get_va(buffer->bo) + buffer->offset;
+   return buffer->bo_va + buffer->offset;
 }
 
 VKAPI_ATTR uint64_t VKAPI_CALL
 radv_GetBufferOpaqueCaptureAddress(VkDevice device, const VkBufferDeviceAddressInfo *pInfo)
 {
    VK_FROM_HANDLE(radv_buffer, buffer, pInfo->buffer);
-   return buffer->bo ? radv_buffer_get_va(buffer->bo) + buffer->offset : 0;
+   return buffer->bo_va + buffer->offset;
 }
 
 VkResult

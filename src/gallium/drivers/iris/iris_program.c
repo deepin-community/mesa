@@ -115,6 +115,11 @@ iris_apply_brw_wm_prog_data(struct iris_compiled_shader *shader,
    iris->has_side_effects     = brw->has_side_effects;
    iris->pulls_bary           = brw->pulls_bary;
 
+   iris->uses_sample_offsets        = brw->uses_sample_offsets;
+   iris->uses_npc_bary_coefficients = brw->uses_npc_bary_coefficients;
+   iris->uses_pc_bary_coefficients  = brw->uses_pc_bary_coefficients;
+   iris->uses_depth_w_coefficients  = brw->uses_depth_w_coefficients;
+
    iris->uses_nonperspective_interp_modes = brw->uses_nonperspective_interp_modes;
 
    iris->is_per_sample = brw_wm_prog_data_is_persample(brw, 0);
@@ -838,8 +843,7 @@ iris_fix_edge_flags(nir_shader *nir)
    nir_fixup_deref_modes(nir);
 
    nir_foreach_function_impl(impl, nir) {
-      nir_metadata_preserve(impl, nir_metadata_block_index |
-                                  nir_metadata_dominance |
+      nir_metadata_preserve(impl, nir_metadata_control_flow |
                                   nir_metadata_live_defs |
                                   nir_metadata_loop_analysis);
    }
@@ -1377,7 +1381,8 @@ iris_setup_binding_table(const struct intel_device_info *devinfo,
                          struct iris_binding_table *bt,
                          unsigned num_render_targets,
                          unsigned num_system_values,
-                         unsigned num_cbufs)
+                         unsigned num_cbufs,
+                         bool use_null_rt)
 {
    const struct shader_info *info = &nir->info;
 
@@ -1400,6 +1405,8 @@ iris_setup_binding_table(const struct intel_device_info *devinfo,
          bt->used_mask[IRIS_SURFACE_GROUP_RENDER_TARGET_READ] =
             BITFIELD64_MASK(num_render_targets);
       }
+
+      bt->use_null_rt = use_null_rt;
    } else if (info->stage == MESA_SHADER_COMPUTE) {
       bt->sizes[IRIS_SURFACE_GROUP_CS_WORK_GROUPS] = 1;
    }
@@ -1854,7 +1861,7 @@ iris_compile_vs(struct iris_screen *screen,
 
    struct iris_binding_table bt;
    iris_setup_binding_table(devinfo, nir, &bt, /* num_render_targets */ 0,
-                            num_system_values, num_cbufs);
+                            num_system_values, num_cbufs, false);
 
    const char *error;
    const unsigned *program;
@@ -2076,13 +2083,13 @@ iris_compile_tcs(struct iris_screen *screen,
          assert(screen->elk);
          nir = elk_nir_create_passthrough_tcs(mem_ctx, screen->elk, &elk_key);
       }
-      source_hash = *(uint32_t*)nir->info.source_sha1;
+      source_hash = *(uint32_t*)nir->info.source_blake3;
    }
 
    iris_setup_uniforms(devinfo, mem_ctx, nir, 0, &system_values,
                        &num_system_values, &num_cbufs);
    iris_setup_binding_table(devinfo, nir, &bt, /* num_render_targets */ 0,
-                            num_system_values, num_cbufs);
+                            num_system_values, num_cbufs, false);
 
    const char *error = NULL;
    const unsigned *program;
@@ -2272,7 +2279,7 @@ iris_compile_tes(struct iris_screen *screen,
 
    struct iris_binding_table bt;
    iris_setup_binding_table(devinfo, nir, &bt, /* num_render_targets */ 0,
-                            num_system_values, num_cbufs);
+                            num_system_values, num_cbufs, false);
 
    const char *error;
    const unsigned *program;
@@ -2454,7 +2461,7 @@ iris_compile_gs(struct iris_screen *screen,
 
    struct iris_binding_table bt;
    iris_setup_binding_table(devinfo, nir, &bt, /* num_render_targets */ 0,
-                            num_system_values, num_cbufs);
+                            num_system_values, num_cbufs, false);
 
    const char *error;
    const unsigned *program;
@@ -2623,16 +2630,14 @@ iris_compile_fs(struct iris_screen *screen,
     */
    brw_nir_lower_fs_outputs(nir);
 
-   /* On Gfx11+, shader RT write messages have a "Null Render Target" bit
-    * and do not need a binding table entry with a null surface.  Earlier
-    * generations need an entry for a null surface.
-    */
-   int null_rts = devinfo->ver < 11 ? 1 : 0;
+   int null_rts = brw_nir_fs_needs_null_rt(devinfo, nir,
+                                           key->multisample_fbo,
+                                           key->alpha_to_coverage) ? 1 : 0;
 
    struct iris_binding_table bt;
    iris_setup_binding_table(devinfo, nir, &bt,
                             MAX2(key->nr_color_regions, null_rts),
-                            num_system_values, num_cbufs);
+                            num_system_values, num_cbufs, null_rts != 0);
 
    const char *error;
    const unsigned *program;
@@ -2803,6 +2808,10 @@ update_last_vue_map(struct iris_context *ice,
          ice->state.stage_dirty_for_nos[IRIS_NOS_LAST_VUE_MAP];
    }
 
+   if (changed_slots & VARYING_BIT_LAYER) {
+      ice->state.dirty |= IRIS_DIRTY_CLIP;
+   }
+
    if (changed_slots || (old_map && old_map->separate != vue_map->separate)) {
       ice->state.dirty |= IRIS_DIRTY_SBE;
    }
@@ -2958,7 +2967,7 @@ iris_compile_cs(struct iris_screen *screen,
 
    struct iris_binding_table bt;
    iris_setup_binding_table(devinfo, nir, &bt, /* num_render_targets */ 0,
-                            num_system_values, num_cbufs);
+                            num_system_values, num_cbufs, false);
 
    const char *error;
    const unsigned *program;
@@ -3200,8 +3209,8 @@ iris_create_uncompiled_shader(struct iris_screen *screen,
       update_so_info(&ish->stream_output, nir->info.outputs_written);
    }
 
-   /* Use lowest dword of source shader sha1 for shader hash. */
-   ish->source_hash = *(uint32_t*)nir->info.source_sha1;
+   /* Use lowest dword of source shader blake3 for shader hash. */
+   ish->source_hash = *(uint32_t*)nir->info.source_blake3;
 
    if (screen->disk_cache) {
       /* Serialize the NIR to a binary blob that we can hash for the disk
@@ -3871,7 +3880,12 @@ iris_use_tcs_multi_patch(struct iris_screen *screen)
 bool
 iris_indirect_ubos_use_sampler(struct iris_screen *screen)
 {
-   return screen->devinfo->ver < 12;
+   if (screen->brw) {
+      return screen->brw->indirect_ubos_use_sampler;
+   } else {
+      assert(screen->elk);
+      return screen->elk->indirect_ubos_use_sampler;
+   }
 }
 
 static void
@@ -3933,12 +3947,10 @@ iris_compiler_init(struct iris_screen *screen)
       screen->brw = brw_compiler_create(screen, screen->devinfo);
       screen->brw->shader_debug_log = iris_shader_debug_log;
       screen->brw->shader_perf_log = iris_shader_perf_log;
-      screen->brw->indirect_ubos_use_sampler = iris_indirect_ubos_use_sampler(screen);
    } else {
       screen->elk = elk_compiler_create(screen, screen->devinfo);
       screen->elk->shader_debug_log = iris_shader_debug_log;
       screen->elk->shader_perf_log = iris_shader_perf_log;
       screen->elk->supports_shader_constants = true;
-      screen->elk->indirect_ubos_use_sampler = iris_indirect_ubos_use_sampler(screen);
    }
 }

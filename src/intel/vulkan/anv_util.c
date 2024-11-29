@@ -57,6 +57,25 @@ __anv_perf_warn(struct anv_device *device,
 }
 
 void
+anv_cmd_buffer_pending_pipe_debug(struct anv_cmd_buffer *cmd_buffer,
+                                  enum anv_pipe_bits bits,
+                                  const char* reason)
+{
+   if (bits == 0)
+      return;
+
+   fprintf(stdout, "acc: ");
+
+   fprintf(stdout, "bits: ");
+   anv_dump_pipe_bits(bits, stdout);
+   fprintf(stdout, "reason: %s", reason);
+
+   if (cmd_buffer->batch.pc_reasons_count < ARRAY_SIZE(cmd_buffer->batch.pc_reasons))
+      cmd_buffer->batch.pc_reasons[cmd_buffer->batch.pc_reasons_count++] = reason;
+   fprintf(stdout, "\n");
+}
+
+void
 anv_dump_pipe_bits(enum anv_pipe_bits bits, FILE *f)
 {
    if (bits & ANV_PIPE_DEPTH_CACHE_FLUSH_BIT)
@@ -69,6 +88,8 @@ anv_dump_pipe_bits(enum anv_pipe_bits bits, FILE *f)
       fputs("+rt_flush ", f);
    if (bits & ANV_PIPE_TILE_CACHE_FLUSH_BIT)
       fputs("+tile_flush ", f);
+   if (bits & ANV_PIPE_L3_FABRIC_FLUSH_BIT)
+      fputs("+l3_fabric_flush ", f);
    if (bits & ANV_PIPE_STATE_CACHE_INVALIDATE_BIT)
       fputs("+state_inval ", f);
    if (bits & ANV_PIPE_CONSTANT_CACHE_INVALIDATE_BIT)
@@ -153,4 +174,54 @@ anv_gfx_state_bit_to_str(enum anv_gfx_state_bits state)
       NAME(TBIMR_TILE_PASS_INFO);
    default: unreachable("invalid state");
    }
+}
+
+VkResult
+anv_device_print_init(struct anv_device *device)
+{
+   VkResult result =
+      anv_device_alloc_bo(device, "printf",
+                          debug_get_num_option("ANV_PRINTF_BUFFER_SIZE", 1024 * 1024),
+                          ANV_BO_ALLOC_CAPTURE |
+                          ANV_BO_ALLOC_MAPPED |
+                          ANV_BO_ALLOC_HOST_COHERENT |
+                          ANV_BO_ALLOC_NO_LOCAL_MEM,
+                          0 /* explicit_address */,
+                          &device->printf.bo);
+   if (result != VK_SUCCESS)
+      return result;
+
+   util_dynarray_init(&device->printf.prints, ralloc_context(NULL));
+   simple_mtx_init(&device->printf.mutex, mtx_plain);
+
+   *((uint32_t *)device->printf.bo->map) = 4;
+
+   return VK_SUCCESS;
+}
+
+void
+anv_device_print_fini(struct anv_device *device)
+{
+   anv_device_release_bo(device, device->printf.bo);
+   util_dynarray_fini(&device->printf.prints);
+   simple_mtx_destroy(&device->printf.mutex);
+}
+
+void
+anv_device_print_shader_prints(struct anv_device *device)
+{
+   simple_mtx_lock(&device->printf.mutex);
+
+   uint32_t *size = device->printf.bo->map;
+
+   u_printf_ptr(stdout,
+                device->printf.bo->map + sizeof(uint32_t),
+                *size - 4,
+                util_dynarray_begin(&device->printf.prints),
+                util_dynarray_num_elements(&device->printf.prints, u_printf_info*));
+
+   /* Reset */
+   *size = 4;
+
+   simple_mtx_unlock(&device->printf.mutex);
 }

@@ -510,20 +510,19 @@ etna_ml_lower_add(struct etna_ml_subgraph *subgraph,
                                   operation->weight_scale);
 }
 
-#define ACCUM_BUFFER_DEPTH 64
-#define INPUT_BUFFER_DEPTH 12
 #define MAX_TILE_WIDTH 64
 
 static unsigned
 calc_superblocks(struct etna_context *ctx, const struct etna_operation *operation, unsigned tile_y, unsigned interleave_mode)
 {
-   unsigned nn_core_count = ctx->screen->specs.nn_core_count;
+   unsigned nn_core_count = etna_ml_get_core_info(ctx)->nn_core_count;
+   unsigned nn_accum_buffer_depth = etna_ml_get_core_info(ctx)->nn_accum_buffer_depth;
    unsigned output_channels = operation->addition ? 1 : operation->output_channels;
    unsigned kernels_per_core = DIV_ROUND_UP(output_channels, nn_core_count);
-   unsigned foo = (ACCUM_BUFFER_DEPTH * interleave_mode) / tile_y;
+   unsigned foo = (nn_accum_buffer_depth * interleave_mode) / tile_y;
 
    if (operation->weight_width == 1)
-      foo = MIN2(foo, ACCUM_BUFFER_DEPTH / 3);
+      foo = MIN2(foo, nn_accum_buffer_depth / 3);
 
    foo = MIN2(foo, kernels_per_core);
    foo = MIN2(foo, 127);
@@ -591,6 +590,8 @@ calc_addition_sizes(unsigned *input_width, unsigned *input_height, unsigned *inp
 static unsigned
 calculate_tiling(struct etna_context *ctx, const struct etna_operation *operation, unsigned *tile_width_out, unsigned *tile_height_out)
 {
+   unsigned nn_input_buffer_depth = etna_ml_get_core_info(ctx)->nn_input_buffer_depth;
+   unsigned nn_accum_buffer_depth = etna_ml_get_core_info(ctx)->nn_accum_buffer_depth;
    unsigned input_width = operation->input_width;
    unsigned input_height = operation->input_height;
    unsigned input_channels = operation->input_channels;
@@ -614,8 +615,8 @@ calculate_tiling(struct etna_context *ctx, const struct etna_operation *operatio
    tile_width = MIN2(output_width, 64);
    interleave_mode = calc_interleave_mode(tile_width, operation->weight_height);
 
-   tile_height = INPUT_BUFFER_DEPTH * interleave_mode - operation->weight_height + 1;
-   tile_height = MIN2(tile_height, interleave_mode * ACCUM_BUFFER_DEPTH);
+   tile_height = nn_input_buffer_depth * interleave_mode - operation->weight_height + 1;
+   tile_height = MIN2(tile_height, interleave_mode * nn_accum_buffer_depth);
    tile_height = MIN2(tile_height, output_height);
 
    if (operation->stride > 1 && tile_height % 2 > 0)
@@ -638,9 +639,9 @@ create_nn_config(struct etna_ml_subgraph *subgraph, const struct etna_operation 
 {
    struct pipe_context *context = subgraph->base.context;
    struct etna_context *ctx = etna_context(context);
-   unsigned nn_core_count = ctx->screen->specs.nn_core_count;
+   unsigned nn_core_count = etna_ml_get_core_info(ctx)->nn_core_count;
    unsigned nn_core_version = ctx->screen->specs.nn_core_version;
-   unsigned oc_sram_size = ctx->screen->specs.on_chip_sram_size;
+   unsigned oc_sram_size = etna_ml_get_core_info(ctx)->on_chip_sram_size;
    struct etna_bo *bo = etna_bo_new(ctx->screen->dev,
                                     sizeof(struct etna_nn_params),
                                     DRM_ETNA_GEM_CACHE_WC);
@@ -966,7 +967,7 @@ static unsigned
 write_core_6(struct etna_ml_subgraph *subgraph, uint32_t *map, unsigned core, const struct etna_operation *operation, unsigned zrl_bits)
 {
    struct pipe_context *pctx = subgraph->base.context;
-   unsigned nn_core_count = etna_context(pctx)->screen->specs.nn_core_count;
+   unsigned nn_core_count = etna_ml_get_core_info(etna_context(pctx))->nn_core_count;
    unsigned input_channels = operation->addition ? 1 : operation->input_channels;
    unsigned output_channels = operation->addition ? 1 : operation->output_channels;
    unsigned cores_used = MIN2(output_channels, nn_core_count);
@@ -1046,7 +1047,7 @@ static unsigned
 write_core_interleaved(struct etna_ml_subgraph *subgraph, uint32_t *map, unsigned core, const struct etna_operation *operation, unsigned zrl_bits)
 {
    struct pipe_context *pctx = subgraph->base.context;
-   unsigned nn_core_count = etna_context(pctx)->screen->specs.nn_core_count;
+   unsigned nn_core_count = etna_ml_get_core_info(etna_context(pctx))->nn_core_count;
    unsigned input_channels = operation->addition ? 1 : operation->input_channels;
    unsigned output_channels = operation->addition ? 1 : operation->output_channels;
    unsigned cores_used = MIN2(output_channels, nn_core_count);
@@ -1133,7 +1134,7 @@ static unsigned
 write_core_sequential(struct etna_ml_subgraph *subgraph, uint32_t *map, unsigned core, const struct etna_operation *operation, unsigned zrl_bits)
 {
    struct pipe_context *pctx = subgraph->base.context;
-   unsigned nn_core_count = etna_context(pctx)->screen->specs.nn_core_count;
+   unsigned nn_core_count = etna_ml_get_core_info(etna_context(pctx))->nn_core_count;
    unsigned output_channels = operation->addition ? 1 : operation->output_channels;
    unsigned cores_used = MIN2(output_channels, nn_core_count);
    unsigned kernels_per_core = DIV_ROUND_UP(output_channels, cores_used);
@@ -1220,7 +1221,7 @@ calculate_weight_bo_size(struct etna_ml_subgraph *subgraph, const struct etna_op
 {
    struct pipe_context *context = subgraph->base.context;
    struct etna_context *ctx = etna_context(context);
-   unsigned nn_core_count = ctx->screen->specs.nn_core_count;
+   unsigned nn_core_count = etna_ml_get_core_info(ctx)->nn_core_count;
    unsigned header_size = ALIGN(nn_core_count * 4, 64);
    unsigned input_channels = operation->addition ? 1 : operation->input_channels;
    unsigned output_channels = operation->addition ? 1 : operation->output_channels;
@@ -1244,8 +1245,8 @@ calculate_zrl_bits(struct etna_ml_subgraph *subgraph, const struct etna_operatio
 {
    struct pipe_context *context = subgraph->base.context;
    struct etna_context *ctx = etna_context(context);
-   unsigned nn_core_count = ctx->screen->specs.nn_core_count;
-   unsigned max_zrl_bits = ctx->screen->specs.nn_zrl_bits;
+   unsigned nn_core_count = etna_ml_get_core_info(ctx)->nn_core_count;
+   unsigned max_zrl_bits = etna_ml_get_core_info(ctx)->nn_zrl_bits;
    unsigned header_size = ALIGN(nn_core_count * 4, 64);
    unsigned input_channels = operation->addition ? 1 : operation->input_channels;
    unsigned output_channels = operation->addition ? 1 : operation->output_channels;
@@ -1297,7 +1298,7 @@ create_coefficients_bo(struct etna_ml_subgraph *subgraph, const struct etna_oper
 {
    struct pipe_context *context = subgraph->base.context;
    struct etna_context *ctx = etna_context(context);
-   unsigned nn_core_count = ctx->screen->specs.nn_core_count;
+   unsigned nn_core_count = etna_ml_get_core_info(ctx)->nn_core_count;
    unsigned header_size = ALIGN(nn_core_count * 4, 64);
    unsigned input_channels = operation->addition ? 1 : operation->input_channels;
    unsigned output_channels = operation->addition ? 1 : operation->output_channels;

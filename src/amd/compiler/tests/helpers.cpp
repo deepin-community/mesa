@@ -158,7 +158,7 @@ setup_nir_cs(enum amd_gfx_level gfx_level, gl_shader_stage stage, enum radeon_fa
 }
 
 void
-finish_program(Program* prog, bool endpgm)
+finish_program(Program* prog, bool endpgm, bool dominance)
 {
    for (Block& BB : prog->blocks) {
       for (unsigned idx : BB.linear_preds)
@@ -167,20 +167,22 @@ finish_program(Program* prog, bool endpgm)
          prog->blocks[idx].logical_succs.emplace_back(BB.index);
    }
 
-   if (endpgm) {
-      for (Block& block : prog->blocks) {
-         if (block.linear_succs.size() == 0) {
-            block.kind |= block_kind_uniform;
+   for (Block& block : prog->blocks) {
+      if (block.linear_succs.size() == 0) {
+         block.kind |= block_kind_uniform;
+         if (endpgm)
             Builder(prog, &block).sopp(aco_opcode::s_endpgm);
-         }
       }
    }
+
+   if (dominance)
+      dominator_tree(program.get());
 }
 
 void
 finish_validator_test()
 {
-   finish_program(program.get());
+   finish_program(program.get(), true, true);
    aco_print_program(program.get(), output);
    fprintf(output, "Validation results:\n");
    if (aco::validate_ir(program.get()))
@@ -192,7 +194,7 @@ finish_validator_test()
 void
 finish_opt_test()
 {
-   finish_program(program.get());
+   finish_program(program.get(), true, true);
    if (!aco::validate_ir(program.get())) {
       fail_test("Validation before optimization failed");
       return;
@@ -208,7 +210,7 @@ finish_opt_test()
 void
 finish_setup_reduce_temp_test()
 {
-   finish_program(program.get());
+   finish_program(program.get(), true, true);
    if (!aco::validate_ir(program.get())) {
       fail_test("Validation before setup_reduce_temp failed");
       return;
@@ -222,26 +224,37 @@ finish_setup_reduce_temp_test()
 }
 
 void
-finish_ra_test(ra_test_policy policy, bool lower)
+finish_lower_subdword_test()
 {
-   finish_program(program.get());
+   finish_program(program.get(), true, true);
+   if (!aco::validate_ir(program.get())) {
+      fail_test("Validation before lower_subdword failed");
+      return;
+   }
+   aco::lower_subdword(program.get());
+   if (!aco::validate_ir(program.get())) {
+      fail_test("Validation after lower_subdword failed");
+      return;
+   }
+   aco_print_program(program.get(), output);
+}
+
+void
+finish_ra_test(ra_test_policy policy)
+{
+   finish_program(program.get(), true, true);
    if (!aco::validate_ir(program.get())) {
       fail_test("Validation before register allocation failed");
       return;
    }
 
    program->workgroup_size = program->wave_size;
-   aco::live live_vars = aco::live_var_analysis(program.get());
-   aco::register_allocation(program.get(), live_vars, policy);
+   aco::live_var_analysis(program.get());
+   aco::register_allocation(program.get(), policy);
 
    if (aco::validate_ra(program.get())) {
       fail_test("Validation after register allocation failed");
       return;
-   }
-
-   if (lower) {
-      aco::ssa_elimination(program.get());
-      aco::lower_to_hw_instr(program.get());
    }
 
    aco_print_program(program.get(), output);
@@ -250,16 +263,40 @@ finish_ra_test(ra_test_policy policy, bool lower)
 void
 finish_optimizer_postRA_test()
 {
-   finish_program(program.get());
+   finish_program(program.get(), true, true);
+
+   if (!aco::validate_ir(program.get())) {
+      fail_test("Validation before optimize_postRA failed");
+      return;
+   }
+
    aco::optimize_postRA(program.get());
+
+   if (!aco::validate_ir(program.get())) {
+      fail_test("Validation after optimize_postRA failed");
+      return;
+   }
+
    aco_print_program(program.get(), output);
 }
 
 void
 finish_to_hw_instr_test()
 {
-   finish_program(program.get());
+   finish_program(program.get(), true, true);
+
+   if (!aco::validate_ir(program.get())) {
+      fail_test("Validation before lower_to_hw_instr failed");
+      return;
+   }
+
    aco::lower_to_hw_instr(program.get());
+
+   if (!aco::validate_ir(program.get())) {
+      fail_test("Validation after lower_to_hw_instr failed");
+      return;
+   }
+
    aco_print_program(program.get(), output);
 }
 
@@ -275,7 +312,7 @@ void
 finish_waitcnt_test()
 {
    finish_program(program.get());
-   aco::insert_wait_states(program.get());
+   aco::insert_waitcnt(program.get());
    aco_print_program(program.get(), output);
 }
 
@@ -344,6 +381,8 @@ finish_isel_test(enum ac_hw_stage hw_stage, unsigned wave_size)
    memset(&config, 0, sizeof(config));
 
    select_program(program.get(), 1, &nb->shader, &config, &options, &info, &args);
+   dominator_tree(program.get());
+   lower_phis(program.get());
 
    ralloc_free(nb->shader);
    glsl_type_singleton_decref();
@@ -489,18 +528,39 @@ fmax(Temp src0, Temp src1, Builder b)
    return b.vop2(aco_opcode::v_max_f32, b.def(v1), src0, src1);
 }
 
+static Temp
+extract(Temp src, unsigned idx, unsigned size, bool sign_extend, Builder b)
+{
+   if (src.type() == RegType::sgpr)
+      return b.pseudo(aco_opcode::p_extract, b.def(src.regClass()), bld.def(s1, scc), src,
+                      Operand::c32(idx), Operand::c32(size), Operand::c32(sign_extend));
+   else
+      return b.pseudo(aco_opcode::p_extract, b.def(src.regClass()), src, Operand::c32(idx),
+                      Operand::c32(size), Operand::c32(sign_extend));
+}
+
 Temp
 ext_ushort(Temp src, unsigned idx, Builder b)
 {
-   return b.pseudo(aco_opcode::p_extract, b.def(src.regClass()), src, Operand::c32(idx),
-                   Operand::c32(16u), Operand::c32(false));
+   return extract(src, idx, 16, false, b);
+}
+
+Temp
+ext_sshort(Temp src, unsigned idx, Builder b)
+{
+   return extract(src, idx, 16, true, b);
 }
 
 Temp
 ext_ubyte(Temp src, unsigned idx, Builder b)
 {
-   return b.pseudo(aco_opcode::p_extract, b.def(src.regClass()), src, Operand::c32(idx),
-                   Operand::c32(8u), Operand::c32(false));
+   return extract(src, idx, 8, false, b);
+}
+
+Temp
+ext_sbyte(Temp src, unsigned idx, Builder b)
+{
+   return extract(src, idx, 8, true, b);
 }
 
 void
@@ -586,6 +646,7 @@ get_vk_device(enum amd_gfx_level gfx_level)
    case GFX10: family = CHIP_NAVI10; break;
    case GFX10_3: family = CHIP_NAVI21; break;
    case GFX11: family = CHIP_NAVI31; break;
+   case GFX12: family = CHIP_GFX1200; break;
    default: family = CHIP_UNKNOWN; break;
    }
    return get_vk_device(family);

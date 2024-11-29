@@ -1,5 +1,4 @@
 # Copyright © 2018 Valve Corporation
-#
 # SPDX-License-Identifier: MIT
 
 aco_depends = files('aco_opcodes.py')
@@ -43,13 +42,16 @@ libaco_files = files(
   'aco_ir.h',
   'aco_assembler.cpp',
   'aco_form_hard_clauses.cpp',
+  'aco_insert_delay_alu.cpp',
   'aco_insert_exec_mask.cpp',
   'aco_insert_NOPs.cpp',
   'aco_insert_waitcnt.cpp',
+  'aco_jump_threading.cpp',
   'aco_reduce_assign.cpp',
   'aco_register_allocation.cpp',
   'aco_live_var_analysis.cpp',
   'aco_lower_phis.cpp',
+  'aco_lower_subdword.cpp',
   'aco_lower_to_cssa.cpp',
   'aco_lower_to_hw_instr.cpp',
   'aco_optimizer.cpp',

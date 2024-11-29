@@ -1,3 +1,5 @@
+dri_gbm.so libgbm1 #MINVER#
+ gbmint_get_backend@Base 24.3.0~rc1
 libgbm.so.1 libgbm1 #MINVER#
 | libgbm1-private
  gbm_bo_create@Base 7.11~1
@@ -38,4 +40,3 @@ libgbm.so.1 libgbm1 #MINVER#
  gbm_surface_has_free_buffers@Base 8.1~0
  gbm_surface_lock_front_buffer@Base 8.1~0
  gbm_surface_release_buffer@Base 8.1~0
- zx_print_driver_map_list@Base 23.1.2-1deepin1

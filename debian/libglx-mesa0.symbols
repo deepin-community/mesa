@@ -325,6 +325,8 @@ libGLX_mesa.so.0 libglx-mesa0
  glFramebufferTexture@Base 0
  glFramebufferTextureLayer@Base 0
  glFramebufferTextureLayerEXT@Base 0
+ glFramebufferTextureMultisampleMultiviewOVR@Base 24.3.0~rc1
+ glFramebufferTextureMultiviewOVR@Base 24.3.0~rc1
  glFrontFace@Base 0
  glFrustum@Base 0
  glFrustumf@Base 0
@@ -1001,6 +1003,8 @@ libGLX_mesa.so.0 libglx-mesa0
  glTexImage3D@Base 0
  glTexImage3DEXT@Base 0
  glTexImage3DMultisample@Base 0
+ glTexStorageAttribs2DEXT@Base 24.2.0~rc1
+ glTexStorageAttribs3DEXT@Base 24.2.0~rc1
  glTexParameterIiv@Base 0
  glTexParameterIivEXT@Base 0
  glTexParameterIuiv@Base 0
@@ -1299,4 +1303,3 @@ libGLX_mesa.so.0 libglx-mesa0
  glWindowPos3sARB@Base 0
  glWindowPos3sv@Base 0
  glWindowPos3svARB@Base 0
- zx_print_driver_map_list@Base 23.1.2-1deepin1

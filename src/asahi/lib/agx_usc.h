@@ -6,20 +6,20 @@
 #pragma once
 
 #include "asahi/genxml/agx_pack.h"
-#include "asahi/lib/pool.h"
+#include "agx_compile.h"
 
 /* Opaque structure representing a USC program being constructed */
 struct agx_usc_builder {
-   struct agx_ptr T;
    uint8_t *head;
 
 #ifndef NDEBUG
+   uint8_t *begin;
    size_t size;
 #endif
 };
 
-static struct agx_usc_builder
-agx_alloc_usc_control(struct agx_pool *pool, unsigned num_reg_bindings)
+static inline unsigned
+agx_usc_size(unsigned num_reg_bindings)
 {
    STATIC_ASSERT(AGX_USC_UNIFORM_HIGH_LENGTH == AGX_USC_UNIFORM_LENGTH);
    STATIC_ASSERT(AGX_USC_TEXTURE_LENGTH == AGX_USC_UNIFORM_LENGTH);
@@ -33,24 +33,27 @@ agx_alloc_usc_control(struct agx_pool *pool, unsigned num_reg_bindings)
    size += MAX2(AGX_USC_NO_PRESHADER_LENGTH, AGX_USC_PRESHADER_LENGTH);
    size += AGX_USC_FRAGMENT_PROPERTIES_LENGTH;
 
-   struct agx_usc_builder b = {
-      .T = agx_pool_alloc_aligned(pool, size, 64),
+   return size;
+}
+
+static struct agx_usc_builder
+agx_usc_builder(void *out, ASSERTED size_t size)
+{
+   return (struct agx_usc_builder){
+      .head = out,
 
 #ifndef NDEBUG
+      .begin = out,
       .size = size,
 #endif
    };
-
-   b.head = (uint8_t *)b.T.cpu;
-
-   return b;
 }
 
 static bool
 agx_usc_builder_validate(struct agx_usc_builder *b, size_t size)
 {
 #ifndef NDEBUG
-   assert(((b->head - (uint8_t *)b->T.cpu) + size) <= b->size);
+   assert(((b->head - b->begin) + size) <= b->size);
 #endif
 
    return true;
@@ -76,6 +79,7 @@ agx_usc_uniform(struct agx_usc_builder *b, unsigned start_halfs,
 {
    assert((start_halfs + size_halfs) <= (1 << 9) && "uniform file overflow");
    assert(size_halfs <= 64 && "caller's responsibility to split");
+   assert(size_halfs > 0 && "no empty uniforms");
 
    if (start_halfs & BITFIELD_BIT(8)) {
       agx_usc_pack(b, UNIFORM_HIGH, cfg) {
@@ -92,18 +96,60 @@ agx_usc_uniform(struct agx_usc_builder *b, unsigned start_halfs,
    }
 }
 
-static uint32_t
-agx_usc_fini(struct agx_usc_builder *b)
-{
-   assert(b->T.gpu <= (1ull << 32) && "pipelines must be in low memory");
-   return b->T.gpu;
-}
-
 static void
 agx_usc_shared_none(struct agx_usc_builder *b)
 {
    agx_usc_pack(b, SHARED, cfg) {
       cfg.layout = AGX_SHARED_LAYOUT_VERTEX_COMPUTE;
       cfg.bytes_per_threadgroup = 65536;
+   }
+}
+
+static void
+agx_usc_shared_non_fragment(struct agx_usc_builder *b,
+                            struct agx_shader_info *info,
+                            unsigned variable_shared_mem)
+{
+   if (info->stage == PIPE_SHADER_FRAGMENT) {
+      return;
+   } else if (info->stage == PIPE_SHADER_COMPUTE && info->imageblock_stride) {
+      assert(info->local_size == 0 && "we don't handle this interaction");
+      assert(variable_shared_mem == 0 && "we don't handle this interaction");
+
+      agx_usc_pack(b, SHARED, cfg) {
+         cfg.layout = AGX_SHARED_LAYOUT_32X32;
+         cfg.uses_shared_memory = true;
+         cfg.sample_count = 1;
+         cfg.sample_stride_in_8_bytes =
+            DIV_ROUND_UP(info->imageblock_stride, 8);
+         cfg.bytes_per_threadgroup = cfg.sample_stride_in_8_bytes * 8 * 32 * 32;
+      }
+   } else if (info->stage == PIPE_SHADER_COMPUTE ||
+              info->stage == PIPE_SHADER_TESS_CTRL) {
+      unsigned size = info->local_size + variable_shared_mem;
+
+      agx_usc_pack(b, SHARED, cfg) {
+         cfg.layout = AGX_SHARED_LAYOUT_VERTEX_COMPUTE;
+         cfg.bytes_per_threadgroup = size > 0 ? size : 65536;
+         cfg.uses_shared_memory = size > 0;
+      }
+   } else {
+      agx_usc_shared_none(b);
+   }
+}
+
+static inline void
+agx_usc_immediates(struct agx_usc_builder *b, struct agx_shader_info *info,
+                   uint64_t base_addr)
+{
+   uint16_t size_16 = info->rodata.size_16;
+
+   for (unsigned range = 0; range < DIV_ROUND_UP(size_16, 64); ++range) {
+      unsigned offset = 64 * range;
+      assert(offset < size_16);
+
+      agx_usc_uniform(b, info->rodata.base_uniform + offset,
+                      MIN2(64, size_16 - offset),
+                      base_addr + info->rodata.offset + (offset * 2));
    }
 }

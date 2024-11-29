@@ -26,6 +26,7 @@
 
 #include "blorp_priv.h"
 #include "dev/intel_device_info.h"
+#include "common/intel_compute_slm.h"
 #include "common/intel_sample_positions.h"
 #include "common/intel_l3_config.h"
 #include "genxml/gen_macros.h"
@@ -592,7 +593,10 @@ blorp_emit_cc_viewport(struct blorp_batch *batch)
 {
    uint32_t cc_vp_offset;
 
-   if (batch->blorp->config.use_cached_dynamic_states) {
+   /* Somehow reusing CC_VIEWPORT on Gfx9 is causing issues :
+    *    https://gitlab.freedesktop.org/mesa/mesa/-/issues/11647
+    */
+   if (GFX_VER != 9 && batch->blorp->config.use_cached_dynamic_states) {
       cc_vp_offset = blorp_get_dynamic_state(batch, BLORP_DYNAMIC_STATE_CC_VIEWPORT);
    } else {
       blorp_emit_dynamic(batch, GENX(CC_VIEWPORT), vp, 32, &cc_vp_offset) {
@@ -778,12 +782,13 @@ blorp_emit_ps_config(struct blorp_batch *batch,
       switch (params->fast_clear_op) {
       case ISL_AUX_OP_NONE:
          break;
+#if GFX_VER < 20
 #if GFX_VER >= 10
       case ISL_AUX_OP_AMBIGUATE:
          ps.RenderTargetFastClearEnable = true;
          ps.RenderTargetResolveType = FAST_CLEAR_0;
          break;
-#endif
+#endif /* GFX_VER >= 10 */
       case ISL_AUX_OP_PARTIAL_RESOLVE:
          ps.RenderTargetResolveType = RESOLVE_PARTIAL;
          break;
@@ -799,6 +804,7 @@ blorp_emit_ps_config(struct blorp_batch *batch,
 #endif
          ps.RenderTargetResolveType = RESOLVE_FULL;
          break;
+#endif /* GFX_VER < 20 */
       case ISL_AUX_OP_FAST_CLEAR:
          /* WA 1406738321:
           * 3D/Volumetric surfaces do not support Fast Clear operation.
@@ -863,18 +869,49 @@ blorp_emit_ps_config(struct blorp_batch *batch,
    }
 
    blorp_emit(batch, GENX(3DSTATE_PS_EXTRA), psx) {
-      if (prog_data) {
-         psx.PixelShaderValid = true;
-#if GFX_VER < 20
-         psx.AttributeEnable = prog_data->num_varying_inputs > 0;
-#endif
-         psx.PixelShaderIsPerSample = prog_data->persample_dispatch;
-         psx.PixelShaderComputedDepthMode = prog_data->computed_depth_mode;
-         psx.PixelShaderComputesStencil = prog_data->computed_stencil;
-      }
-
       if (params->src.enabled)
          psx.PixelShaderKillsPixel = true;
+
+      if (prog_data) {
+         psx.PixelShaderValid = true;
+         psx.PixelShaderComputedDepthMode = prog_data->computed_depth_mode;
+         psx.PixelShaderComputesStencil = prog_data->computed_stencil;
+         psx.PixelShaderIsPerSample = prog_data->persample_dispatch;
+
+#if INTEL_WA_18038825448_GFX_VER
+         psx.EnablePSDependencyOnCPsizeChange =
+            batch->flags & BLORP_BATCH_FORCE_CPS_DEPENDENCY;
+#endif
+
+#if GFX_VER < 20
+         psx.AttributeEnable = prog_data->num_varying_inputs > 0;
+#else
+         /* Bspec 57340 (r59562):
+          *
+          *   For MSAA fast clear, it (clear shader) must be in per-pixel
+          *   dispatch mode.
+          *
+          * Bspec 56424 (r58933):
+          *
+          *   Bit 6 of Bit Group 0: Pixel Shader Is Per Sample
+          *   If this bit is DISABLED, the dispatch rate is determined by the
+          *   value of Pixel Shader Is Per Coarse Pixel.
+          *
+          *   Bit 4 of Bit Group 0: Pixel Shader Is Per Coarse Pixel
+          *   If Pixel Shader Is Per Sample is DISABLED and this bit is
+          *   DISABLED, the pixel shader is dispatched at the per pixel
+          *   shading rate.
+          *
+          * The below assertion ensures the MSAA clear shader is in per-pixel
+          * dispatch mode.
+          */
+         if (params->fast_clear_op == ISL_AUX_OP_FAST_CLEAR &&
+             params->num_samples > 1) {
+            assert(!psx.PixelShaderIsPerSample &&
+                   !psx.PixelShaderIsPerCoarsePixel);
+         }
+#endif
+      }
    }
 }
 
@@ -886,8 +923,7 @@ blorp_emit_blend_state(struct blorp_batch *batch,
    if (!batch->blorp->config.use_cached_dynamic_states) {
       struct GENX(BLEND_STATE) blend = { };
 
-      int size = GENX(BLEND_STATE_length) * 4;
-      size += GENX(BLEND_STATE_ENTRY_length) * 4 * params->num_draw_buffers;
+      const unsigned size = 96;
       uint32_t *state = blorp_alloc_dynamic_state(batch, size, 64, &offset);
       if (state == NULL)
          return;
@@ -1136,6 +1172,18 @@ blorp_emit_surface_state(struct blorp_batch *batch,
    const bool use_clear_address =
       GFX_VER >= 10 && (surface->clear_color_addr.buffer != NULL);
 
+   /* On gfx12 (and optionally on gfx11), hardware will read and write to the
+    * clear color address, converting the raw clear color channels to a pixel
+    * during a fast-clear. To avoid the restrictions associated with the
+    * hardware feature, we instead write a software-converted pixel ourselves.
+    * If we're performing a fast-clear, provide a substitute address to avoid
+    * a collision with hardware. Outside of gfx11 and gfx12, indirect clear
+    * color BOs are not used during fast-clears.
+    */
+   const struct blorp_address op_clear_addr =
+      aux_op == ISL_AUX_OP_FAST_CLEAR ? blorp_get_workaround_address(batch) :
+                                        surface->clear_color_addr;
+
    isl_surf_fill_state(batch->blorp->isl_dev, state,
                        .surf = &surf, .view = &surface->view,
                        .aux_surf = &surface->aux_surf, .aux_usage = aux_usage,
@@ -1144,8 +1192,7 @@ blorp_emit_surface_state(struct blorp_batch *batch,
                        .aux_address = !use_aux_address ? 0 :
                           blorp_get_surface_address(batch, surface->aux_addr),
                        .clear_address = !use_clear_address ? 0 :
-                          blorp_get_surface_address(batch,
-                                                    surface->clear_color_addr),
+                          blorp_get_surface_address(batch, op_clear_addr),
                        .mocs = surface->addr.mocs,
                        .clear_color = surface->clear_color,
                        .use_clear_address = use_clear_address);
@@ -1170,7 +1217,7 @@ blorp_emit_surface_state(struct blorp_batch *batch,
       uint32_t *clear_addr = state + isl_dev->ss.clear_color_state_offset;
       blorp_surface_reloc(batch, state_offset +
                           isl_dev->ss.clear_color_state_offset,
-                          surface->clear_color_addr, *clear_addr);
+                          op_clear_addr, *clear_addr);
 #else
       /* Fast clears just whack the AUX surface and don't actually use the
        * clear color for anything.  We can avoid the MI memcpy on that case.
@@ -1280,6 +1327,8 @@ blorp_emit_depth_stencil_config(struct blorp_batch *batch,
                                 const struct blorp_params *params)
 {
    const struct isl_device *isl_dev = batch->blorp->isl_dev;
+   const struct intel_device_info *devinfo =
+      batch->blorp->compiler->brw->devinfo;
 
    uint32_t *dw = blorp_emit_dwords(batch, isl_dev->ds.size / 4);
    if (dw == NULL)
@@ -1331,21 +1380,24 @@ blorp_emit_depth_stencil_config(struct blorp_batch *batch,
 
    isl_emit_depth_stencil_hiz_s(isl_dev, dw, &info);
 
-#if GFX_VER >= 11
-   /* Wa_1408224581
-    *
-    * Workaround: Gfx12LP Astep only An additional pipe control with
-    * post-sync = store dword operation would be required.( w/a is to
-    * have an additional pipe control after the stencil state whenever
-    * the surface state bits of this state is changing).
-    *
-    * This also seems sufficient to handle Wa_14014097488.
-    */
-   blorp_emit(batch, GENX(PIPE_CONTROL), pc) {
-      pc.PostSyncOperation = WriteImmediateData;
-      pc.Address = blorp_get_workaround_address(batch);
+   if (intel_needs_workaround(devinfo, 1408224581) ||
+       intel_needs_workaround(devinfo, 14014097488) ||
+       intel_needs_workaround(devinfo, 14016712196)) {
+      /* Wa_1408224581
+       *
+       * Workaround: Gfx12LP Astep only An additional pipe control with
+       * post-sync = store dword operation would be required.( w/a is to
+       * have an additional pipe control after the stencil state whenever
+       * the surface state bits of this state is changing).
+       *
+       * This also seems sufficient to handle Wa_14014097488 and
+       * Wa_14016712196.
+       */
+      blorp_emit(batch, GENX(PIPE_CONTROL), pc) {
+         pc.PostSyncOperation = WriteImmediateData;
+         pc.Address = blorp_get_workaround_address(batch);
+      }
    }
-#endif
 }
 
 /* Emits the Optimized HiZ sequence specified in the BDW+ PRMs. The
@@ -1385,13 +1437,10 @@ blorp_emit_gfx8_hiz_op(struct blorp_batch *batch,
     *    (inclusive) defined in the CC_VIEWPORT. If the depth buffer format is
     *    D32_FLOAT, then +/-DENORM values are also allowed.
     *
-    * Set the bounds to match our hardware limits, [0.0, 1.0].
+    * Set the bounds to match our hardware limits.
     */
-   if (params->depth.enabled && params->hiz_op == ISL_AUX_OP_FAST_CLEAR) {
-      assert(params->depth.clear_color.f32[0] >= 0.0f);
-      assert(params->depth.clear_color.f32[0] <= 1.0f);
+   if (params->depth.enabled && params->hiz_op == ISL_AUX_OP_FAST_CLEAR)
       blorp_emit_cc_viewport(batch);
-   }
 
    /* According to the SKL PRM formula for WM_INT::ThreadDispatchEnable, the
     * 3DSTATE_WM::ForceThreadDispatchEnable field can force WM thread dispatch
@@ -1424,6 +1473,16 @@ blorp_emit_gfx8_hiz_op(struct blorp_batch *batch,
          hzp.FullSurfaceDepthandStencilClear = params->full_surface_hiz_op;
 #if GFX_VER >= 20
          hzp.DepthClearValue = params->depth.clear_color.f32[0];
+
+         /* From the Xe2 Bspec 56437 (r61349):
+          *
+          *    The Depth Clear value cannot be a NAN (Not-A-Number) if the
+          *    depth format is Float32.
+          *
+          * We're not required to support NaN in APIs, so flush to zero.
+          */
+         if (util_is_nan(hzp.DepthClearValue))
+            hzp.DepthClearValue = 0;
 #endif
          break;
       case ISL_AUX_OP_FULL_RESOLVE:
@@ -1467,91 +1526,6 @@ blorp_emit_gfx8_hiz_op(struct blorp_batch *batch,
    blorp_measure_end(batch, params);
 }
 
-static void
-blorp_update_clear_color(UNUSED struct blorp_batch *batch,
-                         const struct blorp_surface_info *info)
-{
-   assert(info->clear_color_addr.buffer != NULL);
-#if GFX_VER == 11
-   /* 2 QWORDS */
-   const unsigned inlinedata_dw = 2 * 2;
-   const unsigned num_dwords = GENX(MI_ATOMIC_length) + inlinedata_dw;
-
-   struct blorp_address clear_addr = info->clear_color_addr;
-   uint32_t *dw = blorp_emitn(batch, GENX(MI_ATOMIC), num_dwords,
-                              .DataSize = MI_ATOMIC_QWORD,
-                              .ATOMICOPCODE = MI_ATOMIC_OP_MOVE8B,
-                              .InlineData = true,
-                              .MemoryAddress = clear_addr);
-   /* dw starts at dword 1, but we need to fill dwords 3 and 5 */
-   dw[2] = info->clear_color.u32[0];
-   dw[3] = 0;
-   dw[4] = info->clear_color.u32[1];
-   dw[5] = 0;
-
-   clear_addr.offset += 8;
-   dw = blorp_emitn(batch, GENX(MI_ATOMIC), num_dwords,
-                    .DataSize = MI_ATOMIC_QWORD,
-                    .ATOMICOPCODE = MI_ATOMIC_OP_MOVE8B,
-                    .CSSTALL = true,
-                    .ReturnDataControl = true,
-                    .InlineData = true,
-                    .MemoryAddress = clear_addr);
-   /* dw starts at dword 1, but we need to fill dwords 3 and 5 */
-   dw[2] = info->clear_color.u32[2];
-   dw[3] = 0;
-   dw[4] = info->clear_color.u32[3];
-   dw[5] = 0;
-
-#else
-
-   /* According to Wa_2201730850, in the Clear Color Programming Note under
-    * the Red channel, "Software shall write the converted Depth Clear to this
-    * dword." The only depth formats listed under the red channel are IEEE_FP
-    * and UNORM24_X8. These two requirements are incompatible with the UNORM16
-    * depth format, so just ignore that case and simply perform the conversion
-    * for all depth formats.
-    */
-   union isl_color_value fixed_color = info->clear_color;
-   if (GFX_VER == 12 && isl_surf_usage_is_depth(info->surf.usage)) {
-      isl_color_value_pack(&info->clear_color, info->surf.format,
-                           fixed_color.u32);
-   }
-
-   for (int i = 0; i < 4; i++) {
-      blorp_emit(batch, GENX(MI_STORE_DATA_IMM), sdi) {
-         sdi.Address = info->clear_color_addr;
-         sdi.Address.offset += i * 4;
-         sdi.ImmediateData = fixed_color.u32[i];
-#if GFX_VER >= 12
-         if (i == 3)
-            sdi.ForceWriteCompletionCheck = true;
-#endif
-      }
-   }
-
-   /* The RENDER_SURFACE_STATE::ClearColor field states that software should
-    * write the converted depth value 16B after the clear address:
-    *
-    *    3D Sampler will always fetch clear depth from the location 16-bytes
-    *    above this address, where the clear depth, converted to native
-    *    surface format by software, will be stored.
-    *
-    */
-#if GFX_VER >= 12
-   if (isl_surf_usage_is_depth(info->surf.usage)) {
-      blorp_emit(batch, GENX(MI_STORE_DATA_IMM), sdi) {
-         sdi.Address = info->clear_color_addr;
-         sdi.Address.offset += 4 * 4;
-         sdi.ImmediateData = fixed_color.u32[0];
-         sdi.ForceWriteCompletionCheck = true;
-      }
-   }
-#endif
-
-#endif
-}
-
 static bool
 blorp_uses_bti_rt_writes(const struct blorp_batch *batch, const struct blorp_params *params)
 {
@@ -1565,18 +1539,6 @@ blorp_uses_bti_rt_writes(const struct blorp_batch *batch, const struct blorp_par
 static void
 blorp_exec_3d(struct blorp_batch *batch, const struct blorp_params *params)
 {
-   if (!(batch->flags & BLORP_BATCH_NO_UPDATE_CLEAR_COLOR)) {
-      if (params->fast_clear_op == ISL_AUX_OP_FAST_CLEAR &&
-          params->dst.clear_color_addr.buffer != NULL) {
-         blorp_update_clear_color(batch, &params->dst);
-      }
-
-      if (params->hiz_op == ISL_AUX_OP_FAST_CLEAR &&
-          params->depth.clear_color_addr.buffer != NULL) {
-         blorp_update_clear_color(batch, &params->depth);
-      }
-   }
-
    if (params->hiz_op != ISL_AUX_OP_NONE) {
       blorp_emit_gfx8_hiz_op(batch, params);
       return;
@@ -1670,7 +1632,6 @@ blorp_get_compute_push_const(struct blorp_batch *batch,
 static void
 blorp_exec_compute(struct blorp_batch *batch, const struct blorp_params *params)
 {
-   assert(!(batch->flags & BLORP_BATCH_NO_UPDATE_CLEAR_COLOR));
    assert(!(batch->flags & BLORP_BATCH_PREDICATE_ENABLE));
    assert(params->hiz_op == ISL_AUX_OP_NONE);
 
@@ -1692,43 +1653,42 @@ blorp_exec_compute(struct blorp_batch *batch, const struct blorp_params *params)
    assert(cs_prog_data->local_size[2] == 1);
 
 #if GFX_VERx10 >= 125
-   assert(cs_prog_data->push.per_thread.regs == 0);
-   blorp_emit(batch, GENX(COMPUTE_WALKER), cw) {
-      cw.SIMDSize                       = dispatch.simd_size / 16;
-      cw.MessageSIMD                    = dispatch.simd_size / 16,
-      cw.LocalXMaximum                  = cs_prog_data->local_size[0] - 1;
-      cw.LocalYMaximum                  = cs_prog_data->local_size[1] - 1;
-      cw.LocalZMaximum                  = cs_prog_data->local_size[2] - 1;
-      cw.ThreadGroupIDStartingX         = group_x0;
-      cw.ThreadGroupIDStartingY         = group_y0;
-      cw.ThreadGroupIDStartingZ         = group_z0;
-      cw.ThreadGroupIDXDimension        = group_x1;
-      cw.ThreadGroupIDYDimension        = group_y1;
-      cw.ThreadGroupIDZDimension        = group_z1;
-      cw.ExecutionMask                  = 0xffffffff;
-      cw.PostSync.MOCS                  = isl_mocs(batch->blorp->isl_dev, 0, false);
+   uint32_t surfaces_offset = blorp_setup_binding_table(batch, params);
 
-      uint32_t surfaces_offset = blorp_setup_binding_table(batch, params);
+   uint32_t samplers_offset =
+      params->src.enabled ? blorp_emit_sampler_state(batch) : 0;
 
-      uint32_t samplers_offset =
-         params->src.enabled ? blorp_emit_sampler_state(batch) : 0;
+   uint32_t push_const_offset;
+   unsigned push_const_size;
+   blorp_get_compute_push_const(batch, params, dispatch.threads,
+                                &push_const_offset, &push_const_size);
+   struct GENX(COMPUTE_WALKER_BODY) body = {
+      .SIMDSize                       = dispatch.simd_size / 16,
+      .MessageSIMD                    = dispatch.simd_size / 16,
+      .LocalXMaximum                  = cs_prog_data->local_size[0] - 1,
+      .LocalYMaximum                  = cs_prog_data->local_size[1] - 1,
+      .LocalZMaximum                  = cs_prog_data->local_size[2] - 1,
+      .ThreadGroupIDStartingX         = group_x0,
+      .ThreadGroupIDStartingY         = group_y0,
+      .ThreadGroupIDStartingZ         = group_z0,
+      .ThreadGroupIDXDimension        = group_x1,
+      .ThreadGroupIDYDimension        = group_y1,
+      .ThreadGroupIDZDimension        = group_z1,
+      .ExecutionMask                  = 0xffffffff,
+      .PostSync.MOCS                  = isl_mocs(batch->blorp->isl_dev, 0, false),
 
-      uint32_t push_const_offset;
-      unsigned push_const_size;
-      blorp_get_compute_push_const(batch, params, dispatch.threads,
-                                   &push_const_offset, &push_const_size);
-      cw.IndirectDataStartAddress       = push_const_offset;
-      cw.IndirectDataLength             = push_const_size;
+      .IndirectDataStartAddress       = push_const_offset,
+      .IndirectDataLength             = push_const_size,
 
 #if GFX_VERx10 >= 125
-      cw.GenerateLocalID                = cs_prog_data->generate_local_id != 0;
-      cw.EmitLocal                      = cs_prog_data->generate_local_id;
-      cw.WalkOrder                      = cs_prog_data->walk_order;
-      cw.TileLayout = cs_prog_data->walk_order == INTEL_WALK_ORDER_YXZ ?
-                      TileY32bpe : Linear;
+      .GenerateLocalID                = cs_prog_data->generate_local_id != 0,
+      .EmitLocal                      = cs_prog_data->generate_local_id,
+      .WalkOrder                      = cs_prog_data->walk_order,
+      .TileLayout = cs_prog_data->walk_order == INTEL_WALK_ORDER_YXZ ?
+                    TileY32bpe : Linear,
 #endif
 
-      cw.InterfaceDescriptor = (struct GENX(INTERFACE_DESCRIPTOR_DATA)) {
+      .InterfaceDescriptor = (struct GENX(INTERFACE_DESCRIPTOR_DATA)) {
          .KernelStartPointer = params->cs_prog_kernel,
          .SamplerStatePointer = samplers_offset,
          .SamplerCount = params->src.enabled ? 1 : 0,
@@ -1736,10 +1696,19 @@ blorp_exec_compute(struct blorp_batch *batch, const struct blorp_params *params)
          .BindingTablePointer = surfaces_offset,
          .NumberofThreadsinGPGPUThreadGroup = dispatch.threads,
          .SharedLocalMemorySize =
-            encode_slm_size(GFX_VER, prog_data->total_shared),
-         .PreferredSLMAllocationSize = preferred_slm_allocation_size(devinfo),
+            intel_compute_slm_encode_size(GFX_VER, prog_data->total_shared),
+         .PreferredSLMAllocationSize =
+            intel_compute_preferred_slm_calc_encode_size(devinfo,
+                                                         prog_data->total_shared,
+                                                         dispatch.group_size,
+                                                         dispatch.simd_size),
          .NumberOfBarriers = cs_prog_data->uses_barrier,
-      };
+      },
+   };
+
+   assert(cs_prog_data->push.per_thread.regs == 0);
+   blorp_emit(batch, GENX(COMPUTE_WALKER), cw) {
+      cw.body = body;
    }
 
 #else
@@ -1799,8 +1768,8 @@ blorp_exec_compute(struct blorp_batch *batch, const struct blorp_params *params)
       .BindingTablePointer = surfaces_offset,
       .ConstantURBEntryReadLength = cs_prog_data->push.per_thread.regs,
       .NumberofThreadsinGPGPUThreadGroup = dispatch.threads,
-      .SharedLocalMemorySize = encode_slm_size(GFX_VER,
-                                               prog_data->total_shared),
+      .SharedLocalMemorySize = intel_compute_slm_encode_size(GFX_VER,
+                                                             prog_data->total_shared),
       .BarrierEnable = cs_prog_data->uses_barrier,
       .CrossThreadConstantDataReadLength =
          cs_prog_data->push.cross_thread.regs,
@@ -1908,6 +1877,7 @@ xy_bcb_surf_depth(const struct isl_surf *surf)
                                        : surf->logical_level0_px.array_len;
 }
 
+#if GFX_VER < 20
 static uint32_t
 xy_aux_mode(const struct blorp_surface_info *info)
 {
@@ -1922,7 +1892,8 @@ xy_aux_mode(const struct blorp_surface_info *info)
       unreachable("Unsupported aux mode");
    }
 }
-#endif
+#endif // GFX_VER < 20
+#endif // GFX_VERx10 >= 125
 
 UNUSED static void
 blorp_xy_block_copy_blt(struct blorp_batch *batch,
@@ -1934,7 +1905,6 @@ blorp_xy_block_copy_blt(struct blorp_batch *batch,
    UNUSED const struct isl_device *isl_dev = batch->blorp->isl_dev;
 
    assert(batch->flags & BLORP_BATCH_USE_BLITTER);
-   assert(!(batch->flags & BLORP_BATCH_NO_UPDATE_CLEAR_COLOR));
    assert(!(batch->flags & BLORP_BATCH_PREDICATE_ENABLE));
    assert(params->hiz_op == ISL_AUX_OP_NONE);
 
@@ -2011,15 +1981,19 @@ blorp_xy_block_copy_blt(struct blorp_batch *batch,
       blt.DestinationMipTailStartLOD = dst_surf->miptail_start_level;
       blt.DestinationHorizontalAlign = isl_encode_halign(dst_align.width);
       blt.DestinationVerticalAlign = isl_encode_valign(dst_align.height);
+#if GFX_VER < 20
       /* XY_BLOCK_COPY_BLT only supports AUX_CCS. */
       blt.DestinationDepthStencilResource =
          params->dst.aux_usage == ISL_AUX_USAGE_STC_CCS;
+#endif
       blt.DestinationTargetMemory =
          params->dst.addr.local_hint ? XY_MEM_LOCAL : XY_MEM_SYSTEM;
 
       if (params->dst.aux_usage != ISL_AUX_USAGE_NONE) {
+#if GFX_VER < 20
          blt.DestinationAuxiliarySurfaceMode = xy_aux_mode(&params->dst);
          blt.DestinationCompressionEnable = true;
+#endif
          blt.DestinationCompressionFormat =
             isl_get_render_compression_format(dst_surf->format);
          blt.DestinationClearValueEnable = !!params->dst.clear_color_addr.buffer;
@@ -2048,15 +2022,19 @@ blorp_xy_block_copy_blt(struct blorp_batch *batch,
       blt.SourceMipTailStartLOD = src_surf->miptail_start_level;
       blt.SourceHorizontalAlign = isl_encode_halign(src_align.width);
       blt.SourceVerticalAlign = isl_encode_valign(src_align.height);
+#if GFX_VER < 20
       /* XY_BLOCK_COPY_BLT only supports AUX_CCS. */
       blt.SourceDepthStencilResource =
          params->src.aux_usage == ISL_AUX_USAGE_STC_CCS;
+#endif
       blt.SourceTargetMemory =
          params->src.addr.local_hint ? XY_MEM_LOCAL : XY_MEM_SYSTEM;
 
       if (params->src.aux_usage != ISL_AUX_USAGE_NONE) {
+#if GFX_VER < 20
          blt.SourceAuxiliarySurfaceMode = xy_aux_mode(&params->src);
          blt.SourceCompressionEnable = true;
+#endif
          blt.SourceCompressionFormat =
             isl_get_render_compression_format(src_surf->format);
          blt.SourceClearValueEnable = !!params->src.clear_color_addr.buffer;
@@ -2080,7 +2058,6 @@ blorp_xy_fast_color_blit(struct blorp_batch *batch,
       isl_format_get_layout(params->dst.view.format);
 
    assert(batch->flags & BLORP_BATCH_USE_BLITTER);
-   assert(!(batch->flags & BLORP_BATCH_NO_UPDATE_CLEAR_COLOR));
    assert(!(batch->flags & BLORP_BATCH_PREDICATE_ENABLE));
    assert(params->hiz_op == ISL_AUX_OP_NONE);
 
@@ -2098,6 +2075,10 @@ blorp_xy_fast_color_blit(struct blorp_batch *batch,
 
 #if GFX_VERx10 >= 125
    struct isl_extent3d dst_align = isl_get_image_alignment(dst_surf);
+#endif
+
+#if INTEL_NEEDS_WA_16021021469
+   assert(fmtl->bpb != 96);
 #endif
 
    blorp_emit(batch, GENX(XY_FAST_COLOR_BLT), blt) {
@@ -2136,12 +2117,14 @@ blorp_xy_fast_color_blit(struct blorp_batch *batch,
          params->dst.addr.local_hint ? XY_MEM_LOCAL : XY_MEM_SYSTEM;
 
       if (params->dst.aux_usage != ISL_AUX_USAGE_NONE) {
+#if GFX_VERx10 == 125
          blt.DestinationAuxiliarySurfaceMode = xy_aux_mode(&params->dst);
          blt.DestinationCompressionEnable = true;
-         blt.DestinationCompressionFormat =
-            isl_get_render_compression_format(dst_surf->format);
          blt.DestinationClearValueEnable = !!params->dst.clear_color_addr.buffer;
          blt.DestinationClearAddress = params->dst.clear_color_addr;
+#endif
+         blt.DestinationCompressionFormat =
+            isl_get_render_compression_format(dst_surf->format);
       }
 
       blt.DestinationMOCS = params->dst.addr.mocs;

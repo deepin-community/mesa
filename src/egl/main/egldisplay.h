@@ -111,14 +111,16 @@ struct _egl_extensions {
    EGLBoolean EXT_protected_content;
    EGLBoolean EXT_protected_surface;
    EGLBoolean EXT_query_reset_notification_strategy;
+   EGLBoolean EXT_surface_compression;
    EGLBoolean EXT_surface_CTA861_3_metadata;
    EGLBoolean EXT_surface_SMPTE2086_metadata;
    EGLBoolean EXT_swap_buffers_with_damage;
 
    unsigned int IMG_context_priority;
-#define __EGL_CONTEXT_PRIORITY_LOW_BIT    0
-#define __EGL_CONTEXT_PRIORITY_MEDIUM_BIT 1
-#define __EGL_CONTEXT_PRIORITY_HIGH_BIT   2
+#define __EGL_CONTEXT_PRIORITY_LOW_BIT      0
+#define __EGL_CONTEXT_PRIORITY_MEDIUM_BIT   1
+#define __EGL_CONTEXT_PRIORITY_HIGH_BIT     2
+#define __EGL_CONTEXT_PRIORITY_REALTIME_BIT 3
 
    EGLBoolean KHR_cl_event2;
    EGLBoolean KHR_config_attribs;
@@ -152,6 +154,7 @@ struct _egl_extensions {
    EGLBoolean NOK_texture_from_pixmap;
 
    EGLBoolean NV_post_sub_buffer;
+   EGLBoolean NV_context_priority_realtime;
 
    EGLBoolean WL_bind_wayland_display;
    EGLBoolean WL_create_wayland_buffer_from_image;
@@ -199,6 +202,7 @@ struct _egl_display {
    /* options that affect how the driver initializes the display */
    struct {
       EGLBoolean Zink;           /**< Use kopper only */
+      EGLBoolean FallbackZink;   /**< True if zink is tried as fallback */
       EGLBoolean ForceSoftware;  /**< Use software path only */
       EGLBoolean GalliumHudWarn; /**< Using hud, warn when querying buffer age */
       EGLAttrib *Attribs;        /**< Platform-specific options */

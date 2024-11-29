@@ -781,6 +781,7 @@ typedef enum
     */
    /*@{*/
    SYSTEM_VALUE_FRAG_COORD,
+   SYSTEM_VALUE_PIXEL_COORD,
    SYSTEM_VALUE_POINT_COORD,
    SYSTEM_VALUE_LINE_COORD, /**< Coord along axis perpendicular to line */
    SYSTEM_VALUE_FRONT_FACE,
@@ -817,6 +818,7 @@ typedef enum
    SYSTEM_VALUE_BASE_GLOBAL_INVOCATION_ID,
    SYSTEM_VALUE_GLOBAL_INVOCATION_INDEX,
    SYSTEM_VALUE_WORKGROUP_ID,
+   SYSTEM_VALUE_BASE_WORKGROUP_ID,
    SYSTEM_VALUE_WORKGROUP_INDEX,
    SYSTEM_VALUE_NUM_WORKGROUPS,
    SYSTEM_VALUE_WORKGROUP_SIZE,
@@ -1133,6 +1135,30 @@ enum gl_access_qualifier
     * if MMU faults are suppressed for the load.
     */
    ACCESS_CAN_SPECULATE = (1 << 12),
+
+   /**
+    * Whether coherency with CP (command processor) or GE (geometry engine)
+    * is required.
+    */
+   ACCESS_CP_GE_COHERENT_AMD = (1 << 13),
+
+   /* Guarantee that an image_load is in bounds so we can skip robustness code
+    * on AGX, used for some internal shaders.
+    */
+   ACCESS_IN_BOUNDS_AGX = (1 << 14),
+
+   /**
+    * Disallow vectorization.
+    *
+    * On some hw (AMD), sparse buffer loads return 0 for all components if
+    * a sparse load starts on a non-resident page, crosses the page boundary,
+    * and ends on a resident page. Sometimes we want it to return 0 only for
+    * the portion of the load that's non-resident, and load values for
+    * the portion that's resident. The workaround is to scalarize such loads
+    * and disallow vectorization. This is used by an internal copy_buffer
+    * shader where the API wants to copy all bytes that are resident.
+    */
+   ACCESS_KEEP_SCALAR = (1 << 15),
 };
 
 /**
@@ -1418,22 +1444,26 @@ enum gl_derivative_group {
 
 enum float_controls
 {
+   /* The order of these matters. For float_controls2, only the first 9 bits
+    * are used and stored per-instruction in nir_alu_instr::fp_fast_math.
+    * Any changes in this enum need to be synchronized with that.
+    */
    FLOAT_CONTROLS_DEFAULT_FLOAT_CONTROL_MODE = 0,
-   FLOAT_CONTROLS_DENORM_PRESERVE_FP16       = BITFIELD_BIT(0),
-   FLOAT_CONTROLS_DENORM_PRESERVE_FP32       = BITFIELD_BIT(1),
-   FLOAT_CONTROLS_DENORM_PRESERVE_FP64       = BITFIELD_BIT(2),
-   FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP16  = BITFIELD_BIT(3),
-   FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32  = BITFIELD_BIT(4),
-   FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP64  = BITFIELD_BIT(5),
-   FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP16  = BITFIELD_BIT(6),
-   FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP32  = BITFIELD_BIT(7),
-   FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP64  = BITFIELD_BIT(8),
-   FLOAT_CONTROLS_INF_PRESERVE_FP16          = BITFIELD_BIT(9),
-   FLOAT_CONTROLS_INF_PRESERVE_FP32          = BITFIELD_BIT(10),
-   FLOAT_CONTROLS_INF_PRESERVE_FP64          = BITFIELD_BIT(11),
-   FLOAT_CONTROLS_NAN_PRESERVE_FP16          = BITFIELD_BIT(12),
-   FLOAT_CONTROLS_NAN_PRESERVE_FP32          = BITFIELD_BIT(13),
-   FLOAT_CONTROLS_NAN_PRESERVE_FP64          = BITFIELD_BIT(14),
+   FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP16  = BITFIELD_BIT(0),
+   FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP32  = BITFIELD_BIT(1),
+   FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP64  = BITFIELD_BIT(2),
+   FLOAT_CONTROLS_INF_PRESERVE_FP16          = BITFIELD_BIT(3),
+   FLOAT_CONTROLS_INF_PRESERVE_FP32          = BITFIELD_BIT(4),
+   FLOAT_CONTROLS_INF_PRESERVE_FP64          = BITFIELD_BIT(5),
+   FLOAT_CONTROLS_NAN_PRESERVE_FP16          = BITFIELD_BIT(6),
+   FLOAT_CONTROLS_NAN_PRESERVE_FP32          = BITFIELD_BIT(7),
+   FLOAT_CONTROLS_NAN_PRESERVE_FP64          = BITFIELD_BIT(8),
+   FLOAT_CONTROLS_DENORM_PRESERVE_FP16       = BITFIELD_BIT(9),
+   FLOAT_CONTROLS_DENORM_PRESERVE_FP32       = BITFIELD_BIT(10),
+   FLOAT_CONTROLS_DENORM_PRESERVE_FP64       = BITFIELD_BIT(11),
+   FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP16  = BITFIELD_BIT(12),
+   FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32  = BITFIELD_BIT(13),
+   FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP64  = BITFIELD_BIT(14),
    FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP16     = BITFIELD_BIT(15),
    FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP32     = BITFIELD_BIT(16),
    FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP64     = BITFIELD_BIT(17),
@@ -1454,6 +1484,21 @@ enum float_controls
    FLOAT_CONTROLS_SIGNED_ZERO_INF_NAN_PRESERVE_FP64 =
       FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP64 |
       FLOAT_CONTROLS_INF_PRESERVE_FP64 |
+      FLOAT_CONTROLS_NAN_PRESERVE_FP64,
+   
+   FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE =
+      FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP16 |
+      FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP32 |
+      FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP64,
+
+   FLOAT_CONTROLS_INF_PRESERVE =
+      FLOAT_CONTROLS_INF_PRESERVE_FP16 |
+      FLOAT_CONTROLS_INF_PRESERVE_FP32 |
+      FLOAT_CONTROLS_INF_PRESERVE_FP64,
+
+   FLOAT_CONTROLS_NAN_PRESERVE =
+      FLOAT_CONTROLS_NAN_PRESERVE_FP16 |
+      FLOAT_CONTROLS_NAN_PRESERVE_FP32 |
       FLOAT_CONTROLS_NAN_PRESERVE_FP64,
 };
 
@@ -1542,6 +1587,7 @@ enum ENUM_PACKED gl_subgroup_size
     * also the subgroup size.  If any new values are added, they must respect
     * this invariant.
     */
+   SUBGROUP_SIZE_REQUIRE_4   = 4,   /**< VK_EXT_subgroup_size_control */
    SUBGROUP_SIZE_REQUIRE_8   = 8,   /**< VK_EXT_subgroup_size_control */
    SUBGROUP_SIZE_REQUIRE_16  = 16,  /**< VK_EXT_subgroup_size_control */
    SUBGROUP_SIZE_REQUIRE_32  = 32,  /**< VK_EXT_subgroup_size_control */
