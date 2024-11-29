@@ -1,2 +1,4 @@
 path_max.diff
 src_glx_dri_common.h.diff
+0001-fix-meson.build-more-Gallium-Vulkan-drivers-for-on-a.patch
+0002-add-zx-s-driver-to-mesa-s-driver-map-list-and-export.patch
