@@ -1,5 +1,4 @@
 # Copyright © 2017 Intel Corporation
-#
 # SPDX-License-Identifier: MIT
 
 radv_entrypoints_gen_command = [
@@ -79,6 +78,8 @@ libradv_files = files(
   'nir/radv_nir_lower_view_index.c',
   'nir/radv_nir_lower_viewport_to_zero.c',
   'nir/radv_nir_lower_vs_inputs.c',
+  'nir/radv_nir_opt_tid_function.c',
+  'nir/radv_nir_remap_color_attachment.c',
   'nir/radv_nir_rt_common.c',
   'nir/radv_nir_rt_shader.c',
   'winsys/null/radv_null_bo.c',
@@ -110,8 +111,8 @@ libradv_files = files(
   'radv_device_memory.h',
   'radv_descriptor_set.c',
   'radv_descriptor_set.h',
-  'radv_device_generated_commands.c',
-  'radv_device_generated_commands.h',
+  'radv_dgc.c',
+  'radv_dgc.h',
   'radv_event.c',
   'radv_event.h',
   'radv_formats.c',
@@ -126,6 +127,8 @@ libradv_files = files(
   'radv_physical_device.c',
   'radv_pipeline.c',
   'radv_pipeline.h',
+  'radv_pipeline_binary.c',
+  'radv_pipeline_binary.h',
   'radv_pipeline_cache.c',
   'radv_pipeline_cache.h',
   'radv_pipeline_compute.c',
@@ -173,15 +176,13 @@ if not with_platform_windows
     'winsys/amdgpu/radv_amdgpu_bo.h',
     'winsys/amdgpu/radv_amdgpu_cs.c',
     'winsys/amdgpu/radv_amdgpu_cs.h',
-    'winsys/amdgpu/radv_amdgpu_surface.c',
-    'winsys/amdgpu/radv_amdgpu_surface.h',
     'winsys/amdgpu/radv_amdgpu_winsys.c',
     'winsys/amdgpu/radv_amdgpu_winsys.h',
     'winsys/amdgpu/radv_amdgpu_winsys_public.h',
   )
 endif
 
-if with_llvm
+if amd_with_llvm
   libradv_files += files(
     'radv_llvm_helper.cpp',
     'radv_llvm_helper.h',

@@ -114,7 +114,7 @@
 #include "shader_info.h"
 #include "ac_binary.h"
 #include "ac_gpu_info.h"
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 #include "util/u_live_shader_cache.h"
 #include "util/u_queue.h"
 #include "si_pm4.h"
@@ -125,7 +125,6 @@ extern "C" {
 
 struct nir_shader;
 struct nir_instr;
-struct nir_lower_subgroups_options;
 
 #define SI_NUM_INTERP     32
 #define SI_MAX_ATTRIBS    16
@@ -245,17 +244,57 @@ enum
  */
 #define GS_STATE_NUM_ES_OUTPUTS__SHIFT          13
 #define GS_STATE_NUM_ES_OUTPUTS__MASK           0x3f
-/* Small prim filter precision = num_samples / quant_mode, which can only be equal to 1/2^n
- * where n is between 4 and 12. Knowing that, we only need to store 4 bits of the FP32 exponent.
- * Set it like this: value = (fui(num_samples / quant_mode) >> 23) & 0xf;
- * Expand to FP32 like this: ((0x70 | value) << 23);
- * With 0x70 = 112, we get 2^(112 + value - 127) = 2^(value - 15), which is always a negative
- * exponent and it's equal to 1/2^(15 - value).
+/* Small prim filter precision = num_samples / quant_mode where num_samples is in {1, 2, 4, 8} and
+ * quant_mode is in {256, 1024, 4096}, which is equal to 1/2^n where n is between 5 and 12.
+ *
+ * Equation 1: Represent the value as 1/2^n.
+ * Assumption: log_samples <= 3 and log_quant_mode >= 8
+ *    num_samples / quant_mode =
+ *    2^log_samples / 2^log_quant_mode =
+ *    1 / 2^(log_quant_mode - log_samples) [because log_samples < log_quant_mode]
+ *
+ * Knowing that, we only need 4 bits to represent the FP32 exponent and thus the FP32 number.
+ *
+ * Equation 2: Encoding the exponent.
+ *    1/2^(15 - value) in FP32 = ((value | 0x70) << 23) in binary if value < 15
+ * Proof: With 0x70 = 112, we get FP32 exponent 2^(112 + value - 127) according to the FP32
+ *        definition, which can be simplified to 2^(value - 15), which is a negative exponent
+ *        for value < 15. Given that 2^-n = 1/2^n, the FP32 number is equal to 1/2^(15 - value).
+ *
+ * Equation 3: Convert quant_mode_enum to log_quant_mode.
+ * quant_mode_enum:
+ *    0 means 256  = 2^8  --> log2(256)  = 8
+ *    1 means 1024 = 2^10 --> log2(1024) = 10
+ *    2 means 4096 = 2^12 --> log2(4096) = 12
+ *
+ * Conversion to log_quant_mode:
+ *    log_quant_mode = quant_mode_enum * 2 + 8. Proof:
+ *       0 * 2 + 8 = 8
+ *       1 * 2 + 8 = 10
+ *       2 * 2 + 8 = 12
+ *
+ * Equation 4: Get the exponent value for Equation 2 from Equation 1.
+ *    15 - value = log_quant_mode - log_samples
+ *    value = 15 - (log_quant_mode + log_samples)
+ *
+ * Combine equations 2, 3, and 4 to get the expression computing the FP32 number from log_samples
+ * and quant_mode_enum using integer ops:
+ *    (value | 0x70) << 23 =
+ *    ((15 - (log_quant_mode + log_samples)) | 0x70) << 23 =
+ *    ((15 - (quant_mode_enum * 2 + 8 + log_samples)) | 0x70) << 23 =
+ *    ((15 - quant_mode_enum * 2 - 8 - log_samples) | 0x70) << 23 =
+ *    ((7 - quant_mode_enum * 2 - log_samples) | 0x70) << 23 =
+ *
+ * Since "log_samples <= 3" and "quant_mode_enum * 2 <= 4", we need a SGPR field that stores:
+ *    triangle_precision = 7 - quant_mode_enum * 2 - log_samples
+ *
+ * Line precision ignores log_samples, so the shader should do:
+ *    line_precision = triangle_precision + log_samples
  */
-#define GS_STATE_SMALL_PRIM_PRECISION_NO_AA__SHIFT 19
-#define GS_STATE_SMALL_PRIM_PRECISION_NO_AA__MASK  0xf
-#define GS_STATE_SMALL_PRIM_PRECISION__SHIFT    23
-#define GS_STATE_SMALL_PRIM_PRECISION__MASK     0xf
+#define GS_STATE_SMALL_PRIM_PRECISION__SHIFT    22  /* triangle_precision */
+#define GS_STATE_SMALL_PRIM_PRECISION__MASK     0x7
+#define GS_STATE_SMALL_PRIM_PRECISION_LOG_SAMPLES__SHIFT 25
+#define GS_STATE_SMALL_PRIM_PRECISION_LOG_SAMPLES__MASK  0x3
 #define GS_STATE_STREAMOUT_QUERY_ENABLED__SHIFT 27
 #define GS_STATE_STREAMOUT_QUERY_ENABLED__MASK  0x1
 #define GS_STATE_PROVOKING_VTX_FIRST__SHIFT     28
@@ -298,7 +337,7 @@ enum
 #define SI_NGG_CULL_GET_CLIP_PLANE_ENABLE(x)  (((x) >> 5) & 0xff)
 
 struct si_shader_profile {
-   uint32_t sha1[SHA1_DIGEST_LENGTH32];
+   uint32_t blake3[BLAKE3_OUT_LEN32];
    uint32_t options;
 };
 
@@ -448,7 +487,6 @@ struct si_shader_info {
    uint8_t clipdist_mask;
    uint8_t culldist_mask;
 
-   uint16_t lshs_vertex_stride;
    uint16_t esgs_vertex_stride;
    uint16_t gsvs_vertex_size;
    uint8_t gs_input_verts_per_prim;
@@ -497,6 +535,7 @@ struct si_shader_info {
    bool uses_variable_block_size;
    bool uses_grid_size;
    bool uses_tg_size;
+   bool uses_atomic_ordered_add;
    bool writes_position;
    bool writes_psize;
    bool writes_clipvertex;
@@ -552,12 +591,14 @@ struct si_shader_selector {
 
    /* The compiled NIR shader without a prolog and/or epilog (not
     * uploaded to a buffer object).
+    *
+    * [0] for wave32, [1] for wave64.
     */
-   struct si_shader *main_shader_part;
-   struct si_shader *main_shader_part_ls;     /* as_ls is set in the key */
-   struct si_shader *main_shader_part_es;     /* as_es is set in the key */
-   struct si_shader *main_shader_part_ngg;    /* as_ngg is set in the key */
-   struct si_shader *main_shader_part_ngg_es; /* for Wave32 TES before legacy GS */
+   struct si_shader *main_shader_part[2];
+   struct si_shader *main_shader_part_ls[2];     /* as_ls is set in the key */
+   struct si_shader *main_shader_part_es;        /* as_es && !as_ngg in the key */
+   struct si_shader *main_shader_part_ngg[2];    /* !as_es && as_ngg in the key */
+   struct si_shader *main_shader_part_ngg_es[2]; /* as_es && as_ngg in the key */
 
    struct nir_shader *nir;
    void *nir_binary;
@@ -642,6 +683,7 @@ struct si_ps_epilog_bits {
 union si_shader_part_key {
    struct {
       struct si_ps_prolog_bits states;
+      unsigned use_aco : 1;
       unsigned wave32 : 1;
       unsigned num_input_sgprs : 6;
       /* Color interpolation and two-side color selection. */
@@ -654,6 +696,7 @@ union si_shader_part_key {
    } ps_prolog;
    struct {
       struct si_ps_epilog_bits states;
+      unsigned use_aco : 1;
       unsigned wave32 : 1;
       unsigned uses_discard : 1;
       unsigned colors_written : 8;
@@ -706,6 +749,9 @@ struct si_shader_key_ge {
          unsigned vs_export_prim_id : 1;    /* VS and TES only */
          unsigned gs_tri_strip_adj_fix : 1; /* GS only */
       } u;
+
+      /* Gfx12: When no streamout buffers are bound, streamout must be disabled. */
+      unsigned remove_streamout : 1;
    } mono;
 
    /* Optimization flags for asynchronous compilation only. */
@@ -849,6 +895,7 @@ struct si_shader {
 
    struct si_shader_selector *selector;
    struct si_shader_selector *previous_stage_sel; /* for refcounting */
+   struct si_shader *next_shader; /* Only used during compilation of LS and ES when merged. */
 
    struct si_shader_part *prolog;
    struct si_shader *previous_stage; /* for GFX9 */
@@ -872,6 +919,7 @@ struct si_shader {
    bool is_binary_shared;
    bool is_gs_copy_shader;
    uint8_t wave_size;
+   unsigned complete_shader_binary_size;
 
    /* The following data is all that's needed for binary shaders. */
    struct si_shader_binary binary;
@@ -956,6 +1004,8 @@ struct si_shader {
          unsigned cb_shader_mask;
          unsigned db_shader_control;
          unsigned num_interp;
+         unsigned spi_gs_out_config_ps;
+         unsigned pa_sc_hisz_control;
          bool writes_samplemask;
       } ps;
    };
@@ -984,8 +1034,10 @@ bool si_create_shader_variant(struct si_screen *sscreen, struct ac_llvm_compiler
                               struct si_shader *shader, struct util_debug_callback *debug);
 void si_shader_destroy(struct si_shader *shader);
 unsigned si_shader_io_get_unique_index(unsigned semantic);
-bool si_shader_binary_upload(struct si_screen *sscreen, struct si_shader *shader,
-                             uint64_t scratch_va);
+int si_shader_binary_upload(struct si_screen *sscreen, struct si_shader *shader,
+                            uint64_t scratch_va);
+int si_shader_binary_upload_at(struct si_screen *sscreen, struct si_shader *shader,
+                               uint64_t scratch_va, int64_t bo_offset);
 bool si_can_dump_shader(struct si_screen *sscreen, gl_shader_stage stage,
                         enum si_shader_dump_type dump_type);
 void si_shader_dump(struct si_screen *sscreen, struct si_shader *shader,
@@ -1002,6 +1054,7 @@ bool si_shader_binary_open(struct si_screen *screen, struct si_shader *shader,
 bool si_get_external_symbol(enum amd_gfx_level gfx_level, void *data, const char *name,
                             uint64_t *value);
 unsigned si_get_shader_prefetch_size(struct si_shader *shader);
+unsigned si_get_shader_binary_size(struct si_screen *screen, struct si_shader *shader);
 
 /* si_shader_info.c */
 void si_nir_scan_shader(struct si_screen *sscreen,  const struct nir_shader *nir,
@@ -1016,30 +1069,38 @@ void si_nir_late_opts(struct nir_shader *nir);
 char *si_finalize_nir(struct pipe_screen *screen, void *nirptr);
 
 /* si_state_shaders.cpp */
+unsigned si_shader_num_alloc_param_exports(struct si_shader *shader);
 unsigned si_determine_wave_size(struct si_screen *sscreen, struct si_shader *shader);
 void gfx9_get_gs_info(struct si_shader_selector *es, struct si_shader_selector *gs,
                       struct gfx9_gs_info *out);
 bool gfx10_is_ngg_passthrough(struct si_shader *shader);
-
+unsigned si_shader_lshs_vertex_stride(struct si_shader *ls);
 bool si_should_clear_lds(struct si_screen *sscreen, const struct nir_shader *shader);
 
 /* Inline helpers. */
 
 /* Return the pointer to the main shader part's pointer. */
 static inline struct si_shader **si_get_main_shader_part(struct si_shader_selector *sel,
-                                                         const union si_shader_key *key)
+                                                         const union si_shader_key *key,
+                                                         unsigned wave_size)
 {
+   assert(wave_size == 32 || wave_size == 64);
+   unsigned index = wave_size / 32 - 1;
+
    if (sel->stage <= MESA_SHADER_GEOMETRY) {
       if (key->ge.as_ls)
-         return &sel->main_shader_part_ls;
+         return &sel->main_shader_part_ls[index];
       if (key->ge.as_es && key->ge.as_ngg)
-         return &sel->main_shader_part_ngg_es;
-      if (key->ge.as_es)
+         return &sel->main_shader_part_ngg_es[index];
+      if (key->ge.as_es) {
+         /* legacy GS only support wave 64 */
+         assert(wave_size == 64);
          return &sel->main_shader_part_es;
+      }
       if (key->ge.as_ngg)
-         return &sel->main_shader_part_ngg;
+         return &sel->main_shader_part_ngg[index];
    }
-   return &sel->main_shader_part;
+   return &sel->main_shader_part[index];
 }
 
 static inline bool si_shader_uses_bindless_samplers(struct si_shader_selector *selector)
@@ -1072,7 +1133,8 @@ static inline bool si_shader_uses_streamout(const struct si_shader *shader)
 {
    return shader->selector->stage <= MESA_SHADER_GEOMETRY &&
           shader->selector->info.enabled_streamout_buffer_mask &&
-          !shader->key.ge.opt.remove_streamout;
+          !shader->key.ge.opt.remove_streamout &&
+          !shader->key.ge.mono.remove_streamout;
 }
 
 static inline bool si_shader_uses_discard(struct si_shader *shader)

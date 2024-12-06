@@ -21,6 +21,13 @@ panvk_GetBufferDeviceAddress(VkDevice _device,
    return buffer->dev_addr;
 }
 
+VKAPI_ATTR uint64_t VKAPI_CALL
+panvk_GetBufferOpaqueCaptureAddress(VkDevice _device,
+                                    const VkBufferDeviceAddressInfo *pInfo)
+{
+   return panvk_GetBufferDeviceAddress(_device, pInfo);
+}
+
 VKAPI_ATTR void VKAPI_CALL
 panvk_GetBufferMemoryRequirements2(VkDevice device,
                                    const VkBufferMemoryRequirementsInfo2 *pInfo,
@@ -85,12 +92,12 @@ panvk_CreateBuffer(VkDevice _device, const VkBufferCreateInfo *pCreateInfo,
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO);
 
    if (pCreateInfo->size > PANVK_MAX_BUFFER_SIZE)
-      return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      return panvk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
 
    buffer =
       vk_buffer_create(&device->vk, pCreateInfo, pAllocator, sizeof(*buffer));
    if (buffer == NULL)
-      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return panvk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    *pBuffer = panvk_buffer_to_handle(buffer);
 

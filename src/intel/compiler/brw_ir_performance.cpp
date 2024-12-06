@@ -136,15 +136,15 @@ namespace {
          }
 
          /* Convert the execution size to GRF units. */
-         sx = DIV_ROUND_UP(inst->exec_size * type_sz(tx), REG_SIZE);
+         sx = DIV_ROUND_UP(inst->exec_size * brw_type_size_bytes(tx), REG_SIZE);
 
          /* 32x32 integer multiplication has half the usual ALU throughput.
           * Treat it as double-precision.
           */
          if ((inst->opcode == BRW_OPCODE_MUL || inst->opcode == BRW_OPCODE_MAD) &&
-             !brw_reg_type_is_floating_point(tx) && type_sz(tx) == 4 &&
-             type_sz(inst->src[0].type) == type_sz(inst->src[1].type))
-            tx = brw_int_type(8, tx == BRW_REGISTER_TYPE_D);
+             !brw_type_is_float(tx) && brw_type_size_bytes(tx) == 4 &&
+             brw_type_size_bytes(inst->src[0].type) == brw_type_size_bytes(inst->src[1].type))
+            tx = brw_int_type(8, tx == BRW_TYPE_D);
 
          rcount = inst->opcode == BRW_OPCODE_DPAS ? inst->rcount : 0;
       }
@@ -301,8 +301,6 @@ namespace {
       case BRW_OPCODE_ROR:
       case BRW_OPCODE_ROL:
       case BRW_OPCODE_SUBB:
-      case BRW_OPCODE_SAD2:
-      case BRW_OPCODE_SADA2:
       case BRW_OPCODE_LINE:
       case BRW_OPCODE_NOP:
       case SHADER_OPCODE_CLUSTER_BROADCAST:
@@ -312,12 +310,11 @@ namespace {
       case FS_OPCODE_DDY_COARSE:
       case FS_OPCODE_PIXEL_X:
       case FS_OPCODE_PIXEL_Y:
-      case SHADER_OPCODE_READ_ARCH_REG:
          if (devinfo->ver >= 11) {
             return calculate_desc(info, EU_UNIT_FPU, 0, 2, 0, 0, 2,
                                   0, 10, 6 /* XXX */, 14, 0, 0);
          } else {
-            if (type_sz(info.tx) > 4)
+            if (brw_type_size_bytes(info.tx) > 4)
                return calculate_desc(info, EU_UNIT_FPU, 0, 4, 0, 0, 4,
                                      0, 12, 8 /* XXX */, 16 /* XXX */, 0, 0);
             else
@@ -335,7 +332,7 @@ namespace {
             return calculate_desc(info, EU_UNIT_FPU, 0, 2, 0, 0, 2,
                                   0, 10, 6, 14, 0, 0);
          } else {
-            if (type_sz(info.tx) > 4)
+            if (brw_type_size_bytes(info.tx) > 4)
                return calculate_desc(info, EU_UNIT_FPU, 0, 4, 0, 0, 4,
                                      0, 12, 8 /* XXX */, 16 /* XXX */, 0, 0);
             else
@@ -358,7 +355,7 @@ namespace {
             return calculate_desc(info, EU_UNIT_FPU, 0, 2, 1, 0, 2,
                                   0, 10, 6 /* XXX */, 14 /* XXX */, 0, 0);
          } else {
-            if (type_sz(info.tx) > 4)
+            if (brw_type_size_bytes(info.tx) > 4)
                return calculate_desc(info, EU_UNIT_FPU, 0, 4, 1, 0, 4,
                                      0, 12, 8 /* XXX */, 16 /* XXX */, 0, 0);
             else
@@ -456,6 +453,15 @@ namespace {
             return calculate_desc(info, EU_UNIT_FPU, 16, 6, 0, 0, 6,
                                   0, 8 /* XXX */, 4 /* XXX */,
                                   12 /* XXX */, 0, 0);
+
+      case SHADER_OPCODE_READ_ARCH_REG:
+         if (devinfo->ver >= 12) {
+            return calculate_desc(info, EU_UNIT_FPU, 20, 6, 0, 0, 6,
+                                  0, 10, 6 /* XXX */, 14, 0, 0);
+         } else {
+            return calculate_desc(info, EU_UNIT_FPU, 0, 2, 0, 0, 2,
+                                  0, 8, 4, 12, 0, 0);
+         }
 
       case SHADER_OPCODE_MOV_INDIRECT:
          if (devinfo->ver >= 11)
@@ -772,7 +778,7 @@ namespace {
     * Return the dependency ID of a backend_reg, offset by \p delta GRFs.
     */
    enum intel_eu_dependency_id
-   reg_dependency_id(const intel_device_info *devinfo, const fs_reg &r,
+   reg_dependency_id(const intel_device_info *devinfo, const brw_reg &r,
                      const int delta)
    {
       if (r.file == VGRF) {
@@ -854,8 +860,8 @@ namespace {
    {
       assert(inst->reads_accumulator_implicitly() ||
              inst->writes_accumulator_implicitly(devinfo));
-      const unsigned offset = (inst->group + i) * type_sz(tx) *
-         (brw_reg_type_is_floating_point(tx) ? 1 : 2);
+      const unsigned offset = (inst->group + i) * brw_type_size_bytes(tx) *
+         (brw_type_is_float(tx) ? 1 : 2);
       return offset / (reg_unit(devinfo) * REG_SIZE) % 2;
    }
 
@@ -1006,13 +1012,15 @@ namespace {
        *       weights used elsewhere in the compiler back-end.
        *
        *       Note that we provide slightly more pessimistic weights on
-       *       Gfx12+ for SIMD32, since the effective warp size on that
+       *       Gfx12.x for SIMD32, since the effective warp size on that
        *       platform is 2x the SIMD width due to EU fusion, which increases
        *       the likelihood of divergent control flow in comparison to
        *       previous generations, giving narrower SIMD modes a performance
        *       advantage in several test-cases with non-uniform discard jumps.
+       *       EU fusion has been removed on Xe2+ so its divergence behavior is
+       *       expected to be closer to pre-Gfx12 platforms.
        */
-      const float discard_weight = (dispatch_width > 16 || s->devinfo->ver < 12 ?
+      const float discard_weight = (dispatch_width > 16 || s->devinfo->ver != 12 ?
                                     1.0 : 0.5);
       const float loop_weight = 10;
       unsigned halt_count = 0;

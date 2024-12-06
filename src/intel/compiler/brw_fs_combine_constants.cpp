@@ -21,7 +21,7 @@
  * IN THE SOFTWARE.
  */
 
-/** @file brw_fs_combine_constants.cpp
+/** @file
  *
  * This file contains the opt_combine_constants() pass that runs after the
  * regular optimization loop. It passes over the instruction list and promotes
@@ -996,15 +996,19 @@ supports_src_as_imm(const struct intel_device_info *devinfo, const fs_inst *inst
 
    switch (inst->opcode) {
    case BRW_OPCODE_ADD3:
-      /* ADD3 only exists on Gfx12.5+. */
+   case BRW_OPCODE_BFE:
       return true;
+
+   case BRW_OPCODE_CSEL:
+      /* While MAD can mix F and HF sources on some platforms, CSEL cannot. */
+      return inst->src[0].type != BRW_TYPE_F;
 
    case BRW_OPCODE_MAD:
       /* Integer types can always mix sizes. Floating point types can mix
        * sizes on Gfx12. On Gfx12.5, floating point sources must all be HF or
        * all be F.
        */
-      return devinfo->verx10 < 125 || inst->src[0].type != BRW_REGISTER_TYPE_F;
+      return devinfo->verx10 < 125 || inst->src[0].type != BRW_TYPE_F;
 
    default:
       return false;
@@ -1022,8 +1026,13 @@ can_promote_src_as_imm(const struct intel_device_info *devinfo, fs_inst *inst,
     * only propagates into src0. It's possible that src2 works for W or UW MAD
     * on Gfx12.5.
     */
-   if (src_idx != 0)
-      return false;
+   if (inst->opcode == BRW_OPCODE_BFE) {
+      if (src_idx == 1)
+         return false;
+   } else {
+      if (src_idx != 0)
+         return false;
+   }
 
    if (!supports_src_as_imm(devinfo, inst))
       return false;
@@ -1032,15 +1041,15 @@ can_promote_src_as_imm(const struct intel_device_info *devinfo, fs_inst *inst,
     *        since HF/F mixed mode has been removed from the hardware.
     */
    switch (inst->src[src_idx].type) {
-   case BRW_REGISTER_TYPE_F: {
+   case BRW_TYPE_F: {
       uint16_t hf;
       if (representable_as_hf(inst->src[src_idx].f, &hf)) {
-         inst->src[src_idx] = retype(brw_imm_uw(hf), BRW_REGISTER_TYPE_HF);
+         inst->src[src_idx] = retype(brw_imm_uw(hf), BRW_TYPE_HF);
          can_promote = true;
       }
       break;
    }
-   case BRW_REGISTER_TYPE_D: {
+   case BRW_TYPE_D: {
       int16_t w;
       if (representable_as_w(inst->src[src_idx].d, &w)) {
          inst->src[src_idx] = brw_imm_w(w);
@@ -1048,7 +1057,7 @@ can_promote_src_as_imm(const struct intel_device_info *devinfo, fs_inst *inst,
       }
       break;
    }
-   case BRW_REGISTER_TYPE_UD: {
+   case BRW_TYPE_UD: {
       uint16_t uw;
       if (representable_as_uw(inst->src[src_idx].ud, &uw)) {
          inst->src[src_idx] = brw_imm_uw(uw);
@@ -1056,9 +1065,9 @@ can_promote_src_as_imm(const struct intel_device_info *devinfo, fs_inst *inst,
       }
       break;
    }
-   case BRW_REGISTER_TYPE_W:
-   case BRW_REGISTER_TYPE_UW:
-   case BRW_REGISTER_TYPE_HF:
+   case BRW_TYPE_W:
+   case BRW_TYPE_UW:
+   case BRW_TYPE_HF:
       can_promote = true;
       break;
    default:
@@ -1081,7 +1090,7 @@ add_candidate_immediate(struct table *table, fs_inst *inst, unsigned ip,
    unsigned box_idx = box_instruction(table, const_ctx, inst, ip, block);
 
    v->value.u64 = inst->src[i].d64;
-   v->bit_size = 8 * type_sz(inst->src[i].type);
+   v->bit_size = brw_type_size_bits(inst->src[i].type);
    v->instr_index = box_idx;
    v->src = i;
    v->allow_one_constant = allow_one_constant;
@@ -1093,30 +1102,29 @@ add_candidate_immediate(struct table *table, fs_inst *inst, unsigned ip,
    v->no_negations = !inst->can_do_source_mods(devinfo) ||
                      ((inst->opcode == BRW_OPCODE_SHR ||
                        inst->opcode == BRW_OPCODE_ASR) &&
-                      brw_reg_type_is_unsigned_integer(inst->src[i].type));
+                      brw_type_is_uint(inst->src[i].type));
 
    switch (inst->src[i].type) {
-   case BRW_REGISTER_TYPE_DF:
-   case BRW_REGISTER_TYPE_NF:
-   case BRW_REGISTER_TYPE_F:
-   case BRW_REGISTER_TYPE_HF:
+   case BRW_TYPE_DF:
+   case BRW_TYPE_F:
+   case BRW_TYPE_HF:
       v->type = float_only;
       break;
 
-   case BRW_REGISTER_TYPE_UQ:
-   case BRW_REGISTER_TYPE_Q:
-   case BRW_REGISTER_TYPE_UD:
-   case BRW_REGISTER_TYPE_D:
-   case BRW_REGISTER_TYPE_UW:
-   case BRW_REGISTER_TYPE_W:
+   case BRW_TYPE_UQ:
+   case BRW_TYPE_Q:
+   case BRW_TYPE_UD:
+   case BRW_TYPE_D:
+   case BRW_TYPE_UW:
+   case BRW_TYPE_W:
       v->type = integer_only;
       break;
 
-   case BRW_REGISTER_TYPE_VF:
-   case BRW_REGISTER_TYPE_UV:
-   case BRW_REGISTER_TYPE_V:
-   case BRW_REGISTER_TYPE_UB:
-   case BRW_REGISTER_TYPE_B:
+   case BRW_TYPE_VF:
+   case BRW_TYPE_UV:
+   case BRW_TYPE_V:
+   case BRW_TYPE_UB:
+   case BRW_TYPE_B:
    default:
       unreachable("not reached");
    }
@@ -1141,35 +1149,39 @@ struct register_allocation {
    /**
     * Mask of currently available slots in this register.
     *
-    * Each register is 16, 16-bit slots.  Allocations require 1, 2, or 4 slots
-    * for word, double-word, or quad-word values, respectively.
+    * Each register is 16 (32 on Xe2), 16-bit slots.  Allocations require 1,
+    * 2, or 4 slots for word, double-word, or quad-word values, respectively.
     */
-   uint16_t avail;
+   uint32_t avail;
 };
 
-static fs_reg
-allocate_slots(struct register_allocation *regs, unsigned num_regs,
+static brw_reg
+allocate_slots(const intel_device_info *devinfo,
+               struct register_allocation *regs, unsigned num_regs,
                unsigned bytes, unsigned align_bytes,
                brw::simple_allocator &alloc)
 {
    assert(bytes == 2 || bytes == 4 || bytes == 8);
    assert(align_bytes == 2 || align_bytes == 4 || align_bytes == 8);
 
+   const unsigned slots_per_reg =
+      REG_SIZE * reg_unit(devinfo) / sizeof(uint16_t);
+
    const unsigned words = bytes / 2;
    const unsigned align_words = align_bytes / 2;
-   const uint16_t mask = (1U << words) - 1;
+   const uint32_t mask = (1U << words) - 1;
 
    for (unsigned i = 0; i < num_regs; i++) {
-      for (unsigned j = 0; j <= (16 - words); j += align_words) {
-         const uint16_t x = regs[i].avail >> j;
+      for (unsigned j = 0; j <= (slots_per_reg - words); j += align_words) {
+         const uint32_t x = regs[i].avail >> j;
 
          if ((x & mask) == mask) {
             if (regs[i].nr == UINT_MAX)
-               regs[i].nr = alloc.allocate(1);
+               regs[i].nr = alloc.allocate(reg_unit(devinfo));
 
             regs[i].avail &= ~(mask << j);
 
-            fs_reg reg(VGRF, regs[i].nr);
+            brw_reg reg = brw_vgrf(regs[i].nr, BRW_TYPE_F);
             reg.offset = j * 2;
 
             return reg;
@@ -1181,16 +1193,17 @@ allocate_slots(struct register_allocation *regs, unsigned num_regs,
 }
 
 static void
-deallocate_slots(struct register_allocation *regs, unsigned num_regs,
+deallocate_slots(const struct intel_device_info *devinfo,
+                 struct register_allocation *regs, unsigned num_regs,
                  unsigned reg_nr, unsigned subreg_offset, unsigned bytes)
 {
    assert(bytes == 2 || bytes == 4 || bytes == 8);
    assert(subreg_offset % 2 == 0);
-   assert(subreg_offset + bytes <= 32);
+   assert(subreg_offset + bytes <= REG_SIZE * reg_unit(devinfo));
 
    const unsigned words = bytes / 2;
    const unsigned offset = subreg_offset / 2;
-   const uint16_t mask = ((1U << words) - 1) << offset;
+   const uint32_t mask = ((1U << words) - 1) << offset;
 
    for (unsigned i = 0; i < num_regs; i++) {
       if (regs[i].nr == reg_nr) {
@@ -1203,9 +1216,10 @@ deallocate_slots(struct register_allocation *regs, unsigned num_regs,
 }
 
 static void
-parcel_out_registers(struct imm *imm, unsigned len, const bblock_t *cur_block,
+parcel_out_registers(const intel_device_info *devinfo,
+                     struct imm *imm, unsigned len, const bblock_t *cur_block,
                      struct register_allocation *regs, unsigned num_regs,
-                     brw::simple_allocator &alloc, unsigned ver)
+                     brw::simple_allocator &alloc)
 {
    /* Each basic block has two distinct set of constants.  There is the set of
     * constants that only have uses in that block, and there is the set of
@@ -1226,24 +1240,10 @@ parcel_out_registers(struct imm *imm, unsigned len, const bblock_t *cur_block,
       for (unsigned i = 0; i < len; i++) {
          if (imm[i].block == cur_block &&
              imm[i].used_in_single_block == used_in_single_block) {
-            /* From the BDW and CHV PRM, 3D Media GPGPU, Special Restrictions:
-             *
-             *   "In Align16 mode, the channel selects and channel enables apply
-             *    to a pair of half-floats, because these parameters are defined
-             *    for DWord elements ONLY. This is applicable when both source
-             *    and destination are half-floats."
-             *
-             * This means that Align16 instructions that use promoted HF
-             * immediates and use a <0,1,0>:HF region would read 2 HF slots
-             * instead of replicating the single one we want. To avoid this, we
-             * always populate both HF slots within a DWord with the constant.
-             */
-            const unsigned width = ver == 8 && imm[i].is_half_float ? 2 : 1;
-
-            const fs_reg reg = allocate_slots(regs, num_regs,
-                                              imm[i].size * width,
-                                              get_alignment_for_imm(&imm[i]),
-                                              alloc);
+            const brw_reg reg = allocate_slots(devinfo, regs, num_regs,
+                                               imm[i].size,
+                                               get_alignment_for_imm(&imm[i]),
+                                               alloc);
 
             imm[i].nr = reg.nr;
             imm[i].subreg_offset = reg.offset;
@@ -1253,10 +1253,8 @@ parcel_out_registers(struct imm *imm, unsigned len, const bblock_t *cur_block,
 
    for (unsigned i = 0; i < len; i++) {
       if (imm[i].block == cur_block && imm[i].used_in_single_block) {
-         const unsigned width = ver == 8 && imm[i].is_half_float ? 2 : 1;
-
-         deallocate_slots(regs, num_regs, imm[i].nr, imm[i].subreg_offset,
-                          imm[i].size * width);
+         deallocate_slots(devinfo, regs, num_regs, imm[i].nr,
+                          imm[i].subreg_offset, imm[i].size);
       }
    }
 }
@@ -1302,7 +1300,16 @@ brw_fs_opt_combine_constants(fs_visitor &s)
          }
          break;
 
+      /* FINISHME: CSEL handling could be better. For some cases, src[0] and
+       * src[1] can be commutative (e.g., any integer comparison). In those
+       * cases when src[1] is IMM, the sources could be exchanged. In
+       * addition, when both sources are IMM that could be represented as
+       * 16-bits, it would be better to add both sources with
+       * allow_one_constant=true as is done for SEL.
+       */
+      case BRW_OPCODE_BFE:
       case BRW_OPCODE_ADD3:
+      case BRW_OPCODE_CSEL:
       case BRW_OPCODE_MAD: {
          for (int i = 0; i < inst->sources; i++) {
             if (inst->src[i].file != IMM)
@@ -1318,7 +1325,6 @@ brw_fs_opt_combine_constants(fs_visitor &s)
          break;
       }
 
-      case BRW_OPCODE_BFE:
       case BRW_OPCODE_BFI2:
       case BRW_OPCODE_LRP:
          for (int i = 0; i < inst->sources; i++) {
@@ -1456,7 +1462,7 @@ brw_fs_opt_combine_constants(fs_visitor &s)
             imm->block = intersection;
          }
 
-         if (ib->inst->src[src].type == BRW_REGISTER_TYPE_HF)
+         if (ib->inst->src[src].type == BRW_TYPE_HF)
             imm->is_half_float = true;
       }
 
@@ -1475,14 +1481,16 @@ brw_fs_opt_combine_constants(fs_visitor &s)
    struct register_allocation *regs =
       (struct register_allocation *) calloc(table.len, sizeof(regs[0]));
 
+   const unsigned all_avail = devinfo->ver >= 20 ? 0xffffffff : 0xffff;
+
    for (int i = 0; i < table.len; i++) {
       regs[i].nr = UINT_MAX;
-      regs[i].avail = 0xffff;
+      regs[i].avail = all_avail;
    }
 
    foreach_block(block, s.cfg) {
-      parcel_out_registers(table.imm, table.len, block, regs, table.len,
-                           s.alloc, devinfo->ver);
+      parcel_out_registers(devinfo, table.imm, table.len, block, regs,
+                           table.len, s.alloc);
    }
 
    free(regs);
@@ -1558,7 +1566,7 @@ brw_fs_opt_combine_constants(fs_visitor &s)
       const uint32_t width = 1;
       const fs_builder ibld = fs_builder(&s, width).at(insert_block, n).exec_all();
 
-      fs_reg reg(VGRF, imm->nr);
+      brw_reg reg = brw_vgrf(imm->nr, BRW_TYPE_F);
       reg.offset = imm->subreg_offset;
       reg.stride = 0;
 
@@ -1571,7 +1579,7 @@ brw_fs_opt_combine_constants(fs_visitor &s)
       struct brw_reg imm_reg = build_imm_reg_for_copy(imm);
 
       /* Ensure we have enough space in the register to copy the immediate */
-      assert(reg.offset + type_sz(imm_reg.type) * width <= REG_SIZE);
+      assert(reg.offset + brw_type_size_bytes(imm_reg.type) * width <= REG_SIZE * reg_unit(devinfo));
 
       ibld.MOV(retype(reg, imm_reg.type), imm_reg);
    }
@@ -1580,25 +1588,25 @@ brw_fs_opt_combine_constants(fs_visitor &s)
    /* Rewrite the immediate sources to refer to the new GRFs. */
    for (int i = 0; i < table.len; i++) {
       foreach_list_typed(reg_link, link, link, table.imm[i].uses) {
-         fs_reg *reg = &link->inst->src[link->src];
+         brw_reg *reg = &link->inst->src[link->src];
 
          if (link->inst->opcode == BRW_OPCODE_SEL) {
             if (link->type == either_type) {
                /* Do not change the register type. */
             } else if (link->type == integer_only) {
-               reg->type = brw_int_type(type_sz(reg->type), true);
+               reg->type = brw_int_type(brw_type_size_bytes(reg->type), true);
             } else {
                assert(link->type == float_only);
 
-               switch (type_sz(reg->type)) {
+               switch (brw_type_size_bytes(reg->type)) {
                case 2:
-                  reg->type = BRW_REGISTER_TYPE_HF;
+                  reg->type = BRW_TYPE_HF;
                   break;
                case 4:
-                  reg->type = BRW_REGISTER_TYPE_F;
+                  reg->type = BRW_TYPE_F;
                   break;
                case 8:
-                  reg->type = BRW_REGISTER_TYPE_DF;
+                  reg->type = BRW_TYPE_DF;
                   break;
                default:
                   unreachable("Bad type size");
@@ -1607,43 +1615,43 @@ brw_fs_opt_combine_constants(fs_visitor &s)
          } else if ((link->inst->opcode == BRW_OPCODE_SHL ||
                      link->inst->opcode == BRW_OPCODE_ASR) &&
                     link->negate) {
-            reg->type = brw_int_type(type_sz(reg->type), true);
+            reg->type = brw_int_type(brw_type_size_bytes(reg->type), true);
          }
 
 #if MESA_DEBUG
          switch (reg->type) {
-         case BRW_REGISTER_TYPE_DF:
+         case BRW_TYPE_DF:
             assert((isnan(reg->df) && isnan(table.imm[i].df)) ||
                    (fabs(reg->df) == fabs(table.imm[i].df)));
             break;
-         case BRW_REGISTER_TYPE_F:
+         case BRW_TYPE_F:
             assert((isnan(reg->f) && isnan(table.imm[i].f)) ||
                    (fabsf(reg->f) == fabsf(table.imm[i].f)));
             break;
-         case BRW_REGISTER_TYPE_HF:
+         case BRW_TYPE_HF:
             assert((isnan(_mesa_half_to_float(reg->d & 0xffffu)) &&
                     isnan(_mesa_half_to_float(table.imm[i].w))) ||
                    (fabsf(_mesa_half_to_float(reg->d & 0xffffu)) ==
                     fabsf(_mesa_half_to_float(table.imm[i].w))));
             break;
-         case BRW_REGISTER_TYPE_Q:
+         case BRW_TYPE_Q:
             assert(abs(reg->d64) == abs(table.imm[i].d64));
             break;
-         case BRW_REGISTER_TYPE_UQ:
+         case BRW_TYPE_UQ:
             assert(!link->negate);
             assert(reg->d64 == table.imm[i].d64);
             break;
-         case BRW_REGISTER_TYPE_D:
+         case BRW_TYPE_D:
             assert(abs(reg->d) == abs(table.imm[i].d));
             break;
-         case BRW_REGISTER_TYPE_UD:
+         case BRW_TYPE_UD:
             assert(!link->negate);
             assert(reg->d == table.imm[i].d);
             break;
-         case BRW_REGISTER_TYPE_W:
+         case BRW_TYPE_W:
             assert(abs((int16_t) (reg->d & 0xffff)) == table.imm[i].w);
             break;
-         case BRW_REGISTER_TYPE_UW:
+         case BRW_TYPE_UW:
             assert(!link->negate);
             assert((reg->ud & 0xffffu) == (uint16_t) table.imm[i].w);
             break;
@@ -1698,7 +1706,7 @@ brw_fs_opt_combine_constants(fs_visitor &s)
              inst->conditional_mod == BRW_CONDITIONAL_GE ||
              inst->conditional_mod == BRW_CONDITIONAL_L);
 
-      fs_reg temp = inst->src[0];
+      brw_reg temp = inst->src[0];
       inst->src[0] = inst->src[1];
       inst->src[1] = temp;
 
@@ -1739,7 +1747,7 @@ brw_fs_opt_combine_constants(fs_visitor &s)
 
       delete s.cfg;
       s.cfg = NULL;
-      s.calculate_cfg();
+      brw_calculate_cfg(s);
    }
 
    ralloc_free(const_ctx);

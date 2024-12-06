@@ -1,25 +1,7 @@
 /*
- * Copyright (C) 2021 Valve Corporation
- * Copyright (C) 2014 Rob Clark <robclark@freedesktop.org>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Copyright © 2021 Valve Corporation
+ * Copyright © 2014 Rob Clark <robclark@freedesktop.org>
+ * SPDX-License-Identifier: MIT
  */
 
 #include "ir3_ra.h"
@@ -313,7 +295,10 @@ get_reg_specified(struct ra_ctx *ctx, struct ir3_register *reg, physreg_t physre
 static unsigned
 reg_file_size(struct ir3_register *reg)
 {
-   return RA_SHARED_SIZE;
+   if (reg->flags & IR3_REG_HALF)
+      return RA_SHARED_HALF_SIZE;
+   else
+      return RA_SHARED_SIZE;
 }
 
 static physreg_t
@@ -758,10 +743,14 @@ can_demote_src(struct ir3_instruction *instr)
    case OPC_META_COLLECT:
       return false;
    case OPC_MOV:
-      /* non-shared -> shared floating-point conversions don't work */
+      /* non-shared -> shared floating-point conversions and
+       * 8-bit sign extension don't work.
+       */
       return (!(instr->dsts[0]->flags & IR3_REG_SHARED) ||
-          (full_type(instr->cat1.src_type) != TYPE_F32 &&
-           full_type(instr->cat1.dst_type) != TYPE_F32));
+              !((full_type(instr->cat1.src_type) == TYPE_F32 ||
+                 full_type(instr->cat1.dst_type) == TYPE_F32) ||
+                (instr->cat1.src_type == TYPE_U8 &&
+                 full_type(instr->cat1.dst_type) == TYPE_S32)));
    default:
       return (!is_alu(instr) && !is_sfu(instr)) ||
          !(instr->dsts[0]->flags & IR3_REG_SHARED);
@@ -836,6 +825,24 @@ assign_src(struct ra_ctx *ctx, struct ir3_register *src)
    interval->src = false;
 }
 
+static bool
+is_nontrivial_collect(struct ir3_instruction *collect)
+{
+   if (collect->opc != OPC_META_COLLECT) {
+      return false;
+   }
+
+   struct ir3_register *dst = collect->dsts[0];
+
+   foreach_src_n (src, src_n, collect) {
+      if (src->num != dst->num + src_n) {
+         return true;
+      }
+   }
+
+   return false;
+}
+
 static void
 handle_dst(struct ra_ctx *ctx, struct ir3_instruction *instr,
            struct ir3_register *dst)
@@ -872,9 +879,26 @@ handle_dst(struct ra_ctx *ctx, struct ir3_instruction *instr,
       free_space(ctx, physreg, size);
    }
 
+   dst->num = ra_physreg_to_num(physreg, dst->flags);
+
+   /* Non-trivial collects (i.e., ones that will introduce moves because the
+    * sources don't line-up with the destination) may cause source intervals to
+    * get implicitly moved when they are inserted as children of the destination
+    * interval. Since we don't support moving intervals in shared RA, this may
+    * cause illegal register allocations. Prevent this by creating a new
+    * top-level interval for the destination so that the source intervals will
+    * be left alone.
+    */
+   if (is_nontrivial_collect(instr)) {
+      dst->merge_set = NULL;
+      dst->interval_start = ctx->live->interval_offset;
+      dst->interval_end = dst->interval_start + reg_size(dst);
+      ctx->live->interval_offset = dst->interval_end;
+   }
+
+   ra_update_affinity(reg_file_size(dst), dst, physreg);
    interval->physreg_start = physreg;
    interval->physreg_end = physreg + reg_size(dst);
-   dst->num = ra_physreg_to_num(physreg, dst->flags);
    ir3_reg_interval_insert(&ctx->reg_ctx, &interval->interval);
    d("insert dst %u physreg %u", dst->name, physreg);
 
@@ -953,11 +977,14 @@ handle_split(struct ra_ctx *ctx, struct ir3_instruction *split)
       struct ir3_instruction *spill_split =
          ir3_instr_create(split->block, OPC_META_SPLIT, 1, 1);
       struct ir3_register *dst = __ssa_dst(spill_split);
-      ir3_src_create(spill_split, INVALID_REG, IR3_REG_SSA)->def =
-         src_interval->spill_def;
+      struct ir3_register *src =
+         ir3_src_create(spill_split, INVALID_REG, IR3_REG_SSA);
+      src->def = src_interval->spill_def;
+      src->wrmask = src_interval->spill_def->wrmask;
       spill_split->split.off = split->split.off;
       ir3_instr_move_after(spill_split, split);
       dst_interval->spill_def = dst;
+      list_del(&split->node);
       return;
    }
 
@@ -1189,7 +1216,7 @@ handle_block(struct ra_ctx *ctx, struct ir3_block *block)
    if (block->predecessors_count > 1)
       record_pred_live_outs(ctx, block);
 
-   foreach_instr (instr, &block->instr_list) {
+   foreach_instr_safe (instr, &block->instr_list) {
       di(instr, "processing");
 
       handle_instr(ctx, instr);

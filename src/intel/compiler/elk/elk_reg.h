@@ -727,7 +727,7 @@ static inline struct elk_reg
 elk_imm_uw(uint16_t uw)
 {
    struct elk_reg imm = elk_imm_reg(ELK_REGISTER_TYPE_UW);
-   imm.ud = uw | (uw << 16);
+   imm.ud = uw | ((uint32_t)uw << 16);
    return imm;
 }
 
@@ -1346,6 +1346,16 @@ element_sz(struct elk_reg reg)
 /* elk_packed_float.c */
 int elk_float_to_vf(float f);
 float elk_vf_to_float(unsigned char vf);
+
+static inline bool
+elk_type_is_float(enum elk_reg_type type)
+{
+   return type == ELK_REGISTER_TYPE_DF ||
+      type == ELK_REGISTER_TYPE_NF ||
+      type == ELK_REGISTER_TYPE_F ||
+      type == ELK_REGISTER_TYPE_VF ||
+      type == ELK_REGISTER_TYPE_HF;
+}
 
 #ifdef __cplusplus
 }

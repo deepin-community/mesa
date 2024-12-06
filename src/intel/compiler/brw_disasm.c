@@ -58,11 +58,29 @@ brw_has_uip(const struct intel_device_info *devinfo, enum opcode opcode)
           opcode == BRW_OPCODE_HALT;
 }
 
-static bool
-has_branch_ctrl(const struct intel_device_info *devinfo, enum opcode opcode)
+bool
+brw_has_branch_ctrl(const struct intel_device_info *devinfo, enum opcode opcode)
 {
-   return opcode == BRW_OPCODE_IF ||
-          opcode == BRW_OPCODE_ELSE;
+   switch (opcode) {
+   case BRW_OPCODE_IF:
+   case BRW_OPCODE_ELSE:
+   case BRW_OPCODE_GOTO:
+   case BRW_OPCODE_BREAK:
+   case BRW_OPCODE_CALL:
+   case BRW_OPCODE_CALLA:
+   case BRW_OPCODE_CONTINUE:
+   case BRW_OPCODE_ENDIF:
+   case BRW_OPCODE_HALT:
+   case BRW_OPCODE_JMPI:
+   case BRW_OPCODE_RET:
+   case BRW_OPCODE_WHILE:
+   case BRW_OPCODE_BRC:
+   case BRW_OPCODE_BRD:
+      /* TODO: "join" should also be here if added */
+      return true;
+   default:
+      return false;
+   }
 }
 
 static bool
@@ -246,10 +264,9 @@ static const char *const access_mode[2] = {
 };
 
 static const char *const reg_file[4] = {
-   [0] = "A",
-   [1] = "g",
-   [2] = "m",
-   [3] = "imm",
+   [ARF]       = "A",
+   [FIXED_GRF] = "g",
+   [IMM]       = "imm",
 };
 
 static const char *const writemask[16] = {
@@ -571,12 +588,26 @@ static const char *const lsc_operation[] = {
    [LSC_OP_ATOMIC_XOR]      = "atomic_xor",
 };
 
+const char *
+brw_lsc_op_to_string(unsigned op)
+{
+   assert(op < ARRAY_SIZE(lsc_operation));
+   return lsc_operation[op];
+}
+
 static const char *const lsc_addr_surface_type[] = {
    [LSC_ADDR_SURFTYPE_FLAT] = "flat",
    [LSC_ADDR_SURFTYPE_BSS]  = "bss",
    [LSC_ADDR_SURFTYPE_SS]   = "ss",
    [LSC_ADDR_SURFTYPE_BTI]  = "bti",
 };
+
+const char *
+brw_lsc_addr_surftype_to_string(unsigned t)
+{
+   assert(t < ARRAY_SIZE(lsc_addr_surface_type));
+   return lsc_addr_surface_type[t];
+}
 
 static const char* const lsc_fence_scope[] = {
    [LSC_FENCE_THREADGROUP]     = "threadgroup",
@@ -618,6 +649,13 @@ static const char* const lsc_data_size[] = {
    [LSC_DATA_SIZE_D16U32]  = "d16u32",
    [LSC_DATA_SIZE_D16BF32] = "d16bf32",
 };
+
+const char *
+brw_lsc_data_size_to_string(unsigned s)
+{
+   assert(s < ARRAY_SIZE(lsc_data_size));
+   return lsc_data_size[s];
+}
 
 static const char* const lsc_vect_size_str[] = {
    [LSC_VECT_SIZE_V1] = "V1",
@@ -780,7 +818,7 @@ reg(FILE *file, unsigned _reg_file, unsigned _reg_nr)
 {
    int err = 0;
 
-   if (_reg_file == BRW_ARCHITECTURE_REGISTER_FILE) {
+   if (_reg_file == ARF) {
       switch (_reg_nr & 0xf0) {
       case BRW_ARF_NULL:
          string(file, "null");
@@ -796,12 +834,6 @@ reg(FILE *file, unsigned _reg_file, unsigned _reg_nr)
          break;
       case BRW_ARF_MASK:
          format(file, "mask%d", _reg_nr & 0x0f);
-         break;
-      case BRW_ARF_MASK_STACK:
-         format(file, "ms%d", _reg_nr & 0x0f);
-         break;
-      case BRW_ARF_MASK_STACK_DEPTH:
-         format(file, "msd%d", _reg_nr & 0x0f);
          break;
       case BRW_ARF_STATE:
          format(file, "sr%d", _reg_nr & 0x0f);
@@ -838,12 +870,12 @@ dest(FILE *file, const struct brw_isa_info *isa, const brw_inst *inst)
 {
    const struct intel_device_info *devinfo = isa->devinfo;
    enum brw_reg_type type = brw_inst_dst_type(devinfo, inst);
-   unsigned elem_size = brw_reg_type_to_size(type);
+   unsigned elem_size = brw_type_size_bytes(type);
    int err = 0;
 
    if (is_split_send(devinfo, brw_inst_opcode(isa, inst))) {
       /* These are fixed for split sends */
-      type = BRW_REGISTER_TYPE_UD;
+      type = BRW_TYPE_UD;
       elem_size = 4;
       if (devinfo->ver >= 12) {
          err |= reg(file, brw_inst_send_dst_reg_file(devinfo, inst),
@@ -930,9 +962,9 @@ dest_3src(FILE *file, const struct intel_device_info *devinfo,
    if (devinfo->ver >= 12)
       reg_file = brw_inst_3src_a1_dst_reg_file(devinfo, inst);
    else if (is_align1 && brw_inst_3src_a1_dst_reg_file(devinfo, inst))
-      reg_file = BRW_ARCHITECTURE_REGISTER_FILE;
+      reg_file = ARF;
    else
-      reg_file = BRW_GENERAL_REGISTER_FILE;
+      reg_file = FIXED_GRF;
 
    err |= reg(file, reg_file, brw_inst_3src_dst_reg_nr(devinfo, inst));
    if (err == -1)
@@ -943,9 +975,9 @@ dest_3src(FILE *file, const struct intel_device_info *devinfo,
       subreg_nr = brw_inst_3src_a1_dst_subreg_nr(devinfo, inst);
    } else {
       type = brw_inst_3src_a16_dst_type(devinfo, inst);
-      subreg_nr = brw_inst_3src_a16_dst_subreg_nr(devinfo, inst) * 4;
+      subreg_nr = brw_inst_3src_a16_dst_subreg_nr(devinfo, inst);
    }
-   subreg_nr /= brw_reg_type_to_size(type);
+   subreg_nr /= brw_type_size_bytes(type);
 
    if (subreg_nr)
       format(file, ".%u", subreg_nr);
@@ -1019,7 +1051,7 @@ src_da1(FILE *file,
    if (err == -1)
       return 0;
    if (sub_reg_num) {
-      unsigned elem_size = brw_reg_type_to_size(type);
+      unsigned elem_size = brw_type_size_bytes(type);
       format(file, ".%d", sub_reg_num / elem_size);   /* use formal style like spec */
    }
    src_align1_region(file, _vert_stride, _width, _horiz_stride);
@@ -1106,7 +1138,7 @@ src_da16(FILE *file,
    if (err == -1)
       return 0;
    if (_subreg_nr) {
-      unsigned elem_size = brw_reg_type_to_size(type);
+      unsigned elem_size = brw_type_size_bytes(type);
 
       /* bit4 for subreg number byte addressing. Make this same meaning as
          in da1 case, so output looks consistent. */
@@ -1224,24 +1256,16 @@ src0_3src(FILE *file, const struct intel_device_info *devinfo,
       return 0;
 
    if (is_align1) {
-      if (devinfo->ver >= 12 && !brw_inst_3src_a1_src0_is_imm(devinfo, inst)) {
-         _file = brw_inst_3src_a1_src0_reg_file(devinfo, inst);
-      } else if (brw_inst_3src_a1_src0_reg_file(devinfo, inst) ==
-                 BRW_ALIGN1_3SRC_GENERAL_REGISTER_FILE) {
-         _file = BRW_GENERAL_REGISTER_FILE;
-      } else if (brw_inst_3src_a1_src0_type(devinfo, inst) ==
-                 BRW_REGISTER_TYPE_NF) {
-         _file = BRW_ARCHITECTURE_REGISTER_FILE;
-      } else {
-         _file = BRW_IMMEDIATE_VALUE;
+      _file = brw_inst_3src_a1_src0_reg_file(devinfo, inst);
+      if (_file == IMM) {
          uint16_t imm_val = brw_inst_3src_a1_src0_imm(devinfo, inst);
          enum brw_reg_type type = brw_inst_3src_a1_src0_type(devinfo, inst);
 
-         if (type == BRW_REGISTER_TYPE_W) {
+         if (type == BRW_TYPE_W) {
             format(file, "%dW", imm_val);
-         } else if (type == BRW_REGISTER_TYPE_UW) {
+         } else if (type == BRW_TYPE_UW) {
             format(file, "0x%04xUW", imm_val);
-         } else if (type == BRW_REGISTER_TYPE_HF) {
+         } else if (type == BRW_TYPE_HF) {
             format(file, "0x%04xHF", imm_val);
          }
          return 0;
@@ -1256,9 +1280,9 @@ src0_3src(FILE *file, const struct intel_device_info *devinfo,
                          brw_inst_3src_a1_src0_hstride(devinfo, inst));
       _width = implied_width(_vert_stride, _horiz_stride);
    } else {
-      _file = BRW_GENERAL_REGISTER_FILE;
+      _file = FIXED_GRF;
       reg_nr = brw_inst_3src_src0_reg_nr(devinfo, inst);
-      subreg_nr = brw_inst_3src_a16_src0_subreg_nr(devinfo, inst) * 4;
+      subreg_nr = brw_inst_3src_a16_src0_subreg_nr(devinfo, inst);
       type = brw_inst_3src_a16_src_type(devinfo, inst);
 
       if (brw_inst_3src_a16_src0_rep_ctrl(devinfo, inst)) {
@@ -1275,7 +1299,7 @@ src0_3src(FILE *file, const struct intel_device_info *devinfo,
                       _width == BRW_WIDTH_1 &&
                       _horiz_stride == BRW_HORIZONTAL_STRIDE_0;
 
-   subreg_nr /= brw_reg_type_to_size(type);
+   subreg_nr /= brw_type_size_bytes(type);
 
    err |= control(file, "negate", m_negate,
                   brw_inst_3src_src0_negate(devinfo, inst), NULL);
@@ -1311,15 +1335,7 @@ src1_3src(FILE *file, const struct intel_device_info *devinfo,
       return 0;
 
    if (is_align1) {
-      if (devinfo->ver >= 12) {
-         _file = brw_inst_3src_a1_src1_reg_file(devinfo, inst);
-      } else if (brw_inst_3src_a1_src1_reg_file(devinfo, inst) ==
-                 BRW_ALIGN1_3SRC_GENERAL_REGISTER_FILE) {
-         _file = BRW_GENERAL_REGISTER_FILE;
-      } else {
-         _file = BRW_ARCHITECTURE_REGISTER_FILE;
-      }
-
+      _file = brw_inst_3src_a1_src1_reg_file(devinfo, inst);
       reg_nr = brw_inst_3src_src1_reg_nr(devinfo, inst);
       subreg_nr = brw_inst_3src_a1_src1_subreg_nr(devinfo, inst);
       type = brw_inst_3src_a1_src1_type(devinfo, inst);
@@ -1330,9 +1346,9 @@ src1_3src(FILE *file, const struct intel_device_info *devinfo,
                          brw_inst_3src_a1_src1_hstride(devinfo, inst));
       _width = implied_width(_vert_stride, _horiz_stride);
    } else {
-      _file = BRW_GENERAL_REGISTER_FILE;
+      _file = FIXED_GRF;
       reg_nr = brw_inst_3src_src1_reg_nr(devinfo, inst);
-      subreg_nr = brw_inst_3src_a16_src1_subreg_nr(devinfo, inst) * 4;
+      subreg_nr = brw_inst_3src_a16_src1_subreg_nr(devinfo, inst);
       type = brw_inst_3src_a16_src_type(devinfo, inst);
 
       if (brw_inst_3src_a16_src1_rep_ctrl(devinfo, inst)) {
@@ -1349,7 +1365,7 @@ src1_3src(FILE *file, const struct intel_device_info *devinfo,
                       _width == BRW_WIDTH_1 &&
                       _horiz_stride == BRW_HORIZONTAL_STRIDE_0;
 
-   subreg_nr /= brw_reg_type_to_size(type);
+   subreg_nr /= brw_type_size_bytes(type);
 
    err |= control(file, "negate", m_negate,
                   brw_inst_3src_src1_negate(devinfo, inst), NULL);
@@ -1385,21 +1401,16 @@ src2_3src(FILE *file, const struct intel_device_info *devinfo,
       return 0;
 
    if (is_align1) {
-      if (devinfo->ver >= 12 && !brw_inst_3src_a1_src2_is_imm(devinfo, inst)) {
-         _file = brw_inst_3src_a1_src2_reg_file(devinfo, inst);
-      } else if (brw_inst_3src_a1_src2_reg_file(devinfo, inst) ==
-                 BRW_ALIGN1_3SRC_GENERAL_REGISTER_FILE) {
-         _file = BRW_GENERAL_REGISTER_FILE;
-      } else {
-         _file = BRW_IMMEDIATE_VALUE;
+      _file = brw_inst_3src_a1_src2_reg_file(devinfo, inst);
+      if (_file == IMM) {
          uint16_t imm_val = brw_inst_3src_a1_src2_imm(devinfo, inst);
          enum brw_reg_type type = brw_inst_3src_a1_src2_type(devinfo, inst);
 
-         if (type == BRW_REGISTER_TYPE_W) {
+         if (type == BRW_TYPE_W) {
             format(file, "%dW", imm_val);
-         } else if (type == BRW_REGISTER_TYPE_UW) {
+         } else if (type == BRW_TYPE_UW) {
             format(file, "0x%04xUW", imm_val);
-         } else if (type == BRW_REGISTER_TYPE_HF) {
+         } else if (type == BRW_TYPE_HF) {
             format(file, "0x%04xHF", imm_val);
          }
          return 0;
@@ -1418,9 +1429,9 @@ src2_3src(FILE *file, const struct intel_device_info *devinfo,
                          brw_inst_3src_a1_src2_hstride(devinfo, inst));
       _width = implied_width(_vert_stride, _horiz_stride);
    } else {
-      _file = BRW_GENERAL_REGISTER_FILE;
+      _file = FIXED_GRF;
       reg_nr = brw_inst_3src_src2_reg_nr(devinfo, inst);
-      subreg_nr = brw_inst_3src_a16_src2_subreg_nr(devinfo, inst) * 4;
+      subreg_nr = brw_inst_3src_a16_src2_subreg_nr(devinfo, inst);
       type = brw_inst_3src_a16_src_type(devinfo, inst);
 
       if (brw_inst_3src_a16_src2_rep_ctrl(devinfo, inst)) {
@@ -1437,7 +1448,7 @@ src2_3src(FILE *file, const struct intel_device_info *devinfo,
                       _width == BRW_WIDTH_1 &&
                       _horiz_stride == BRW_HORIZONTAL_STRIDE_0;
 
-   subreg_nr /= brw_reg_type_to_size(type);
+   subreg_nr /= brw_type_size_bytes(type);
 
    err |= control(file, "negate", m_negate,
                   brw_inst_3src_src2_negate(devinfo, inst), NULL);
@@ -1534,28 +1545,28 @@ imm(FILE *file, const struct brw_isa_info *isa, enum brw_reg_type type,
    const struct intel_device_info *devinfo = isa->devinfo;
 
    switch (type) {
-   case BRW_REGISTER_TYPE_UQ:
+   case BRW_TYPE_UQ:
       format(file, "0x%016"PRIx64"UQ", brw_inst_imm_uq(devinfo, inst));
       break;
-   case BRW_REGISTER_TYPE_Q:
+   case BRW_TYPE_Q:
       format(file, "0x%016"PRIx64"Q", brw_inst_imm_uq(devinfo, inst));
       break;
-   case BRW_REGISTER_TYPE_UD:
+   case BRW_TYPE_UD:
       format(file, "0x%08xUD", brw_inst_imm_ud(devinfo, inst));
       break;
-   case BRW_REGISTER_TYPE_D:
+   case BRW_TYPE_D:
       format(file, "%dD", brw_inst_imm_d(devinfo, inst));
       break;
-   case BRW_REGISTER_TYPE_UW:
+   case BRW_TYPE_UW:
       format(file, "0x%04xUW", (uint16_t) brw_inst_imm_ud(devinfo, inst));
       break;
-   case BRW_REGISTER_TYPE_W:
+   case BRW_TYPE_W:
       format(file, "%dW", (int16_t) brw_inst_imm_d(devinfo, inst));
       break;
-   case BRW_REGISTER_TYPE_UV:
+   case BRW_TYPE_UV:
       format(file, "0x%08xUV", brw_inst_imm_ud(devinfo, inst));
       break;
-   case BRW_REGISTER_TYPE_VF:
+   case BRW_TYPE_VF:
       format(file, "0x%"PRIx64"VF", brw_inst_bits(inst, 127, 96));
       pad(file, 48);
       format(file, "/* [%-gF, %-gF, %-gF, %-gF]VF */",
@@ -1564,10 +1575,10 @@ imm(FILE *file, const struct brw_isa_info *isa, enum brw_reg_type type,
              brw_vf_to_float(brw_inst_imm_ud(devinfo, inst) >> 16),
              brw_vf_to_float(brw_inst_imm_ud(devinfo, inst) >> 24));
       break;
-   case BRW_REGISTER_TYPE_V:
+   case BRW_TYPE_V:
       format(file, "0x%08xV", brw_inst_imm_ud(devinfo, inst));
       break;
-   case BRW_REGISTER_TYPE_F:
+   case BRW_TYPE_F:
       /* The DIM instruction's src0 uses an F type but contains a
        * 64-bit immediate
        */
@@ -1575,21 +1586,21 @@ imm(FILE *file, const struct brw_isa_info *isa, enum brw_reg_type type,
       pad(file, 48);
       format(file, " /* %-gF */", brw_inst_imm_f(devinfo, inst));
       break;
-   case BRW_REGISTER_TYPE_DF:
+   case BRW_TYPE_DF:
       format(file, "0x%016"PRIx64"DF", brw_inst_imm_uq(devinfo, inst));
       pad(file, 48);
       format(file, "/* %-gDF */", brw_inst_imm_df(devinfo, inst));
       break;
-   case BRW_REGISTER_TYPE_HF:
+   case BRW_TYPE_HF:
       format(file, "0x%04xHF",
              (uint16_t) brw_inst_imm_ud(devinfo, inst));
       pad(file, 48);
       format(file, "/* %-gHF */",
              _mesa_half_to_float((uint16_t) brw_inst_imm_ud(devinfo, inst)));
       break;
-   case BRW_REGISTER_TYPE_NF:
-   case BRW_REGISTER_TYPE_UB:
-   case BRW_REGISTER_TYPE_B:
+   case BRW_TYPE_UB:
+   case BRW_TYPE_B:
+   default:
       format(file, "*** invalid immediate type %d ", type);
    }
    return 0;
@@ -1655,25 +1666,25 @@ src0(FILE *file, const struct brw_isa_info *isa, const brw_inst *inst)
       if (devinfo->ver >= 12) {
          return src_sends_da(file,
                              devinfo,
-                             BRW_REGISTER_TYPE_UD,
+                             BRW_TYPE_UD,
                              brw_inst_send_src0_reg_file(devinfo, inst),
                              brw_inst_src0_da_reg_nr(devinfo, inst),
                              0);
       } else if (brw_inst_send_src0_address_mode(devinfo, inst) == BRW_ADDRESS_DIRECT) {
          return src_sends_da(file,
                              devinfo,
-                             BRW_REGISTER_TYPE_UD,
-                             BRW_GENERAL_REGISTER_FILE,
+                             BRW_TYPE_UD,
+                             FIXED_GRF,
                              brw_inst_src0_da_reg_nr(devinfo, inst),
                              brw_inst_src0_da16_subreg_nr(devinfo, inst));
       } else {
          return src_sends_ia(file,
                              devinfo,
-                             BRW_REGISTER_TYPE_UD,
+                             BRW_TYPE_UD,
                              brw_inst_send_src0_ia16_addr_imm(devinfo, inst),
                              brw_inst_src0_ia_subreg_nr(devinfo, inst));
       }
-   } else if (brw_inst_src0_reg_file(devinfo, inst) == BRW_IMMEDIATE_VALUE) {
+   } else if (brw_inst_src0_reg_file(devinfo, inst) == IMM) {
       return imm(file, isa, brw_inst_src0_type(devinfo, inst), inst);
    } else if (brw_inst_access_mode(devinfo, inst) == BRW_ALIGN_1) {
       if (brw_inst_src0_address_mode(devinfo, inst) == BRW_ADDRESS_DIRECT) {
@@ -1733,11 +1744,11 @@ src1(FILE *file, const struct brw_isa_info *isa, const brw_inst *inst)
    if (is_split_send(devinfo, brw_inst_opcode(isa, inst))) {
       return src_sends_da(file,
                           devinfo,
-                          BRW_REGISTER_TYPE_UD,
+                          BRW_TYPE_UD,
                           brw_inst_send_src1_reg_file(devinfo, inst),
                           brw_inst_send_src1_reg_nr(devinfo, inst),
                           0 /* subreg_nr */);
-   } else if (brw_inst_src1_reg_file(devinfo, inst) == BRW_IMMEDIATE_VALUE) {
+   } else if (brw_inst_src1_reg_file(devinfo, inst) == IMM) {
       return imm(file, isa, brw_inst_src1_type(devinfo, inst), inst);
    } else if (brw_inst_access_mode(devinfo, inst) == BRW_ALIGN_1) {
       if (brw_inst_src1_address_mode(devinfo, inst) == BRW_ADDRESS_DIRECT) {
@@ -1860,8 +1871,8 @@ swsb(FILE *file, const struct brw_isa_info *isa, const brw_inst *inst)
       opcode == BRW_OPCODE_SEND || opcode == BRW_OPCODE_SENDC ||
       opcode == BRW_OPCODE_MATH || opcode == BRW_OPCODE_DPAS ||
       (devinfo->has_64bit_float_via_math_pipe &&
-       inst_has_type(isa, inst, BRW_REGISTER_TYPE_DF));
-   const struct tgl_swsb swsb = tgl_swsb_decode(devinfo, is_unordered, x);
+       inst_has_type(isa, inst, BRW_TYPE_DF));
+   const struct tgl_swsb swsb = tgl_swsb_decode(devinfo, is_unordered, x, opcode);
    if (swsb.regdist)
       format(file, " %s@%d",
              (swsb.pipe == TGL_PIPE_FLOAT ? "F" :
@@ -2011,8 +2022,8 @@ brw_disassemble_inst(FILE *file, const struct brw_isa_info *isa,
       format(file, "x%d", rcount);
    } else if (!is_send(opcode) &&
               (devinfo->ver < 12 ||
-               brw_inst_src0_reg_file(devinfo, inst) != BRW_IMMEDIATE_VALUE ||
-               type_sz(brw_inst_src0_type(devinfo, inst)) < 8)) {
+               brw_inst_src0_reg_file(devinfo, inst) != IMM ||
+               brw_type_size_bytes(brw_inst_src0_type(devinfo, inst)) < 8)) {
       err |= control(file, "conditional modifier", conditional_modifier,
                      brw_inst_cond_modifier(devinfo, inst), NULL);
 
@@ -2125,7 +2136,7 @@ brw_disassemble_inst(FILE *file, const struct brw_isa_info *isa,
             fprintf(file, "0x%08"PRIx32, imm_ex_desc);
          }
       } else {
-         if (brw_inst_src1_reg_file(devinfo, inst) != BRW_IMMEDIATE_VALUE) {
+         if (brw_inst_src1_reg_file(devinfo, inst) != IMM) {
             /* show the indirect descriptor source */
             pad(file, 48);
             err |= src1(file, isa, inst);
@@ -2257,6 +2268,8 @@ brw_disassemble_inst(FILE *file, const struct brw_isa_info *isa,
                case LSC_OP_LOAD:
                   format(file, ",");
                   err |= control(file, "cache_load",
+                                 devinfo->ver >= 20 ?
+                                 xe2_lsc_cache_load :
                                  lsc_cache_load,
                                  lsc_msg_desc_cache_ctrl(devinfo, imm_desc),
                                  &space);
@@ -2264,6 +2277,8 @@ brw_disassemble_inst(FILE *file, const struct brw_isa_info *isa,
                default:
                   format(file, ",");
                   err |= control(file, "cache_store",
+                                 devinfo->ver >= 20 ?
+                                 xe2_lsc_cache_store :
                                  lsc_cache_store,
                                  lsc_msg_desc_cache_ctrl(devinfo, imm_desc),
                                  &space);
@@ -2559,7 +2574,7 @@ brw_disassemble_inst(FILE *file, const struct brw_isa_info *isa,
                      (devinfo->ver >= 12 ? brw_inst_atomic_control(devinfo, inst) :
                                            brw_inst_thread_control(devinfo, inst)),
                      &space);
-      if (has_branch_ctrl(devinfo, opcode)) {
+      if (brw_has_branch_ctrl(devinfo, opcode)) {
          err |= control(file, "branch ctrl", branch_ctrl,
                         brw_inst_branch_control(devinfo, inst), &space);
       } else if (devinfo->ver < 20) {

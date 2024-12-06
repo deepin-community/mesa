@@ -74,7 +74,7 @@ blorp_params_get_clear_kernel_fs(struct blorp_batch *batch,
    void *mem_ctx = ralloc_context(NULL);
 
    nir_builder b;
-   blorp_nir_init_shader(&b, mem_ctx, MESA_SHADER_FRAGMENT,
+   blorp_nir_init_shader(&b, blorp, mem_ctx, MESA_SHADER_FRAGMENT,
                          blorp_shader_type_to_name(blorp_key.base.shader_type));
 
    nir_variable *v_color =
@@ -133,7 +133,8 @@ blorp_params_get_clear_kernel_cs(struct blorp_batch *batch,
    void *mem_ctx = ralloc_context(NULL);
 
    nir_builder b;
-   blorp_nir_init_shader(&b, mem_ctx, MESA_SHADER_COMPUTE, "BLORP-gpgpu-clear");
+   blorp_nir_init_shader(&b, blorp, mem_ctx, MESA_SHADER_COMPUTE,
+                         "BLORP-gpgpu-clear");
    blorp_set_cs_dims(b.shader, blorp_key.local_y);
 
    nir_def *dst_pos = nir_load_global_invocation_id(&b, 32);
@@ -210,7 +211,20 @@ get_fast_clear_rect(const struct isl_device *dev,
 
    /* Only single sampled surfaces need to (and actually can) be resolved. */
    if (surf->samples == 1) {
-      if (dev->info->verx10 >= 125) {
+      const uint32_t bs = isl_format_get_layout(surf->format)->bpb / 8;
+      if (dev->info->ver >= 20) {
+         /* From Bspec 57340, "MCS/CCS Buffers, Fast Clear for Render Target(s)":
+          *
+          *    Table "Tile4/Tile64 2D/2D Array/Cube Surface"
+          *    Table "Tile64 3D/Volumetric"
+          *
+          * The below calculation is derived from these tables.
+          */
+         assert(surf->tiling == ISL_TILING_4 ||
+                surf->tiling == ISL_TILING_64_XE2);
+         x_align = x_scaledown = 64 / bs;
+         y_align = y_scaledown = 4;
+      } else if (dev->info->verx10 >= 125) {
          /* From Bspec 47709, "MCS/CCS Buffer for Render Target(s)":
           *
           *    SW must ensure that clearing rectangle dimensions cover the
@@ -221,8 +235,6 @@ get_fast_clear_rect(const struct isl_device *dev,
           * The X and Y scale down factors in the table that follows are used
           * for both alignment and scaling down.
           */
-         const uint32_t bs = isl_format_get_layout(surf->format)->bpb / 8;
-
          if (surf->tiling == ISL_TILING_4) {
             x_align = x_scaledown = 1024 / bs;
             y_align = y_scaledown = 16;
@@ -255,7 +267,6 @@ get_fast_clear_rect(const struct isl_device *dev,
             unreachable("Unsupported tiling format");
          }
       } else {
-         assert(aux_surf->usage == ISL_SURF_USAGE_CCS_BIT);
          /* From the Ivy Bridge PRM, Vol2 Part1 11.7 "MCS Buffer for Render
           * Target(s)", beneath the "Fast Color Clear" bullet (p327):
           *
@@ -267,24 +278,28 @@ get_fast_clear_rect(const struct isl_device *dev,
           *     requirements, an MCS buffer can be created such that it
           *     follows the requirement and covers the RT.
           *
-          * The alignment size in the table that follows is related to the
-          * alignment size that is baked into the CCS surface format but with X
-          * alignment multiplied by 16 and Y alignment multiplied by 32.
+          * The alignment size in the table that follows is a multiple of the
+          * alignment size that is baked into the CCS surface format.
           */
-         x_align = isl_format_get_layout(aux_surf->format)->bw;
-         y_align = isl_format_get_layout(aux_surf->format)->bh;
+         enum isl_format ccs_format;
+         if (ISL_GFX_VERX10(dev) == 120) {
+            assert(surf->tiling == ISL_TILING_Y0);
+            switch (isl_format_get_layout(surf->format)->bpb) {
+            case   8: ccs_format = ISL_FORMAT_GFX12_CCS_8BPP_Y0;   break;
+            case  16: ccs_format = ISL_FORMAT_GFX12_CCS_16BPP_Y0;  break;
+            case  32: ccs_format = ISL_FORMAT_GFX12_CCS_32BPP_Y0;  break;
+            case  64: ccs_format = ISL_FORMAT_GFX12_CCS_64BPP_Y0;  break;
+            case 128: ccs_format = ISL_FORMAT_GFX12_CCS_128BPP_Y0; break;
+            default:  unreachable("Invalid surface bpb for fast clearing");
+            }
+         } else {
+            assert(aux_surf->usage == ISL_SURF_USAGE_CCS_BIT);
+            ccs_format = aux_surf->format;
+         }
 
-         x_align *= 16;
-
-         /* The line alignment requirement for Y-tiled is halved at SKL and again
-          * at TGL.
-          */
-         if (dev->info->ver >= 12)
-            y_align *= 8;
-         else if (dev->info->ver >= 9)
-            y_align *= 16;
-         else
-            y_align *= 32;
+         x_align = isl_format_get_layout(ccs_format)->bw * 16;
+         y_align = isl_format_get_layout(ccs_format)->bh * 32 /
+                   isl_format_get_layout(ccs_format)->bpb;
 
          /* From the Ivy Bridge PRM, Vol2 Part1 11.7 "MCS Buffer for Render
           * Target(s)", beneath the "Fast Color Clear" bullet (p327):
@@ -346,22 +361,31 @@ get_fast_clear_rect(const struct isl_device *dev,
        * horizontally and 2 vertically.  So the resulting alignment is 4
        * vertically and either 4 or 16 horizontally, and the scaledown
        * factor is 2 vertically and either 2 or 8 horizontally.
+       *
+       * On Xe2+:
+       * Bspec 57340 (r59562):
+       *
+       *    Fast Clear MCS Surface
+       *    (Table)
+       *
+       * The scaled down values in the Xe2 table are different from what's in
+       * the previous platforms.
        */
       switch (aux_surf->format) {
       case ISL_FORMAT_MCS_2X:
       case ISL_FORMAT_MCS_4X:
-         x_scaledown = 8;
+         x_scaledown = dev->info->ver >= 20 ? 64 : 8;
          break;
       case ISL_FORMAT_MCS_8X:
-         x_scaledown = 2;
+         x_scaledown = dev->info->ver >= 20 ? 16 : 2;
          break;
       case ISL_FORMAT_MCS_16X:
-         x_scaledown = 1;
+         x_scaledown = dev->info->ver >= 20 ? 8 : 1;
          break;
       default:
          unreachable("Unexpected MCS format for fast clear");
       }
-      y_scaledown = 2;
+      y_scaledown = dev->info->ver >= 20 ? 4 : 2;
       x_align = x_scaledown * 2;
       y_align = y_scaledown * 2;
    }
@@ -389,7 +413,34 @@ blorp_fast_clear(struct blorp_batch *batch,
    params.x1 = x1;
    params.y1 = y1;
 
-   memset(&params.wm_inputs.clear_color, 0xff, 4*sizeof(float));
+   if (batch->blorp->isl_dev->info->ver >= 20) {
+      union isl_color_value clear_color =
+         isl_color_value_swizzle_inv(surf->clear_color, swizzle);
+      if (format == ISL_FORMAT_R9G9B9E5_SHAREDEXP) {
+         clear_color.u32[0] = float3_to_rgb9e5(clear_color.f32);
+         format = ISL_FORMAT_R32_UINT;
+      } else if (format == ISL_FORMAT_L8_UNORM_SRGB) {
+         clear_color.f32[0] = util_format_linear_to_srgb_float(clear_color.f32[0]);
+         format = ISL_FORMAT_R8_UNORM;
+      }
+
+      /* Bspec 57340 (r59562):
+       *
+       *   Overview of Fast Clear:
+       *      Pixel shader's color output is treated as Clear Value, value
+       *      should be a constant.
+       */
+      memcpy(&params.wm_inputs.clear_color, &clear_color, 4 * sizeof(float));
+   } else {
+      /* BSpec: 2423 (r153658):
+       *
+       *   The pixel shader kernel requires no attributes, and delivers a
+       *   value of 0xFFFFFFFF in all channels of the render target write
+       *   message The replicated color message should be used.
+       */
+      memset(&params.wm_inputs.clear_color, 0xff, 4 * sizeof(float));
+   }
+
    params.fast_clear_op = ISL_AUX_OP_FAST_CLEAR;
 
    get_fast_clear_rect(batch->blorp->isl_dev, surf->surf, surf->aux_surf,
@@ -566,6 +617,7 @@ blorp_clear(struct blorp_batch *batch,
    if (!compute && !blorp_ensure_sf_program(batch, &params))
       return;
 
+   assert(num_layers > 0);
    while (num_layers > 0) {
       blorp_surface_info_init(batch, &params.dst, surf, level,
                                   start_layer, format, true);
@@ -792,6 +844,7 @@ blorp_clear_depth_stencil(struct blorp_batch *batch,
                           uint8_t stencil_mask, uint8_t stencil_value)
 {
    assert((batch->flags & BLORP_BATCH_USE_COMPUTE) == 0);
+   assert(num_layers > 0);
 
    if (!clear_depth && blorp_clear_stencil_as_rgba(batch, stencil, level,
                                                    start_layer, num_layers,
@@ -872,82 +925,6 @@ blorp_clear_depth_stencil(struct blorp_batch *batch,
       start_layer += params.num_layers;
       num_layers -= params.num_layers;
    }
-}
-
-bool
-blorp_can_hiz_clear_depth(const struct intel_device_info *devinfo,
-                          const struct isl_surf *surf,
-                          enum isl_aux_usage aux_usage,
-                          uint32_t level, uint32_t layer,
-                          uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1)
-{
-   /* This function currently doesn't support any gen prior to gfx8 */
-   assert(devinfo->ver >= 8);
-
-   if (devinfo->ver == 8 && surf->format == ISL_FORMAT_R16_UNORM) {
-      /* From the BDW PRM, Vol 7, "Depth Buffer Clear":
-       *
-       *   The following restrictions apply only if the depth buffer surface
-       *   type is D16_UNORM and software does not use the “full surf clear”:
-       *
-       *   If Number of Multisamples is NUMSAMPLES_1, the rectangle must be
-       *   aligned to an 8x4 pixel block relative to the upper left corner of
-       *   the depth buffer, and contain an integer number of these pixel
-       *   blocks, and all 8x4 pixels must be lit.
-       *
-       * Alignment requirements for other sample counts are listed, but they
-       * can all be satisfied by the one mentioned above.
-       */
-      if (x0 % 8 || y0 % 4 || x1 % 8 || y1 % 4)
-         return false;
-   } else if (isl_aux_usage_has_ccs(aux_usage)) {
-      /* We have to set the WM_HZ_OP::FullSurfaceDepthandStencilClear bit
-       * whenever we clear an uninitialized HIZ buffer (as some drivers
-       * currently do). However, this bit seems liable to clear 16x8 pixels in
-       * the ZCS on Gfx12 - greater than the slice alignments of many depth
-       * buffers.
-       *
-       * This is the hypothesis behind some corruption that was seen with the
-       * amd_vertex_shader_layer-layered-depth-texture-render piglit test.
-       *
-       * From the Compressed Depth Buffers section of the Bspec, under the
-       * Gfx12 texture performant and ZCS columns:
-       *
-       *    Update with clear at either 16x8 or 8x4 granularity, based on
-       *    fs_clr or otherwise.
-       *
-       * There are a number of ways to avoid full surface CCS clears that
-       * overlap other slices, but for now we choose to disable fast-clears
-       * when an initializing clear could hit another miplevel.
-       *
-       * NOTE: Because the CCS compresses the depth buffer and not a version
-       * of it that has been rearranged with different alignments (like Gfx8+
-       * HIZ), we have to make sure that the x0 and y0 are at least 16x8
-       * aligned in the context of the entire surface.
-       */
-      uint32_t slice_x0, slice_y0, slice_z0, slice_a0;
-      isl_surf_get_image_offset_el(surf, level,
-                                   surf->dim == ISL_SURF_DIM_3D ? 0 : layer,
-                                   surf->dim == ISL_SURF_DIM_3D ? layer: 0,
-                                   &slice_x0, &slice_y0, &slice_z0, &slice_a0);
-      const bool max_x1_y1 =
-         x1 == u_minify(surf->logical_level0_px.width, level) &&
-         y1 == u_minify(surf->logical_level0_px.height, level);
-      const uint32_t haligned_x1 = ALIGN(x1, surf->image_alignment_el.w);
-      const uint32_t valigned_y1 = ALIGN(y1, surf->image_alignment_el.h);
-      const bool unaligned = (slice_x0 + x0) % 16 || (slice_y0 + y0) % 8 ||
-                             (max_x1_y1 ? haligned_x1 % 16 || valigned_y1 % 8 :
-                              x1 % 16 || y1 % 8);
-      const bool partial_clear = x0 > 0 || y0 > 0 || !max_x1_y1;
-      const bool multislice_surf = surf->levels > 1 ||
-                                   surf->logical_level0_px.depth > 1 ||
-                                   surf->logical_level0_px.array_len > 1;
-
-      if (unaligned && (partial_clear || multislice_surf))
-         return false;
-   }
-
-   return isl_aux_usage_has_hiz(aux_usage);
 }
 
 static bool
@@ -1284,7 +1261,7 @@ blorp_params_get_mcs_partial_resolve_kernel(struct blorp_batch *batch,
    void *mem_ctx = ralloc_context(NULL);
 
    nir_builder b;
-   blorp_nir_init_shader(&b, mem_ctx, MESA_SHADER_FRAGMENT,
+   blorp_nir_init_shader(&b, blorp, mem_ctx, MESA_SHADER_FRAGMENT,
                          blorp_shader_type_to_name(blorp_key.base.shader_type));
 
    nir_variable *v_color =
@@ -1425,10 +1402,27 @@ blorp_mcs_ambiguate(struct blorp_batch *batch,
    default: unreachable("Unexpected MCS format size for ambiguate");
    }
 
+   /* From Bspec 57340 (r59562):
+    *
+    *   To the calculated MCS size we add 4kb page to be used as clear value
+    *   storage.
+    *
+    * and
+    *
+    *   When allocating memory, MCS buffer size is extended by 4KB over its
+    *   original calculated size. First 4KB page of the MCS is reserved for
+    *   internal HW usage.
+    *
+    * We shift aux buffer's start address by 4KB, accordingly.
+    */
+   struct blorp_address aux_addr = surf->aux_addr;
+   if (ISL_GFX_VER(batch->blorp->isl_dev) >= 20)
+      aux_addr.offset += 4096;
+
    params.dst = (struct blorp_surface_info) {
       .enabled = true,
       .surf = *surf->aux_surf,
-      .addr = surf->aux_addr,
+      .addr = aux_addr,
       .view = {
          .usage = ISL_SURF_USAGE_RENDER_TARGET_BIT,
          .format = renderable_format,

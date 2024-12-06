@@ -8,8 +8,6 @@ use crate::impl_cl_type_trait;
 use mesa_rust::compiler::clc::spirv::SPIRVBin;
 use mesa_rust::compiler::clc::*;
 use mesa_rust::compiler::nir::*;
-use mesa_rust::pipe::resource::*;
-use mesa_rust::pipe::screen::ResourceType;
 use mesa_rust::util::disk_cache::*;
 use mesa_rust_gen::*;
 use rusticl_llvm_gen::*;
@@ -92,87 +90,16 @@ pub struct Program {
 
 impl_cl_type_trait!(cl_program, Program, CL_INVALID_PROGRAM);
 
-pub struct NirKernelBuild {
-    pub nir_or_cso: KernelDevStateVariant,
-    pub constant_buffer: Option<Arc<PipeResource>>,
-    pub info: pipe_compute_state_object_info,
-    pub shared_size: u64,
-    pub printf_info: Option<NirPrintfInfo>,
-}
-
-// SAFETY: `CSOWrapper` is only safe to use if the device supports `PIPE_CAP_SHAREABLE_SHADERS` and
-//         we make sure to set `nir_or_cso` to `KernelDevStateVariant::Cso` only if that's the case.
-unsafe impl Send for NirKernelBuild {}
-unsafe impl Sync for NirKernelBuild {}
-
 pub struct ProgramBuild {
     pub builds: HashMap<&'static Device, ProgramDevBuild>,
-    pub kernel_info: HashMap<String, KernelInfo>,
+    pub kernel_info: HashMap<String, Arc<KernelInfo>>,
     spec_constants: HashMap<u32, nir_const_value>,
     kernels: Vec<String>,
 }
 
-impl NirKernelBuild {
-    pub fn new(dev: &'static Device, mut nir: NirShader) -> Self {
-        let cso = CSOWrapper::new(dev, &nir);
-        let info = cso.get_cso_info();
-        let cb = Self::create_nir_constant_buffer(dev, &nir);
-        let shared_size = nir.shared_size() as u64;
-        let printf_info = nir.take_printf_info();
-
-        let nir_or_cso = if !dev.shareable_shaders() {
-            KernelDevStateVariant::Nir(nir)
-        } else {
-            KernelDevStateVariant::Cso(cso)
-        };
-
-        NirKernelBuild {
-            nir_or_cso: nir_or_cso,
-            constant_buffer: cb,
-            info: info,
-            shared_size: shared_size,
-            printf_info: printf_info,
-        }
-    }
-
-    fn create_nir_constant_buffer(dev: &Device, nir: &NirShader) -> Option<Arc<PipeResource>> {
-        let buf = nir.get_constant_buffer();
-        let len = buf.len() as u32;
-
-        if len > 0 {
-            // TODO bind as constant buffer
-            let res = dev
-                .screen()
-                .resource_create_buffer(len, ResourceType::Normal, PIPE_BIND_GLOBAL)
-                .unwrap();
-
-            dev.helper_ctx()
-                .exec(|ctx| ctx.buffer_subdata(&res, 0, buf.as_ptr().cast(), len))
-                .wait();
-
-            Some(Arc::new(res))
-        } else {
-            None
-        }
-    }
-}
-
 impl ProgramBuild {
-    pub fn attribute_str(&self, kernel: &str, d: &Device) -> String {
-        let info = self.dev_build(d);
-
-        let attributes_strings = [
-            info.spirv.as_ref().unwrap().vec_type_hint(kernel),
-            info.spirv.as_ref().unwrap().local_size(kernel),
-            info.spirv.as_ref().unwrap().local_size_hint(kernel),
-        ];
-
-        let attributes_strings: Vec<_> = attributes_strings
-            .iter()
-            .flatten()
-            .map(String::as_str)
-            .collect();
-        attributes_strings.join(",")
+    pub fn spirv_info(&self, kernel: &str, d: &Device) -> Option<&clc_kernel_info> {
+        self.dev_build(d).spirv.as_ref()?.kernel_info(kernel)
     }
 
     fn args(&self, dev: &Device, kernel: &str) -> Vec<spirv::SPIRVKernelArg> {
@@ -192,14 +119,13 @@ impl ProgramBuild {
 
             // TODO: we could run this in parallel?
             for dev in self.devs_with_build() {
-                let (kernel_info, nir) = convert_spirv_to_nir(self, kernel_name, &args, dev);
-                kernel_info_set.insert(kernel_info);
+                let build_result = convert_spirv_to_nir(self, kernel_name, &args, dev);
+                kernel_info_set.insert(build_result.kernel_info);
 
-                self.builds
-                    .get_mut(dev)
-                    .unwrap()
-                    .kernels
-                    .insert(kernel_name.clone(), Arc::new(NirKernelBuild::new(dev, nir)));
+                self.builds.get_mut(dev).unwrap().kernels.insert(
+                    kernel_name.clone(),
+                    Arc::new(build_result.nir_kernel_builds),
+                );
             }
 
             // we want the same (internal) args for every compiled kernel, for now
@@ -212,7 +138,8 @@ impl ProgramBuild {
                 kernel_info.attributes_string = String::new();
             }
 
-            self.kernel_info.insert(kernel_name.clone(), kernel_info);
+            self.kernel_info
+                .insert(kernel_name.clone(), Arc::new(kernel_info));
         }
     }
 
@@ -253,6 +180,10 @@ impl ProgramBuild {
         } else {
             None
         }
+    }
+
+    pub fn kernels(&self) -> &[String] {
+        &self.kernels
     }
 
     pub fn to_nir(&self, kernel: &str, d: &Device) -> NirShader {
@@ -297,7 +228,7 @@ pub struct ProgramDevBuild {
     options: String,
     log: String,
     bin_type: cl_program_binary_type,
-    pub kernels: HashMap<String, Arc<NirKernelBuild>>,
+    pub kernels: HashMap<String, Arc<NirKernelBuilds>>,
 }
 
 fn prepare_options(options: &str, dev: &Device) -> Vec<CString> {
@@ -355,12 +286,8 @@ impl Program {
                 (
                     d,
                     ProgramDevBuild {
-                        spirv: None,
                         status: CL_BUILD_NONE,
-                        log: String::from(""),
-                        options: String::from(""),
-                        bin_type: CL_PROGRAM_BINARY_TYPE_NONE,
-                        kernels: HashMap::new(),
+                        ..Default::default()
                     },
                 )
             })
@@ -415,7 +342,7 @@ impl Program {
 
                     debug_assert!(
                         // `blob_read_*` doesn't advance the pointer on failure to read
-                        blob.current.offset_from(blob.data) == BIN_HEADER_SIZE_V1 as isize
+                        blob.current.byte_offset_from(blob.data) == BIN_HEADER_SIZE_V1 as isize
                             || blob.overrun,
                     );
 
@@ -429,7 +356,7 @@ impl Program {
                     }
 
                     let name: &[u8] = slice::from_raw_parts(name.cast(), name_length);
-                    if dev.screen().name().as_bytes() != name {
+                    if dev.screen().name().to_bytes() != name {
                         return Err(CL_INVALID_BINARY);
                     }
 
@@ -544,7 +471,7 @@ impl Program {
             let info = lock.dev_build(d);
 
             res.push(info.spirv.as_ref().map_or(0, |s| {
-                s.to_bin().len() + d.screen().name().as_bytes().len() + BIN_HEADER_SIZE
+                s.to_bin().len() + d.screen().name().to_bytes().len() + BIN_HEADER_SIZE
             }));
         }
         res
@@ -591,7 +518,7 @@ impl Program {
                 blob_write_uint32(&mut blob, 1_u32.to_le());
 
                 let device_name = d.screen().name();
-                let device_name = device_name.as_bytes();
+                let device_name = device_name.to_bytes();
 
                 blob_write_uint32(&mut blob, (device_name.len() as u32).to_le());
                 blob_write_uint32(&mut blob, (spirv.len() as u32).to_le());
@@ -607,19 +534,10 @@ impl Program {
         Ok(ptrs.to_vec())
     }
 
-    pub fn kernel_signatures(&self, kernel_name: &str) -> HashSet<Vec<spirv::SPIRVKernelArg>> {
-        let build = self.build_info();
-        let devs = build.devs_with_build();
-
-        if devs.is_empty() {
-            return HashSet::new();
-        }
-
-        devs.iter().map(|d| build.args(d, kernel_name)).collect()
-    }
-
-    pub fn kernels(&self) -> Vec<String> {
-        self.build_info().kernels.clone()
+    // TODO: at the moment we do not support compiling programs with different signatures across
+    // devices. If we do in the future, this needs to be properly implemented.
+    pub fn has_unique_kernel_signatures(&self, _kernel_name: &str) -> bool {
+        true
     }
 
     pub fn active_kernels(&self) -> bool {
@@ -799,9 +717,8 @@ impl Program {
                     spirv: spirv,
                     status: status,
                     log: log,
-                    options: String::from(""),
                     bin_type: bin_type,
-                    kernels: HashMap::new(),
+                    ..Default::default()
                 },
             );
         }

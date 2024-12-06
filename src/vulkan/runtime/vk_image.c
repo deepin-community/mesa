@@ -101,6 +101,18 @@ vk_image_init(struct vk_device *device,
 #endif
 
 #if DETECT_OS_ANDROID
+   if (image->external_handle_types &
+             VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID)
+      image->android_buffer_type = ANDROID_BUFFER_HARDWARE;
+
+   const VkNativeBufferANDROID *native_buffer =
+      vk_find_struct_const(pCreateInfo->pNext, NATIVE_BUFFER_ANDROID);
+
+   if (native_buffer != NULL) {
+      assert(image->android_buffer_type == ANDROID_BUFFER_NONE);
+      image->android_buffer_type = ANDROID_BUFFER_NATIVE;
+   }
+
    const VkExternalFormatANDROID *ext_format =
       vk_find_struct_const(pCreateInfo->pNext, EXTERNAL_FORMAT_ANDROID);
    if (ext_format && ext_format->externalFormat != 0) {
@@ -147,6 +159,12 @@ vk_image_destroy(struct vk_device *device,
                  const VkAllocationCallbacks *alloc,
                  struct vk_image *image)
 {
+#if DETECT_OS_ANDROID
+   if (image->anb_memory) {
+      device->dispatch_table.FreeMemory(
+         (VkDevice)device, image->anb_memory, alloc);
+   }
+#endif
    vk_object_free(device, alloc, image);
 }
 
@@ -423,6 +441,12 @@ vk_image_view_init(struct vk_device *device,
          vk_image_expand_aspect_mask(image, range->aspectMask);
 
       assert(!(image_view->aspects & ~image->aspects));
+      const VkImageUsageFlags video = VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
+                                      VK_IMAGE_USAGE_VIDEO_DECODE_SRC_BIT_KHR |
+                                      VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR |
+                                      VK_IMAGE_USAGE_VIDEO_ENCODE_DST_BIT_KHR |
+                                      VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR |
+                                      VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR;
 
       /* From the Vulkan 1.2.184 spec:
        *
@@ -438,11 +462,10 @@ vk_image_view_init(struct vk_device *device,
        *    be identical to the image format, and the sampler to be used with the
        *    image view must enable sampler Y′CBCR conversion."
        *
-       * Since no one implements video yet, we can ignore the bits about video
-       * create flags and assume YCbCr formats match.
        */
       if ((image->aspects & VK_IMAGE_ASPECT_PLANE_1_BIT) &&
-          (range->aspectMask == VK_IMAGE_ASPECT_COLOR_BIT))
+          (range->aspectMask == VK_IMAGE_ASPECT_COLOR_BIT) &&
+          !(image->usage & video))
          assert(image_view->format == image->format);
 
       /* From the Vulkan 1.2.184 spec:
@@ -516,6 +539,23 @@ vk_image_view_init(struct vk_device *device,
 
    image_view->extent =
       vk_image_mip_level_extent(image, image_view->base_mip_level);
+
+   if (vk_format_is_compressed(image->format) &&
+       !vk_format_is_compressed(image_view->format)) {
+      const struct util_format_description *fmt =
+         vk_format_description(image->format);
+
+      /* Non-compressed view of compressed image only works for single MIP
+       * views.
+       */
+      assert(image_view->level_count == 1);
+      image_view->extent.width =
+         DIV_ROUND_UP(image_view->extent.width, fmt->block.width);
+      image_view->extent.height =
+         DIV_ROUND_UP(image_view->extent.height, fmt->block.height);
+      image_view->extent.depth =
+         DIV_ROUND_UP(image_view->extent.depth, fmt->block.depth);
+   }
 
    /* By default storage uses the same as the image properties, but it can be
     * overriden with VkImageViewSlicedCreateInfoEXT.

@@ -13,7 +13,9 @@ if with_intel_vk
       '--vn', 'float64_spv_source',
       '--glsl-version', '450',
       '-Olib',
-    ]
+      glslang_depfile,
+    ],
+    depfile : 'float64_spv.h.d',
   )
 endif
 
@@ -48,7 +50,8 @@ intel_shaders_gens = [ [ 80,   8],
                        [110,  11],
                        [120,  12],
                        [125, 125],
-                       [200,  20] ]
+                       [200,  20],
+                       [300,  30] ]
 intel_shaders = []
 foreach gen : intel_shaders_gens
   intel_shaders += custom_target(

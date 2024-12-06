@@ -11,10 +11,10 @@
 
 struct agx_cf_binding {
    /* Base coefficient register */
-   unsigned cf_base;
+   uint8_t cf_base;
 
    /* Slot being bound */
-   gl_varying_slot slot;
+   gl_varying_slot slot : 8;
 
    /* First component bound.
     *
@@ -30,6 +30,8 @@ struct agx_cf_binding {
 
    /* Perspective correct interpolation */
    bool perspective : 1;
+
+   uint8_t pad;
 };
 
 /* Conservative bound, * 4 due to offsets (TODO: maybe worth eliminating
@@ -60,8 +62,12 @@ struct agx_interp_info {
    uint64_t flat;
    uint64_t linear;
 };
+static_assert(sizeof(struct agx_interp_info) == 16, "packed");
 
 struct agx_shader_info {
+   enum pipe_shader_type stage;
+   uint32_t binary_size;
+
    union agx_varyings varyings;
 
    /* Number of uniforms */
@@ -69,6 +75,9 @@ struct agx_shader_info {
 
    /* Local memory allocation in bytes */
    unsigned local_size;
+
+   /* Local imageblock allocation in bytes per thread */
+   unsigned imageblock_stride;
 
    /* Scratch memory allocation in bytes for main/preamble respectively */
    unsigned scratch_size, preamble_scratch_size;
@@ -84,6 +93,9 @@ struct agx_shader_info {
 
    /* Does the shader read the tilebuffer? */
    bool reads_tib;
+
+   /* Does the shader require early fragment tests? */
+   bool early_fragment_tests;
 
    /* Does the shader potentially draw to a nonzero viewport? */
    bool nonzero_viewport;
@@ -112,6 +124,9 @@ struct agx_shader_info {
    /* Reads base vertex/instance */
    bool uses_base_param;
 
+   /* Uses txf and hence needs a txf sampler mapped */
+   bool uses_txf;
+
    /* Number of 16-bit registers used by the main shader and preamble
     * respectively.
     */
@@ -120,16 +135,24 @@ struct agx_shader_info {
    /* Output mask set during driver lowering */
    uint64_t outputs;
 
-   /* Immediate data that must be uploaded and mapped as uniform registers */
-   unsigned immediate_base_uniform;
-   unsigned immediate_size_16;
-   uint16_t immediates[512];
+   /* There may be constants in the binary. The driver must map these to uniform
+    * registers as specified hre.
+    */
+   struct {
+      /* Offset in the binary */
+      uint32_t offset;
+
+      /* Base uniform to map constants */
+      uint16_t base_uniform;
+
+      /* Number of 16-bit constants to map contiguously there */
+      uint16_t size_16;
+   } rodata;
 };
 
 struct agx_shader_part {
    struct agx_shader_info info;
    void *binary;
-   size_t binary_size;
 };
 
 #define AGX_MAX_RTS (8)
@@ -176,14 +199,24 @@ struct agx_fs_shader_key {
    uint8_t cf_base;
 };
 
-struct agx_shader_key {
-   /* Number of reserved preamble slots at the start */
-   unsigned reserved_preamble;
-
+struct agx_device_key {
    /* Does the target GPU need explicit cluster coherency for atomics?
     * Only used on G13X.
     */
    bool needs_g13x_coherency;
+
+   /* Is soft fault enabled? This is technically system-wide policy set by the
+    * kernel, but that's functionally a hardware feature.
+    */
+   bool soft_fault;
+};
+
+struct agx_shader_key {
+   /* Device info */
+   struct agx_device_key dev;
+
+   /* Number of reserved preamble slots at the start */
+   unsigned reserved_preamble;
 
    /* Library routines to link against */
    const nir_shader *libagx;
@@ -221,10 +254,13 @@ struct agx_shader_key {
 struct agx_interp_info agx_gather_interp_info(nir_shader *nir);
 uint64_t agx_gather_texcoords(nir_shader *nir);
 
+void agx_link_libagx(nir_shader *nir, const nir_shader *libagx);
 void agx_preprocess_nir(nir_shader *nir, const nir_shader *libagx);
 bool agx_nir_lower_discard_zs_emit(nir_shader *s);
 bool agx_nir_lower_sample_mask(nir_shader *s);
+bool agx_nir_lower_interpolation(nir_shader *s);
 
+bool agx_nir_lower_cull_distance_vs(struct nir_shader *s);
 bool agx_nir_lower_cull_distance_fs(struct nir_shader *s,
                                     unsigned nr_distances);
 
@@ -258,16 +294,26 @@ static const nir_shader_compiler_options agx_nir_options = {
    .lower_isign = true,
    .lower_fsign = true,
    .lower_iabs = true,
+   .lower_fminmax_signed_zero = true,
    .lower_fdph = true,
    .lower_ffract = true,
    .lower_ldexp = true,
    .lower_pack_half_2x16 = true,
+   .lower_pack_unorm_2x16 = true,
+   .lower_pack_snorm_2x16 = true,
+   .lower_pack_unorm_4x8 = true,
+   .lower_pack_snorm_4x8 = true,
    .lower_pack_64_2x32 = true,
    .lower_unpack_half_2x16 = true,
+   .lower_unpack_unorm_2x16 = true,
+   .lower_unpack_snorm_2x16 = true,
+   .lower_unpack_unorm_4x8 = true,
+   .lower_unpack_snorm_4x8 = true,
    .lower_extract_byte = true,
    .lower_insert_byte = true,
    .lower_insert_word = true,
    .has_cs_global_id = true,
+   .lower_device_index_to_zero = true,
    .lower_hadd = true,
    .vectorize_io = true,
    .use_interpolated_input_intrinsics = true,
@@ -280,4 +326,6 @@ static const nir_shader_compiler_options agx_nir_options = {
    .lower_doubles_options = (nir_lower_doubles_options)(~0),
    .lower_fquantize2f16 = true,
    .compact_arrays = true,
+   .discard_is_demote = true,
+   .scalarize_ddx = true,
 };

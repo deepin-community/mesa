@@ -25,7 +25,6 @@
 
 #include "color.h"
 #include "hw_shared.h"
-#include "color_pwl.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -121,14 +120,11 @@ void vpe10_cm_helper_program_color_matrices(struct config_writer *config_writer,
 void vpe10_cm_helper_program_gamcor_xfer_func(struct config_writer *config_writer,
     const struct pwl_params *params, const struct vpe10_xfer_func_reg *reg);
 
-bool vpe10_cm_helper_translate_curve_to_hw_format(
-    const struct transfer_func *output_tf, struct pwl_params *lut_params, bool fixpoint);
+bool vpe10_cm_helper_translate_curve_to_hw_format(const struct transfer_func *tf,
+    struct pwl_params *lut_params, bool fixpoint, bool dirty);
 
 bool vpe10_cm_helper_translate_curve_to_degamma_hw_format(
-    const struct transfer_func *output_tf, struct pwl_params *lut_params);
-
-void vpe10_cm_get_tf_pwl_params(const struct transfer_func *output_tf,
-    struct pwl_params **lut_params, enum cm_type vpe_cm_type);
+    const struct transfer_func *tf, struct pwl_params *lut_params, bool dirty);
 
 #ifdef __cplusplus
 }

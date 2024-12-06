@@ -21,7 +21,7 @@
  * IN THE SOFTWARE.
  */
 
-/** @file brw_eu_compact.c
+/** @file
  *
  * Instruction compaction is a feature of G45 and newer hardware that allows
  * for a smaller instruction encoding.
@@ -1463,9 +1463,9 @@ compact_immediate(const struct intel_device_info *devinfo,
        * field
        */
       switch (type) {
-      case BRW_REGISTER_TYPE_W:
-      case BRW_REGISTER_TYPE_UW:
-      case BRW_REGISTER_TYPE_HF:
+      case BRW_TYPE_W:
+      case BRW_TYPE_UW:
+      case BRW_TYPE_HF:
          if ((imm >> 16) != (imm & 0xffff))
             return -1;
          break;
@@ -1474,45 +1474,45 @@ compact_immediate(const struct intel_device_info *devinfo,
       }
 
       switch (type) {
-      case BRW_REGISTER_TYPE_F:
+      case BRW_TYPE_F:
          /* We get the high 12-bits as-is; rest must be zero */
          if ((imm & 0xfffff) == 0)
             return (imm >> 20) & 0xfff;
          break;
-      case BRW_REGISTER_TYPE_HF:
+      case BRW_TYPE_HF:
          /* We get the high 12-bits as-is; rest must be zero */
          if ((imm & 0xf) == 0)
             return (imm >> 4) & 0xfff;
          break;
-      case BRW_REGISTER_TYPE_UD:
-      case BRW_REGISTER_TYPE_VF:
-      case BRW_REGISTER_TYPE_UV:
-      case BRW_REGISTER_TYPE_V:
+      case BRW_TYPE_UD:
+      case BRW_TYPE_VF:
+      case BRW_TYPE_UV:
+      case BRW_TYPE_V:
          /* We get the low 12-bits as-is; rest must be zero */
          if ((imm & 0xfffff000) == 0)
             return imm & 0xfff;
          break;
-      case BRW_REGISTER_TYPE_UW:
+      case BRW_TYPE_UW:
          /* We get the low 12-bits as-is; rest must be zero */
          if ((imm & 0xf000) == 0)
             return imm & 0xfff;
          break;
-      case BRW_REGISTER_TYPE_D:
+      case BRW_TYPE_D:
          /* We get the low 11-bits as-is; 12th is replicated */
          if (((int)imm >> 11) == 0 || ((int)imm >> 11) == -1)
             return imm & 0xfff;
          break;
-      case BRW_REGISTER_TYPE_W:
+      case BRW_TYPE_W:
          /* We get the low 11-bits as-is; 12th is replicated */
          if (((short)imm >> 11) == 0 || ((short)imm >> 11) == -1)
             return imm & 0xfff;
          break;
-      case BRW_REGISTER_TYPE_NF:
-      case BRW_REGISTER_TYPE_DF:
-      case BRW_REGISTER_TYPE_Q:
-      case BRW_REGISTER_TYPE_UQ:
-      case BRW_REGISTER_TYPE_B:
-      case BRW_REGISTER_TYPE_UB:
+      case BRW_TYPE_DF:
+      case BRW_TYPE_Q:
+      case BRW_TYPE_UQ:
+      case BRW_TYPE_B:
+      case BRW_TYPE_UB:
+      default:
          return -1;
       }
    } else {
@@ -1531,32 +1531,33 @@ uncompact_immediate(const struct intel_device_info *devinfo,
 {
    if (devinfo->ver >= 12) {
       switch (type) {
-      case BRW_REGISTER_TYPE_F:
+      case BRW_TYPE_F:
          return compact_imm << 20;
-      case BRW_REGISTER_TYPE_HF:
+      case BRW_TYPE_HF:
          return (compact_imm << 20) | (compact_imm << 4);
-      case BRW_REGISTER_TYPE_UD:
-      case BRW_REGISTER_TYPE_VF:
-      case BRW_REGISTER_TYPE_UV:
-      case BRW_REGISTER_TYPE_V:
+      case BRW_TYPE_UD:
+      case BRW_TYPE_VF:
+      case BRW_TYPE_UV:
+      case BRW_TYPE_V:
          return compact_imm;
-      case BRW_REGISTER_TYPE_UW:
+      case BRW_TYPE_UW:
          /* Replicate */
          return compact_imm << 16 | compact_imm;
-      case BRW_REGISTER_TYPE_D:
+      case BRW_TYPE_D:
          /* Extend the 12th bit into the high 20 bits */
          return (int)(compact_imm << 20) >> 20;
-      case BRW_REGISTER_TYPE_W:
+      case BRW_TYPE_W:
          /* Extend the 12th bit into the high 4 bits and replicate */
          return ((int)(compact_imm << 20) >> 4) |
                 ((unsigned short)((short)(compact_imm << 4) >> 4));
-      case BRW_REGISTER_TYPE_NF:
-      case BRW_REGISTER_TYPE_DF:
-      case BRW_REGISTER_TYPE_Q:
-      case BRW_REGISTER_TYPE_UQ:
-      case BRW_REGISTER_TYPE_B:
-      case BRW_REGISTER_TYPE_UB:
+      case BRW_TYPE_DF:
+      case BRW_TYPE_Q:
+      case BRW_TYPE_UQ:
+      case BRW_TYPE_B:
+      case BRW_TYPE_UB:
          unreachable("not reached");
+      default:
+         unreachable("invalid type");
       }
    } else {
       /* Replicate the 13th bit into the high 19 bits */
@@ -1570,12 +1571,12 @@ static bool
 has_immediate(const struct intel_device_info *devinfo, const brw_inst *inst,
               enum brw_reg_type *type)
 {
-   if (brw_inst_src0_reg_file(devinfo, inst) == BRW_IMMEDIATE_VALUE) {
+   if (brw_inst_src0_reg_file(devinfo, inst) == IMM) {
       *type = brw_inst_src0_type(devinfo, inst);
-      return *type != INVALID_REG_TYPE;
-   } else if (brw_inst_src1_reg_file(devinfo, inst) == BRW_IMMEDIATE_VALUE) {
+      return *type != BRW_TYPE_INVALID;
+   } else if (brw_inst_src1_reg_file(devinfo, inst) == IMM) {
       *type = brw_inst_src1_type(devinfo, inst);
-      return *type != INVALID_REG_TYPE;
+      return *type != BRW_TYPE_INVALID;
    }
 
    return false;
@@ -1595,7 +1596,7 @@ precompact(const struct brw_isa_info *isa, brw_inst inst)
     * sequential elements, so convert to those before compacting.
     */
    if (devinfo->verx10 >= 125) {
-      if (brw_inst_src0_reg_file(devinfo, &inst) == BRW_GENERAL_REGISTER_FILE &&
+      if (brw_inst_src0_reg_file(devinfo, &inst) == FIXED_GRF &&
           brw_inst_src0_vstride(devinfo, &inst) > BRW_VERTICAL_STRIDE_1 &&
           brw_inst_src0_vstride(devinfo, &inst) == (brw_inst_src0_width(devinfo, &inst) + 1) &&
           brw_inst_src0_hstride(devinfo, &inst) == BRW_HORIZONTAL_STRIDE_1) {
@@ -1604,7 +1605,7 @@ precompact(const struct brw_isa_info *isa, brw_inst inst)
          brw_inst_set_src0_hstride(devinfo, &inst, BRW_HORIZONTAL_STRIDE_0);
       }
 
-      if (brw_inst_src1_reg_file(devinfo, &inst) == BRW_GENERAL_REGISTER_FILE &&
+      if (brw_inst_src1_reg_file(devinfo, &inst) == FIXED_GRF &&
           brw_inst_src1_vstride(devinfo, &inst) > BRW_VERTICAL_STRIDE_1 &&
           brw_inst_src1_vstride(devinfo, &inst) == (brw_inst_src1_width(devinfo, &inst) + 1) &&
           brw_inst_src1_hstride(devinfo, &inst) == BRW_HORIZONTAL_STRIDE_1) {
@@ -1614,7 +1615,7 @@ precompact(const struct brw_isa_info *isa, brw_inst inst)
       }
    }
 
-   if (brw_inst_src0_reg_file(devinfo, &inst) != BRW_IMMEDIATE_VALUE)
+   if (brw_inst_src0_reg_file(devinfo, &inst) != IMM)
       return inst;
 
    /* The Bspec's section titled "Non-present Operands" claims that if src0
@@ -1639,9 +1640,9 @@ precompact(const struct brw_isa_info *isa, brw_inst inst)
     * overlap with the immediate and setting them would overwrite the
     * immediate we set.
     */
-   if (!(brw_inst_src0_type(devinfo, &inst) == BRW_REGISTER_TYPE_DF ||
-         brw_inst_src0_type(devinfo, &inst) == BRW_REGISTER_TYPE_UQ ||
-         brw_inst_src0_type(devinfo, &inst) == BRW_REGISTER_TYPE_Q)) {
+   if (!(brw_inst_src0_type(devinfo, &inst) == BRW_TYPE_DF ||
+         brw_inst_src0_type(devinfo, &inst) == BRW_TYPE_UQ ||
+         brw_inst_src0_type(devinfo, &inst) == BRW_TYPE_Q)) {
       brw_inst_set_src1_reg_hw_type(devinfo, &inst, 0);
    }
 
@@ -1661,11 +1662,11 @@ precompact(const struct brw_isa_info *isa, brw_inst inst)
     */
    if (devinfo->ver < 12 &&
        brw_inst_imm_ud(devinfo, &inst) == 0x0 &&
-       brw_inst_src0_type(devinfo, &inst) == BRW_REGISTER_TYPE_F &&
-       brw_inst_dst_type(devinfo, &inst) == BRW_REGISTER_TYPE_F &&
+       brw_inst_src0_type(devinfo, &inst) == BRW_TYPE_F &&
+       brw_inst_dst_type(devinfo, &inst) == BRW_TYPE_F &&
        brw_inst_dst_hstride(devinfo, &inst) == BRW_HORIZONTAL_STRIDE_1) {
       enum brw_reg_file file = brw_inst_src0_reg_file(devinfo, &inst);
-      brw_inst_set_src0_file_type(devinfo, &inst, file, BRW_REGISTER_TYPE_VF);
+      brw_inst_set_src0_file_type(devinfo, &inst, file, BRW_TYPE_VF);
    }
 
    /* There are no mappings for dst:d | i:d, so if the immediate is suitable
@@ -1674,16 +1675,16 @@ precompact(const struct brw_isa_info *isa, brw_inst inst)
     * FINISHME: Use dst:f | imm:f on Gfx12
     */
    if (devinfo->ver < 12 &&
-       compact_immediate(devinfo, BRW_REGISTER_TYPE_D,
+       compact_immediate(devinfo, BRW_TYPE_D,
                          brw_inst_imm_ud(devinfo, &inst)) != -1 &&
        brw_inst_cond_modifier(devinfo, &inst) == BRW_CONDITIONAL_NONE &&
-       brw_inst_src0_type(devinfo, &inst) == BRW_REGISTER_TYPE_D &&
-       brw_inst_dst_type(devinfo, &inst) == BRW_REGISTER_TYPE_D) {
+       brw_inst_src0_type(devinfo, &inst) == BRW_TYPE_D &&
+       brw_inst_dst_type(devinfo, &inst) == BRW_TYPE_D) {
       enum brw_reg_file src_file = brw_inst_src0_reg_file(devinfo, &inst);
       enum brw_reg_file dst_file = brw_inst_dst_reg_file(devinfo, &inst);
 
-      brw_inst_set_src0_file_type(devinfo, &inst, src_file, BRW_REGISTER_TYPE_UD);
-      brw_inst_set_dst_file_type(devinfo, &inst, dst_file, BRW_REGISTER_TYPE_UD);
+      brw_inst_set_src0_file_type(devinfo, &inst, src_file, BRW_TYPE_UD);
+      brw_inst_set_dst_file_type(devinfo, &inst, dst_file, BRW_TYPE_UD);
    }
 
    return inst;
@@ -2236,11 +2237,17 @@ update_uip_jip(const struct brw_isa_info *isa, brw_inst *insn,
    /* JIP and UIP are in units of bytes on Gfx8+. */
    int shift = 3;
 
+   /* Even though the values are signed, we don't need the rounding behavior
+    * of integer division. The shifts are safe.
+    */
+   assert(brw_inst_jip(devinfo, insn) % 8 == 0 &&
+          brw_inst_uip(devinfo, insn) % 8 == 0);
+
    int32_t jip_compacted = brw_inst_jip(devinfo, insn) >> shift;
    jip_compacted -= compacted_between(this_old_ip,
                                       this_old_ip + (jip_compacted / 2),
                                       compacted_counts);
-   brw_inst_set_jip(devinfo, insn, jip_compacted << shift);
+   brw_inst_set_jip(devinfo, insn, (uint32_t)jip_compacted << shift);
 
    if (brw_inst_opcode(isa, insn) == BRW_OPCODE_ENDIF ||
        brw_inst_opcode(isa, insn) == BRW_OPCODE_WHILE)
@@ -2250,7 +2257,7 @@ update_uip_jip(const struct brw_isa_info *isa, brw_inst *insn,
    uip_compacted -= compacted_between(this_old_ip,
                                       this_old_ip + (uip_compacted / 2),
                                       compacted_counts);
-   brw_inst_set_uip(devinfo, insn, uip_compacted << shift);
+   brw_inst_set_uip(devinfo, insn, (uint32_t)uip_compacted << shift);
 }
 
 static void
@@ -2281,6 +2288,7 @@ compaction_state_init(struct compaction_state *c,
    c->isa = isa;
    switch (devinfo->ver) {
    case 20:
+   case 30:
       c->control_index_table = xe2_control_index_table;
       c->datatype_table = xe2_datatype_table;
       c->subreg_table = xe2_subreg_table;
@@ -2434,9 +2442,9 @@ brw_compact_instructions(struct brw_codegen *p, int start_offset,
          if (brw_inst_cmpt_control(devinfo, insn))
             break;
 
-         if (brw_inst_dst_reg_file(devinfo, insn) == BRW_ARCHITECTURE_REGISTER_FILE &&
+         if (brw_inst_dst_reg_file(devinfo, insn) == ARF &&
              brw_inst_dst_da_reg_nr(devinfo, insn) == BRW_ARF_IP) {
-            assert(brw_inst_src1_reg_file(devinfo, insn) == BRW_IMMEDIATE_VALUE);
+            assert(brw_inst_src1_reg_file(devinfo, insn) == IMM);
 
             int shift = 3;
             int jump_compacted = brw_inst_imm_d(devinfo, insn) >> shift;

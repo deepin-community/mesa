@@ -327,24 +327,6 @@ vk_to_isl_color_with_format(VkClearColorValue color, enum isl_format format)
    return isl_color;
 }
 
-/**
- * Warn on ignored extension structs.
- *
- * The Vulkan spec requires us to ignore unsupported or unknown structs in
- * a pNext chain.  In debug mode, emitting warnings for ignored structs may
- * help us discover structs that we should not have ignored.
- *
- *
- * From the Vulkan 1.0.38 spec:
- *
- *    Any component of the implementation (the loader, any enabled layers,
- *    and drivers) must skip over, without processing (other than reading the
- *    sType and pNext members) any chained structures with sType values not
- *    defined by extensions supported by that component.
- */
-#define anv_debug_ignored_stype(sType) \
-   mesa_logd("%s: ignored VkStructureType %u\n", __func__, (sType))
-
 void __anv_perf_warn(struct anv_device *device,
                      const struct vk_object_base *object,
                      const char *file, int line, const char *format, ...)
@@ -509,6 +491,15 @@ anv_address_physical(struct anv_address addr)
    } else {
       return intel_canonical_address(addr.offset);
    }
+}
+
+static inline struct u_trace_address
+anv_address_utrace(struct anv_address addr)
+{
+   return (struct u_trace_address) {
+      .bo = addr.bo,
+      .offset = addr.offset,
+   };
 }
 
 static inline struct anv_address
@@ -927,7 +918,11 @@ struct anv_physical_device {
     int64_t                                     master_minor;
     struct intel_query_engine_info *            engine_info;
 
-    void (*cmd_emit_timestamp)(struct anv_batch *, struct anv_device *, struct anv_address, enum anv_timestamp_capture_type);
+    void (*cmd_emit_timestamp)(struct anv_batch *, struct anv_device *,
+                               struct anv_address, enum anv_timestamp_capture_type);
+    void (*cmd_capture_data)(struct anv_batch *, struct anv_device *,
+                             struct anv_address, struct anv_address,
+                             uint32_t);
     struct intel_measure_device                 measure_device;
 };
 
@@ -3468,19 +3463,10 @@ anv_image_clear_depth_stencil(struct anv_cmd_buffer *cmd_buffer,
                               VkRect2D area,
                               float depth_value, uint8_t stencil_value);
 void
-anv_image_msaa_resolve(struct anv_cmd_buffer *cmd_buffer,
-                       const struct anv_image *src_image,
-                       enum isl_aux_usage src_aux_usage,
-                       uint32_t src_level, uint32_t src_base_layer,
-                       const struct anv_image *dst_image,
-                       enum isl_aux_usage dst_aux_usage,
-                       uint32_t dst_level, uint32_t dst_base_layer,
-                       VkImageAspectFlagBits aspect,
-                       uint32_t src_x, uint32_t src_y,
-                       uint32_t dst_x, uint32_t dst_y,
-                       uint32_t width, uint32_t height,
-                       uint32_t layer_count,
-                       enum blorp_filter filter);
+anv_attachment_msaa_resolve(struct anv_cmd_buffer *cmd_buffer,
+                            const struct anv_attachment *att,
+                            VkImageLayout layout,
+                            VkImageAspectFlagBits aspect);
 void
 anv_image_hiz_op(struct anv_cmd_buffer *cmd_buffer,
                  const struct anv_image *image,

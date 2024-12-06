@@ -15,13 +15,10 @@
 
 #include "vk_format.h"
 
-#include "nouveau_bo.h"
-#include "nouveau_context.h"
-
 #include "nvtypes.h"
-#include "nvk_cl902d.h"
-#include "nvk_cl90b5.h"
-#include "nvk_clc1b5.h"
+#include "nv_push_cl902d.h"
+#include "nv_push_cl90b5.h"
+#include "nv_push_clc1b5.h"
 
 static inline uint16_t
 nvk_cmd_buffer_copy_cls(struct nvk_cmd_buffer *cmd)
@@ -219,12 +216,12 @@ nouveau_copy_rect(struct nvk_cmd_buffer *cmd, struct nouveau_copy *copy)
       if (copy->dst.image_type != VK_IMAGE_TYPE_3D)
          dst_addr += (z + copy->dst.offset_el.a) * copy->dst.array_stride;
 
-      if (!copy->src.tiling.is_tiled) {
+      if (copy->src.tiling.gob_type == NIL_GOB_TYPE_LINEAR) {
          src_addr += copy->src.offset_el.x * copy->src.bpp +
                      copy->src.offset_el.y * copy->src.row_stride;
       }
 
-      if (!copy->dst.tiling.is_tiled) {
+      if (copy->dst.tiling.gob_type == NIL_GOB_TYPE_LINEAR) {
          dst_addr += copy->dst.offset_el.x * copy->dst.bpp +
                      copy->dst.offset_el.y * copy->dst.row_stride;
       }
@@ -242,15 +239,14 @@ nouveau_copy_rect(struct nvk_cmd_buffer *cmd, struct nouveau_copy *copy)
       P_NV90B5_LINE_COUNT(p, copy->extent_el.height);
 
       uint32_t src_layout = 0, dst_layout = 0;
-      if (copy->src.tiling.is_tiled) {
+      if (copy->src.tiling.gob_type != NIL_GOB_TYPE_LINEAR) {
          P_MTHD(p, NV90B5, SET_SRC_BLOCK_SIZE);
+         assert(nil_gob_type_height(copy->src.tiling.gob_type) == 8);
          P_NV90B5_SET_SRC_BLOCK_SIZE(p, {
             .width = 0, /* Tiles are always 1 GOB wide */
             .height = copy->src.tiling.y_log2,
             .depth = copy->src.tiling.z_log2,
-            .gob_height = copy->src.tiling.gob_height_is_8 ?
-                          GOB_HEIGHT_GOB_HEIGHT_FERMI_8 :
-                          GOB_HEIGHT_GOB_HEIGHT_TESLA_4,
+            .gob_height = GOB_HEIGHT_GOB_HEIGHT_FERMI_8,
          });
          /* We use the stride for copies because the copy hardware has no
           * concept of a tile width.  Instead, we just set the width to the
@@ -283,15 +279,14 @@ nouveau_copy_rect(struct nvk_cmd_buffer *cmd, struct nouveau_copy *copy)
          src_layout = NV90B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_PITCH;
       }
 
-      if (copy->dst.tiling.is_tiled) {
+      if (copy->dst.tiling.gob_type != NIL_GOB_TYPE_LINEAR) {
          P_MTHD(p, NV90B5, SET_DST_BLOCK_SIZE);
+         assert(nil_gob_type_height(copy->dst.tiling.gob_type) == 8);
          P_NV90B5_SET_DST_BLOCK_SIZE(p, {
             .width = 0, /* Tiles are always 1 GOB wide */
             .height = copy->dst.tiling.y_log2,
             .depth = copy->dst.tiling.z_log2,
-            .gob_height = copy->dst.tiling.gob_height_is_8 ?
-                          GOB_HEIGHT_GOB_HEIGHT_FERMI_8 :
-                          GOB_HEIGHT_GOB_HEIGHT_TESLA_4,
+            .gob_height = GOB_HEIGHT_GOB_HEIGHT_FERMI_8,
          });
          /* We use the stride for copies because the copy hardware has no
           * concept of a tile width.  Instead, we just set the width to the
@@ -472,7 +467,7 @@ nvk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
       vk_foreach_struct_const(ext, region->pNext) {
          switch (ext->sType) {
          default:
-            nvk_debug_ignored_stype(ext->sType);
+            vk_debug_ignored_stype(ext->sType);
             break;
          }
       }
@@ -481,7 +476,7 @@ nvk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
    vk_foreach_struct_const(ext, pCopyBufferToImageInfo->pNext) {
       switch (ext->sType) {
       default:
-         nvk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(ext->sType);
          break;
       }
    }
@@ -579,7 +574,7 @@ nvk_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
       vk_foreach_struct_const(ext, region->pNext) {
          switch (ext->sType) {
          default:
-            nvk_debug_ignored_stype(ext->sType);
+            vk_debug_ignored_stype(ext->sType);
             break;
          }
       }
@@ -588,7 +583,7 @@ nvk_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
    vk_foreach_struct_const(ext, pCopyImageToBufferInfo->pNext) {
       switch (ext->sType) {
       default:
-         nvk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(ext->sType);
          break;
       }
    }
@@ -700,6 +695,25 @@ nvk_CmdCopyImage2(VkCommandBuffer commandBuffer,
             copy.remap.dst[1] = NV90B5_SET_REMAP_COMPONENTS_DST_Y_NO_WRITE;
             copy.remap.dst[2] = NV90B5_SET_REMAP_COMPONENTS_DST_Z_NO_WRITE;
             copy.remap.dst[3] = NV90B5_SET_REMAP_COMPONENTS_DST_W_SRC_W;
+         } else {
+            /* If we're copying both, there's nothing special to do */
+            assert(src_aspects == (VK_IMAGE_ASPECT_DEPTH_BIT |
+                               VK_IMAGE_ASPECT_STENCIL_BIT));
+         }
+         break;
+      case VK_FORMAT_D32_SFLOAT_S8_UINT:
+         if (src_aspects == VK_IMAGE_ASPECT_DEPTH_BIT) {
+            copy.remap.comp_size = 4;
+            copy.remap.dst[0] = NV90B5_SET_REMAP_COMPONENTS_DST_W_SRC_X;
+            copy.remap.dst[1] = NV90B5_SET_REMAP_COMPONENTS_DST_Y_NO_WRITE;
+            copy.remap.dst[2] = NV90B5_SET_REMAP_COMPONENTS_DST_Z_NO_WRITE;
+            copy.remap.dst[3] = NV90B5_SET_REMAP_COMPONENTS_DST_W_NO_WRITE;
+         } else if (src_aspects == VK_IMAGE_ASPECT_STENCIL_BIT) {
+            copy.remap.comp_size = 4;
+            copy.remap.dst[0] = NV90B5_SET_REMAP_COMPONENTS_DST_X_NO_WRITE;
+            copy.remap.dst[1] = NV90B5_SET_REMAP_COMPONENTS_DST_Y_SRC_Y;
+            copy.remap.dst[2] = NV90B5_SET_REMAP_COMPONENTS_DST_Z_NO_WRITE;
+            copy.remap.dst[3] = NV90B5_SET_REMAP_COMPONENTS_DST_W_NO_WRITE;
          } else {
             /* If we're copying both, there's nothing special to do */
             assert(src_aspects == (VK_IMAGE_ASPECT_DEPTH_BIT |

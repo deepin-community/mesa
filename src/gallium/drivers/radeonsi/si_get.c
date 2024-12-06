@@ -5,6 +5,7 @@
  */
 
 #include "compiler/nir/nir.h"
+#include "ac_nir.h"
 #include "ac_shader_util.h"
 #include "radeon_uvd_enc.h"
 #include "radeon_vce.h"
@@ -16,12 +17,6 @@
 #include "vl/vl_decoder.h"
 #include "vl/vl_video_buffer.h"
 #include <sys/utsname.h>
-
-#if LLVM_AVAILABLE
-#include <llvm/Config/llvm-config.h> /* for LLVM_VERSION_MAJOR */
-#else
-#define LLVM_VERSION_MAJOR 0
-#endif
 
 /* The capabilities reported by the kernel has priority
    over the existing logic in si_get_video_param */
@@ -46,12 +41,27 @@ static const char *si_get_device_vendor(struct pipe_screen *pscreen)
    return "AMD";
 }
 
+static bool
+si_is_compute_copy_faster(struct pipe_screen *pscreen,
+                          enum pipe_format src_format,
+                          enum pipe_format dst_format,
+                          unsigned width,
+                          unsigned height,
+                          unsigned depth,
+                          bool cpu)
+{
+   if (cpu)
+      /* very basic for now */
+      return width * height * depth > 64 * 64;
+   return false;
+}
+
 static int si_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 {
    struct si_screen *sscreen = (struct si_screen *)pscreen;
 
    /* Gfx8 (Polaris11) hangs, so don't enable this on Gfx8 and older chips. */
-   bool enable_sparse = sscreen->info.gfx_level >= GFX9 &&
+   bool enable_sparse = sscreen->info.gfx_level >= GFX9 && sscreen->info.gfx_level < GFX12 &&
       sscreen->info.has_sparse_vm_mappings;
 
    switch (param) {
@@ -124,7 +134,6 @@ static int si_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_STRING_MARKER:
    case PIPE_CAP_CULL_DISTANCE:
    case PIPE_CAP_SHADER_ARRAY_COMPONENTS:
-   case PIPE_CAP_SHADER_CAN_READ_OUTPUTS:
    case PIPE_CAP_STREAM_OUTPUT_PAUSE_RESUME:
    case PIPE_CAP_STREAM_OUTPUT_INTERLEAVE_BUFFERS:
    case PIPE_CAP_DOUBLES:
@@ -171,8 +180,15 @@ static int si_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_CL_GL_SHARING:
       return 1;
 
+   /* Tahiti and Verde only: reduction mode is unsupported due to a bug
+    * (it might work sometimes, but that's not enough)
+    */
+   case PIPE_CAP_SAMPLER_REDUCTION_MINMAX:
+   case PIPE_CAP_SAMPLER_REDUCTION_MINMAX_ARB:
+      return !(sscreen->info.family == CHIP_TAHITI || sscreen->info.family == CHIP_VERDE);
+
    case PIPE_CAP_TEXTURE_TRANSFER_MODES:
-      return PIPE_TEXTURE_TRANSFER_BLIT;
+      return PIPE_TEXTURE_TRANSFER_BLIT | PIPE_TEXTURE_TRANSFER_COMPUTE;
 
    case PIPE_CAP_DRAW_VERTEX_STATE:
       return !(sscreen->debug_flags & DBG(NO_FAST_DISPLAY_LIST));
@@ -264,9 +280,6 @@ static int si_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       /* Allow 1/4th of the heap size. */
       return sscreen->info.max_heap_size_kb / 1024 / 4;
 
-   case PIPE_CAP_VERTEX_BUFFER_OFFSET_4BYTE_ALIGNED_ONLY:
-   case PIPE_CAP_VERTEX_BUFFER_STRIDE_4BYTE_ALIGNED_ONLY:
-   case PIPE_CAP_VERTEX_ELEMENT_SRC_OFFSET_4BYTE_ALIGNED_ONLY:
    case PIPE_CAP_PREFER_BACK_BUFFER_REUSE:
    case PIPE_CAP_UMA:
    case PIPE_CAP_PREFER_IMM_ARRAYS_AS_CONSTBUF:
@@ -328,23 +341,21 @@ static int si_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 
    /* Texturing. */
    case PIPE_CAP_MAX_TEXTURE_2D_SIZE:
-      return 16384;
+      /* TODO: Gfx12 supports 64K textures, but Gallium can't represent them at the moment. */
+      return sscreen->info.gfx_level >= GFX12 ? 32768 : 16384;
    case PIPE_CAP_MAX_TEXTURE_CUBE_LEVELS:
       if (!sscreen->info.has_3d_cube_border_color_mipmap)
          return 0;
-      return 15; /* 16384 */
+      return sscreen->info.gfx_level >= GFX12 ? 16 : 15; /* 32K : 16K */
    case PIPE_CAP_MAX_TEXTURE_3D_LEVELS:
       if (!sscreen->info.has_3d_cube_border_color_mipmap)
          return 0;
-      if (sscreen->info.gfx_level >= GFX10)
-         return 14;
-      /* textures support 8192, but layered rendering supports 2048 */
-      return 12;
+      /* This is limited by maximums that both the texture unit and layered rendering support. */
+      return sscreen->info.gfx_level >= GFX12 ? 15 : /* 16K */
+             sscreen->info.gfx_level >= GFX10 ? 14 : 12; /* 8K : 2K */
    case PIPE_CAP_MAX_TEXTURE_ARRAY_LAYERS:
-      if (sscreen->info.gfx_level >= GFX10)
-         return 8192;
-      /* textures support 8192, but layered rendering supports 2048 */
-      return 2048;
+      /* This is limited by maximums that both the texture unit and layered rendering support. */
+      return sscreen->info.gfx_level >= GFX10 ? 8192 : 2048;
 
    /* Sparse texture */
    case PIPE_CAP_MAX_SPARSE_TEXTURE_SIZE:
@@ -401,6 +412,15 @@ static int si_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       /* Conversion to nanos from cycles per millisecond */
       return DIV_ROUND_UP(1000000, sscreen->info.clock_crystal_freq);
 
+   case PIPE_CAP_SHADER_SUBGROUP_SIZE:
+      return 64;
+   case PIPE_CAP_SHADER_SUBGROUP_SUPPORTED_STAGES:
+      return BITFIELD_MASK(PIPE_SHADER_TYPES);
+   case PIPE_CAP_SHADER_SUBGROUP_SUPPORTED_FEATURES:
+      return BITFIELD_MASK(PIPE_SHADER_SUBGROUP_NUM_FEATURES);
+   case PIPE_CAP_SHADER_SUBGROUP_QUAD_ALL_STAGES:
+      return true;
+
    default:
       return u_pipe_screen_get_param_defaults(pscreen, param);
    }
@@ -408,8 +428,6 @@ static int si_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 
 static float si_get_paramf(struct pipe_screen *pscreen, enum pipe_capf param)
 {
-   struct si_screen *sscreen = (struct si_screen *)pscreen;
-
    switch (param) {
    case PIPE_CAPF_MIN_LINE_WIDTH:
    case PIPE_CAPF_MIN_LINE_WIDTH_AA:
@@ -430,8 +448,10 @@ static float si_get_paramf(struct pipe_screen *pscreen, enum pipe_capf param)
    case PIPE_CAPF_MAX_TEXTURE_ANISOTROPY:
       return 16.0f;
    case PIPE_CAPF_MAX_TEXTURE_LOD_BIAS:
-      /* This is the maximum value of the LOD_BIAS sampler field. */
-      return sscreen->info.gfx_level >= GFX10 ? 31 : 16;
+      /* The hw can do 31, but this test fails if we use that:
+       *    KHR-GL46.texture_lod_bias.texture_lod_bias_all
+       */
+      return 16;
    case PIPE_CAPF_MIN_CONSERVATIVE_RASTER_DILATE:
    case PIPE_CAPF_MAX_CONSERVATIVE_RASTER_DILATE:
    case PIPE_CAPF_CONSERVATIVE_RASTER_DILATE_GRANULARITY:
@@ -663,7 +683,7 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
       case PIPE_VIDEO_CAP_NPOT_TEXTURES:
          return 1;
       case PIPE_VIDEO_CAP_MIN_WIDTH:
-         return 256;
+         return (codec == PIPE_VIDEO_FORMAT_HEVC) ? 130 : 128;
       case PIPE_VIDEO_CAP_MIN_HEIGHT:
          return 128;
       case PIPE_VIDEO_CAP_MAX_WIDTH:
@@ -698,9 +718,8 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
          return (sscreen->info.vcn_ip_version >= VCN_1_0_0) ? 1 : 0;
 
       case PIPE_VIDEO_CAP_ENC_HEVC_FEATURE_FLAGS:
-         if ((sscreen->info.vcn_ip_version >= VCN_1_0_0) &&
-               (profile == PIPE_VIDEO_PROFILE_HEVC_MAIN ||
-             profile == PIPE_VIDEO_PROFILE_HEVC_MAIN_10)) {
+         if (profile == PIPE_VIDEO_PROFILE_HEVC_MAIN ||
+             profile == PIPE_VIDEO_PROFILE_HEVC_MAIN_10) {
             union pipe_h265_enc_cap_features pipe_features;
             pipe_features.value = 0;
 
@@ -709,17 +728,20 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
             pipe_features.bits.constrained_intra_pred = PIPE_ENC_FEATURE_SUPPORTED;
             pipe_features.bits.deblocking_filter_disable
                                                       = PIPE_ENC_FEATURE_SUPPORTED;
-            if (sscreen->info.vcn_ip_version >= VCN_2_0_0)
+            if (sscreen->info.vcn_ip_version >= VCN_2_0_0) {
                pipe_features.bits.sao = PIPE_ENC_FEATURE_SUPPORTED;
+               pipe_features.bits.cu_qp_delta = PIPE_ENC_FEATURE_SUPPORTED;
+            }
+            if (sscreen->info.vcn_ip_version >= VCN_3_0_0)
+               pipe_features.bits.transform_skip = PIPE_ENC_FEATURE_SUPPORTED;
 
             return pipe_features.value;
          } else
             return 0;
 
       case PIPE_VIDEO_CAP_ENC_HEVC_BLOCK_SIZES:
-         if (sscreen->info.vcn_ip_version >= VCN_1_0_0 &&
-             (profile == PIPE_VIDEO_PROFILE_HEVC_MAIN ||
-              profile == PIPE_VIDEO_PROFILE_HEVC_MAIN_10)) {
+         if (profile == PIPE_VIDEO_PROFILE_HEVC_MAIN ||
+             profile == PIPE_VIDEO_PROFILE_HEVC_MAIN_10) {
             union pipe_h265_enc_cap_block_sizes pipe_block_sizes;
             pipe_block_sizes.value = 0;
 
@@ -729,19 +751,23 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
             pipe_block_sizes.bits.log2_max_luma_transform_block_size_minus2 = 3;
             pipe_block_sizes.bits.log2_min_luma_transform_block_size_minus2 = 0;
 
+            if (sscreen->info.ip[AMD_IP_UVD_ENC].num_queues) {
+               pipe_block_sizes.bits.max_max_transform_hierarchy_depth_inter = 3;
+               pipe_block_sizes.bits.min_max_transform_hierarchy_depth_inter = 3;
+               pipe_block_sizes.bits.max_max_transform_hierarchy_depth_intra = 3;
+               pipe_block_sizes.bits.min_max_transform_hierarchy_depth_intra = 3;
+            }
+
             return pipe_block_sizes.value;
          } else
             return 0;
-
-      case PIPE_VIDEO_CAP_ENC_SUPPORTS_ASYNC_OPERATION:
-         return (sscreen->info.vcn_ip_version >= VCN_1_0_0) ? 1 : 0;
 
       case PIPE_VIDEO_CAP_ENC_MAX_SLICES_PER_FRAME:
          return (sscreen->info.vcn_ip_version >= VCN_1_0_0) ? 128 : 1;
 
       case PIPE_VIDEO_CAP_ENC_SLICES_STRUCTURE:
          if (sscreen->info.vcn_ip_version >= VCN_2_0_0) {
-            int value = (PIPE_VIDEO_CAP_SLICE_STRUCTURE_POWER_OF_TWO_ROWS |
+            int value = (PIPE_VIDEO_CAP_SLICE_STRUCTURE_ARBITRARY_MACROBLOCKS |
                          PIPE_VIDEO_CAP_SLICE_STRUCTURE_EQUAL_ROWS |
                          PIPE_VIDEO_CAP_SLICE_STRUCTURE_EQUAL_MULTI_ROWS);
             return value;
@@ -793,7 +819,7 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
             union pipe_av1_enc_cap_features_ext2 attrib_ext2;
             attrib_ext2.value = 0;
 
-           attrib_ext2.bits.tile_size_bytes_minus1 = 1;
+           attrib_ext2.bits.tile_size_bytes_minus1 = 3;
            attrib_ext2.bits.obu_size_bytes_minus1 = 1;
            /**
             * tx_mode supported.
@@ -813,14 +839,15 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
             return 1;
          else
             return 0;
-      case PIPE_VIDEO_CAP_EFC_SUPPORTED:
-         return ((sscreen->info.family > CHIP_RENOIR) &&
-                 !(sscreen->debug_flags & DBG(NO_EFC)));
 
       case PIPE_VIDEO_CAP_ENC_MAX_REFERENCES_PER_FRAME:
          if (sscreen->info.vcn_ip_version >= VCN_3_0_0) {
             int refPicList0 = 1;
             int refPicList1 = codec == PIPE_VIDEO_FORMAT_MPEG4_AVC ? 1 : 0;
+            if (sscreen->info.vcn_ip_version >= VCN_5_0_0 && codec == PIPE_VIDEO_FORMAT_AV1) {
+               refPicList0 = 2;
+               refPicList1 = 1;
+            }
             return refPicList0 | (refPicList1 << 16);
          } else
             return 1;
@@ -859,6 +886,20 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
          }
          else
             return 0;
+
+      case PIPE_VIDEO_CAP_ENC_RATE_CONTROL_QVBR:
+         if (sscreen->info.vcn_ip_version >= VCN_3_0_0 &&
+             sscreen->info.vcn_ip_version < VCN_4_0_0)
+            return sscreen->info.vcn_enc_minor_version >= 30;
+
+         if (sscreen->info.vcn_ip_version >= VCN_4_0_0 &&
+             sscreen->info.vcn_ip_version < VCN_5_0_0)
+            return sscreen->info.vcn_enc_minor_version >= 15;
+
+         if (sscreen->info.vcn_ip_version >= VCN_5_0_0)
+            return sscreen->info.vcn_enc_minor_version >= 3;
+
+         return 0;
 
       default:
          return 0;
@@ -1068,6 +1109,7 @@ static bool si_vid_is_format_supported(struct pipe_screen *screen, enum pipe_for
       case PIPE_FORMAT_Y8_400_UNORM:
          return true;
       case PIPE_FORMAT_Y8_U8_V8_444_UNORM:
+      case PIPE_FORMAT_Y8_U8_V8_440_UNORM:
          if (sscreen->info.vcn_ip_version >= VCN_2_0_0)
             return true;
          else
@@ -1098,6 +1140,59 @@ static bool si_vid_is_format_supported(struct pipe_screen *screen, enum pipe_for
       return format == PIPE_FORMAT_NV12;
 
    return vl_video_buffer_is_format_supported(screen, format, profile, entrypoint);
+}
+
+static bool si_vid_is_target_buffer_supported(struct pipe_screen *screen,
+                                              enum pipe_format format,
+                                              struct pipe_video_buffer *target,
+                                              enum pipe_video_profile profile,
+                                              enum pipe_video_entrypoint entrypoint)
+{
+   struct si_screen *sscreen = (struct si_screen *)screen;
+   struct si_texture *tex = (struct si_texture *)((struct vl_video_buffer *)target)->resources[0];
+   const bool is_dcc = tex->surface.meta_offset;
+   const bool is_format_conversion = format != target->buffer_format;
+
+   switch (entrypoint) {
+   case PIPE_VIDEO_ENTRYPOINT_BITSTREAM:
+      return !is_dcc && !is_format_conversion;
+
+   case PIPE_VIDEO_ENTRYPOINT_ENCODE:
+      if (is_dcc)
+         return false;
+
+      /* EFC */
+      if (is_format_conversion) {
+         const bool input_8bit =
+            target->buffer_format == PIPE_FORMAT_B8G8R8A8_UNORM ||
+            target->buffer_format == PIPE_FORMAT_B8G8R8X8_UNORM ||
+            target->buffer_format == PIPE_FORMAT_R8G8B8A8_UNORM ||
+            target->buffer_format == PIPE_FORMAT_R8G8B8X8_UNORM;
+         const bool input_10bit =
+            target->buffer_format == PIPE_FORMAT_B10G10R10A2_UNORM ||
+            target->buffer_format == PIPE_FORMAT_B10G10R10X2_UNORM ||
+            target->buffer_format == PIPE_FORMAT_R10G10B10A2_UNORM ||
+            target->buffer_format == PIPE_FORMAT_R10G10B10X2_UNORM;
+
+         if (sscreen->info.vcn_ip_version < VCN_2_0_0 ||
+             sscreen->info.vcn_ip_version == VCN_2_2_0 ||
+             sscreen->info.vcn_ip_version >= VCN_5_0_0 ||
+             sscreen->debug_flags & DBG(NO_EFC))
+            return false;
+
+         if (input_8bit)
+            return format == PIPE_FORMAT_NV12;
+         else if (input_10bit)
+            return format == PIPE_FORMAT_NV12 || format == PIPE_FORMAT_P010;
+         else
+            return false;
+      }
+
+      return true;
+
+   default:
+      return !is_format_conversion;
+   }
 }
 
 static unsigned get_max_threads_per_block(struct si_screen *screen, enum pipe_shader_ir ir_type)
@@ -1343,7 +1438,7 @@ static void si_init_renderer_string(struct si_screen *sscreen)
       snprintf(kernel_version, sizeof(kernel_version), ", %s", uname_data.release);
 
    const char *compiler_name =
-#if LLVM_AVAILABLE
+#if AMD_LLVM_AVAILABLE
       !sscreen->use_aco ? "LLVM " MESA_LLVM_VERSION_STRING :
 #endif
       "ACO";
@@ -1366,131 +1461,28 @@ static unsigned si_varying_expression_max_cost(nir_shader *producer, nir_shader 
    unsigned num_profiles = si_get_num_shader_profiles();
 
    for (unsigned i = 0; i < num_profiles; i++) {
-      if (_mesa_printed_sha1_equal(consumer->info.source_sha1, si_shader_profiles[i].sha1)) {
+      if (_mesa_printed_blake3_equal(consumer->info.source_blake3, si_shader_profiles[i].blake3)) {
          if (si_shader_profiles[i].options & SI_PROFILE_NO_OPT_UNIFORM_VARYINGS)
             return 0; /* only propagate constants */
          break;
       }
    }
 
-   switch (consumer->info.stage) {
-   case MESA_SHADER_TESS_CTRL: /* VS->TCS */
-      /* Non-amplifying shaders can always have their variyng expressions
-       * moved into later shaders.
-       */
-      return UINT_MAX;
-
-   case MESA_SHADER_GEOMETRY: /* VS->GS, TES->GS */
-      return consumer->info.gs.vertices_in == 1 ? UINT_MAX :
-             consumer->info.gs.vertices_in == 2 ? 20 : 14;
-
-   case MESA_SHADER_TESS_EVAL: /* VS->TES, TCS->TES */
-   case MESA_SHADER_FRAGMENT:
-      /* Up to 3 uniforms and 5 ALUs. */
-      return 14;
-
-   default:
-      unreachable("unexpected shader stage");
-   }
+   return ac_nir_varying_expression_max_cost(producer, consumer);
 }
 
-static unsigned si_varying_estimate_instr_cost(nir_instr *instr)
+
+static void
+si_driver_thread_add_job(struct pipe_screen *screen, void *data,
+                         struct util_queue_fence *fence,
+                         pipe_driver_thread_func execute,
+                         pipe_driver_thread_func cleanup,
+                         const size_t job_size)
 {
-   unsigned dst_bit_size, src_bit_size, num_dst_dwords;
-   nir_op alu_op;
-
-   /* This is a very loose approximation based on gfx10. */
-   switch (instr->type) {
-   case nir_instr_type_alu:
-      dst_bit_size = nir_instr_as_alu(instr)->def.bit_size;
-      src_bit_size = nir_instr_as_alu(instr)->src[0].src.ssa->bit_size;
-      alu_op = nir_instr_as_alu(instr)->op;
-      num_dst_dwords = DIV_ROUND_UP(dst_bit_size, 32);
-
-      switch (alu_op) {
-      case nir_op_mov:
-      case nir_op_vec2:
-      case nir_op_vec3:
-      case nir_op_vec4:
-      case nir_op_vec5:
-      case nir_op_vec8:
-      case nir_op_vec16:
-      case nir_op_fabs:
-      case nir_op_fneg:
-      case nir_op_fsat:
-         return 0;
-
-      case nir_op_imul:
-      case nir_op_umul_low:
-         return dst_bit_size <= 16 ? 1 : 4 * num_dst_dwords;
-
-      case nir_op_imul_high:
-      case nir_op_umul_high:
-      case nir_op_imul_2x32_64:
-      case nir_op_umul_2x32_64:
-         return 4;
-
-      case nir_op_fexp2:
-      case nir_op_flog2:
-      case nir_op_frcp:
-      case nir_op_frsq:
-      case nir_op_fsqrt:
-      case nir_op_fsin:
-      case nir_op_fcos:
-      case nir_op_fsin_amd:
-      case nir_op_fcos_amd:
-         return 4; /* FP16 & FP32. */
-
-      case nir_op_fpow:
-         return 4 + 1 + 4; /* log2 + mul + exp2 */
-
-      case nir_op_fsign:
-         return dst_bit_size == 64 ? 4 : 3; /* See ac_build_fsign. */
-
-      case nir_op_idiv:
-      case nir_op_udiv:
-      case nir_op_imod:
-      case nir_op_umod:
-      case nir_op_irem:
-         return dst_bit_size == 64 ? 80 : 40;
-
-      case nir_op_fdiv:
-         return dst_bit_size == 64 ? 80 : 5; /* FP16 & FP32: rcp + mul */
-
-      case nir_op_fmod:
-      case nir_op_frem:
-         return dst_bit_size == 64 ? 80 : 8;
-
-      default:
-         /* Double opcodes. Comparisons have always full performance. */
-         if ((dst_bit_size == 64 &&
-              nir_op_infos[alu_op].output_type & nir_type_float) ||
-             (dst_bit_size >= 8 && src_bit_size == 64 &&
-              nir_op_infos[alu_op].input_types[0] & nir_type_float))
-            return 16;
-
-         return DIV_ROUND_UP(MAX2(dst_bit_size, src_bit_size), 32);
-      }
-
-   case nir_instr_type_intrinsic:
-      dst_bit_size = nir_instr_as_intrinsic(instr)->def.bit_size;
-      num_dst_dwords = DIV_ROUND_UP(dst_bit_size, 32);
-
-      switch (nir_instr_as_intrinsic(instr)->intrinsic) {
-      case nir_intrinsic_load_deref:
-         /* Uniform or UBO load.
-          * Set a low cost to balance the number of scalar loads and ALUs.
-          */
-         return 3 * num_dst_dwords;
-
-      default:
-         unreachable("unexpected intrinsic");
-      }
-
-   default:
-      unreachable("unexpected instr type");
-   }
+   struct si_screen *sscreen = (struct si_screen *)screen;
+   util_queue_add_job(&sscreen->shader_compiler_queue, data, fence, execute, cleanup, job_size);
 }
+
 
 void si_init_screen_get_functions(struct si_screen *sscreen)
 {
@@ -1499,6 +1491,8 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
    sscreen->b.get_device_vendor = si_get_device_vendor;
    sscreen->b.get_screen_fd = si_get_screen_fd;
    sscreen->b.get_param = si_get_param;
+   sscreen->b.is_compute_copy_faster = si_is_compute_copy_faster;
+   sscreen->b.driver_thread_add_job = si_driver_thread_add_job;
    sscreen->b.get_paramf = si_get_paramf;
    sscreen->b.get_compute_param = si_get_compute_param;
    sscreen->b.get_timestamp = si_get_timestamp;
@@ -1517,6 +1511,7 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
        sscreen->info.ip[AMD_IP_VPE].num_queues) {
       sscreen->b.get_video_param = si_get_video_param;
       sscreen->b.is_video_format_supported = si_vid_is_format_supported;
+      sscreen->b.is_video_target_buffer_supported = si_vid_is_target_buffer_supported;
    } else {
       sscreen->b.get_video_param = si_get_video_param_no_video_hw;
       sscreen->b.is_video_format_supported = vl_video_buffer_is_format_supported;
@@ -1548,6 +1543,7 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
       (sscreen->info.family >= CHIP_GFX940 && !sscreen->info.has_graphics) ||
       /* fma32 is too slow for gpu < gfx9, so apply the option only for gpu >= gfx9 */
       (sscreen->info.gfx_level >= GFX9 && sscreen->options.force_use_fma32);
+   bool has_mediump = sscreen->info.gfx_level >= GFX8 && sscreen->options.fp16;
 
    nir_shader_compiler_options *options = sscreen->nir_options;
    ac_set_nir_options(&sscreen->info, !sscreen->use_aco, options);
@@ -1574,11 +1570,9 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
     * when execution mode is rtz instead of rtne.
     */
    options->force_f2f16_rtz = true;
-   options->io_options = nir_io_has_flexible_input_interpolation_except_flat |
-                         nir_io_glsl_lower_derefs |
-                         (sscreen->options.optimize_io ? nir_io_glsl_opt_varyings : 0);
-   options->lower_mediump_io = sscreen->info.gfx_level >= GFX8 && sscreen->options.fp16 ?
-                                  si_lower_mediump_io : NULL;
+   options->io_options |= (!has_mediump ? nir_io_mediump_is_32bit : 0) | nir_io_has_intrinsics |
+                          (sscreen->options.optimize_io ? nir_io_glsl_opt_varyings : 0);
+   options->lower_mediump_io = has_mediump ? si_lower_mediump_io : NULL;
    /* HW supports indirect indexing for: | Enabled in driver
     * -------------------------------------------------------
     * TCS inputs                         | Yes
@@ -1593,24 +1587,5 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
                                       BITFIELD_BIT(MESA_SHADER_TESS_EVAL);
    options->support_indirect_outputs = BITFIELD_BIT(MESA_SHADER_TESS_CTRL);
    options->varying_expression_max_cost = si_varying_expression_max_cost;
-   options->varying_estimate_instr_cost = si_varying_estimate_instr_cost;
-
-   nir_lower_subgroups_options *lower_subgroups_options = sscreen->nir_lower_subgroups_options;
-   lower_subgroups_options->subgroup_size = 64;
-   lower_subgroups_options->ballot_bit_size = 64;
-   lower_subgroups_options->ballot_components = 1;
-   lower_subgroups_options->lower_to_scalar = true;
-   lower_subgroups_options->lower_subgroup_masks = true;
-   lower_subgroups_options->lower_relative_shuffle = true;
-   lower_subgroups_options->lower_rotate_to_shuffle = !sscreen->use_aco;
-   lower_subgroups_options->lower_shuffle_to_32bit = true;
-   lower_subgroups_options->lower_vote_eq = true;
-   lower_subgroups_options->lower_vote_bool_eq = true;
-   lower_subgroups_options->lower_quad_broadcast_dynamic = true;
-   lower_subgroups_options->lower_quad_broadcast_dynamic_to_const = sscreen->info.gfx_level <= GFX7;
-   lower_subgroups_options->lower_shuffle_to_swizzle_amd = true;
-   lower_subgroups_options->lower_ballot_bit_count_to_mbcnt_amd = true;
-   lower_subgroups_options->lower_inverse_ballot = !sscreen->use_aco && LLVM_VERSION_MAJOR < 17;
-   lower_subgroups_options->lower_boolean_reduce = true;
-   lower_subgroups_options->lower_boolean_shuffle = true;
+   options->varying_estimate_instr_cost = ac_nir_varying_estimate_instr_cost;
 }

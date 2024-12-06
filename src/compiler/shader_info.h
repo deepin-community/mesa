@@ -26,7 +26,7 @@
 #define SHADER_INFO_H
 
 #include "util/bitset.h"
-#include "util/sha1/sha1.h"
+#include "util/mesa-blake3.h"
 #include "shader_enums.h"
 #include <stdint.h>
 
@@ -37,101 +37,6 @@ extern "C" {
 #define MAX_XFB_BUFFERS        4
 #define MAX_INLINABLE_UNIFORMS 4
 
-struct spirv_supported_capabilities {
-   bool address;
-   bool amd_fragment_mask;
-   bool amd_gcn_shader;
-   bool amd_image_gather_bias_lod;
-   bool amd_image_read_write_lod;
-   bool amd_shader_ballot;
-   bool amd_shader_explicit_vertex_parameter;
-   bool amd_trinary_minmax;
-   bool atomic_storage;
-   bool cooperative_matrix;
-   bool demote_to_helper_invocation;
-   bool derivative_group;
-   bool descriptor_array_dynamic_indexing;
-   bool descriptor_array_non_uniform_indexing;
-   bool descriptor_indexing;
-   bool device_group;
-   bool draw_parameters;
-   bool float_controls;
-   bool float16_atomic_add;
-   bool float16_atomic_min_max;
-   bool float16;
-   bool float32_atomic_add;
-   bool float32_atomic_min_max;
-   bool float64_atomic_add;
-   bool float64_atomic_min_max;
-   bool float64;
-   bool fragment_barycentric;
-   bool fragment_density;
-   bool fragment_fully_covered;
-   bool fragment_shader_pixel_interlock;
-   bool fragment_shader_sample_interlock;
-   bool fragment_shading_rate;
-   bool generic_pointers;
-   bool geometry_streams;
-   bool groups;
-   bool image_atomic_int64;
-   bool image_ms_array;
-   bool image_read_without_format;
-   bool image_write_without_format;
-   bool int16;
-   bool int64_atomics;
-   bool int64;
-   bool int8;
-   bool integer_functions2;
-   bool kernel_image_read_write;
-   bool kernel_image;
-   bool kernel;
-   bool linkage;
-   bool literal_sampler;
-   bool mesh_shading_nv;
-   bool mesh_shading;
-   bool min_lod;
-   bool multiview;
-   bool per_view_attributes_nv;
-   bool physical_storage_buffer_address;
-   bool post_depth_coverage;
-   bool printf;
-   bool quad_control;
-   bool ray_cull_mask;
-   bool ray_query;
-   bool ray_tracing;
-   bool ray_traversal_primitive_culling;
-   bool ray_tracing_position_fetch;
-   bool runtime_descriptor_array;
-   bool shader_clock;
-   bool shader_enqueue;
-   bool shader_sm_builtins_nv;
-   bool shader_viewport_index_layer;
-   bool shader_viewport_mask_nv;
-   bool sparse_residency;
-   bool stencil_export;
-   bool storage_16bit;
-   bool storage_8bit;
-   bool storage_image_ms;
-   bool subgroup_arithmetic;
-   bool subgroup_ballot;
-   bool subgroup_basic;
-   bool subgroup_dispatch;
-   bool subgroup_quad;
-   bool subgroup_rotate;
-   bool subgroup_shuffle;
-   bool subgroup_uniform_control_flow;
-   bool subgroup_vote;
-   bool tessellation;
-   bool transform_feedback;
-   bool variable_pointers;
-   bool vk_memory_model_device_scope;
-   bool vk_memory_model;
-   bool workgroup_memory_explicit_layout;
-
-   bool intel_subgroup_shuffle;
-   bool intel_subgroup_buffer_block_io;
-};
-
 typedef struct shader_info {
    const char *name;
 
@@ -141,8 +46,8 @@ typedef struct shader_info {
    /* Shader is internal, and should be ignored by things like NIR_DEBUG=print */
    bool internal;
 
-   /* SHA1 of the original source, used by shader detection in drivers. */
-   uint8_t source_sha1[SHA1_DIGEST_LENGTH];
+   /* BLAKE3 of the original source, used by shader detection in drivers. */
+   blake3_hash source_blake3;
 
    /** The shader stage, such as MESA_SHADER_VERTEX. */
    gl_shader_stage stage:8;
@@ -278,13 +183,6 @@ typedef struct shader_info {
    /* Whether texture size, levels, or samples is queried. */
    bool uses_resource_info_query:1;
 
-   /**
-    * True if this shader uses the fddx/fddy opcodes.
-    *
-    * Note that this does not include the "fine" and "coarse" variants.
-    */
-   bool uses_fddx_fddy:1;
-
    /** Has divergence analysis ever been run? */
    bool divergence_analysis_run:1;
 
@@ -353,6 +251,9 @@ typedef struct shader_info {
     */
    bool maximally_reconverges:1;
 
+   /* Use ACO instead of LLVM on AMD. */
+   bool use_aco_amd:1;
+
    /**
      * Set if this shader uses legacy (DX9 or ARB assembly) math rules.
      *
@@ -376,6 +277,12 @@ typedef struct shader_info {
      * in as a uniform.
      */
    bool use_legacy_math_rules;
+
+   /*
+    * Arrangement of invocations used to calculate derivatives in
+    * compute/task/mesh shaders.  From KHR_compute_shader_derivatives.
+    */
+   enum gl_derivative_group derivative_group:2;
 
    union {
       struct {
@@ -424,7 +331,6 @@ typedef struct shader_info {
 
       struct {
          bool uses_discard:1;
-         bool uses_demote:1;
          bool uses_fbfetch_output:1;
          bool fbfetch_coherent:1;
          bool color_is_dual_source:1;
@@ -535,12 +441,6 @@ typedef struct shader_info {
          uint8_t user_data_components_amd:4;
 
          /*
-          * Arrangement of invocations used to calculate derivatives in a compute
-          * shader.  From NV_compute_shader_derivatives.
-          */
-         enum gl_derivative_group derivative_group:2;
-
-         /*
           * If the shader might run with shared mem on top of `shared_size`.
           */
          bool has_variable_shared_mem:1;
@@ -550,6 +450,15 @@ typedef struct shader_info {
           * SPV_KHR_cooperative_matrix.
           */
          bool has_cooperative_matrix:1;
+
+         /**
+          * Number of bytes of shared imageblock memory per thread. Currently,
+          * this requires that the workgroup size is 32x32x1 and that
+          * shared_size = 0. These requirements could be lifted in the future.
+          * However, there is no current OpenGL/Vulkan API support for
+          * imageblocks. This is only used internally to accelerate blit/copy.
+          */
+         uint8_t image_block_size_per_thread_agx;
 
          /**
           * pointer size is:
@@ -580,6 +489,14 @@ typedef struct shader_info {
          /** Is the vertex order counterclockwise? */
          bool ccw:1;
          bool point_mode:1;
+
+         /* Bit mask of TCS per-vertex inputs (VS outputs) that are used
+          * with a vertex index that is equal to the invocation id.
+          *
+          * Not mutually exclusive with tcs_cross_invocation_inputs_read, i.e.
+          * both input[0] and input[invocation_id] can be present.
+          */
+         uint64_t tcs_same_invocation_inputs_read;
 
          /* Bit mask of TCS per-vertex inputs (VS outputs) that are used
           * with a vertex index that is NOT the invocation id

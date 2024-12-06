@@ -615,7 +615,7 @@ static bool pvr_physical_device_get_properties(
 
    snprintf(properties->deviceName,
             sizeof(properties->deviceName),
-            "Imagination PowerVR %s %s",
+            "PowerVR %s %s",
             dev_info->ident.series_name,
             dev_info->ident.public_name);
 
@@ -721,15 +721,6 @@ static VkResult pvr_physical_device_init(struct pvr_physical_device *pdevice,
    char *render_path;
    VkResult result;
 
-   if (!getenv("PVR_I_WANT_A_BROKEN_VULKAN_DRIVER")) {
-      return vk_errorf(instance,
-                       VK_ERROR_INCOMPATIBLE_DRIVER,
-                       "WARNING: powervr is not a conformant Vulkan "
-                       "implementation. Pass "
-                       "PVR_I_WANT_A_BROKEN_VULKAN_DRIVER=1 if you know "
-                       "what you're doing.");
-   }
-
    render_path = vk_strdup(&instance->vk.alloc,
                            drm_render_device->nodes[DRM_NODE_RENDER],
                            VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
@@ -754,6 +745,16 @@ static VkResult pvr_physical_device_init(struct pvr_physical_device *pdevice,
       pvr_winsys_create(render_path, display_path, &instance->vk.alloc, &ws);
    if (result != VK_SUCCESS)
       goto err_vk_free_display_path;
+
+   if (!getenv("PVR_I_WANT_A_BROKEN_VULKAN_DRIVER")) {
+      result = vk_errorf(instance,
+                         VK_ERROR_INCOMPATIBLE_DRIVER,
+                         "WARNING: powervr is not a conformant Vulkan "
+                         "implementation. Pass "
+                         "PVR_I_WANT_A_BROKEN_VULKAN_DRIVER=1 if you know "
+                         "what you're doing.");
+      goto err_pvr_winsys_destroy;
+   }
 
    pdevice->instance = instance;
    pdevice->render_path = render_path;
@@ -1230,7 +1231,7 @@ void pvr_GetPhysicalDeviceQueueFamilyProperties2(
       p->queueFamilyProperties = pvr_queue_family_properties;
 
       vk_foreach_struct (ext, p->pNext) {
-         pvr_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(ext->sType);
       }
    }
 }
@@ -1259,7 +1260,7 @@ void pvr_GetPhysicalDeviceMemoryProperties2(
          break;
       }
       default:
-         pvr_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(ext->sType);
          break;
       }
    }
@@ -2154,7 +2155,7 @@ VkResult pvr_AllocateMemory(VkDevice _device,
       case VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO:
          break;
       default:
-         pvr_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(ext->sType);
          break;
       }
    }

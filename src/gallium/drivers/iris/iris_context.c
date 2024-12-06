@@ -30,6 +30,7 @@
 #include "util/format/u_format.h"
 #include "util/u_upload_mgr.h"
 #include "iris_context.h"
+#include "iris_perf.h"
 #include "iris_resource.h"
 #include "iris_screen.h"
 #include "iris_utrace.h"
@@ -218,6 +219,7 @@ iris_destroy_context(struct pipe_context *ctx)
 
    blorp_finish(&ice->blorp);
 
+   intel_perf_free_context(ice->perf_ctx);
    if (ctx->stream_uploader)
       u_upload_destroy(ctx->stream_uploader);
    if (ctx->const_uploader)
@@ -246,6 +248,7 @@ iris_destroy_context(struct pipe_context *ctx)
 
    iris_destroy_batches(ice);
    iris_destroy_binder(&ice->state.binder);
+   iris_bo_unreference(ice->draw.generation.ring_bo);
 
    iris_utrace_fini(ice);
 
@@ -257,6 +260,9 @@ iris_destroy_context(struct pipe_context *ctx)
 
 #define genX_call(devinfo, func, ...)             \
    switch ((devinfo)->verx10) {                   \
+   case 300:                                      \
+      gfx30_##func(__VA_ARGS__);                  \
+      break;                                      \
    case 200:                                      \
       gfx20_##func(__VA_ARGS__);                  \
       break;                                      \

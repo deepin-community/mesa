@@ -151,6 +151,7 @@ dzn_physical_device_get_extensions(struct dzn_physical_device *pdev)
 #endif
       .EXT_scalar_block_layout               = true,
       .EXT_separate_stencil_usage            = true,
+      .EXT_shader_replicated_composites      = true,
       .EXT_shader_subgroup_ballot            = true,
       .EXT_shader_subgroup_vote              = true,
       .EXT_subgroup_size_control             = true,
@@ -236,6 +237,9 @@ dzn_instance_destroy(struct dzn_instance *instance, const VkAllocationCallbacks 
 
    if (instance->d3d12_mod)
       util_dl_close(instance->d3d12_mod);
+
+   driDestroyOptionCache(&instance->dri_options);
+   driDestroyOptionInfo(&instance->available_dri_options);
 
    vk_free2(vk_default_allocator(), alloc, instance);
 }
@@ -793,6 +797,7 @@ dzn_physical_device_get_features(const struct dzn_physical_device *pdev,
 
       .vertexAttributeInstanceRateDivisor = true,
       .vertexAttributeInstanceRateZeroDivisor = true,
+      .shaderReplicatedComposites         = true,
    };
 }
 
@@ -1264,7 +1269,7 @@ dzn_physical_device_get_format_properties(struct dzn_physical_device *pdev,
    VkFormatProperties *base_props = &properties->formatProperties;
 
    vk_foreach_struct(ext, properties->pNext) {
-      dzn_debug_ignored_stype(ext->sType);
+      vk_debug_ignored_stype(ext->sType);
    }
 
    if (dfmt_info.Format == DXGI_FORMAT_UNKNOWN) {
@@ -1391,7 +1396,7 @@ dzn_physical_device_get_image_format_properties(struct dzn_physical_device *pdev
          usage |= ((const VkImageStencilUsageCreateInfo *)s)->stencilUsage;
          break;
       default:
-         dzn_debug_ignored_stype(s->sType);
+         vk_debug_ignored_stype(s->sType);
          break;
       }
    }
@@ -1406,7 +1411,7 @@ dzn_physical_device_get_image_format_properties(struct dzn_physical_device *pdev
          external_props->externalMemoryProperties = (VkExternalMemoryProperties) { 0 };
          break;
       default:
-         dzn_debug_ignored_stype(s->sType);
+         vk_debug_ignored_stype(s->sType);
          break;
       }
    }
@@ -1912,7 +1917,7 @@ dzn_GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice,
          p->queueFamilyProperties = pdev->queue_families[i].props;
 
          vk_foreach_struct(ext, pQueueFamilyProperties->pNext) {
-            dzn_debug_ignored_stype(ext->sType);
+            vk_debug_ignored_stype(ext->sType);
          }
       }
    }
@@ -1935,7 +1940,7 @@ dzn_GetPhysicalDeviceMemoryProperties2(VkPhysicalDevice physicalDevice,
                                          &pMemoryProperties->memoryProperties);
 
    vk_foreach_struct(ext, pMemoryProperties->pNext) {
-      dzn_debug_ignored_stype(ext->sType);
+      vk_debug_ignored_stype(ext->sType);
    }
 }
 
@@ -2650,7 +2655,7 @@ dzn_device_memory_create(struct dzn_device *device,
          break;
       }
       default:
-         dzn_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(ext->sType);
          break;
       }
    }
@@ -3277,7 +3282,7 @@ dzn_GetBufferMemoryRequirements2(VkDevice dev,
       }
 
       default:
-         dzn_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(ext->sType);
          break;
       }
    }

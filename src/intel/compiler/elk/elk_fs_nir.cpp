@@ -240,7 +240,6 @@ emit_system_values_block(nir_to_elk_state &ntb, nir_block *block)
          break;
 
       case nir_intrinsic_load_workgroup_id:
-      case nir_intrinsic_load_workgroup_id_zero_base:
          assert(gl_shader_stage_is_compute(s.stage));
          reg = &ntb.system_values[SYSTEM_VALUE_WORKGROUP_ID];
          if (reg->file == BAD_FILE)
@@ -782,7 +781,6 @@ static void
 emit_fsign(nir_to_elk_state &ntb, const fs_builder &bld, const nir_alu_instr *instr,
            elk_fs_reg result, elk_fs_reg *op, unsigned fsign_src)
 {
-   elk_fs_visitor &s = ntb.s;
    const intel_device_info *devinfo = ntb.devinfo;
 
    elk_fs_inst *inst;
@@ -864,46 +862,7 @@ emit_fsign(nir_to_elk_state &ntb, const fs_builder &bld, const nir_alu_instr *in
 
       inst->predicate = ELK_PREDICATE_NORMAL;
    } else {
-      /* For doubles we do the same but we need to consider:
-       *
-       * - 2-src instructions can't operate with 64-bit immediates
-       * - The sign is encoded in the high 32-bit of each DF
-       * - We need to produce a DF result.
-       */
-
-      elk_fs_reg zero = s.vgrf(glsl_double_type());
-      bld.MOV(zero, elk_setup_imm_df(bld, 0.0));
-      bld.CMP(bld.null_reg_df(), op[0], zero, ELK_CONDITIONAL_NZ);
-
-      bld.MOV(result, zero);
-
-      elk_fs_reg r = subscript(result, ELK_REGISTER_TYPE_UD, 1);
-      bld.AND(r, subscript(op[0], ELK_REGISTER_TYPE_UD, 1),
-              elk_imm_ud(0x80000000u));
-
-      if (instr->op == nir_op_fsign) {
-         set_predicate(ELK_PREDICATE_NORMAL,
-                       bld.OR(r, r, elk_imm_ud(0x3ff00000u)));
-      } else {
-         if (devinfo->has_64bit_int) {
-            /* This could be done better in some cases.  If the scale is an
-             * immediate with the low 32-bits all 0, emitting a separate XOR and
-             * OR would allow an algebraic optimization to remove the OR.  There
-             * are currently zero instances of fsign(double(x))*IMM in shader-db
-             * or any test suite, so it is hard to care at this time.
-             */
-            elk_fs_reg result_int64 = retype(result, ELK_REGISTER_TYPE_UQ);
-            inst = bld.XOR(result_int64, result_int64,
-                           retype(op[1], ELK_REGISTER_TYPE_UQ));
-         } else {
-            elk_fs_reg result_int64 = retype(result, ELK_REGISTER_TYPE_UQ);
-            bld.MOV(subscript(result_int64, ELK_REGISTER_TYPE_UD, 0),
-                    subscript(op[1], ELK_REGISTER_TYPE_UD, 0));
-            bld.XOR(subscript(result_int64, ELK_REGISTER_TYPE_UD, 1),
-                    subscript(result_int64, ELK_REGISTER_TYPE_UD, 1),
-                    subscript(op[1], ELK_REGISTER_TYPE_UD, 1));
-         }
-      }
+      unreachable("Should have been lowered by nir_opt_algebraic.");
    }
 }
 
@@ -1213,21 +1172,6 @@ fs_nir_emit_alu(nir_to_elk_state &ntb, nir_alu_instr *instr,
 
    case nir_op_fcos:
       inst = bld.emit(ELK_SHADER_OPCODE_COS, result, op[0]);
-      break;
-
-   case nir_op_fddx_fine:
-      inst = bld.emit(ELK_FS_OPCODE_DDX_FINE, result, op[0]);
-      break;
-   case nir_op_fddx:
-   case nir_op_fddx_coarse:
-      inst = bld.emit(ELK_FS_OPCODE_DDX_COARSE, result, op[0]);
-      break;
-   case nir_op_fddy_fine:
-      inst = bld.emit(ELK_FS_OPCODE_DDY_FINE, result, op[0]);
-      break;
-   case nir_op_fddy:
-   case nir_op_fddy_coarse:
-      inst = bld.emit(ELK_FS_OPCODE_DDY_COARSE, result, op[0]);
       break;
 
    case nir_op_fadd:
@@ -1651,16 +1595,10 @@ fs_nir_emit_alu(nir_to_elk_state &ntb, nir_alu_instr *instr,
    case nir_op_pack_half_2x16:
       unreachable("not reached: should be handled by lower_packing_builtins");
 
-   case nir_op_unpack_half_2x16_split_x_flush_to_zero:
-      assert(FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP16 & execution_mode);
-      FALLTHROUGH;
    case nir_op_unpack_half_2x16_split_x:
       inst = bld.F16TO32(result, subscript(op[0], ELK_REGISTER_TYPE_HF, 0));
       break;
 
-   case nir_op_unpack_half_2x16_split_y_flush_to_zero:
-      assert(FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP16 & execution_mode);
-      FALLTHROUGH;
    case nir_op_unpack_half_2x16_split_y:
       inst = bld.F16TO32(result, subscript(op[0], ELK_REGISTER_TYPE_HF, 1));
       break;
@@ -3795,10 +3733,8 @@ fs_nir_emit_fs_intrinsic(nir_to_elk_state &ntb,
    }
 
    case nir_intrinsic_demote:
-   case nir_intrinsic_discard:
    case nir_intrinsic_terminate:
    case nir_intrinsic_demote_if:
-   case nir_intrinsic_discard_if:
    case nir_intrinsic_terminate_if: {
       /* We track our discarded pixels in f0.1/f1.0.  By predicating on it, we
        * can update just the flag bits that aren't yet discarded.  If there's
@@ -3807,7 +3743,6 @@ fs_nir_emit_fs_intrinsic(nir_to_elk_state &ntb,
        */
       elk_fs_inst *cmp = NULL;
       if (instr->intrinsic == nir_intrinsic_demote_if ||
-          instr->intrinsic == nir_intrinsic_discard_if ||
           instr->intrinsic == nir_intrinsic_terminate_if) {
          nir_alu_instr *alu = nir_src_as_alu_instr(instr->src[0]);
 
@@ -3846,8 +3781,28 @@ fs_nir_emit_fs_intrinsic(nir_to_elk_state &ntb,
                /* The old sequence that would have been generated is,
                 * basically, bool_result == false.  This is equivalent to
                 * !bool_result, so negate the old modifier.
+                *
+                * Unfortunately, we can't do this to most float comparisons
+                * because of NaN, so we'll have to fallback to the old-style
+                * compare.
+                *
+                * For example, this code (after negation):
+                *    (+f1.0) cmp.ge.f1.0(8) null<1>F g30<8,8,1>F     0x0F
+                * will provide different results from this:
+                *    cmp.l.f0.0(8)   g31<1>F         g30<1,1,0>F     0x0F
+                *    (+f1.0) cmp.z.f1.0(8) null<1>D  g31<8,8,1>D     0D
+                * because both (NaN >= 0) == false and (NaN < 0) == false.
+                *
+                * It will still work for == and != though, because
+                * (NaN == x) == false and (NaN != x) == true.
                 */
-               cmp->conditional_mod = elk_negate_cmod(cmp->conditional_mod);
+               if (elk_type_is_float(cmp->src[0].type) &&
+                   cmp->conditional_mod != ELK_CONDITIONAL_EQ &&
+                   cmp->conditional_mod != ELK_CONDITIONAL_NEQ) {
+                  cmp = NULL;
+               } else {
+                  cmp->conditional_mod = elk_negate_cmod(cmp->conditional_mod);
+               }
             }
          }
 
@@ -3884,7 +3839,8 @@ fs_nir_emit_fs_intrinsic(nir_to_elk_state &ntb,
       break;
    }
 
-   case nir_intrinsic_load_input: {
+   case nir_intrinsic_load_input:
+   case nir_intrinsic_load_per_primitive_input: {
       /* In Fragment Shaders load_input is used either for flat inputs or
        * per-primitive inputs.
        */
@@ -4095,8 +4051,7 @@ fs_nir_emit_cs_intrinsic(nir_to_elk_state &ntb,
       s.cs_payload().load_subgroup_id(bld, dest);
       break;
 
-   case nir_intrinsic_load_workgroup_id:
-   case nir_intrinsic_load_workgroup_id_zero_base: {
+   case nir_intrinsic_load_workgroup_id: {
       elk_fs_reg val = ntb.system_values[SYSTEM_VALUE_WORKGROUP_ID];
       assert(val.file != BAD_FILE);
       dest.type = val.type;
@@ -5316,69 +5271,6 @@ fs_nir_emit_intrinsic(nir_to_elk_state &ntb,
       fs_nir_emit_global_atomic(ntb, bld, instr);
       break;
 
-   case nir_intrinsic_load_global_const_block_intel: {
-      assert(instr->def.bit_size == 32);
-      assert(instr->num_components == 8 || instr->num_components == 16);
-
-      const fs_builder ubld = bld.exec_all().group(instr->num_components, 0);
-      elk_fs_reg load_val;
-
-      bool is_pred_const = nir_src_is_const(instr->src[1]);
-      if (is_pred_const && nir_src_as_uint(instr->src[1]) == 0) {
-         /* In this case, we don't want the UBO load at all.  We really
-          * shouldn't get here but it's possible.
-          */
-         load_val = elk_imm_ud(0);
-      } else {
-         /* The uniform process may stomp the flag so do this first */
-         elk_fs_reg addr = bld.emit_uniformize(get_nir_src(ntb, instr->src[0]));
-
-         load_val = ubld.vgrf(ELK_REGISTER_TYPE_UD);
-
-         /* If the predicate is constant and we got here, then it's non-zero
-          * and we don't need the predicate at all.
-          */
-         if (!is_pred_const) {
-            /* Load the predicate */
-            elk_fs_reg pred = bld.emit_uniformize(get_nir_src(ntb, instr->src[1]));
-            elk_fs_inst *mov = ubld.MOV(bld.null_reg_d(), pred);
-            mov->conditional_mod = ELK_CONDITIONAL_NZ;
-
-            /* Stomp the destination with 0 if we're OOB */
-            mov = ubld.MOV(load_val, elk_imm_ud(0));
-            mov->predicate = ELK_PREDICATE_NORMAL;
-            mov->predicate_inverse = true;
-         }
-
-         elk_fs_reg srcs[A64_LOGICAL_NUM_SRCS];
-         srcs[A64_LOGICAL_ADDRESS] = addr;
-         srcs[A64_LOGICAL_SRC] = elk_fs_reg(); /* No source data */
-         srcs[A64_LOGICAL_ARG] = elk_imm_ud(instr->num_components);
-         /* This intrinsic loads memory from a uniform address, sometimes
-          * shared across lanes. We never need to mask it.
-          */
-         srcs[A64_LOGICAL_ENABLE_HELPERS] = elk_imm_ud(0);
-
-         elk_fs_inst *load = ubld.emit(ELK_SHADER_OPCODE_A64_OWORD_BLOCK_READ_LOGICAL,
-                                   load_val, srcs, A64_LOGICAL_NUM_SRCS);
-         if (!is_pred_const)
-            load->predicate = ELK_PREDICATE_NORMAL;
-      }
-
-      /* From the HW perspective, we just did a single SIMD16 instruction
-       * which loaded a dword in each SIMD channel.  From NIR's perspective,
-       * this instruction returns a vec16.  Any users of this data in the
-       * back-end will expect a vec16 per SIMD channel so we have to emit a
-       * pile of MOVs to resolve this discrepancy.  Fortunately, copy-prop
-       * will generally clean them up for us.
-       */
-      for (unsigned i = 0; i < instr->num_components; i++) {
-         bld.MOV(retype(offset(dest, bld, i), ELK_REGISTER_TYPE_UD),
-                 component(load_val, i));
-      }
-      break;
-   }
-
    case nir_intrinsic_load_global_constant_uniform_block_intel: {
       const unsigned total_dwords = ALIGN(instr->num_components,
                                           REG_SIZE * reg_unit(devinfo) / 4);
@@ -6044,6 +5936,25 @@ fs_nir_emit_intrinsic(nir_to_elk_state &ntb,
       }
       break;
    }
+
+   case nir_intrinsic_ddx_fine:
+      bld.emit(ELK_FS_OPCODE_DDX_FINE, retype(dest, ELK_REGISTER_TYPE_F),
+               retype(get_nir_src(ntb, instr->src[0]), ELK_REGISTER_TYPE_F));
+      break;
+   case nir_intrinsic_ddx:
+   case nir_intrinsic_ddx_coarse:
+      bld.emit(ELK_FS_OPCODE_DDX_COARSE, retype(dest, ELK_REGISTER_TYPE_F),
+               retype(get_nir_src(ntb, instr->src[0]), ELK_REGISTER_TYPE_F));
+      break;
+   case nir_intrinsic_ddy_fine:
+      bld.emit(ELK_FS_OPCODE_DDY_FINE, retype(dest, ELK_REGISTER_TYPE_F),
+               retype(get_nir_src(ntb, instr->src[0]), ELK_REGISTER_TYPE_F));
+      break;
+   case nir_intrinsic_ddy:
+   case nir_intrinsic_ddy_coarse:
+      bld.emit(ELK_FS_OPCODE_DDY_COARSE, retype(dest, ELK_REGISTER_TYPE_F),
+               retype(get_nir_src(ntb, instr->src[0]), ELK_REGISTER_TYPE_F));
+      break;
 
    case nir_intrinsic_reduce: {
       elk_fs_reg src = get_nir_src(ntb, instr->src[0]);

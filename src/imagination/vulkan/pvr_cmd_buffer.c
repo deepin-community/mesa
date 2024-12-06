@@ -84,8 +84,8 @@ struct pvr_compute_kernel_info {
    uint32_t pds_code_offset;
    enum PVRX(CDMCTRL_SD_TYPE) sd_type;
    bool usc_common_shared;
-   uint32_t local_size[PVR_WORKGROUP_DIMENSIONS];
    uint32_t global_size[PVR_WORKGROUP_DIMENSIONS];
+   uint32_t local_size[PVR_WORKGROUP_DIMENSIONS];
    uint32_t max_instances;
 };
 
@@ -963,7 +963,8 @@ static void pvr_setup_pbe_state(
                                     &surface_params.source_format,
                                     &surface_params.gamma);
 
-   surface_params.is_normalized = pvr_vk_format_is_fully_normalized(iview->vk.format);
+   surface_params.is_normalized =
+      pvr_vk_format_is_fully_normalized(iview->vk.format);
    surface_params.pbe_packmode = pvr_get_pbe_packmode(iview->vk.format);
    surface_params.nr_components = vk_format_get_nr_components(iview->vk.format);
 
@@ -1167,6 +1168,7 @@ pvr_sub_cmd_gfx_align_ds_subtiles(struct pvr_cmd_buffer *const cmd_buffer,
     */
    assert(list_last_entry(&cmd_buffer->sub_cmds, struct pvr_sub_cmd, link) ==
           prev_sub_cmd);
+   assert(prev_sub_cmd == cmd_buffer->state.current_sub_cmd);
 
    if (!pvr_ds_attachment_requires_zls(ds))
       return VK_SUCCESS;
@@ -1221,12 +1223,16 @@ pvr_sub_cmd_gfx_align_ds_subtiles(struct pvr_cmd_buffer *const cmd_buffer,
    };
 
    if (ds->load.d || ds->load.s) {
+      struct pvr_sub_cmd *new_sub_cmd;
+
       cmd_buffer->state.current_sub_cmd = NULL;
 
       result =
          pvr_cmd_buffer_start_sub_cmd(cmd_buffer, PVR_SUB_CMD_TYPE_TRANSFER);
       if (result != VK_SUCCESS)
          return result;
+
+      new_sub_cmd = cmd_buffer->state.current_sub_cmd;
 
       result = pvr_copy_image_to_buffer_region_format(cmd_buffer,
                                                       ds_image,
@@ -1237,7 +1243,7 @@ pvr_sub_cmd_gfx_align_ds_subtiles(struct pvr_cmd_buffer *const cmd_buffer,
       if (result != VK_SUCCESS)
          return result;
 
-      cmd_buffer->state.current_sub_cmd->transfer.serialize_with_frag = true;
+      new_sub_cmd->transfer.serialize_with_frag = true;
 
       result = pvr_cmd_buffer_end_sub_cmd(cmd_buffer);
       if (result != VK_SUCCESS)
@@ -1245,9 +1251,11 @@ pvr_sub_cmd_gfx_align_ds_subtiles(struct pvr_cmd_buffer *const cmd_buffer,
 
       /* Now we have to fiddle with cmd_buffer to place this transfer command
        * *before* the target gfx subcommand.
+       *
+       * Note the doc for list_move_to() is subtly wrong - item is placed
+       * directly *after* loc in the list, not "in front of".
        */
-      list_move_to(&cmd_buffer->state.current_sub_cmd->link,
-                   &prev_sub_cmd->link);
+      list_move_to(&new_sub_cmd->link, prev_sub_cmd->link.prev);
 
       cmd_buffer->state.current_sub_cmd = prev_sub_cmd;
    }
@@ -1732,6 +1740,9 @@ static VkResult pvr_sub_cmd_gfx_job_init(const struct pvr_device_info *dev_info,
    job->run_frag = true;
    job->geometry_terminate = true;
 
+   /* TODO: Enable pixel merging when it's safe to do. */
+   job->disable_pixel_merging = true;
+
    return VK_SUCCESS;
 }
 
@@ -1947,15 +1958,15 @@ pvr_compute_generate_idfwdf(struct pvr_cmd_buffer *cmd_buffer,
                             struct pvr_sub_cmd_compute *const sub_cmd)
 {
    struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
-   bool *const is_sw_barier_required =
+   bool *const is_sw_barrier_required =
       &state->current_sub_cmd->compute.pds_sw_barrier_requires_clearing;
    const struct pvr_physical_device *pdevice = cmd_buffer->device->pdevice;
    struct pvr_csb *csb = &sub_cmd->control_stream;
    const struct pvr_pds_upload *program;
 
    if (PVR_NEED_SW_COMPUTE_PDS_BARRIER(&pdevice->dev_info) &&
-       *is_sw_barier_required) {
-      *is_sw_barier_required = false;
+       *is_sw_barrier_required) {
+      *is_sw_barrier_required = false;
       program = &cmd_buffer->device->idfwdf_state.sw_compute_barrier_pds;
    } else {
       program = &cmd_buffer->device->idfwdf_state.pds;
@@ -4307,8 +4318,8 @@ static void pvr_compute_update_shared(struct pvr_cmd_buffer *cmd_buffer,
          DIV_ROUND_UP(const_shared_regs,
                       PVRX(CDMCTRL_KERNEL0_USC_COMMON_SIZE_UNIT_SIZE)),
 
-      .local_size = { 1, 1, 1 },
       .global_size = { 1, 1, 1 },
+      .local_size = { 1, 1, 1 },
    };
 
    /* Sometimes we don't have a secondary program if there were no constants to
@@ -4377,8 +4388,8 @@ void pvr_compute_update_shared_private(
       .pds_code_offset = pipeline->pds_shared_update_code_offset,
       .sd_type = PVRX(CDMCTRL_SD_TYPE_NONE),
       .usc_common_shared = true,
-      .local_size = { 1, 1, 1 },
       .global_size = { 1, 1, 1 },
+      .local_size = { 1, 1, 1 },
    };
 
    /* We don't need to pad the workgroup size. */
@@ -5998,7 +6009,8 @@ pvr_emit_dirty_ppp_state(struct pvr_cmd_buffer *const cmd_buffer,
 
    if (!dynamic_state->rs.rasterizer_discard_enable &&
        state->dirty.fragment_descriptors &&
-       state->gfx_pipeline->shader_state.fragment.bo) {
+       state->gfx_pipeline->shader_state.fragment.bo &&
+       !state->gfx_pipeline->shader_state.fragment.stage_state.empty_program) {
       pvr_setup_fragment_state_pointers(cmd_buffer, sub_cmd);
    }
 
@@ -6238,8 +6250,6 @@ static VkResult pvr_validate_draw_state(struct pvr_cmd_buffer *cmd_buffer)
       &gfx_pipeline->shader_state.fragment.stage_state;
    const struct pvr_pipeline_stage_state *const vertex_state =
       &gfx_pipeline->shader_state.vertex.stage_state;
-   const struct pvr_pipeline_layout *const pipeline_layout =
-      gfx_pipeline->base.layout;
    struct pvr_sub_cmd_gfx *sub_cmd;
    bool fstencil_writemask_zero;
    bool bstencil_writemask_zero;
@@ -6345,13 +6355,13 @@ static VkResult pvr_validate_draw_state(struct pvr_cmd_buffer *cmd_buffer)
    state->dirty.fragment_descriptors = state->dirty.vertex_descriptors;
 
    /* Account for dirty descriptor set. */
-   state->dirty.vertex_descriptors |=
-      state->dirty.gfx_desc_dirty &&
-      pipeline_layout
-         ->per_stage_descriptor_masks[PVR_STAGE_ALLOCATION_VERTEX_GEOMETRY];
-   state->dirty.fragment_descriptors |=
-      state->dirty.gfx_desc_dirty &&
-      pipeline_layout->per_stage_descriptor_masks[PVR_STAGE_ALLOCATION_FRAGMENT];
+   /* TODO: It could be the case that there are no descriptors for a specific
+    * stage, or that the update descriptors aren't active for a particular
+    * stage. In such cases we could avoid regenerating the descriptor PDS
+    * program.
+    */
+   state->dirty.vertex_descriptors |= state->dirty.gfx_desc_dirty;
+   state->dirty.fragment_descriptors |= state->dirty.gfx_desc_dirty;
 
    if (BITSET_TEST(dynamic_state->dirty, MESA_VK_DYNAMIC_CB_BLEND_CONSTANTS))
       state->dirty.fragment_descriptors = true;
@@ -7642,7 +7652,6 @@ pvr_cmd_buffer_insert_mid_frag_barrier_event(struct pvr_cmd_buffer *cmd_buffer,
    cmd_buffer->state.current_sub_cmd->event = (struct pvr_sub_cmd_event){
       .type = PVR_EVENT_TYPE_BARRIER,
       .barrier = {
-         .in_render_pass = true,
          .wait_for_stage_mask = src_stage_mask,
          .wait_at_stage_mask = dst_stage_mask,
       },
@@ -7697,6 +7706,7 @@ void pvr_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
    uint32_t src_stage_mask;
    uint32_t dst_stage_mask;
    bool is_barrier_needed;
+   VkResult result;
 
    PVR_CHECK_COMMAND_BUFFER_BUILDING_STATE(cmd_buffer);
 
@@ -7749,9 +7759,9 @@ void pvr_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
 
       switch (src_stage_mask) {
       case PVR_PIPELINE_STAGE_FRAG_BIT:
-         is_barrier_needed = !render_pass;
+         is_barrier_needed = false;
 
-         if (is_barrier_needed)
+         if (!render_pass)
             break;
 
          assert(current_sub_cmd->type == PVR_SUB_CMD_TYPE_GRAPHICS);
@@ -7806,23 +7816,18 @@ void pvr_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
                                        pDependencyInfo->pImageMemoryBarriers);
 
    if (is_stencil_store_load_needed) {
-      VkResult result;
-
+      assert(render_pass);
       result = pvr_cmd_buffer_insert_mid_frag_barrier_event(cmd_buffer,
                                                             src_stage_mask,
                                                             dst_stage_mask);
       if (result != VK_SUCCESS)
          mesa_loge("Failed to insert mid frag barrier event.");
-   } else {
-      if (is_barrier_needed) {
-         VkResult result;
-
-         result = pvr_cmd_buffer_insert_barrier_event(cmd_buffer,
-                                                      src_stage_mask,
-                                                      dst_stage_mask);
-         if (result != VK_SUCCESS)
-            mesa_loge("Failed to insert pipeline barrier event.");
-      }
+   } else if (is_barrier_needed) {
+      result = pvr_cmd_buffer_insert_barrier_event(cmd_buffer,
+                                                   src_stage_mask,
+                                                   dst_stage_mask);
+      if (result != VK_SUCCESS)
+         mesa_loge("Failed to insert pipeline barrier event.");
    }
 }
 
@@ -7946,9 +7951,9 @@ void pvr_CmdWaitEvents2(VkCommandBuffer commandBuffer,
 }
 
 void pvr_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
-                               VkPipelineStageFlags2 stage,
-                               VkQueryPool queryPool,
-                               uint32_t query)
+                            VkPipelineStageFlags2 stage,
+                            VkQueryPool queryPool,
+                            uint32_t query)
 {
    unreachable("Timestamp queries are not supported.");
 }

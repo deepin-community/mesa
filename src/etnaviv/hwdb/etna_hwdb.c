@@ -88,6 +88,7 @@ etna_query_feature_db(struct etna_core_info *info)
    ETNA_FEATURE(PE_NO_ALPHA_TEST, PE_NO_ALPHA_TEST);
 
    ETNA_FEATURE(SH_NO_ONECONST_LIMIT, SH_NO_ONECONST_LIMIT);
+   ETNA_FEATURE(COMPUTE_ONLY, COMPUTE_ONLY);
 
    ETNA_FEATURE(DEC400, DEC400);
 
@@ -112,6 +113,8 @@ etna_query_feature_db(struct etna_core_info *info)
       info->npu.on_chip_sram_size = db->VIP_SRAM_SIZE;
       info->npu.axi_sram_size = db->AXI_SRAM_SIZE;
       info->npu.nn_zrl_bits = db->NN_ZRL_BITS;
+      info->npu.nn_accum_buffer_depth = db->NNAccumBufferDepth;
+      info->npu.nn_input_buffer_depth = db->NNInputBufferDepth;
    }
 
    return true;

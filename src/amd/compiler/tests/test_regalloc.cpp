@@ -14,7 +14,7 @@ BEGIN_TEST(regalloc.subdword_alloc.reuse_16bit_operands)
     * while the lower 16 bits are still live, so the output must be stored in
     * a register other than v0. For the second v_cvt_f32_f16, the original
     * value stored in v0 is no longer used and hence it's safe to store the
-    * result in v0.
+    * result in v0, which might or might not happen.
     */
 
    /* TODO: is this possible to do on GFX11? */
@@ -31,7 +31,7 @@ BEGIN_TEST(regalloc.subdword_alloc.reuse_16bit_operands)
             bld.pseudo(aco_opcode::p_split_vector, bld.def(v2b), bld.def(v2b), inputs[0]);
 
          //! v1: %_:v[#b] = v_cvt_f32_f16 %_:v[#a][16:32] dst_sel:dword src0_sel:uword1
-         //! v1: %_:v[#a] = v_cvt_f32_f16 %_:v[#a][0:16]
+         //! v1: %_:v[#_] = v_cvt_f32_f16 %_:v[#a][0:16]
          //; success = (b != a)
          auto result1 = bld.vop1(aco_opcode::v_cvt_f32_f16, bld.def(v1), tmp.def(1).getTemp());
          auto result2 = bld.vop1(aco_opcode::v_cvt_f32_f16, bld.def(v1), tmp.def(0).getTemp());
@@ -76,7 +76,7 @@ BEGIN_TEST(regalloc.precolor.swap)
    //! s2: %op0_2:s[2-3], s2: %op1_2:s[0-1] = p_parallelcopy %op0:s[0-1], %op1:s[2-3]
    //! p_unit_test %op0_2:s[2-3], %op1_2:s[0-1]
    Operand op(inputs[0]);
-   op.setFixed(PhysReg(2));
+   op.setPrecolored(PhysReg(2));
    bld.pseudo(aco_opcode::p_unit_test, op, op1);
 
    finish_ra_test(ra_test_policy());
@@ -90,7 +90,7 @@ BEGIN_TEST(regalloc.precolor.blocking_vector)
    //! s1: %tmp1_2:s[1], s2: %tmp0_2:s[2-3] = p_parallelcopy %tmp1:s[2], %tmp0:s[0-1]
    //! p_unit_test %tmp1_2:s[1]
    Operand op(inputs[1]);
-   op.setFixed(PhysReg(1));
+   op.setPrecolored(PhysReg(1));
    bld.pseudo(aco_opcode::p_unit_test, op);
 
    //! p_unit_test %tmp0_2:s[2-3]
@@ -104,13 +104,13 @@ BEGIN_TEST(regalloc.precolor.vector.test)
    if (!setup_cs("s2 s1 s1", GFX10))
       return;
 
-   //! s2: %tmp0_2:s[2-3], s1: %tmp2_2:s[0] = p_parallelcopy %tmp0:s[0-1], %tmp2:s[3]
+   //! s2: %tmp0_2:s[2-3], s1: %tmp2_2:s[#t2] = p_parallelcopy %tmp0:s[0-1], %tmp2:s[3]
    //! p_unit_test %tmp0_2:s[2-3]
    Operand op(inputs[0]);
-   op.setFixed(PhysReg(2));
+   op.setPrecolored(PhysReg(2));
    bld.pseudo(aco_opcode::p_unit_test, op);
 
-   //! p_unit_test %tmp2_2:s[0]
+   //! p_unit_test %tmp2_2:s[#t2]
    bld.pseudo(aco_opcode::p_unit_test, inputs[2]);
 
    finish_ra_test(ra_test_policy());
@@ -121,13 +121,13 @@ BEGIN_TEST(regalloc.precolor.vector.collect)
    if (!setup_cs("s2 s1 s1", GFX10))
       return;
 
-   //! s2: %tmp0_2:s[2-3], s1: %tmp1_2:s[0], s1: %tmp2_2:s[1] = p_parallelcopy %tmp0:s[0-1], %tmp1:s[2], %tmp2:s[3]
+   //! s2: %tmp0_2:s[2-3], s1: %tmp1_2:s[#t1], s1: %tmp2_2:s[#t2] = p_parallelcopy %tmp0:s[0-1], %tmp1:s[2], %tmp2:s[3]
    //! p_unit_test %tmp0_2:s[2-3]
    Operand op(inputs[0]);
-   op.setFixed(PhysReg(2));
+   op.setPrecolored(PhysReg(2));
    bld.pseudo(aco_opcode::p_unit_test, op);
 
-   //! p_unit_test %tmp1_2:s[0], %tmp2_2:s[1]
+   //! p_unit_test %tmp1_2:s[#t1], %tmp2_2:s[#t2]
    bld.pseudo(aco_opcode::p_unit_test, inputs[1], inputs[2]);
 
    finish_ra_test(ra_test_policy());
@@ -138,8 +138,8 @@ BEGIN_TEST(regalloc.precolor.vgpr_move)
    if (!setup_cs("v1 v1", GFX10))
       return;
 
-   //! v1: %tmp1_2:v[0], v1: %tmp0_2:v[1] = p_parallelcopy %tmp1:v[1], %tmp0:v[0]
-   //! p_unit_test %tmp0_2:v[1], %tmp1_2:v[0]
+   //! v1: %tmp1_2:v[0], v1: %tmp0_2:v[#t0] = p_parallelcopy %tmp1:v[1], %tmp0:v[0]
+   //! p_unit_test %tmp0_2:v[#t0], %tmp1_2:v[0]
    bld.pseudo(aco_opcode::p_unit_test, inputs[0], Operand(inputs[1], PhysReg(256)));
 
    finish_ra_test(ra_test_policy());
@@ -170,43 +170,6 @@ BEGIN_TEST(regalloc.precolor.different_regs)
               Operand(inputs[0], PhysReg(256 + 1)), Operand(inputs[0], PhysReg(256 + 2)));
 
    finish_ra_test(ra_test_policy());
-END_TEST
-
-BEGIN_TEST(regalloc.scratch_sgpr.create_vector)
-   if (!setup_cs("v1 s1", GFX7))
-      return;
-
-   Temp tmp = bld.pseudo(aco_opcode::p_extract_vector, bld.def(v1b), inputs[0], Operand::zero());
-
-   //>> v3b: %0:v[0][0:24] = v_and_b32 0xffffff, %0:v[0][0:24]
-   //! s1: %0:s[1] = s_mov_b32 0x1000001
-   //! v1: %0:v[0] = v_mul_lo_u32 %0:s[1], %_:v[0][0:8]
-   bld.pseudo(aco_opcode::p_create_vector, bld.def(v1), Operand(v3b), Operand(tmp));
-
-   //! p_unit_test %_:s[0]
-   //! s_endpgm
-   bld.pseudo(aco_opcode::p_unit_test, inputs[1]);
-
-   finish_ra_test(ra_test_policy(), true);
-END_TEST
-
-BEGIN_TEST(regalloc.scratch_sgpr.create_vector_sgpr_operand)
-   if (!setup_cs("v2 s1", GFX7))
-      return;
-
-   Temp tmp = bld.pseudo(aco_opcode::p_extract_vector, bld.def(v1b), inputs[0], Operand::c32(4u));
-
-   //>> v1: %0:v[0] = v_mov_b32 %_:s[0]
-   //! v3b: %0:v[1][0:24] = v_and_b32 0xffffff, %0:v[1][0:24]
-   //! s1: %0:s[1] = s_mov_b32 0x1000001
-   //! v1: %0:v[1] = v_mul_lo_u32 %0:s[1], %_:v[1][0:8]
-   bld.pseudo(aco_opcode::p_create_vector, bld.def(v2), inputs[1], Operand(v3b), Operand(tmp));
-
-   //! p_unit_test %_:s[0]
-   //! s_endpgm
-   bld.pseudo(aco_opcode::p_unit_test, inputs[1]);
-
-   finish_ra_test(ra_test_policy(), true);
 END_TEST
 
 BEGIN_TEST(regalloc.branch_def_phis_at_merge_block)
@@ -302,9 +265,9 @@ BEGIN_TEST(regalloc.vinterp_fp16)
       bld.vinterp_inreg(aco_opcode::v_interp_p10_f16_f32_inreg, bld.def(v1), lo, inputs[1], hi);
    bld.pseudo(aco_opcode::p_unit_test, tmp0);
 
-   //! v2b: %tmp1:v[0][16:32] = v_interp_p2_f16_f32_inreg %in0:v[0], %in2:v[2], %tmp0:v[1] opsel_hi
-   //! v1: %tmp2:v[0] = p_create_vector 0, %tmp1:v[0][16:32]
-   //! p_unit_test %tmp2:v[0]
+   //! v2b: %tmp1:v[#r][16:32] = v_interp_p2_f16_f32_inreg %in0:v[0], %in2:v[2], %tmp0:v[1] opsel_hi
+   //! v1: %tmp2:v[#r] = p_create_vector 0, %tmp1:v[#r][16:32]
+   //! p_unit_test %tmp2:v[#r]
    Temp tmp1 = bld.vinterp_inreg(aco_opcode::v_interp_p2_f16_f32_inreg, bld.def(v2b), inputs[0],
                                  inputs[2], tmp0);
    Temp tmp2 = bld.pseudo(aco_opcode::p_create_vector, bld.def(v1), Operand::zero(2), tmp1);
@@ -321,11 +284,11 @@ BEGIN_TEST(regalloc.writelane)
    //! s1: %tmp:m0 = p_parallelcopy %int3:s[2]
    Temp tmp = bld.copy(bld.def(s1, m0), inputs[3]);
 
-   //! s1: %in1_2:m0,  s1: %tmp_2:s[0] = p_parallelcopy %in1:s[0], %tmp:m0
+   //! s1: %in1_2:m0,  s1: %tmp_2:s[#t2] = p_parallelcopy %in1:s[0], %tmp:m0
    //! v1: %tmp2:v[0] = v_writelane_b32_e64 %in1_2:m0, %in2:s[1], %in0:v[0]
    Temp tmp2 = bld.writelane(bld.def(v1), inputs[1], inputs[2], inputs[0]);
 
-   //! p_unit_test %tmp_2:s[0], %tmp2:v[0]
+   //! p_unit_test %tmp_2:s[#t2], %tmp2:v[0]
    bld.pseudo(aco_opcode::p_unit_test, tmp, tmp2);
 
    finish_ra_test(ra_test_policy());
@@ -334,9 +297,7 @@ END_TEST
 static void
 end_linear_vgpr(Temp tmp)
 {
-   Operand op(tmp);
-   op.setLateKill(true);
-   bld.pseudo(aco_opcode::p_end_linear_vgpr, op);
+   bld.pseudo(aco_opcode::p_end_linear_vgpr, tmp);
 }
 
 BEGIN_TEST(regalloc.linear_vgpr.alloc.basic)
@@ -345,10 +306,10 @@ BEGIN_TEST(regalloc.linear_vgpr.alloc.basic)
 
    //>> lv1: %ltmp0:v[31] = p_start_linear_vgpr
    //! lv1: %ltmp1:v[30] = p_start_linear_vgpr
-   //! p_end_linear_vgpr (latekill)%ltmp0:v[31]
+   //! p_end_linear_vgpr %ltmp0:v[31]
    //! lv1: %ltmp2:v[31] = p_start_linear_vgpr
-   //! p_end_linear_vgpr (latekill)%ltmp1:v[30]
-   //! p_end_linear_vgpr (latekill)%ltmp2:v[31]
+   //! p_end_linear_vgpr %ltmp1:v[30]
+   //! p_end_linear_vgpr %ltmp2:v[31]
    Temp ltmp0 = bld.pseudo(aco_opcode::p_start_linear_vgpr, bld.def(v1.as_linear()));
    Temp ltmp1 = bld.pseudo(aco_opcode::p_start_linear_vgpr, bld.def(v1.as_linear()));
    end_linear_vgpr(ltmp0);
@@ -368,7 +329,7 @@ BEGIN_TEST(regalloc.linear_vgpr.alloc.compact_grow)
 
       //! lv1: %ltmp0:v[31] = p_start_linear_vgpr
       //! lv1: %ltmp1:v[30] = p_start_linear_vgpr
-      //! p_end_linear_vgpr (latekill)%ltmp0:v[31]
+      //! p_end_linear_vgpr %ltmp0:v[31]
       Temp ltmp0 = bld.pseudo(aco_opcode::p_start_linear_vgpr, bld.def(v1.as_linear()));
       Temp ltmp1 = bld.pseudo(aco_opcode::p_start_linear_vgpr, bld.def(v1.as_linear()));
       end_linear_vgpr(ltmp0);
@@ -384,8 +345,8 @@ BEGIN_TEST(regalloc.linear_vgpr.alloc.compact_grow)
       //! lv2: %ltmp2:v[29-30] = p_start_linear_vgpr
       Temp ltmp2 = bld.pseudo(aco_opcode::p_start_linear_vgpr, bld.def(v2.as_linear()));
 
-      //! p_end_linear_vgpr (latekill)%ltmp1_2:v[31]
-      //! p_end_linear_vgpr (latekill)%ltmp2:v[29-30]
+      //! p_end_linear_vgpr %ltmp1_2:v[31]
+      //! p_end_linear_vgpr %ltmp2:v[29-30]
       end_linear_vgpr(ltmp1);
       end_linear_vgpr(ltmp2);
 
@@ -408,9 +369,9 @@ BEGIN_TEST(regalloc.linear_vgpr.alloc.compact_shrink)
       //! lv1: %ltmp2:v[29] = p_start_linear_vgpr
       //! lv1: %ltmp3:v[28] = p_start_linear_vgpr
       //! lv1: %ltmp4:v[27] = p_start_linear_vgpr
-      //! p_end_linear_vgpr (latekill)%ltmp0:v[31]
-      //! p_end_linear_vgpr (latekill)%ltmp2:v[29]
-      //! p_end_linear_vgpr (latekill)%ltmp4:v[27]
+      //! p_end_linear_vgpr %ltmp0:v[31]
+      //! p_end_linear_vgpr %ltmp2:v[29]
+      //! p_end_linear_vgpr %ltmp4:v[27]
       Temp ltmp0 = bld.pseudo(aco_opcode::p_start_linear_vgpr, bld.def(v1.as_linear()));
       Temp ltmp1 = bld.pseudo(aco_opcode::p_start_linear_vgpr, bld.def(v1.as_linear()));
       Temp ltmp2 = bld.pseudo(aco_opcode::p_start_linear_vgpr, bld.def(v1.as_linear()));
@@ -429,9 +390,9 @@ BEGIN_TEST(regalloc.linear_vgpr.alloc.compact_shrink)
       //! v28: %_:v[0-27] = p_unit_test
       bld.pseudo(aco_opcode::p_unit_test, bld.def(RegClass::get(RegType::vgpr, 28 * 4)));
 
-      //! p_end_linear_vgpr (latekill)%ltmp1_2:v[31]
-      //! p_end_linear_vgpr (latekill)%ltmp3_2:v[30]
-      //! p_end_linear_vgpr (latekill)%ltmp5:v[28-29]
+      //! p_end_linear_vgpr %ltmp1_2:v[31]
+      //! p_end_linear_vgpr %ltmp3_2:v[30]
+      //! p_end_linear_vgpr %ltmp5:v[28-29]
       end_linear_vgpr(ltmp1);
       end_linear_vgpr(ltmp3);
       end_linear_vgpr(ltmp5);
@@ -449,7 +410,7 @@ BEGIN_TEST(regalloc.linear_vgpr.alloc.compact_for_normal)
 
       //! lv1: %ltmp0:v[31] = p_start_linear_vgpr
       //! lv1: %ltmp1:v[30] = p_start_linear_vgpr
-      //! p_end_linear_vgpr (latekill)%ltmp0:v[31]
+      //! p_end_linear_vgpr %ltmp0:v[31]
       Temp ltmp0 = bld.pseudo(aco_opcode::p_start_linear_vgpr, bld.def(v1.as_linear()));
       Temp ltmp1 = bld.pseudo(aco_opcode::p_start_linear_vgpr, bld.def(v1.as_linear()));
       end_linear_vgpr(ltmp0);
@@ -458,7 +419,7 @@ BEGIN_TEST(regalloc.linear_vgpr.alloc.compact_for_normal)
       //! v31: %_:v[0-30] = p_unit_test
       bld.pseudo(aco_opcode::p_unit_test, bld.def(RegClass::get(RegType::vgpr, 31 * 4)));
 
-      //! p_end_linear_vgpr (latekill)%ltmp1_2:v[31]
+      //! p_end_linear_vgpr %ltmp1_2:v[31]
       end_linear_vgpr(ltmp1);
 
       finish_ra_test(ra_test_policy{pessimistic});
@@ -474,7 +435,7 @@ BEGIN_TEST(regalloc.linear_vgpr.alloc.compact_for_vec)
 
       //! lv1: %ltmp0:v[31] = p_start_linear_vgpr
       //! lv1: %ltmp1:v[30] = p_start_linear_vgpr
-      //! p_end_linear_vgpr (latekill)%ltmp0:v[31]
+      //! p_end_linear_vgpr %ltmp0:v[31]
       Temp ltmp0 = bld.pseudo(aco_opcode::p_start_linear_vgpr, bld.def(v1.as_linear()));
       Temp ltmp1 = bld.pseudo(aco_opcode::p_start_linear_vgpr, bld.def(v1.as_linear()));
       end_linear_vgpr(ltmp0);
@@ -484,7 +445,7 @@ BEGIN_TEST(regalloc.linear_vgpr.alloc.compact_for_vec)
       RegClass v31 = RegClass::get(RegType::vgpr, 31 * 4);
       bld.pseudo(aco_opcode::p_create_vector, bld.def(v31), Operand(v31));
 
-      //! p_end_linear_vgpr (latekill)%ltmp1_2:v[31]
+      //! p_end_linear_vgpr %ltmp1_2:v[31]
       end_linear_vgpr(ltmp1);
 
       finish_ra_test(ra_test_policy{pessimistic});
@@ -504,7 +465,7 @@ BEGIN_TEST(regalloc.linear_vgpr.alloc.killed_op)
       Temp tmp1 = bld.pseudo(aco_opcode::p_unit_test, bld.def(v1));
 
       //! lv1: %ltmp0:v[31] = p_start_linear_vgpr %tmp1:v[31]
-      //! p_end_linear_vgpr (latekill)%ltmp0:v[31]
+      //! p_end_linear_vgpr %ltmp0:v[31]
       Temp ltmp0 = bld.pseudo(aco_opcode::p_start_linear_vgpr, bld.def(v1.as_linear()), tmp1);
       end_linear_vgpr(ltmp0);
 
@@ -531,7 +492,7 @@ BEGIN_TEST(regalloc.linear_vgpr.alloc.move_killed_op)
       //~gfx8_optimistic! v1: %tmp1_2:v[31], v1: %tmp2_2:v[30] = p_parallelcopy %tmp1:v[30], %tmp2:v[31]
       //~gfx8_pessimistic! v1: %tmp2_2:v[30], v1: %tmp1_2:v[31] = p_parallelcopy %tmp2:v[31], %tmp1:v[30]
       //! lv1: %ltmp0:v[31] = p_start_linear_vgpr %tmp1_2:v[31]
-      //! p_end_linear_vgpr (latekill)%ltmp0:v[31]
+      //! p_end_linear_vgpr %ltmp0:v[31]
       Temp ltmp0 = bld.pseudo(aco_opcode::p_start_linear_vgpr, bld.def(v1.as_linear()), tmp1);
       end_linear_vgpr(ltmp0);
 
@@ -551,7 +512,7 @@ BEGIN_TEST(regalloc.linear_vgpr.compact_for_future_def)
       //>> lv2: %ltmp0:v[30-31] = p_start_linear_vgpr
       //! lv1: %ltmp1:v[29] = p_start_linear_vgpr
       //! lv1: %ltmp2:v[28] = p_start_linear_vgpr
-      //! p_end_linear_vgpr (latekill)%ltmp1:v[29]
+      //! p_end_linear_vgpr %ltmp1:v[29]
       Temp ltmp0 = bld.pseudo(aco_opcode::p_start_linear_vgpr, bld.def(v2.as_linear()));
       Temp ltmp1 = bld.pseudo(aco_opcode::p_start_linear_vgpr, bld.def(v1.as_linear()));
       Temp ltmp2 = bld.pseudo(aco_opcode::p_start_linear_vgpr, bld.def(v1.as_linear()));
@@ -586,8 +547,8 @@ BEGIN_TEST(regalloc.linear_vgpr.compact_for_future_def)
       program->blocks[2].logical_preds.push_back(1);
       program->blocks[2].kind |= block_kind_top_level;
 
-      //! p_end_linear_vgpr (latekill)%ltmp0_2:v[30-31]
-      //! p_end_linear_vgpr (latekill)%ltmp2_2:v[29]
+      //! p_end_linear_vgpr %ltmp0_2:v[30-31]
+      //! p_end_linear_vgpr %ltmp2_2:v[29]
       end_linear_vgpr(ltmp0);
       end_linear_vgpr(ltmp2);
 
@@ -615,7 +576,7 @@ BEGIN_TEST(regalloc.linear_vgpr.compact_for_future_phis)
       //>> lv1: %ltmp0:v[31] = p_start_linear_vgpr
       //! lv1: %ltmp1:v[30] = p_start_linear_vgpr
       //! lv1: %ltmp2:v[29] = p_start_linear_vgpr
-      //! p_end_linear_vgpr (latekill)%ltmp1:v[30]
+      //! p_end_linear_vgpr %ltmp1:v[30]
       Temp ltmp0 = bld.pseudo(aco_opcode::p_start_linear_vgpr, bld.def(v1.as_linear()));
       Temp ltmp1 = bld.pseudo(aco_opcode::p_start_linear_vgpr, bld.def(v1.as_linear()));
       Temp ltmp2 = bld.pseudo(aco_opcode::p_start_linear_vgpr, bld.def(v1.as_linear()));
@@ -651,8 +612,8 @@ BEGIN_TEST(regalloc.linear_vgpr.compact_for_future_phis)
       Temp tmp = bld.pseudo(aco_opcode::p_phi, bld.def(v30), Operand(v30));
       bld.pseudo(aco_opcode::p_unit_test, tmp);
 
-      //! p_end_linear_vgpr (latekill)%ltmp0_2:v[31]
-      //! p_end_linear_vgpr (latekill)%ltmp2_2:v[30]
+      //! p_end_linear_vgpr %ltmp0_2:v[31]
+      //! p_end_linear_vgpr %ltmp2_2:v[30]
       end_linear_vgpr(ltmp0);
       end_linear_vgpr(ltmp2);
 

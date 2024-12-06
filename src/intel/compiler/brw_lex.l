@@ -2,7 +2,7 @@
 %option nounput
 %{
 #include <string.h>
-#include "brw_asm.h"
+#include "brw_asm_internal.h"
 #undef ALIGN16
 #include "brw_gram.tab.h"
 
@@ -10,7 +10,7 @@
 int yycolumn = 1;
 
 int saved_state = 0;
-extern char *input_filename;
+extern const char *input_filename;
 
 #define YY_NO_INPUT
 #define YY_USER_ACTION                                  	\
@@ -108,8 +108,6 @@ rndu 		{ yylval.integer = BRW_OPCODE_RNDU; return RNDU; }
 rndz 		{ yylval.integer = BRW_OPCODE_RNDZ; return RNDZ; }
 rol 		{ yylval.integer = BRW_OPCODE_ROL; return ROL; }
 ror 		{ yylval.integer = BRW_OPCODE_ROR; return ROR; }
-sad2 		{ yylval.integer = BRW_OPCODE_SAD2; return SAD2; }
-sada2 		{ yylval.integer = BRW_OPCODE_SADA2; return SADA2; }
 sel 		{ yylval.integer = BRW_OPCODE_SEL; return SEL; }
 send 		{
 			yylval.integer = BRW_OPCODE_SEND;
@@ -283,6 +281,9 @@ nomask      	{ return MASK_DISABLE; }
 atomic       	{ return ATOMIC; }
 switch       	{ return SWITCH; }
 
+ /* Branch control */
+BranchCtrl	{ return BRANCH_CTRL; }
+
  /* Quarter Control */
 1[HNQ]       	{ }
 "2Q"	        { return QTR_2Q; }
@@ -303,7 +304,6 @@ switch       	{ return SWITCH; }
 :?DF 	{ return TYPE_DF; }
 :?F 	{ return TYPE_F; }
 :?HF 	{ return TYPE_HF; }
-:?NF 	{ return TYPE_NF; }
 :?Q 	{ return TYPE_Q; }
 :?UB 	{ return TYPE_UB; }
 :?UD 	{ return TYPE_UD; }
@@ -383,6 +383,7 @@ sr[0-9]+ 	{ yylval.integer = atoi(yytext + 2); return STATEREG; }
 		        }
 <MSGDESC>"{"    	{ yyless(0); BEGIN(INITIAL); return MSGDESC_END; }
 <MSGDESC>.      	{ }
+<MSGDESC>\n     	{ yycolumn = 1; }
 
 "0x"[0-9a-f][0-9a-f]* 	{
 			   yylval.llint = strtoull(yytext + 2, NULL, 16);
@@ -414,6 +415,7 @@ sr[0-9]+ 	{ yylval.integer = atoi(yytext + 2); return STATEREG; }
 "I@"[1-7]	{ yylval.integer = atoi(yytext + 2); return REG_DIST_INT; }
 "L@"[1-7]	{ yylval.integer = atoi(yytext + 2); return REG_DIST_LONG; }
 "A@"[1-7]	{ yylval.integer = atoi(yytext + 2); return REG_DIST_ALL; }
+"M@"[1-7]	{ yylval.integer = atoi(yytext + 2); return REG_DIST_MATH; }
 
 "$"[0-9]*	{ yylval.integer = atoi(yytext + 1); return SBID_ALLOC; }
 "$"[0-9]*".src"	{ yylval.integer = atoi(yytext + 1); return SBID_WAIT_SRC; }

@@ -1,24 +1,6 @@
 /*
- * Copyright (C) 2021 Valve Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Copyright © 2021 Valve Corporation
+ * SPDX-License-Identifier: MIT
  */
 
 #include "util/ralloc.h"
@@ -134,14 +116,18 @@ validate_error(struct ra_val_ctx *ctx, const char *condstr)
 static unsigned
 get_file_size(struct ra_val_ctx *ctx, struct ir3_register *reg)
 {
-   if (reg->flags & IR3_REG_SHARED)
-      return RA_SHARED_SIZE;
-   else if (reg->flags & IR3_REG_PREDICATE)
+   if (reg->flags & IR3_REG_SHARED) {
+      if (reg->flags & IR3_REG_HALF)
+         return RA_SHARED_HALF_SIZE;
+      else
+         return RA_SHARED_SIZE;
+   } else if (reg->flags & IR3_REG_PREDICATE) {
       return ctx->predicate_size;
-   else if (ctx->merged_regs || !(reg->flags & IR3_REG_HALF))
+   } else if (ctx->merged_regs || !(reg->flags & IR3_REG_HALF)) {
       return ctx->full_size;
-   else
+   } else {
       return ctx->half_size;
+   }
 }
 
 static struct reg_state *
@@ -189,7 +175,7 @@ validate_simple(struct ra_val_ctx *ctx, struct ir3_instruction *instr)
    foreach_dst_if (dst, instr, validate_reg_is_dst) {
       if (ctx->shared_ra && !(dst->flags & IR3_REG_SHARED))
          continue;
-      validate_assert(ctx, dst->num != INVALID_REG);
+      validate_assert(ctx, ra_reg_get_num(dst) != INVALID_REG);
       unsigned dst_max = ra_reg_get_physreg(dst) + reg_size(dst);
       validate_assert(ctx, dst_max <= get_file_size(ctx, dst));
       if (dst->tied)
@@ -199,7 +185,7 @@ validate_simple(struct ra_val_ctx *ctx, struct ir3_instruction *instr)
    foreach_src_if (src, instr, validate_reg_is_src) {
       if (ctx->shared_ra && !(src->flags & IR3_REG_SHARED))
          continue;
-      validate_assert(ctx, src->num != INVALID_REG);
+      validate_assert(ctx, ra_reg_get_num(src) != INVALID_REG);
       unsigned src_max = ra_reg_get_physreg(src) + reg_size(src);
       validate_assert(ctx, src_max <= get_file_size(ctx, src));
    }

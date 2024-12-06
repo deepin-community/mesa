@@ -43,7 +43,12 @@ st_nir_finish_builtin_nir(struct st_context *st, nir_shader *nir)
    NIR_PASS(_, nir, nir_split_var_copies);
    NIR_PASS(_, nir, nir_lower_var_copies);
    NIR_PASS(_, nir, nir_lower_system_values);
-   NIR_PASS(_, nir, nir_lower_compute_system_values, NULL);
+
+   struct nir_lower_compute_system_values_options cs_options = {
+      .has_base_global_invocation_id = false,
+      .has_base_workgroup_id = false,
+   };
+   NIR_PASS(_, nir, nir_lower_compute_system_values, &cs_options);
 
    if (nir->options->lower_to_scalar) {
       nir_variable_mode mask =
@@ -76,7 +81,7 @@ st_nir_finish_builtin_nir(struct st_context *st, nir_shader *nir)
    }
 }
 
-struct pipe_shader_state *
+void *
 st_nir_finish_builtin_shader(struct st_context *st,
                              nir_shader *nir)
 {
@@ -93,7 +98,7 @@ st_nir_finish_builtin_shader(struct st_context *st,
 /**
  * Make a simple shader that copies inputs to corresponding outputs.
  */
-struct pipe_shader_state *
+void *
 st_nir_make_passthrough_shader(struct st_context *st,
                                const char *shader_name,
                                gl_shader_stage stage,
@@ -138,7 +143,7 @@ st_nir_make_passthrough_shader(struct st_context *st,
  * Make a simple shader that reads color value from a constant buffer
  * and uses it to clear all color buffers.
  */
-struct pipe_shader_state *
+void *
 st_nir_make_clearcolor_shader(struct st_context *st)
 {
    const nir_shader_compiler_options *options =

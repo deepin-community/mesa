@@ -75,7 +75,7 @@ compute_local_index_id(nir_builder *b,
     */
 
    nir_def *id_x, *id_y, *id_z;
-   switch (nir->info.cs.derivative_group) {
+   switch (nir->info.derivative_group) {
    case DERIVATIVE_GROUP_NONE:
       if (nir->info.num_images == 0 &&
           nir->info.num_textures == 0) {
@@ -272,8 +272,7 @@ lower_cs_intrinsics_convert_block(struct lower_intrinsics_state *state,
       if (intrinsic->def.bit_size == 64)
          sysval = nir_u2u64(b, sysval);
 
-      nir_def_rewrite_uses(&intrinsic->def, sysval);
-      nir_instr_remove(&intrinsic->instr);
+      nir_def_replace(&intrinsic->def, sysval);
 
       state->progress = true;
    }
@@ -291,7 +290,7 @@ lower_cs_intrinsics_convert_impl(struct lower_intrinsics_state *state)
    }
 
    nir_metadata_preserve(state->impl,
-                         nir_metadata_block_index | nir_metadata_dominance);
+                         nir_metadata_control_flow);
 }
 
 bool
@@ -309,10 +308,10 @@ elk_nir_lower_cs_intrinsics(nir_shader *nir,
    /* Constraints from NV_compute_shader_derivatives. */
    if (gl_shader_stage_is_compute(nir->info.stage) &&
        !nir->info.workgroup_size_variable) {
-      if (nir->info.cs.derivative_group == DERIVATIVE_GROUP_QUADS) {
+      if (nir->info.derivative_group == DERIVATIVE_GROUP_QUADS) {
          assert(nir->info.workgroup_size[0] % 2 == 0);
          assert(nir->info.workgroup_size[1] % 2 == 0);
-      } else if (nir->info.cs.derivative_group == DERIVATIVE_GROUP_LINEAR) {
+      } else if (nir->info.derivative_group == DERIVATIVE_GROUP_LINEAR) {
          ASSERTED unsigned workgroup_size =
             nir->info.workgroup_size[0] *
             nir->info.workgroup_size[1] *

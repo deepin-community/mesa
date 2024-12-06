@@ -50,7 +50,7 @@ intel_nir_blockify_uniform_loads_instr(nir_builder *b,
       if (devinfo->ver < 9)
          return false;
 
-      if (nir_src_is_divergent(intrin->src[1]))
+      if (nir_src_is_divergent(&intrin->src[1]))
          return false;
 
       if (intrin->def.bit_size != 32)
@@ -69,21 +69,29 @@ intel_nir_blockify_uniform_loads_instr(nir_builder *b,
       return true;
 
    case nir_intrinsic_load_shared:
-      /* Block loads on shared memory are not supported before the LSC. */
-      if (!devinfo->has_lsc)
+      /* Block loads on shared memory are not supported before Icelake. */
+      if (devinfo->ver < 11)
          return false;
 
-      if (nir_src_is_divergent(intrin->src[0]))
+      if (nir_src_is_divergent(&intrin->src[0]))
          return false;
 
       if (intrin->def.bit_size != 32)
+         return false;
+
+      /* Without the LSC, we have to use OWord Block Load messages (the one
+       * that requires OWord aligned offsets, too).
+       */
+      if (!devinfo->has_lsc &&
+          (intrin->def.num_components < 4 ||
+           nir_intrinsic_align(intrin) < 16))
          return false;
 
       intrin->intrinsic = nir_intrinsic_load_shared_uniform_block_intel;
       return true;
 
    case nir_intrinsic_load_global_constant:
-      if (nir_src_is_divergent(intrin->src[0]))
+      if (nir_src_is_divergent(&intrin->src[0]))
          return false;
 
       if (intrin->def.bit_size != 32)
@@ -109,8 +117,7 @@ intel_nir_blockify_uniform_loads(nir_shader *shader,
 {
    return nir_shader_instructions_pass(shader,
                                        intel_nir_blockify_uniform_loads_instr,
-                                       nir_metadata_block_index |
-                                       nir_metadata_dominance |
+                                       nir_metadata_control_flow |
                                        nir_metadata_live_defs,
                                        (void *) devinfo);
 }

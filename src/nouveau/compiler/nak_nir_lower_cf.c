@@ -7,9 +7,10 @@
 #include "nir_builder.h"
 
 static void
-push_block(nir_builder *b, nir_block *block)
+push_block(nir_builder *b, nir_block *block, bool divergent)
 {
    assert(nir_cursors_equal(b->cursor, nir_after_impl(b->impl)));
+   block->divergent = divergent;
    block->cf_node.parent = &b->impl->cf_node;
    exec_list_push_tail(&b->impl->body, &block->cf_node.node);
    b->cursor = nir_after_block(block);
@@ -28,6 +29,12 @@ struct scope {
    struct scope *parent;
    uint32_t depth;
 
+   /**
+    * True if control-flow ever diverges within this scope, not accounting
+    * for divergence in child scopes.
+    */
+   bool divergent;
+
    nir_block *merge;
    nir_def *bar;
 
@@ -38,13 +45,15 @@ static struct scope
 push_scope(nir_builder *b,
            enum scope_type scope_type,
            struct scope *parent,
+           bool divergent,
            bool needs_sync,
            nir_block *merge_block)
 {
    struct scope scope = {
-      .parent = parent,
       .type = scope_type,
-      .depth = parent != NULL ? parent->depth + 1 : 0,
+      .parent = parent,
+      .depth = parent->depth + 1,
+      .divergent = parent->divergent || divergent,
       .merge = merge_block,
    };
 
@@ -85,9 +94,9 @@ pop_scope(nir_builder *b, nir_def *esc_reg, struct scope scope)
       nir_block *esc_block = nir_block_create(b->shader);
       nir_block *next_block = nir_block_create(b->shader);
       nir_goto_if(b, esc_block, esc, next_block);
-      push_block(b, esc_block);
+      push_block(b, esc_block, false);
       nir_goto(b, parent_merge);
-      push_block(b, next_block);
+      push_block(b, next_block, scope.parent->divergent);
    }
 }
 
@@ -286,31 +295,32 @@ lower_cf_list(nir_builder *b, nir_def *esc_reg, struct scope *parent_scope,
          nir_if *nif = nir_cf_node_as_if(node);
 
          nir_def *cond = nif->condition.ssa;
+         bool divergent = nir_src_is_divergent(&nif->condition);
          nir_instr_clear_src(NULL, &nif->condition);
 
          nir_block *then_block = nir_block_create(b->shader);
          nir_block *else_block = nir_block_create(b->shader);
          nir_block *merge_block = nir_block_create(b->shader);
 
-         const bool needs_sync = cond->divergent &&
+         const bool needs_sync = divergent &&
             block_is_merge(nir_cf_node_as_block(nir_cf_node_next(node))) &&
             !parent_scope_will_sync(&nif->cf_node, parent_scope);
 
          struct scope scope = push_scope(b, SCOPE_TYPE_IF_MERGE,
-                                         parent_scope, needs_sync,
-                                         merge_block);
+                                         parent_scope, divergent,
+                                         needs_sync, merge_block);
 
          nir_goto_if(b, then_block, cond, else_block);
 
-         push_block(b, then_block);
+         push_block(b, then_block, scope.divergent);
          lower_cf_list(b, esc_reg, &scope, &nif->then_list);
          normal_exit(b, esc_reg, merge_block);
 
-         push_block(b, else_block);
+         push_block(b, else_block, scope.divergent);
          lower_cf_list(b, esc_reg, &scope, &nif->else_list);
          normal_exit(b, esc_reg, merge_block);
 
-         push_block(b, merge_block);
+         push_block(b, merge_block, parent_scope->divergent);
          pop_scope(b, esc_reg, scope);
 
          break;
@@ -331,27 +341,31 @@ lower_cf_list(nir_builder *b, nir_def *esc_reg, struct scope *parent_scope,
           * while avoiding an extra sync for the loop break is tricky at best.
           */
          struct scope break_scope = push_scope(b, SCOPE_TYPE_LOOP_BREAK,
-                                               parent_scope, loop->divergent,
+                                               parent_scope,
+                                               nir_loop_is_divergent(loop),
+                                               nir_loop_is_divergent(loop),
                                                break_block);
 
          nir_goto(b, head_block);
-         push_block(b, head_block);
+         push_block(b, head_block, break_scope.divergent);
 
          struct scope cont_scope = push_scope(b, SCOPE_TYPE_LOOP_CONT,
-                                              &break_scope, loop->divergent,
+                                              &break_scope,
+                                              nir_loop_is_divergent(loop),
+                                              nir_loop_is_divergent(loop),
                                               cont_block);
 
          lower_cf_list(b, esc_reg, &cont_scope, &loop->body);
          normal_exit(b, esc_reg, cont_block);
 
-         push_block(b, cont_block);
+         push_block(b, cont_block, break_scope.divergent);
 
          pop_scope(b, esc_reg, cont_scope);
 
          lower_cf_list(b, esc_reg, &break_scope, &loop->continue_list);
 
          nir_goto(b, head_block);
-         push_block(b, break_block);
+         push_block(b, break_block, parent_scope->divergent);
 
          pop_scope(b, esc_reg, break_scope);
 
@@ -362,6 +376,55 @@ lower_cf_list(nir_builder *b, nir_def *esc_reg, struct scope *parent_scope,
          unreachable("Unknown CF node type");
       }
    }
+}
+
+static void
+recompute_phi_divergence_impl(nir_function_impl *impl)
+{
+   bool progress;
+   do {
+      progress = false;
+      nir_foreach_block_unstructured(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_phi)
+               break;
+
+            nir_phi_instr *phi = nir_instr_as_phi(instr);
+
+            bool divergent = false;
+            nir_foreach_phi_src(phi_src, phi) {
+               /* There is a tricky case we need to care about here where a
+                * convergent block has a divergent dominator.  This can happen
+                * if, for instance, you have the following loop:
+                *
+                *    loop {
+                *       if (div) {
+                *          %20 = load_ubo(0, 0);
+                *       } else {
+                *          terminate;
+                *       }
+                *    }
+                *    use(%20);
+                *
+                * In this case, the load_ubo() dominates the use() even though
+                * the load_ubo() exists in divergent control-flow.  In this
+                * case, we simply flag the whole phi divergent because we
+                * don't want to deal with inserting a r2ur somewhere.
+                */
+               if (phi_src->pred->divergent || phi_src->src.ssa->divergent ||
+                   phi_src->src.ssa->parent_instr->block->divergent) {
+                  divergent = true;
+                  break;
+               }
+            }
+
+            if (divergent != phi->def.divergent) {
+               phi->def.divergent = divergent;
+               progress = true;
+            }
+         }
+      }
+   } while(progress);
 }
 
 static bool
@@ -413,6 +476,7 @@ lower_cf_func(nir_function *func)
    nir_sort_unstructured_blocks(new_impl);
    nir_repair_ssa_impl(new_impl);
    nir_lower_reg_intrinsics_to_ssa_impl(new_impl);
+   recompute_phi_divergence_impl(new_impl);
 
    return true;
 }

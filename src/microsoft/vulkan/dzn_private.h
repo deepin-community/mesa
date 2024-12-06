@@ -248,9 +248,6 @@ dzn_physical_device_get_mem_type_mask_for_resource(const struct dzn_physical_dev
 enum dxil_shader_model
 dzn_get_shader_model(const struct dzn_physical_device *pdev);
 
-#define dzn_debug_ignored_stype(sType) \
-   mesa_logd("%s: ignored VkStructureType %u\n", __func__, (sType))
-
 PFN_D3D12_SERIALIZE_VERSIONED_ROOT_SIGNATURE
 d3d12_get_serialize_root_sig(struct util_dl_library *d3d12_mod);
 
@@ -913,6 +910,7 @@ static_assert(sizeof(D3D12_RASTERIZER_DESC) >= sizeof(D3D12_RASTERIZER_DESC1) &&
 struct dzn_pipeline {
    struct vk_object_base base;
    VkPipelineBindPoint type;
+   VkPipelineCreateFlags2KHR flags;
    struct dzn_device *device;
    struct {
       uint32_t sets_param_count;

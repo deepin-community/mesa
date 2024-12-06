@@ -1,24 +1,6 @@
 /*
- * Copyright (c) 2012 Rob Clark <robdclark@gmail.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Copyright © 2012 Rob Clark <robdclark@gmail.com>
+ * SPDX-License-Identifier: MIT
  */
 
 #include "ir3.h"
@@ -69,7 +51,7 @@ ir3_destroy(struct ir3 *shader)
 
 static bool
 is_shared_consts(struct ir3_compiler *compiler,
-                 struct ir3_const_state *const_state,
+                 const struct ir3_const_state *const_state,
                  struct ir3_register *reg)
 {
    if (const_state->push_consts_type == IR3_PUSH_CONSTS_SHARED &&
@@ -89,7 +71,6 @@ collect_reg_info(struct ir3_instruction *instr, struct ir3_register *reg,
                  struct ir3_info *info)
 {
    struct ir3_shader_variant *v = info->data;
-   unsigned repeat = instr->repeat;
 
    if (reg->flags & IR3_REG_IMMED) {
       /* nothing to do */
@@ -100,10 +81,6 @@ collect_reg_info(struct ir3_instruction *instr, struct ir3_register *reg,
    if (is_shared_consts(v->compiler, ir3_const_state(v), reg))
       return;
 
-   if (!(reg->flags & IR3_REG_R)) {
-      repeat = 0;
-   }
-
    unsigned components;
    int16_t max;
 
@@ -112,7 +89,7 @@ collect_reg_info(struct ir3_instruction *instr, struct ir3_register *reg,
       max = (reg->array.base + components - 1);
    } else {
       components = util_last_bit(reg->wrmask);
-      max = (reg->num + repeat + components - 1);
+      max = (reg->num + components - 1);
    }
 
    if (reg->flags & IR3_REG_CONST) {
@@ -293,6 +270,8 @@ ir3_collect_info(struct ir3_shader_variant *v)
    info->size = MAX2(v->instrlen * compiler->instr_align, instr_count + 4) * 8;
    info->sizedwords = info->size / 4;
 
+   info->early_preamble = v->early_preamble;
+
    bool in_preamble = false;
    bool has_eq = false;
 
@@ -313,9 +292,12 @@ ir3_collect_info(struct ir3_shader_variant *v)
 
          if ((instr->opc == OPC_STP || instr->opc == OPC_LDP)) {
             unsigned components = instr->srcs[2]->uim_val;
-            if (components * type_size(instr->cat6.type) > 32) {
+
+            /* This covers any multi-component access that could straddle
+             * across multiple double-words.
+             */
+            if (components > 1)
                info->multi_dword_ldp_stp = true;
-            }
 
             if (instr->opc == OPC_STP)
                info->stp_count += components;
@@ -646,6 +628,7 @@ instr_create(struct ir3_block *block, opc_t opc, int ndst, int nsrc)
    instr->srcs_max = nsrc;
 #endif
 
+   list_inithead(&instr->rpt_node);
    return instr;
 }
 
@@ -725,6 +708,7 @@ ir3_instr_clone(struct ir3_instruction *instr)
    *new_instr = *instr;
    new_instr->dsts = dsts;
    new_instr->srcs = srcs;
+   list_inithead(&new_instr->rpt_node);
 
    insert_instr(ir3_before_terminator(instr->block), new_instr);
 
@@ -763,6 +747,74 @@ ir3_instr_add_dep(struct ir3_instruction *instr, struct ir3_instruction *dep)
    }
 
    array_insert(instr, instr->deps, dep);
+}
+
+void
+ir3_instr_remove(struct ir3_instruction *instr)
+{
+   list_delinit(&instr->node);
+   list_delinit(&instr->rpt_node);
+}
+
+void
+ir3_instr_create_rpt(struct ir3_instruction **instrs, unsigned n)
+{
+   assert(n > 0 && !ir3_instr_is_rpt(instrs[0]));
+
+   for (unsigned i = 1; i < n; ++i) {
+      assert(!ir3_instr_is_rpt(instrs[i]));
+      assert(instrs[i]->serialno > instrs[i - 1]->serialno);
+
+      list_addtail(&instrs[i]->rpt_node, &instrs[0]->rpt_node);
+   }
+}
+
+bool
+ir3_instr_is_rpt(const struct ir3_instruction *instr)
+{
+   return !list_is_empty(&instr->rpt_node);
+}
+
+bool
+ir3_instr_is_first_rpt(const struct ir3_instruction *instr)
+{
+   if (!ir3_instr_is_rpt(instr))
+      return false;
+
+   struct ir3_instruction *prev_rpt =
+      list_entry(instr->rpt_node.prev, struct ir3_instruction, rpt_node);
+   return prev_rpt->serialno > instr->serialno;
+}
+
+struct ir3_instruction *
+ir3_instr_prev_rpt(const struct ir3_instruction *instr)
+{
+   assert(ir3_instr_is_rpt(instr));
+
+   if (ir3_instr_is_first_rpt(instr))
+      return NULL;
+   return list_entry(instr->rpt_node.prev, struct ir3_instruction, rpt_node);
+}
+
+struct ir3_instruction *
+ir3_instr_first_rpt(struct ir3_instruction *instr)
+{
+   assert(ir3_instr_is_rpt(instr));
+
+   while (!ir3_instr_is_first_rpt(instr)) {
+      instr = ir3_instr_prev_rpt(instr);
+      assert(instr);
+   }
+
+   return instr;
+}
+
+unsigned
+ir3_instr_rpt_length(const struct ir3_instruction *instr)
+{
+   assert(ir3_instr_is_first_rpt(instr));
+
+   return list_length(&instr->rpt_node) + 1;
 }
 
 struct ir3_register *
@@ -822,6 +874,33 @@ ir3_instr_set_address(struct ir3_instruction *instr,
    } else {
       assert(instr->address->def->instr == addr);
    }
+}
+
+/* Does this instruction use the scalar ALU?
+ */
+bool
+is_scalar_alu(struct ir3_instruction *instr,
+              const struct ir3_compiler *compiler)
+{
+   /* MOVMSK seems to always need (ss) even with other scalar ALU instructions
+    */
+   return instr->opc != OPC_MOVMSK &&
+      instr->opc != OPC_SCAN_CLUSTERS_MACRO &&
+      instr->opc != OPC_SCAN_MACRO &&
+      is_alu(instr) && (instr->dsts[0]->flags & IR3_REG_SHARED) &&
+      /* scalar->scalar mov instructions (but NOT cov) were supported before the
+       * scalar ALU was supported, but they still required (ss) whereas on GPUs
+       * that have a scalar ALU they are executed on it and do not require (ss).
+       * We have to be careful to return false for these if scalar ALU isn't
+       * supported, so that we treat them like vector->scalar mov instructions
+       * (such as requiring (ss)).
+       */
+      compiler->has_scalar_alu &&
+      /* moves from normal to shared seem to use a separate ALU as before and
+       * require a (ss) on dependent instructions.
+       */
+      ((instr->opc != OPC_MOV && !is_subgroup_cond_mov_macro(instr)) ||
+       (instr->srcs[0]->flags & (IR3_REG_SHARED | IR3_REG_IMMED | IR3_REG_CONST)));
 }
 
 void
@@ -1071,9 +1150,6 @@ ir3_valid_flags(struct ir3_instruction *instr, unsigned n, unsigned flags)
    struct ir3_compiler *compiler = instr->block->shader->compiler;
    unsigned valid_flags;
 
-   if ((flags & IR3_REG_SHARED) && opc_cat(instr->opc) > 3)
-      return false;
-
    flags = cp_flags(flags);
 
    /* If destination is indirect, then source cannot be.. at least
@@ -1110,7 +1186,10 @@ ir3_valid_flags(struct ir3_instruction *instr, unsigned n, unsigned flags)
       if (flags & ~(IR3_REG_IMMED | IR3_REG_CONST | IR3_REG_SHARED))
          return false;
 
-      if ((flags & IR3_REG_SHARED) && !(instr->dsts[0]->flags & IR3_REG_SHARED))
+      /* Except for immed/const sources, source and dest shared-ness must match.
+       */
+      if (!(flags & (IR3_REG_IMMED | IR3_REG_CONST)) &&
+          (flags & IR3_REG_SHARED) != (instr->dsts[0]->flags & IR3_REG_SHARED))
          return false;
 
       return true;
@@ -1128,7 +1207,10 @@ ir3_valid_flags(struct ir3_instruction *instr, unsigned n, unsigned flags)
          valid_flags = IR3_REG_SHARED;
          break;
       case OPC_SCAN_MACRO:
-         return flags == 0;
+         if (n == 0)
+            return flags == 0;
+         else
+            return flags == IR3_REG_SHARED;
          break;
       case OPC_SCAN_CLUSTERS_MACRO:
          if (n == 0)
@@ -1136,9 +1218,32 @@ ir3_valid_flags(struct ir3_instruction *instr, unsigned n, unsigned flags)
          else
             return flags == 0;
          break;
-      default:
+      default: {
          valid_flags =
             IR3_REG_IMMED | IR3_REG_CONST | IR3_REG_RELATIV | IR3_REG_SHARED;
+
+         /* floating-point conversions when moving from non-shared to shared
+          * seem not to work. We only use floating-point types in ir3 for
+          * conversions, so don't bother specially handling the case where the
+          * types are equal. Same goes for 8-bit sign extension.
+          */
+         if ((instr->dsts[0]->flags & IR3_REG_SHARED) &&
+             !(flags & (IR3_REG_SHARED | IR3_REG_IMMED | IR3_REG_CONST)) &&
+             ((full_type(instr->cat1.src_type) == TYPE_F32 ||
+               full_type(instr->cat1.dst_type) == TYPE_F32) ||
+              (instr->cat1.src_type == TYPE_U8 &&
+               full_type(instr->cat1.dst_type) == TYPE_S32)))
+            return false;
+
+         /* Conversions seem not to work in shared->shared copies before scalar
+          * ALU is supported.
+          */
+         if (!compiler->has_scalar_alu &&
+             (flags & IR3_REG_SHARED) &&
+             (instr->dsts[0]->flags & IR3_REG_SHARED) &&
+             instr->cat1.src_type != instr->cat1.dst_type)
+            return false;
+      }
       }
       if (flags & ~valid_flags)
          return false;
@@ -1155,6 +1260,12 @@ ir3_valid_flags(struct ir3_instruction *instr, unsigned n, unsigned flags)
           n == 1 && flags == IR3_REG_IMMED)
          return true;
 
+      /* cat2/cat3 scalar ALU instructions must not have regular sources. */
+      if (instr->dsts[0]->flags & IR3_REG_SHARED) {
+         if (!(flags & (IR3_REG_SHARED | IR3_REG_IMMED | IR3_REG_CONST)))
+            return false;
+      }
+
       if (flags & (IR3_REG_CONST | IR3_REG_IMMED | IR3_REG_SHARED)) {
          unsigned m = n ^ 1;
          /* cannot deal w/ const or shared in both srcs:
@@ -1162,9 +1273,14 @@ ir3_valid_flags(struct ir3_instruction *instr, unsigned n, unsigned flags)
           */
          if (m < instr->srcs_count) {
             struct ir3_register *reg = instr->srcs[m];
-            if ((flags & (IR3_REG_CONST | IR3_REG_SHARED)) &&
-                (reg->flags & (IR3_REG_CONST | IR3_REG_SHARED)))
-               return false;
+            if (instr->dsts[0]->flags & IR3_REG_SHARED) {
+               if ((flags & IR3_REG_CONST) && (reg->flags & IR3_REG_CONST))
+                  return false;
+            } else {
+               if ((flags & (IR3_REG_CONST | IR3_REG_SHARED)) &&
+                   (reg->flags & (IR3_REG_CONST | IR3_REG_SHARED)))
+                  return false;
+            }
             if ((flags & IR3_REG_IMMED) && reg->flags & (IR3_REG_IMMED))
                return false;
          }
@@ -1203,14 +1319,23 @@ ir3_valid_flags(struct ir3_instruction *instr, unsigned n, unsigned flags)
       if (flags & ~valid_flags)
          return false;
 
-      if (flags & (IR3_REG_CONST | IR3_REG_SHARED | IR3_REG_RELATIV)) {
+      if (flags & (IR3_REG_CONST | IR3_REG_RELATIV) ||
+          (!(instr->dsts[0]->flags & IR3_REG_SHARED) &&
+           (flags & IR3_REG_SHARED))) {
          /* cannot deal w/ const/shared/relativ in 2nd src: */
          if (n == 1)
             return false;
       }
 
+      if (instr->dsts[0]->flags & IR3_REG_SHARED) {
+         if (!(flags & (IR3_REG_SHARED | IR3_REG_IMMED | IR3_REG_CONST)))
+            return false;
+      }
+
       break;
    case 4:
+      if ((instr->dsts[0]->flags & IR3_REG_SHARED) != (flags & IR3_REG_SHARED))
+         return false;
       /* seems like blob compiler avoids const as src.. */
       /* TODO double check if this is still the case on a4xx */
       if (flags & (IR3_REG_CONST | IR3_REG_IMMED))
@@ -1219,12 +1344,28 @@ ir3_valid_flags(struct ir3_instruction *instr, unsigned n, unsigned flags)
          return false;
       break;
    case 5:
+      if (instr->opc == OPC_ISAM && (instr->flags & IR3_INSTR_V)) {
+         if (((instr->flags & IR3_INSTR_S2EN) && n == 2) ||
+             (!(instr->flags & IR3_INSTR_S2EN) && n == 1)) {
+            return flags == IR3_REG_IMMED;
+         }
+      }
       /* no flags allowed */
       if (flags)
          return false;
       break;
    case 6:
       valid_flags = IR3_REG_IMMED;
+
+      if (instr->opc == OPC_STC && n == 1)
+         valid_flags |= IR3_REG_SHARED;
+      if (instr->opc == OPC_SHFL) {
+         if (n == 0)
+            valid_flags &= ~IR3_REG_IMMED;
+         else if (n == 1)
+            valid_flags |= IR3_REG_SHARED;
+      }
+
       if (flags & ~valid_flags)
          return false;
 
@@ -1279,12 +1420,18 @@ ir3_valid_flags(struct ir3_instruction *instr, unsigned n, unsigned flags)
          if (instr->opc == OPC_LDG_A && (n < 2))
             return false;
 
+         if (instr->opc == OPC_STC && n != 0)
+            return false;
+
          /* as with atomics, these cat6 instrs can only have an immediate
           * for SSBO/IBO slot argument
           */
          switch (instr->opc) {
          case OPC_LDIB:
          case OPC_STIB:
+            if (n != 0 && n != 2)
+               return false;
+            break;
          case OPC_RESINFO:
             if (n != 0)
                return false;
@@ -1349,4 +1496,25 @@ ir3_get_cond_for_nonzero_compare(struct ir3_instruction *instr)
    }
 
    return instr;
+}
+
+bool
+ir3_supports_rpt(struct ir3_compiler *compiler, unsigned opc)
+{
+   switch (opc_cat(opc)) {
+   case 0:
+      return opc == OPC_NOP;
+   case 1:
+      return opc == OPC_MOV || opc == OPC_SWZ || opc == OPC_MOVMSK;
+   case 2:
+      if (opc == OPC_BARY_F && !compiler->has_rpt_bary_f)
+         return false;
+      return true;
+   case 3:
+      return opc != OPC_DP2ACC && opc != OPC_DP4ACC;
+   case 4:
+      return opc != OPC_RCP;
+   default:
+      return false;
+   }
 }

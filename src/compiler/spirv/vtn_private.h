@@ -31,17 +31,17 @@
 #include "util/u_dynarray.h"
 #include "nir_spirv.h"
 #include "spirv.h"
+#include "spirv_info.h"
 #include "vtn_generator_ids.h"
 
 extern uint32_t mesa_spirv_debug;
 
-#ifndef NDEBUG
 #define MESA_SPIRV_DEBUG(flag) unlikely(mesa_spirv_debug & (MESA_SPIRV_DEBUG_ ## flag))
-#else
-#define MESA_SPIRV_DEBUG(flag) false
-#endif
 
 #define MESA_SPIRV_DEBUG_STRUCTURED     (1u << 0)
+#define MESA_SPIRV_DEBUG_VALUES         (1u << 1)
+#define MESA_SPIRV_DEBUG_ASM            (1u << 2)
+#define MESA_SPIRV_DEBUG_COLOR          (1u << 3)
 
 struct vtn_builder;
 struct vtn_decoration;
@@ -364,8 +364,8 @@ struct vtn_type {
 
       /* Members for pointer types */
       struct {
-         /* For pointers, the vtn_type for dereferenced type */
-         struct vtn_type *deref;
+         /* For pointers, the vtn_type of the object pointed to. */
+         struct vtn_type *pointed;
 
          /* Storage class for pointers */
          SpvStorageClass storage_class;
@@ -483,16 +483,8 @@ struct vtn_pointer {
    /** The variable mode for the referenced data */
    enum vtn_variable_mode mode;
 
-   /** The dereferenced type of this pointer */
+   /** The pointer type of this pointer */
    struct vtn_type *type;
-
-   /** The pointer type of this pointer
-    *
-    * This may be NULL for some temporary pointers constructed as part of a
-    * large load, store, or copy.  It MUST be valid for all pointers which are
-    * stored as SPIR-V SSA values.
-    */
-   struct vtn_type *ptr_type;
 
    /** The referenced variable, if known
     *
@@ -671,6 +663,9 @@ struct vtn_builder {
    enum vtn_generator generator_id;
    SpvSourceLanguage source_lang;
 
+   struct spirv_capabilities supported_capabilities;
+   struct spirv_capabilities enabled_capabilities;
+
    /* True if we need to fix up CS OpControlBarrier */
    bool wa_glslang_cs_barrier;
 
@@ -680,9 +675,6 @@ struct vtn_builder {
    /* True if we need to ignore OpReturn after OpEmitMeshTasksEXT. */
    bool wa_ignore_return_after_emit_mesh_tasks;
 
-   /* True if DemoteToHelperInvocation capability is used by the shader. */
-   bool uses_demote_to_helper_invocation;
-
    /* Workaround discard bugs in HLSL -> SPIR-V compilers */
    bool convert_discard_to_demote;
 
@@ -690,14 +682,14 @@ struct vtn_builder {
    const char *entry_point_name;
    struct vtn_value *entry_point;
    struct vtn_value *workgroup_size_builtin;
-   bool variable_pointers;
-   bool image_gather_bias_lod;
 
    uint32_t *interface_ids;
    size_t interface_ids_count;
 
    struct vtn_function *func;
    struct list_head functions;
+
+   struct hash_table *strings;
 
    /* Current function parameter index */
    unsigned func_param_idx;
@@ -733,6 +725,9 @@ vtn_untyped_value(struct vtn_builder *b, uint32_t value_id)
                "SPIR-V id %u is out-of-bounds", value_id);
    return &b->values[value_id];
 }
+
+void vtn_print_value(struct vtn_builder *b, struct vtn_value *val, FILE *f);
+void vtn_dump_values(struct vtn_builder *b, FILE *f);
 
 static inline uint32_t
 vtn_id_for_value(struct vtn_builder *b, struct vtn_value *value)
@@ -970,6 +965,8 @@ void vtn_handle_bitcast(struct vtn_builder *b, const uint32_t *w,
                         unsigned count);
 
 void vtn_handle_no_contraction(struct vtn_builder *b, struct vtn_value *val);
+
+void vtn_handle_fp_fast_math(struct vtn_builder *b, struct vtn_value *val);
 
 void vtn_handle_subgroup(struct vtn_builder *b, SpvOp opcode,
                          const uint32_t *w, unsigned count);
