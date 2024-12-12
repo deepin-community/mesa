@@ -1,3 +1,9 @@
+mesa (24.1.5-1deepin3) unstable; urgency=medium
+
+  * support mips64el.
+
+ -- lichenggang <lichenggang@deepin.org>  Thu, 12 Dec 2024 10:30:35 +0800
+
 mesa (24.1.5-1deepin2) unstable; urgency=medium
 
   * Fix a bad loop implementation in zx_print_driver_map_list().
