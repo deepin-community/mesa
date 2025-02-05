@@ -322,7 +322,8 @@ static void gfx11_sh_query_get_result_resource(struct si_context *sctx, struct s
       consts.config = 1;
    }
 
-   if (result_type == PIPE_QUERY_TYPE_I64 || result_type == PIPE_QUERY_TYPE_U64)
+   bool is_result_64bit = result_type == PIPE_QUERY_TYPE_I64 || result_type == PIPE_QUERY_TYPE_U64;
+   if (is_result_64bit)
       consts.config |= 8;
 
    constant_buffer.buffer_size = sizeof(consts);
@@ -345,6 +346,12 @@ static void gfx11_sh_query_get_result_resource(struct si_context *sctx, struct s
    grid.grid[1] = 1;
    grid.grid[2] = 1;
 
+   /* TODO: Range-invalidate GL2 */
+   if (sctx->screen->info.cp_sdma_ge_use_system_memory_scope) {
+      sctx->barrier_flags |= SI_BARRIER_INV_L2;
+      si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier);
+   }
+
    struct gfx11_sh_query_buffer *qbuf = query->first;
    for (;;) {
       unsigned begin = qbuf == query->first ? query->first_begin : 0;
@@ -366,7 +373,7 @@ static void gfx11_sh_query_get_result_resource(struct si_context *sctx, struct s
       if (qbuf == query->last) {
          ssbo[2].buffer = resource;
          ssbo[2].buffer_offset = offset;
-         ssbo[2].buffer_size = 8;
+         ssbo[2].buffer_size = is_result_64bit ? 8 : 4;
       }
 
       sctx->b.set_constant_buffer(&sctx->b, PIPE_SHADER_COMPUTE, 0, false, &constant_buffer);
@@ -387,9 +394,13 @@ static void gfx11_sh_query_get_result_resource(struct si_context *sctx, struct s
 
       /* ssbo[2] is either tmp_buffer or resource */
       assert(ssbo[2].buffer);
-      si_launch_grid_internal_ssbos(sctx, &grid, sctx->sh_query_result_shader,
-                                    SI_OP_SYNC_PS_BEFORE | SI_OP_SYNC_AFTER, SI_COHERENCY_SHADER,
-                                    3, ssbo, (1 << 2) | (ssbo[1].buffer ? 1 << 1 : 0));
+
+      unsigned writable_bitmask = (1 << 2) | (ssbo[1].buffer ? 1 << 1 : 0);
+
+      si_barrier_before_internal_op(sctx, 0, 3, ssbo, writable_bitmask, 0, NULL);
+      si_launch_grid_internal_ssbos(sctx, &grid, sctx->sh_query_result_shader, 3, ssbo,
+                                    writable_bitmask, false);
+      si_barrier_after_internal_op(sctx, 0, 3, ssbo, writable_bitmask, 0, NULL);
 
       if (qbuf == query->last)
          break;

@@ -12,6 +12,7 @@
 #include "util/build_id.h"
 #include "util/driconf.h"
 #include "util/mesa-sha1.h"
+#include "util/u_debug.h"
 
 VKAPI_ATTR VkResult VKAPI_CALL
 nvk_EnumerateInstanceVersion(uint32_t *pApiVersion)
@@ -74,6 +75,24 @@ nvk_EnumerateInstanceExtensionProperties(const char *pLayerName,
       &instance_extensions, pPropertyCount, pProperties);
 }
 
+static void
+nvk_init_debug_flags(struct nvk_instance *instance)
+{
+   const struct debug_control flags[] = {
+      { "push_dump", NVK_DEBUG_PUSH_DUMP },
+      { "push", NVK_DEBUG_PUSH_DUMP },
+      { "push_sync", NVK_DEBUG_PUSH_SYNC },
+      { "zero_memory", NVK_DEBUG_ZERO_MEMORY },
+      { "vm", NVK_DEBUG_VM },
+      { "no_cbuf", NVK_DEBUG_NO_CBUF },
+      { "edb_bview", NVK_DEBUG_FORCE_EDB_BVIEW },
+      { "gart", NVK_DEBUG_FORCE_GART },
+      { NULL, 0 },
+   };
+
+   instance->debug_flags = parse_debug_string(getenv("NVK_DEBUG"), flags);
+}
+
 static const driOptionDescription nvk_dri_options[] = {
    DRI_CONF_SECTION_PERFORMANCE
       DRI_CONF_ADAPTIVE_SYNC(true)
@@ -85,9 +104,10 @@ static const driOptionDescription nvk_dri_options[] = {
    DRI_CONF_SECTION_END
 
    DRI_CONF_SECTION_DEBUG
-      DRI_CONF_FORCE_VK_VENDOR(0)
+      DRI_CONF_FORCE_VK_VENDOR()
       DRI_CONF_VK_WSI_FORCE_SWAPCHAIN_TO_CURRENT_EXTENT(false)
       DRI_CONF_VK_X11_IGNORE_SUBOPTIMAL(false)
+      DRI_CONF_VK_ZERO_VRAM(false)
    DRI_CONF_SECTION_END
 };
 
@@ -101,6 +121,9 @@ nvk_init_dri_options(struct nvk_instance *instance)
 
    instance->force_vk_vendor =
       driQueryOptioni(&instance->dri_options, "force_vk_vendor");
+
+   if (driQueryOptionb(&instance->dri_options, "vk_zero_vram"))
+      instance->debug_flags |= NVK_DEBUG_ZERO_MEMORY;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -132,6 +155,7 @@ nvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
    if (result != VK_SUCCESS)
       goto fail_alloc;
 
+   nvk_init_debug_flags(instance);
    nvk_init_dri_options(instance);
 
    instance->vk.physical_devices.try_create_for_drm =

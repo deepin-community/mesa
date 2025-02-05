@@ -1,24 +1,6 @@
 /*
- * Copyright (C) 2014 Rob Clark <robclark@freedesktop.org>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Copyright © 2014 Rob Clark <robclark@freedesktop.org>
+ * SPDX-License-Identifier: MIT
  *
  * Authors:
  *    Rob Clark <robclark@freedesktop.org>
@@ -52,16 +34,22 @@ struct ir3_legalize_ctx {
    int max_bary;
    bool early_input_release;
    bool has_inputs;
+   bool has_tex_prefetch;
 };
 
 struct ir3_nop_state {
-   unsigned full_ready[4 * 48];
-   unsigned half_ready[4 * 48];
+   unsigned full_ready[GPR_REG_SIZE];
+   unsigned half_ready[GPR_REG_SIZE];
 };
 
 struct ir3_legalize_state {
    regmask_t needs_ss;
+   regmask_t needs_ss_scalar_full; /* half scalar ALU producer -> full scalar ALU consumer */
+   regmask_t needs_ss_scalar_half; /* full scalar ALU producer -> half scalar ALU consumer */
    regmask_t needs_ss_war; /* write after read */
+   regmask_t needs_ss_or_sy_war;  /* WAR for sy-producer sources */
+   regmask_t needs_ss_scalar_war; /* scalar ALU write -> ALU write */
+   regmask_t needs_ss_or_sy_scalar_war;
    regmask_t needs_sy;
    bool needs_ss_for_const;
 
@@ -93,6 +81,25 @@ struct ir3_legalize_block_data {
    struct ir3_legalize_state state;
 };
 
+static inline bool
+needs_ss_war(struct ir3_legalize_state *state, struct ir3_register *dst,
+             bool is_scalar_alu)
+{
+   if (regmask_get(&state->needs_ss_war, dst))
+      return true;
+   if (regmask_get(&state->needs_ss_or_sy_war, dst))
+      return true;
+
+   if (!is_scalar_alu) {
+      if (regmask_get(&state->needs_ss_scalar_war, dst))
+         return true;
+      if (regmask_get(&state->needs_ss_or_sy_scalar_war, dst))
+         return true;
+   }
+
+   return false;
+}
+
 static inline void
 apply_ss(struct ir3_instruction *instr,
          struct ir3_legalize_state *state,
@@ -100,7 +107,12 @@ apply_ss(struct ir3_instruction *instr,
 {
    instr->flags |= IR3_INSTR_SS;
    regmask_init(&state->needs_ss_war, mergedregs);
+   regmask_init(&state->needs_ss_or_sy_war, mergedregs);
    regmask_init(&state->needs_ss, mergedregs);
+   regmask_init(&state->needs_ss_scalar_war, mergedregs);
+   regmask_init(&state->needs_ss_or_sy_scalar_war, mergedregs);
+   regmask_init(&state->needs_ss_scalar_full, mergedregs);
+   regmask_init(&state->needs_ss_scalar_half, mergedregs);
    state->needs_ss_for_const = false;
 }
 
@@ -111,17 +123,19 @@ apply_sy(struct ir3_instruction *instr,
 {
    instr->flags |= IR3_INSTR_SY;
    regmask_init(&state->needs_sy, mergedregs);
+   regmask_init(&state->needs_ss_or_sy_war, mergedregs);
+   regmask_init(&state->needs_ss_or_sy_scalar_war, mergedregs);
 }
 
 static bool
-count_instruction(struct ir3_instruction *n)
+count_instruction(struct ir3_instruction *n, struct ir3_compiler *compiler)
 {
    /* NOTE: don't count branch/jump since we don't know yet if they will
     * be eliminated later in resolve_jumps().. really should do that
     * earlier so we don't have this constraint.
     */
-   return is_alu(n) ||
-          (is_flow(n) && (n->opc != OPC_JUMP) && (n->opc != OPC_BR) &&
+   return (is_alu(n) && !is_scalar_alu(n, compiler)) ||
+      (is_flow(n) && (n->opc != OPC_JUMP) && (n->opc != OPC_BR) &&
            (n->opc != OPC_BRAA) && (n->opc != OPC_BRAO));
 }
 
@@ -213,6 +227,9 @@ delay_update(struct ir3_legalize_state *state,
              unsigned cycle,
              bool mergedregs)
 {
+   if (writes_addr1(instr) && instr->block->in_early_preamble)
+      return;
+
    foreach_dst_n (dst, n, instr) {
       unsigned elems = post_ra_reg_elems(dst);
       unsigned num = post_ra_reg_num(dst);
@@ -312,7 +329,6 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
    struct ir3_legalize_state prev_state = bd->state;
    struct ir3_legalize_state *state = &bd->begin_state;
    bool last_input_needs_ss = false;
-   bool has_tex_prefetch = false;
    bool mergedregs = ctx->so->mergedregs;
 
    /* Our input state is the OR of all predecessor blocks' state.
@@ -335,6 +351,8 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
       regmask_or(&state->needs_ss, &state->needs_ss, &pstate->needs_ss);
       regmask_or(&state->needs_ss_war, &state->needs_ss_war,
                  &pstate->needs_ss_war);
+      regmask_or(&state->needs_ss_or_sy_war, &state->needs_ss_or_sy_war,
+                 &pstate->needs_ss_or_sy_war);
       regmask_or(&state->needs_sy, &state->needs_sy, &pstate->needs_sy);
       state->needs_ss_for_const |= pstate->needs_ss_for_const;
 
@@ -363,6 +381,17 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
       struct ir3_legalize_state *pstate = &pbd->state;
 
       regmask_or_shared(&state->needs_ss, &state->needs_ss, &pstate->needs_ss);
+      regmask_or_shared(&state->needs_ss_scalar_full,
+                        &state->needs_ss_scalar_full,
+                        &pstate->needs_ss_scalar_full);
+      regmask_or_shared(&state->needs_ss_scalar_half,
+                        &state->needs_ss_scalar_half,
+                        &pstate->needs_ss_scalar_half);
+      regmask_or_shared(&state->needs_ss_scalar_war, &state->needs_ss_scalar_war,
+                        &pstate->needs_ss_scalar_war);
+      regmask_or_shared(&state->needs_ss_or_sy_scalar_war,
+                        &state->needs_ss_or_sy_scalar_war,
+                        &pstate->needs_ss_or_sy_scalar_war);
    }
 
    memcpy(&bd->state, state, sizeof(*state));
@@ -406,7 +435,10 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
       if (is_input(n)) {
          struct ir3_register *inloc = n->srcs[0];
          assert(inloc->flags & IR3_REG_IMMED);
-         ctx->max_bary = MAX2(ctx->max_bary, inloc->iim_val);
+
+         int last_inloc =
+            inloc->iim_val + ((inloc->flags & IR3_REG_R) ? n->repeat : 0);
+         ctx->max_bary = MAX2(ctx->max_bary, last_inloc);
       }
 
       if ((last_n && is_barrier(last_n)) || n->opc == OPC_SHPE) {
@@ -418,6 +450,8 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
       if (last_n && (last_n->opc == OPC_PREDT)) {
          apply_ss(n, state, mergedregs);
       }
+
+      bool n_is_scalar_alu = is_scalar_alu(n, ctx->compiler);
 
       /* NOTE: consider dst register too.. it could happen that
        * texture sample instruction (for example) writes some
@@ -432,7 +466,7 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
          else
             reg = n->srcs[i - n->dsts_count];
 
-         if (reg_gpr(reg)) {
+         if (is_reg_gpr(reg)) {
 
             /* TODO: we probably only need (ss) for alu
              * instr consuming sfu result.. need to make
@@ -443,6 +477,34 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
                last_input_needs_ss = false;
             }
 
+            /* There is a fast feedback path for scalar ALU instructions which
+             * only takes 1 cycle of latency, similar to the normal 3 cycle
+             * latency path for ALU instructions. For this fast path the
+             * producer and consumer must use the same register size (i.e. no
+             * writing a full register and then reading half of it or vice
+             * versa). If we don't hit this path, either because of a mismatched
+             * size or a read via the regular ALU, then the write latency is
+             * variable and we must use (ss) to wait for the scalar ALU. This is
+             * different from the fixed 6 cycle latency for mismatched vector
+             * ALU accesses.
+             */
+            if (n_is_scalar_alu) {
+               /* Check if we have a mismatched size RaW dependency */
+               if (regmask_get((reg->flags & IR3_REG_HALF) ?
+                               &state->needs_ss_scalar_half :
+                               &state->needs_ss_scalar_full, reg)) {
+                  apply_ss(n, state, mergedregs);
+                  last_input_needs_ss = false;
+               }
+            } else {
+               /* check if we have a scalar -> vector RaW dependency */
+               if (regmask_get(&state->needs_ss_scalar_half, reg) ||
+                   regmask_get(&state->needs_ss_scalar_full, reg)) {
+                  apply_ss(n, state, mergedregs);
+                  last_input_needs_ss = false;
+               }
+            }
+
             if (regmask_get(&state->needs_sy, reg)) {
                apply_sy(n, state, mergedregs);
             }
@@ -451,15 +513,26 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
                apply_ss(n, state, mergedregs);
                last_input_needs_ss = false;
             }
+         } else if (reg_is_addr1(reg) && block->in_early_preamble) {
+            if (regmask_get(&state->needs_ss, reg)) {
+               apply_ss(n, state, mergedregs);
+               last_input_needs_ss = false;
+            }
          }
       }
 
       foreach_dst (reg, n) {
-         if (regmask_get(&state->needs_ss_war, reg)) {
+         if (needs_ss_war(state, reg, n_is_scalar_alu)) {
             apply_ss(n, state, mergedregs);
             last_input_needs_ss = false;
          }
       }
+
+      /* I'm not exactly what this is for, but it seems we need this on every
+       * mova1 in early preambles.
+       */
+      if (writes_addr1(n) && block->in_early_preamble)
+         n->srcs[0]->flags |= IR3_REG_R;
 
       /* cat5+ does not have an (ss) bit, if needed we need to
        * insert a nop to carry the sync flag.  Would be kinda
@@ -483,6 +556,7 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
        */
 
       if ((delay > 0) && (ctx->compiler->gen >= 6) && last_n &&
+          !n_is_scalar_alu &&
           ((opc_cat(last_n->opc) == 2) || (opc_cat(last_n->opc) == 3)) &&
           (last_n->repeat == 0)) {
          /* the previous cat2/cat3 instruction can encode at most 3 nop's: */
@@ -524,19 +598,29 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
          list_addtail(&n->node, &block->instr_list);
       }
 
-      if (is_sfu(n))
+      if (is_sfu(n) || n->opc == OPC_SHFL)
          regmask_set(&state->needs_ss, n->dsts[0]);
 
       foreach_dst (dst, n) {
-         if (dst->flags & IR3_REG_SHARED)
+         if (dst->flags & IR3_REG_SHARED) {
+            if (n_is_scalar_alu) {
+               if (dst->flags & IR3_REG_HALF)
+                  regmask_set(&state->needs_ss_scalar_full, dst);
+               else
+                  regmask_set(&state->needs_ss_scalar_half, dst);
+            } else {
+               regmask_set(&state->needs_ss, dst);
+            }
+         } else if (reg_is_addr1(dst) && block->in_early_preamble) {
             regmask_set(&state->needs_ss, dst);
+         }
       }
 
-      if (is_tex_or_prefetch(n)) {
+      if (is_tex_or_prefetch(n) && n->dsts_count > 0) {
          regmask_set(&state->needs_sy, n->dsts[0]);
          if (n->opc == OPC_META_TEX_PREFETCH)
-            has_tex_prefetch = true;
-      } else if (n->opc == OPC_RESINFO) {
+            ctx->has_tex_prefetch = true;
+      } else if (n->opc == OPC_RESINFO && n->dsts_count > 0) {
          regmask_set(&state->needs_ss, n->dsts[0]);
          ir3_NOP(block)->flags |= IR3_INSTR_SS;
          last_input_needs_ss = false;
@@ -565,18 +649,54 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
       /* both tex/sfu appear to not always immediately consume
        * their src register(s):
        */
-      if (is_tex(n) || is_sfu(n) || is_mem(n)) {
-         foreach_src (reg, n) {
-            regmask_set(&state->needs_ss_war, reg);
+      if (is_war_hazard_producer(n)) {
+         /* These WAR hazards can always be resolved with (ss). However, when
+          * the reader is a sy-producer, they can also be resolved using (sy)
+          * because once we have synced the reader's results using (sy), its
+          * sources have definitely been consumed. We track the two cases
+          * separately so that we don't add an unnecessary (ss) if a (sy) sync
+          * already happened.
+          * For example, this prevents adding the unnecessary (ss) in the
+          * following sequence:
+          * sam rd, rs, ...
+          * (sy)... ; sam synced so consumed its sources
+          * (ss)write rs ; (ss) unnecessary since rs has been consumed already
+          */
+         bool needs_ss = is_ss_producer(n) || is_store(n) || n->opc == OPC_STC;
+
+         if (n_is_scalar_alu) {
+            /* Scalar ALU also does not immediately read its source because it
+             * is not executed right away, but scalar ALU instructions are
+             * executed in-order so subsequent scalar ALU instructions don't
+             * need to wait for previous ones.
+             */
+            regmask_t *mask = needs_ss ? &state->needs_ss_scalar_war
+                                       : &state->needs_ss_or_sy_scalar_war;
+
+            foreach_src (reg, n) {
+               if ((reg->flags & IR3_REG_SHARED) || is_reg_a0(reg)) {
+                  regmask_set(mask, reg);
+               }
+            }
+         } else {
+            regmask_t *mask =
+               needs_ss ? &state->needs_ss_war : &state->needs_ss_or_sy_war;
+
+            foreach_src (reg, n) {
+               if (!(reg->flags & (IR3_REG_IMMED | IR3_REG_CONST))) {
+                  regmask_set(mask, reg);
+               }
+            }
          }
       }
 
-      if (count_instruction(n))
+      bool count = count_instruction(n, ctx->compiler);
+      if (count)
          cycle += 1;
 
       delay_update(state, n, cycle, mergedregs);
 
-      if (count_instruction(n))
+      if (count)
          cycle += n->repeat;
 
       if (ctx->early_input_release && is_input(n)) {
@@ -617,7 +737,8 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
 
    assert(inputs_remaining == 0 || !ctx->early_input_release);
 
-   if (has_tex_prefetch && !ctx->has_inputs) {
+   if (block == ir3_after_preamble(ctx->so->ir) &&
+       ctx->has_tex_prefetch && !ctx->has_inputs) {
       /* texture prefetch, but *no* inputs.. we need to insert a
        * dummy bary.f at the top of the shader to unblock varying
        * storage:
@@ -702,6 +823,25 @@ apply_fine_deriv_macro(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
       }
    }
 
+   return true;
+}
+
+/* Some instructions can take a dummy destination of r63.x, which we model as it
+ * not having a destination in the IR to avoid having special code to handle
+ * this. Insert the dummy destination after everything else is done.
+ */
+static bool
+expand_dummy_dests(struct ir3_block *block)
+{
+   foreach_instr (n, &block->instr_list) {
+      if ((n->opc == OPC_SAM || n->opc == OPC_LDC || n->opc == OPC_RESINFO) &&
+          n->dsts_count == 0) {
+         struct ir3_register *dst = ir3_dst_create(n, INVALID_REG, 0);
+         /* Copy the blob's writemask */
+         if (n->opc == OPC_SAM)
+            dst->wrmask = 0b1111;
+      }
+   }
    return true;
 }
 
@@ -839,11 +979,6 @@ retarget_jump(struct ir3_instruction *instr, struct ir3_block *new_target)
 
    /* and remove old_target's predecessor: */
    ir3_block_remove_predecessor(old_target, cur_block);
-
-   /* If we reconverged at the old target, we'll reconverge at the new target
-    * too:
-    */
-   new_target->reconvergence_point |= old_target->reconvergence_point;
 
    instr->cat0.target = new_target;
 
@@ -1242,8 +1377,7 @@ dbg_sync_sched(struct ir3 *ir, struct ir3_shader_variant *so)
 {
    foreach_block (block, &ir->block_list) {
       foreach_instr_safe (instr, &block->instr_list) {
-         if (opc_cat(instr->opc) == 4 || opc_cat(instr->opc) == 5 ||
-             opc_cat(instr->opc) == 6) {
+         if (is_ss_producer(instr) || is_sy_producer(instr)) {
             struct ir3_instruction *nop = ir3_NOP(block);
             nop->flags |= IR3_INSTR_SS | IR3_INSTR_SY;
             ir3_instr_move_after(nop, instr);
@@ -1260,6 +1394,43 @@ dbg_nop_sched(struct ir3 *ir, struct ir3_shader_variant *so)
          struct ir3_instruction *nop = ir3_NOP(block);
          nop->repeat = 5;
          ir3_instr_move_before(nop, instr);
+      }
+   }
+}
+
+static void
+dbg_expand_rpt(struct ir3 *ir)
+{
+   foreach_block (block, &ir->block_list) {
+      foreach_instr_safe (instr, &block->instr_list) {
+         if (instr->repeat == 0 || instr->opc == OPC_NOP ||
+             instr->opc == OPC_SWZ || instr->opc == OPC_GAT ||
+             instr->opc == OPC_SCT) {
+            continue;
+         }
+
+         for (unsigned i = 0; i <= instr->repeat; ++i) {
+            struct ir3_instruction *rpt = ir3_instr_clone(instr);
+            ir3_instr_move_before(rpt, instr);
+            rpt->repeat = 0;
+
+            foreach_dst (dst, rpt) {
+               dst->num += i;
+               dst->wrmask = 1;
+            }
+
+            foreach_src (src, rpt) {
+               if (!(src->flags & IR3_REG_R))
+                  continue;
+
+               src->num += i;
+               src->uim_val += i;
+               src->wrmask = 1;
+               src->flags &= ~IR3_REG_R;
+            }
+         }
+
+         list_delinit(&instr->node);
       }
    }
 }
@@ -1298,7 +1469,6 @@ helper_sched(struct ir3_legalize_ctx *ctx, struct ir3 *ir,
             bd->uses_helpers_beginning = true;
             if (instr->opc != OPC_META_TEX_PREFETCH) {
                non_prefetch_helpers = true;
-               break;
             }
          }
 
@@ -1314,9 +1484,11 @@ helper_sched(struct ir3_legalize_ctx *ctx, struct ir3 *ir,
       struct ir3_instruction *terminator = ir3_block_get_terminator(block);
       if (terminator) {
          if (terminator->opc == OPC_BALL || terminator->opc == OPC_BANY ||
-             terminator->opc == OPC_GETONE) {
+             (terminator->opc == OPC_GETONE &&
+              (terminator->flags & IR3_INSTR_NEEDS_HELPERS))) {
             bd->uses_helpers_beginning = true;
             bd->uses_helpers_end = true;
+            non_prefetch_helpers = true;
          }
       }
 
@@ -1340,8 +1512,8 @@ helper_sched(struct ir3_legalize_ctx *ctx, struct ir3 *ir,
          if (!bd->uses_helpers_beginning)
             continue;
 
-         for (unsigned i = 0; i < block->predecessors_count; i++) {
-            struct ir3_block *pred = block->predecessors[i];
+         for (unsigned i = 0; i < block->physical_predecessors_count; i++) {
+            struct ir3_block *pred = block->physical_predecessors[i];
             struct ir3_helper_block_data *pred_bd = pred->data;
             if (!pred_bd->uses_helpers_end) {
                pred_bd->uses_helpers_end = true;
@@ -1408,8 +1580,8 @@ helper_sched(struct ir3_legalize_ctx *ctx, struct ir3 *ir,
        * helper invocations.
        */
       bool pred_uses_helpers = bd->uses_helpers_beginning;
-      for (unsigned i = 0; i < block->predecessors_count; i++) {
-         struct ir3_block *pred = block->predecessors[i];
+      for (unsigned i = 0; i < block->physical_predecessors_count; i++) {
+         struct ir3_block *pred = block->physical_predecessors[i];
          struct ir3_helper_block_data *pred_bd = pred->data;
          if (pred_bd->uses_helpers_end) {
             pred_uses_helpers = true;
@@ -1496,9 +1668,19 @@ ir3_legalize(struct ir3 *ir, struct ir3_shader_variant *so, int *max_bary)
          rzalloc(ctx, struct ir3_legalize_block_data);
 
       regmask_init(&bd->state.needs_ss_war, mergedregs);
+      regmask_init(&bd->state.needs_ss_or_sy_war, mergedregs);
+      regmask_init(&bd->state.needs_ss_scalar_war, mergedregs);
+      regmask_init(&bd->state.needs_ss_or_sy_scalar_war, mergedregs);
+      regmask_init(&bd->state.needs_ss_scalar_full, mergedregs);
+      regmask_init(&bd->state.needs_ss_scalar_half, mergedregs);
       regmask_init(&bd->state.needs_ss, mergedregs);
       regmask_init(&bd->state.needs_sy, mergedregs);
       regmask_init(&bd->begin_state.needs_ss_war, mergedregs);
+      regmask_init(&bd->begin_state.needs_ss_or_sy_war, mergedregs);
+      regmask_init(&bd->begin_state.needs_ss_scalar_war, mergedregs);
+      regmask_init(&bd->begin_state.needs_ss_or_sy_scalar_war, mergedregs);
+      regmask_init(&bd->begin_state.needs_ss_scalar_full, mergedregs);
+      regmask_init(&bd->begin_state.needs_ss_scalar_half, mergedregs);
       regmask_init(&bd->begin_state.needs_ss, mergedregs);
       regmask_init(&bd->begin_state.needs_sy, mergedregs);
 
@@ -1511,20 +1693,80 @@ ir3_legalize(struct ir3 *ir, struct ir3_shader_variant *so, int *max_bary)
     * a5xx and a6xx do automatically release varying storage at the end.
     */
    ctx->early_input_release = true;
+
    struct ir3_block *start_block = ir3_after_preamble(ir);
+
+   /* Gather information to determine whether we can enable early preamble.
+    */
+   bool gpr_in_preamble = false;
+   bool pred_in_preamble = false;
+   bool relative_in_preamble = false;
+   bool in_preamble = start_block != ir3_start_block(ir);
+   bool has_preamble = start_block != ir3_start_block(ir);
+
    foreach_block (block, &ir->block_list) {
+      if (block == start_block)
+         in_preamble = false;
+
       foreach_instr (instr, &block->instr_list) {
          if (is_input(instr)) {
             ctx->has_inputs = true;
             if (block != start_block) {
                ctx->early_input_release = false;
-               break;
             }
+         }
+
+         if (is_meta(instr))
+            continue;
+
+         foreach_src (reg, instr) {
+            if (in_preamble) {
+               if (!(reg->flags & IR3_REG_SHARED) && is_reg_gpr(reg))
+                  gpr_in_preamble = true;
+               if (reg->flags & IR3_REG_RELATIV)
+                  relative_in_preamble = true;
+            }
+         }
+
+         foreach_dst (reg, instr) {
+            if (is_dest_gpr(reg)) {
+               if (in_preamble) {
+                  if (!(reg->flags & IR3_REG_SHARED))
+                     gpr_in_preamble = true;
+                  if (reg->flags & IR3_REG_RELATIV)
+                     relative_in_preamble = true;
+               }
+            }
+         }
+
+         if (in_preamble && writes_pred(instr)) {
+            pred_in_preamble = true;
          }
       }
    }
 
+   so->early_preamble = has_preamble && !gpr_in_preamble &&
+      !pred_in_preamble && !relative_in_preamble &&
+      ir->compiler->has_early_preamble &&
+      !(ir3_shader_debug & IR3_DBG_NOEARLYPREAMBLE);
+
+   /* On a7xx, sync behavior for a1.x is different in the early preamble. RaW
+    * dependencies must be synchronized with (ss) there must be an extra
+    * (r) on the source of the mova1 instruction.
+    */
+   if (so->early_preamble && ir->compiler->gen >= 7) {
+      foreach_block (block, &ir->block_list) {
+         if (block == start_block)
+            break;
+         block->in_early_preamble = true;
+      }
+   }
+
    assert(ctx->early_input_release || ctx->compiler->gen >= 5);
+
+   if (ir3_shader_debug & IR3_DBG_EXPANDRPT) {
+      dbg_expand_rpt(ir);
+   }
 
    /* process each block: */
    do {
@@ -1545,8 +1787,6 @@ ir3_legalize(struct ir3 *ir, struct ir3_shader_variant *so, int *max_bary)
    }
 
    block_sched(ir);
-   if (so->type == MESA_SHADER_FRAGMENT)
-      kill_sched(ir, so);
 
    foreach_block (block, &ir->block_list) {
       progress |= apply_fine_deriv_macro(ctx, block);
@@ -1560,15 +1800,26 @@ ir3_legalize(struct ir3 *ir, struct ir3_shader_variant *so, int *max_bary)
       dbg_nop_sched(ir, so);
    }
 
+   bool cfg_changed = false;
    while (opt_jump(ir))
-      ;
+      cfg_changed = true;
 
    prede_sched(ir);
+
+   if (cfg_changed)
+      ir3_calc_reconvergence(so);
+
+   if (so->type == MESA_SHADER_FRAGMENT)
+      kill_sched(ir, so);
 
    /* TODO: does (eq) exist before a6xx? */
    if (so->type == MESA_SHADER_FRAGMENT && so->need_pixlod &&
        so->compiler->gen >= 6)
       helper_sched(ctx, ir, so);
+
+   foreach_block (block, &ir->block_list) {
+      progress |= expand_dummy_dests(block);
+   }
 
    ir3_count_instructions(ir);
    resolve_jumps(ir);

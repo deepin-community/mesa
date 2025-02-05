@@ -1,3 +1,5 @@
+// Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
+
 #include <string.h>
 #include <math.h>
 #include "color_bg.h"
@@ -158,7 +160,8 @@ static void set_gamut_remap_matrix(double* res, enum color_space src_cs, enum co
     case COLOR_SPACE_MSREF_SCRGB:
     case COLOR_SPACE_YCBCR709_LIMITED:
     case COLOR_SPACE_YCBCR709:
-    case COLOR_SPACE_JFIF:
+    case COLOR_SPACE_YCBCR_JFIF:
+    case COLOR_SPACE_RGB_JFIF:
         memcpy(rgb_to_xyz, bt_709_rgb_xyz_matrix, 9 * sizeof(double));
         break;
     case COLOR_SPACE_YCBCR601:
@@ -183,7 +186,8 @@ static void set_gamut_remap_matrix(double* res, enum color_space src_cs, enum co
     case COLOR_SPACE_MSREF_SCRGB:
     case COLOR_SPACE_YCBCR709_LIMITED:
     case COLOR_SPACE_YCBCR709:
-    case COLOR_SPACE_JFIF:
+    case COLOR_SPACE_YCBCR_JFIF:
+    case COLOR_SPACE_RGB_JFIF:
         memcpy(xyz_to_rgb, bt_709_xyz_rgb_matrix, 9 * sizeof(double));
         break;
     case COLOR_SPACE_YCBCR601:
@@ -405,7 +409,8 @@ static bool is_limited_cs(enum color_space cs)
     case COLOR_SPACE_MSREF_SCRGB:
     case COLOR_SPACE_YCBCR601:
     case COLOR_SPACE_YCBCR709:
-    case COLOR_SPACE_JFIF:
+    case COLOR_SPACE_YCBCR_JFIF:
+    case COLOR_SPACE_RGB_JFIF:
     case COLOR_SPACE_2020_YCBCR:
         is_limited = false;
         break;
@@ -446,8 +451,7 @@ static void vpe_bg_degam(
         compute_degam(output_tf->tf, (double)bg_color->rgba.g, &degam_g, true);
         compute_degam(output_tf->tf, (double)bg_color->rgba.b, &degam_b, true);
         break;
-    case TRANSFER_FUNC_LINEAR_0_125:
-    case TRANSFER_FUNC_LINEAR_0_1:
+    case TRANSFER_FUNC_LINEAR:
         break;
     default:
         VPE_ASSERT(0);
@@ -471,8 +475,7 @@ static void vpe_bg_inverse_gamut_remap(enum color_space output_cs,
         bg_rgb[2] = (double)bg_color->rgba.b;
 
         switch (output_tf->tf) {
-        case TRANSFER_FUNC_LINEAR_0_1:
-        case TRANSFER_FUNC_LINEAR_0_125:
+        case TRANSFER_FUNC_LINEAR:
             /* Since linear output uses Bt709, and this conversion is only needed
              * when the tone mapping is enabled on (Bt2020) input, it is needed to
              * apply the reverse of Bt2020 -> Bt709 on the background color to
@@ -515,6 +518,7 @@ static void inverse_output_csc(enum color_space output_cs, struct vpe_color* bg_
         // output is RGB cs, follow output's range
         // but need yuv to rgb csc
     case COLOR_SPACE_SRGB_LIMITED:
+    case COLOR_SPACE_RGB601_LIMITED:
         bgcolor_cs = COLOR_SPACE_YCBCR709_LIMITED;
         break;
     case COLOR_SPACE_2020_RGB_LIMITEDRANGE:
@@ -522,6 +526,7 @@ static void inverse_output_csc(enum color_space output_cs, struct vpe_color* bg_
         break;
     case COLOR_SPACE_SRGB:
     case COLOR_SPACE_MSREF_SCRGB:
+    case COLOR_SPACE_RGB601:
         bgcolor_cs = COLOR_SPACE_YCBCR709;
         break;
     case COLOR_SPACE_2020_RGB_FULLRANGE:

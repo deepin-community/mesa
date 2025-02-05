@@ -169,12 +169,12 @@ remove_barriers(nir_shader *nir, bool is_compute)
 static bool
 lower_demote_impl(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
-   if (intr->intrinsic == nir_intrinsic_demote || intr->intrinsic == nir_intrinsic_terminate) {
-      intr->intrinsic = nir_intrinsic_discard;
+   if (intr->intrinsic == nir_intrinsic_demote) {
+      intr->intrinsic = nir_intrinsic_terminate;
       return true;
    }
-   if (intr->intrinsic == nir_intrinsic_demote_if || intr->intrinsic == nir_intrinsic_terminate_if) {
-      intr->intrinsic = nir_intrinsic_discard_if;
+   if (intr->intrinsic == nir_intrinsic_demote_if) {
+      intr->intrinsic = nir_intrinsic_terminate_if;
       return true;
    }
    return false;
@@ -289,7 +289,10 @@ lvp_create_pipeline_nir(nir_shader *nir)
 }
 
 static VkResult
-compile_spirv(struct lvp_device *pdevice, const VkPipelineShaderStageCreateInfo *sinfo, nir_shader **nir)
+compile_spirv(struct lvp_device *pdevice,
+              VkPipelineCreateFlags2KHR pipeline_flags,
+              const VkPipelineShaderStageCreateInfo *sinfo,
+              nir_shader **nir)
 {
    gl_shader_stage stage = vk_to_mesa_shader_stage(sinfo->stage);
    assert(stage <= LVP_SHADER_STAGES && stage != MESA_SHADER_NONE);
@@ -302,58 +305,6 @@ compile_spirv(struct lvp_device *pdevice, const VkPipelineShaderStageCreateInfo 
 
    const struct spirv_to_nir_options spirv_options = {
       .environment = NIR_SPIRV_VULKAN,
-      .caps = {
-         .float64 = (pdevice->pscreen->get_param(pdevice->pscreen, PIPE_CAP_DOUBLES) == 1),
-         .int16 = true,
-         .int64 = (pdevice->pscreen->get_param(pdevice->pscreen, PIPE_CAP_INT64) == 1),
-         .tessellation = true,
-         .float_controls = true,
-         .float32_atomic_add = true,
-#if LLVM_VERSION_MAJOR >= 15
-         .float32_atomic_min_max = true,
-#endif
-         .image_ms_array = true,
-         .image_read_without_format = true,
-         .image_write_without_format = true,
-         .storage_image_ms = true,
-         .geometry_streams = true,
-         .storage_8bit = true,
-         .storage_16bit = true,
-         .variable_pointers = true,
-         .stencil_export = true,
-         .post_depth_coverage = true,
-         .transform_feedback = true,
-         .device_group = true,
-         .draw_parameters = true,
-         .shader_viewport_index_layer = true,
-         .shader_clock = true,
-         .multiview = true,
-         .physical_storage_buffer_address = true,
-         .int64_atomics = true,
-         .subgroup_arithmetic = true,
-         .subgroup_basic = true,
-         .subgroup_ballot = true,
-         .subgroup_quad = true,
-#if LLVM_VERSION_MAJOR >= 10
-         .subgroup_shuffle = true,
-#endif
-         .subgroup_vote = true,
-         .vk_memory_model = true,
-         .vk_memory_model_device_scope = true,
-         .int8 = true,
-         .float16 = true,
-         .demote_to_helper_invocation = true,
-         .mesh_shading = true,
-         .descriptor_array_dynamic_indexing = true,
-         .descriptor_array_non_uniform_indexing = true,
-         .descriptor_indexing = true,
-         .runtime_descriptor_array = true,
-         .shader_enqueue = true,
-         .ray_query = true,
-         .ray_cull_mask = true,
-         .ray_tracing = true,
-         .ray_tracing_position_fetch = true,
-      },
       .ubo_addr_format = nir_address_format_vec2_index_32bit_offset,
       .ssbo_addr_format = nir_address_format_vec2_index_32bit_offset,
       .phys_ssbo_addr_format = nir_address_format_64bit_global,
@@ -365,7 +316,7 @@ compile_spirv(struct lvp_device *pdevice, const VkPipelineShaderStageCreateInfo 
 #endif
    };
 
-   result = vk_pipeline_shader_stage_to_nir(&pdevice->vk, sinfo,
+   result = vk_pipeline_shader_stage_to_nir(&pdevice->vk, pipeline_flags, sinfo,
                                             &spirv_options, pdevice->physical_device->drv_options[stage],
                                             NULL, nir);
    return result;
@@ -415,6 +366,7 @@ lvp_shader_lower(struct lvp_device *pdevice, struct lvp_pipeline *pipeline, nir_
    subgroup_opts.ballot_components = 1;
    subgroup_opts.ballot_bit_size = 32;
    subgroup_opts.lower_inverse_ballot = true;
+   subgroup_opts.lower_rotate_to_shuffle = true;
    NIR_PASS_V(nir, nir_lower_subgroups, &subgroup_opts);
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
@@ -422,7 +374,9 @@ lvp_shader_lower(struct lvp_device *pdevice, struct lvp_pipeline *pipeline, nir_
    NIR_PASS_V(nir, nir_lower_system_values);
    NIR_PASS_V(nir, nir_lower_is_helper_invocation);
    NIR_PASS_V(nir, lower_demote);
-   NIR_PASS_V(nir, nir_lower_compute_system_values, NULL);
+
+   const struct nir_lower_compute_system_values_options compute_system_values = {0};
+   NIR_PASS_V(nir, nir_lower_compute_system_values, &compute_system_values);
 
    NIR_PASS_V(nir, nir_remove_dead_variables,
               nir_var_uniform | nir_var_image, NULL);
@@ -493,9 +447,16 @@ lvp_shader_lower(struct lvp_device *pdevice, struct lvp_pipeline *pipeline, nir_
     * functions that need to be pre-compiled.
     */
    const nir_lower_tex_options tex_options = {
+      /* lower_tg4_offsets can introduce new sparse residency intrinsics
+       * which is why we have to lower everything before calling
+       * lvp_nir_lower_sparse_residency.
+       */
+      .lower_tg4_offsets = true,
       .lower_txd = true,
    };
    NIR_PASS(_, nir, nir_lower_tex, &tex_options);
+
+   NIR_PASS(_, nir, lvp_nir_lower_sparse_residency);
 
    lvp_shader_optimize(nir);
 
@@ -515,7 +476,7 @@ VkResult
 lvp_spirv_to_nir(struct lvp_pipeline *pipeline, const VkPipelineShaderStageCreateInfo *sinfo,
                  nir_shader **out_nir)
 {
-   VkResult result = compile_spirv(pipeline->device, sinfo, out_nir);
+   VkResult result = compile_spirv(pipeline->device, pipeline->flags, sinfo, out_nir);
    if (result == VK_SUCCESS)
       lvp_shader_lower(pipeline->device, pipeline, *out_nir, pipeline->layout);
 
@@ -811,6 +772,7 @@ lvp_graphics_pipeline_init(struct lvp_pipeline *pipeline,
                            VkPipelineCreateFlagBits2KHR flags)
 {
    pipeline->type = LVP_PIPELINE_GRAPHICS;
+   pipeline->flags = flags;
 
    VkResult result;
 
@@ -1097,8 +1059,10 @@ static VkResult
 lvp_compute_pipeline_init(struct lvp_pipeline *pipeline,
                           struct lvp_device *device,
                           struct lvp_pipeline_cache *cache,
-                          const VkComputePipelineCreateInfo *pCreateInfo)
+                          const VkComputePipelineCreateInfo *pCreateInfo,
+                          VkPipelineCreateFlagBits2KHR flags)
 {
+   pipeline->flags = flags;
    pipeline->device = device;
    pipeline->layout = lvp_pipeline_layout_from_handle(pCreateInfo->layout);
    vk_pipeline_layout_ref(&pipeline->layout->vk);
@@ -1140,7 +1104,7 @@ lvp_compute_pipeline_create(
    vk_object_base_init(&device->vk, &pipeline->base,
                        VK_OBJECT_TYPE_PIPELINE);
    uint64_t t0 = os_time_get_nano();
-   result = lvp_compute_pipeline_init(pipeline, device, cache, pCreateInfo);
+   result = lvp_compute_pipeline_init(pipeline, device, cache, pCreateInfo, flags);
    if (result != VK_SUCCESS) {
       vk_free(&device->vk.alloc, pipeline);
       return result;
@@ -1241,7 +1205,7 @@ create_shader_object(struct lvp_device *device, const VkShaderCreateInfoEXT *pCr
          pCreateInfo->pName,
          pCreateInfo->pSpecializationInfo,
       };
-      VkResult result = compile_spirv(device, &sinfo, &nir);
+      VkResult result = compile_spirv(device, 0, &sinfo, &nir);
       if (result != VK_SUCCESS)
          goto fail;
       nir->info.separate_shader = true;
@@ -1400,6 +1364,7 @@ lvp_exec_graph_pipeline_create(VkDevice _device, VkPipelineCache _cache,
    uint64_t t0 = os_time_get_nano();
 
    pipeline->type = LVP_PIPELINE_EXEC_GRAPH;
+   pipeline->flags = vk_graph_pipeline_create_flags(create_info);
    pipeline->layout = lvp_pipeline_layout_from_handle(create_info->layout);
 
    pipeline->exec_graph.scratch_size = 0;

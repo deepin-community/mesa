@@ -1,23 +1,184 @@
+mesa (24.3.0-1deepin1) unstable; urgency=medium
+
+  * Add deepin patches
+
+ -- xiangzelong <xiangzelong@deepin.org>  Fri, 29 Nov 2024 14:48:08 +0800
+
 mesa (24.1.5-1deepin3) unstable; urgency=medium
 
   * support mips64el.
 
  -- lichenggang <lichenggang@deepin.org>  Thu, 12 Dec 2024 10:30:35 +0800
 
-mesa (24.1.5-1deepin2) unstable; urgency=medium
+mesa (24.3.0-1) experimental; urgency=medium
 
-  * Fix a bad loop implementation in zx_print_driver_map_list().
+  * New upstream release.
 
- -- Mingcong Bai <baimingcong@uniontech.com>  Fri, 18 Oct 2024 17:48:47 +0800
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 22 Nov 2024 13:43:07 +0200
 
-mesa (24.1.5-1deepin1) unstable; urgency=medium
+mesa (24.3.0~rc2-1) experimental; urgency=medium
 
-  * Add missing patches from previous branches.
-  * Sync OrcJIT patches from AOSC-Tracking/mesa @ aosc/mesa-24.1.5.
-  * Actually enable OrcJIT for loong64, riscv64
-  * Disable Rust features as we are locked into an older version.
+  * New upstream release candidate.
 
- -- Mingcong Bai <baimingcong@uniontech.com>  Fri, 02 Aug 2024 16:19:12 +0800
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 14 Nov 2024 17:09:15 +0200
+
+mesa (24.3.0~rc1-1) experimental; urgency=medium
+
+  * New upstream release candidate.
+  * patches: Refreshed.
+  * rules: Drop obsoleted config options.
+  * libglx-mesa0.symbols: Updated.
+  * libgbm1: Add dri_gbm.so.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Tue, 12 Nov 2024 15:17:38 +0200
+
+mesa (24.2.6-1) unstable; urgency=medium
+
+  * New upstream release.
+  * fix-armhf-build.diff: Dropped, upstream.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Tue, 05 Nov 2024 09:59:12 +0200
+
+mesa (24.2.4-1) unstable; urgency=medium
+
+  * New upstream release.
+  * clc-find-opencl-headers.diff: Dropped, upstream.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 03 Oct 2024 22:18:55 +0300
+
+mesa (24.2.3-1) unstable; urgency=medium
+
+  * New upstream release.
+  * patches: Fix build on armel/armhf with llvm-19.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 20 Sep 2024 21:57:00 +0300
+
+mesa (24.2.2-1+exp1) experimental; urgency=medium
+
+  * rules: Migrate to llvm-19.
+  * clc-find-opencl-headers.diff: Fix finding the opencl headers with
+    llvm-19.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Tue, 17 Sep 2024 14:43:27 +0300
+
+mesa (24.2.2-1) unstable; urgency=medium
+
+  * New upstream release.
+  * patches: dril fixes dropped, upstream.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 06 Sep 2024 07:13:53 +0300
+
+mesa (24.2.1-4) unstable; urgency=medium
+
+  * patches: Add patches to fix autopkgtest regressions in dril.
+  * rules: Enable softpipe everywhere again. (Closes: #1080475)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 05 Sep 2024 11:49:34 +0300
+
+mesa (24.2.1-3) unstable; urgency=medium
+
+  * rules: Set MESON_PACKAGE_CACHE_DIR only for archs where nvk is
+    built, fixes armel build.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 29 Aug 2024 10:54:30 +0300
+
+mesa (24.2.1-2) unstable; urgency=medium
+
+  [ WANG Xuerui ]
+  * rules: disable TLSDESC for loong64 for now
+
+  [ Fabio Pedretti ]
+  * removed unused lua5.4 dependency
+
+  [ Timo Aaltonen ]
+  * Add upstream metadata, drop old git url from d/watch.
+  * New upstream release.
+  * control: Bump librust-syn-dev build-dep.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 29 Aug 2024 09:42:42 +0300
+
+mesa (24.2.0-2) experimental; urgency=medium
+
+  * control, rules: Drop armel, mips64el, loong64 from NVK_ARCHS (FTBFS).
+  * rules: ORCJIT is enabled by default now, so don't force draw-use-
+    llvm=false on riscv64.
+  * rules: Fix m68k build, and rework setting buildflags. (Closes:
+    #1067207)
+  * rules: Really drop ppc64el from optimization workaround, drop sh3 as
+    it's an obsolete arch, and for sh4 limit it to just setting a single
+    flag.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 15 Aug 2024 09:14:51 +0300
+
+mesa (24.2.0-1) experimental; urgency=medium
+
+  * New upstream release.
+  * rules: Build llvmpipe only where llvm is enabled.
+  * rules: Build softpipe or llvmpipe depending on the arch, not both.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Wed, 14 Aug 2024 22:13:47 +0300
+
+mesa (24.2.0~rc4-1) experimental; urgency=medium
+
+  * New upstream release candidate.
+  * control: Add python3-yaml to build-depends.
+  * control: Move libclc-NN dependency to LLVM_ARCHS.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Wed, 07 Aug 2024 16:34:17 +0300
+
+mesa (24.2.0~rc3-2) experimental; urgency=medium
+
+  * Add ldconfig trigger for mesa-drm-shim.
+  * control: Bump libdrm-dev build-dep.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Mon, 05 Aug 2024 09:38:13 +0300
+
+mesa (24.2.0~rc3-1) experimental; urgency=medium
+
+  [ Timo Aaltonen ]
+  * New upstream release candidate.
+  * control: Migrate to pkgconf.
+  * Add some lintian-overrides.
+  * control: Fix drm-shim description.
+  * control, rules: Bump llvm to 18. (Closes: #1072901)
+
+  [ Simon McVittie ]
+  * d/rules: Replace deprecated swrast with softpipe and llvmpipe
+  * d/rules: Replace deprecated glvnd=true with glvnd=enabled
+  * libglx-mesa0.symbols: Update for new symbols
+  * Add a new private shared library package for libgallium.so
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 02 Aug 2024 11:53:58 +0300
+
+mesa (24.1.6-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Wed, 14 Aug 2024 22:04:49 +0300
+
+mesa (24.1.5-3) unstable; urgency=medium
+
+  * control: Mark NVK build-deps accordingly.
+  * rules: Drop --wrap-mode=default, leftover from previous testing.
+    (Closes: #1077729)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 02 Aug 2024 17:45:45 +0300
+
+mesa (24.1.5-2) unstable; urgency=medium
+
+  [ Adrian Bunk ]
+  * control, rules: mips64el has latest LLVM already for some time
+
+  [ Timo Aaltonen ]
+  * rules: Fix FTBFS by only cleaning some nvk test binaries if they
+    actually get built.
+  * rules: Add a new NVK_ARCHS which is a subset of RUSTICL_ARCHS, strip
+    powerpc, ppc64el and s390x from it.
+  * control: Add lua5.4 to build-depends for arm* in order to work
+    around FTBFS caused by setting MESON_PACKAGE_CACHE_DIR for nvk.
+    (Closes: #1077729)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 02 Aug 2024 11:25:02 +0300
 
 mesa (24.1.5-1) unstable; urgency=medium
 
@@ -163,12 +324,6 @@ mesa (24.0.2-1) unstable; urgency=medium
     (Closes: #1064704)
 
  -- Timo Aaltonen <tjaalton@debian.org>  Thu, 29 Feb 2024 09:22:00 +0200
-
-mesa (24.0.1-1deepin3) unstable; urgency=medium
-
-  * Add radeon-fix-gnome-shell-crash.diff.
-
- -- xiangzelong <xiangzelong@deepin.org>  Fri, 12 Apr 2024 16:46:54 +0800
 
 mesa (24.0.1-1) unstable; urgency=medium
 
@@ -450,12 +605,6 @@ mesa (23.1.3-1) unstable; urgency=medium
   * New upstream release.
 
  -- Timo Aaltonen <tjaalton@debian.org>  Wed, 05 Jul 2023 17:23:23 +0300
-
-mesa (23.1.2-1deepin1) unstable; urgency=medium
-
-  * add zx support .
-
- -- LiChengGang <lichenggang@uniontech.com>  Fri, 16 Jun 2023 16:47:02 +0800
 
 mesa (23.1.2-1) unstable; urgency=medium
 

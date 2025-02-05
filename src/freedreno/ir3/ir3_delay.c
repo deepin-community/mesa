@@ -1,30 +1,14 @@
 /*
- * Copyright (C) 2019 Google, Inc.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Copyright © 2019 Google, Inc.
+ * SPDX-License-Identifier: MIT
  *
  * Authors:
  *    Rob Clark <robclark@freedesktop.org>
  */
 
 #include "ir3.h"
+
+#include "ir3_compiler.h"
 
 /* The maximum number of nop's we may need to insert between two instructions.
  */
@@ -43,7 +27,8 @@
  * assigns a value and the one that consumes
  */
 int
-ir3_delayslots(struct ir3_instruction *assigner,
+ir3_delayslots(struct ir3_compiler *compiler,
+               struct ir3_instruction *assigner,
                struct ir3_instruction *consumer, unsigned n, bool soft)
 {
    /* generally don't count false dependencies, since this can just be
@@ -63,12 +48,26 @@ ir3_delayslots(struct ir3_instruction *assigner,
    if (writes_addr0(assigner) || writes_addr1(assigner))
       return 6;
 
-   if (soft && is_ss_producer(assigner))
+   if (soft && needs_ss(compiler, assigner, consumer))
       return soft_ss_delay(assigner);
 
    /* handled via sync flags: */
-   if (is_ss_producer(assigner) || is_sy_producer(assigner))
+   if (needs_ss(compiler, assigner, consumer) ||
+       is_sy_producer(assigner))
       return 0;
+
+   /* scalar ALU -> scalar ALU depdendencies where the source and destination
+    * register sizes match don't require any nops.
+    */
+   if (is_scalar_alu(assigner, compiler)) {
+      assert(is_scalar_alu(consumer, compiler));
+      /* If the sizes don't match then we need (ss) and needs_ss() should've
+       * returned above.
+       */
+      assert((assigner->dsts[0]->flags & IR3_REG_HALF) ==
+             (consumer->srcs[n]->flags & IR3_REG_HALF));
+      return 0;
+   }
 
    /* As far as we know, shader outputs don't need any delay. */
    if (consumer->opc == OPC_END || consumer->opc == OPC_CHMASK)
@@ -96,11 +95,12 @@ ir3_delayslots(struct ir3_instruction *assigner,
 }
 
 unsigned
-ir3_delayslots_with_repeat(struct ir3_instruction *assigner,
+ir3_delayslots_with_repeat(struct ir3_compiler *compiler,
+                           struct ir3_instruction *assigner,
                            struct ir3_instruction *consumer,
                            unsigned assigner_n, unsigned consumer_n)
 {
-   unsigned delay = ir3_delayslots(assigner, consumer, consumer_n, false);
+   unsigned delay = ir3_delayslots(compiler, assigner, consumer, consumer_n, false);
 
    struct ir3_register *src = consumer->srcs[consumer_n];
    struct ir3_register *dst = assigner->dsts[assigner_n];
@@ -124,14 +124,11 @@ ir3_delayslots_with_repeat(struct ir3_instruction *assigner,
    if (assigner->opc == OPC_MOVMSK)
       return delay;
 
-   bool mismatched_half =
-      (src->flags & IR3_REG_HALF) != (dst->flags & IR3_REG_HALF);
-
    /* TODO: Handle the combination of (rpt) and different component sizes
     * better like below. This complicates things significantly because the
     * components don't line up.
     */
-   if (mismatched_half)
+   if ((src->flags & IR3_REG_HALF) != (dst->flags & IR3_REG_HALF))
       return delay;
 
    /* If an instruction has a (rpt), then it acts as a sequence of

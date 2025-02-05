@@ -1,27 +1,9 @@
-/**********************************************************
- * Copyright 2009-2023 VMware, Inc.  All rights reserved.
- *
- * Permission is hereby granted, free of charge, to any person
- * obtaining a copy of this software and associated documentation
- * files (the "Software"), to deal in the Software without
- * restriction, including without limitation the rights to use, copy,
- * modify, merge, publish, distribute, sublicense, and/or sell copies
- * of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be
- * included in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- *
- **********************************************************/
+/*
+ * Copyright (c) 2009-2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc.
+ * and/or its subsidiaries.
+ * SPDX-License-Identifier: MIT
+ */
 
 
 #include "svga_cmd.h"
@@ -31,6 +13,8 @@
 #include "util/u_debug_stack.h"
 #include "util/u_debug_flush.h"
 #include "util/u_hash_table.h"
+#include "util/u_bitmask.h"
+#include "util/u_atomic.h"
 #include "pipebuffer/pb_buffer.h"
 #include "pipebuffer/pb_validate.h"
 
@@ -144,6 +128,11 @@ struct vmw_svga_winsys_context
    uint64_t seen_surfaces;
    uint64_t seen_regions;
    uint64_t seen_mobs;
+
+   int32_t refcount;
+
+   /* Bitmask of userspace managed surfaces */
+   struct util_bitmask *surface_id_bm;
 
    /**
     * Whether this context should fail to reserve more commands, not because it
@@ -675,13 +664,26 @@ vmw_swc_destroy(struct svga_winsys_context *swc)
       vmw_svga_winsys_shader_reference(&ishader->vshader, NULL);
    }
 
+   if (vmw_has_userspace_surface(vswc->vws))
+      util_bitmask_destroy(vswc->surface_id_bm);
    _mesa_hash_table_destroy(vswc->hash, NULL);
    pb_validate_destroy(vswc->validate);
    vmw_ioctl_context_destroy(vswc->vws, swc->cid);
+   if (vswc->vws->swc == swc)
+      vswc->vws->swc = NULL;
 #if MESA_DEBUG
    debug_flush_ctx_destroy(vswc->fctx);
 #endif
    FREE(vswc);
+}
+
+void
+vmw_swc_unref(struct svga_winsys_context *swc)
+{
+   struct vmw_svga_winsys_context *vswc = vmw_svga_winsys_context(swc);
+   if (p_atomic_dec_zero(&vswc->refcount)) {
+      vmw_swc_destroy(swc);
+   }
 }
 
 /**
@@ -782,7 +784,7 @@ vmw_svga_winsys_context_create(struct svga_winsys_screen *sws)
    if(!vswc)
       return NULL;
 
-   vswc->base.destroy = vmw_swc_destroy;
+   vswc->base.destroy = vmw_swc_unref;
    vswc->base.reserve = vmw_swc_reserve;
    vswc->base.get_command_buffer_size = vmw_swc_get_command_buffer_size;
    vswc->base.surface_relocation = vmw_swc_surface_relocation;
@@ -829,6 +831,31 @@ vmw_svga_winsys_context_create(struct svga_winsys_screen *sws)
    if (!vswc->hash)
       goto out_no_hash;
 
+   if (vmw_has_userspace_surface(vws)) {
+      if(!(vswc->surface_id_bm = util_bitmask_create()))
+         goto out_no_user_srf;
+      /**
+       * First id assigned is 0 which is invalid for surface id. Consume the
+       * first id.
+       */
+      vmw_swc_surface_add_userspace_id(&vswc->base);
+   }
+
+   /**
+    * The context refcount is initialized to 2, one reference is for the context
+    * itself and the other is for vws screen. One unref is done when context
+    * destroy is called and the other when the either vws screen is destroyed
+    * or it initializes another context.
+    * This ensures that a screen always has access to its last created context.
+    * The vws screen needs this context to submit surface commands for userspace
+    * managed surfaces.
+    */
+   p_atomic_set(&vswc->refcount, 1);
+   if (vws->swc)
+      vmw_swc_unref(vws->swc);
+   vws->swc = &vswc->base;
+   p_atomic_inc(&vswc->refcount);
+
 #if MESA_DEBUG
    vswc->fctx = debug_flush_ctx_create(true, VMW_DEBUG_FLUSH_STACK);
 #endif
@@ -836,6 +863,8 @@ vmw_svga_winsys_context_create(struct svga_winsys_screen *sws)
    vswc->base.force_coherent = vws->force_coherent;
    return &vswc->base;
 
+out_no_user_srf:
+   _mesa_hash_table_destroy(vswc->hash, NULL);
 out_no_hash:
    pb_validate_destroy(vswc->validate);
 out_no_validate:
@@ -843,4 +872,19 @@ out_no_validate:
 out_no_context:
    FREE(vswc);
    return NULL;
+}
+
+void
+vmw_swc_surface_clear_userspace_id(struct svga_winsys_context *swc,
+                                   uint32 sid)
+{
+   struct vmw_svga_winsys_context *vswc = vmw_svga_winsys_context(swc);
+   util_bitmask_clear(vswc->surface_id_bm, sid);
+}
+
+uint32_t
+vmw_swc_surface_add_userspace_id(struct svga_winsys_context *swc)
+{
+   struct vmw_svga_winsys_context *vswc = vmw_svga_winsys_context(swc);
+   return util_bitmask_add(vswc->surface_id_bm);
 }

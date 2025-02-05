@@ -23,7 +23,6 @@
  */
 
 #include "util/detect_os.h"
-#include "driver_trace/tr_screen.h"
 
 #include "zink_context.h"
 #include "zink_screen.h"
@@ -132,7 +131,6 @@ kopper_CreateSurface(struct zink_screen *screen, struct kopper_displaytarget *cd
       /* VK_PRESENT_MODE_SHARED_DEMAND_REFRESH_KHR and VK_PRESENT_MODE_SHARED_CONTINUOUS_REFRESH_KHR
       * are not handled
       */
-      assert(modes[i] <= VK_PRESENT_MODE_FIFO_RELAXED_KHR);
       if (modes[i] <= VK_PRESENT_MODE_FIFO_RELAXED_KHR)
          cdt->present_modes |= BITFIELD_BIT(modes[i]);
    }
@@ -303,8 +301,18 @@ kopper_CreateSwapchain(struct zink_screen *screen, struct kopper_displaytarget *
        * Due to above restrictions, it is only possible to create a new swapchain on this
        * platform with imageExtent being equal to the current size of the window.
        */
-      cswap->scci.imageExtent.width = cdt->caps.currentExtent.width;
-      cswap->scci.imageExtent.height = cdt->caps.currentExtent.height;
+      if (cdt->caps.currentExtent.width == 0xFFFFFFFF && cdt->caps.currentExtent.height == 0xFFFFFFFF) {
+         /*
+            currentExtent is the current width and height of the surface, or the special value (0xFFFFFFFF,
+            0xFFFFFFFF) indicating that the surface size will be determined by the extent of a swapchain
+            targeting the surface.
+          */
+         cswap->scci.imageExtent.width = w;
+         cswap->scci.imageExtent.height = h;
+      } else {
+         cswap->scci.imageExtent.width = cdt->caps.currentExtent.width;
+         cswap->scci.imageExtent.height = cdt->caps.currentExtent.height;
+      }
       break;
    case KOPPER_WAYLAND:
       /* On Wayland, currentExtent is the special value (0xFFFFFFFF, 0xFFFFFFFF), indicating that the
@@ -614,7 +622,7 @@ kill_swapchain(struct zink_context *ctx, struct zink_resource *res)
    struct zink_screen *screen = zink_screen(ctx->base.screen);
    /* dead swapchain */
    mesa_loge("zink: swapchain killed %p\n", res);
-   zink_batch_reference_resource(&ctx->batch, res);
+   zink_batch_reference_resource(ctx, res);
    struct pipe_resource *pres = screen->base.resource_create(&screen->base, &res->base.b);
    zink_resource_object_reference(screen, &res->obj, zink_resource(pres)->obj);
    res->layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -646,7 +654,8 @@ zink_kopper_acquire(struct zink_context *ctx, struct zink_resource *res, uint64_
    const struct kopper_swapchain *cswap = cdt->swapchain;
    res->obj->new_dt |= res->base.b.width0 != cswap->scci.imageExtent.width ||
                        res->base.b.height0 != cswap->scci.imageExtent.height;
-   VkResult ret = kopper_acquire(zink_screen(trace_screen_unwrap(ctx->base.screen)), res, timeout);
+   struct zink_screen *zscreen = zink_screen(kopper_get_zink_screen(ctx->base.screen));
+   VkResult ret = kopper_acquire(zscreen, res, timeout);
    if (ret == VK_SUCCESS || ret == VK_SUBOPTIMAL_KHR) {
       if (cswap != cdt->swapchain) {
          ctx->swapchain_size = cdt->swapchain->scci.imageExtent;
@@ -657,7 +666,7 @@ zink_kopper_acquire(struct zink_context *ctx, struct zink_resource *res, uint64_
       kill_swapchain(ctx, res);
    }
    bool is_kill = is_swapchain_kill(ret);
-   zink_batch_usage_set(&cdt->swapchain->batch_uses, ctx->batch.state);
+   zink_batch_usage_set(&cdt->swapchain->batch_uses, ctx->bs);
    return !is_kill;
 }
 
@@ -877,6 +886,8 @@ zink_kopper_present_queue(struct zink_screen *screen, struct zink_resource *res,
       kopper_present(cpi, screen, -1);
    }
    res->obj->indefinite_acquire = false;
+   res->use_damage = false;
+   memset(&res->damage, 0, sizeof(res->damage));
    cdt->swapchain->images[res->obj->dt_idx].acquired = NULL;
    res->obj->dt_idx = UINT32_MAX;
 }
@@ -977,7 +988,7 @@ zink_kopper_acquire_readback(struct zink_context *ctx, struct zink_resource *res
       res->base.b.width0 = ctx->swapchain_size.width;
       res->base.b.height0 = ctx->swapchain_size.height;
    }
-   zink_batch_usage_set(&cdt->swapchain->batch_uses, ctx->batch.state);
+   zink_batch_usage_set(&cdt->swapchain->batch_uses, ctx->bs);
    *readback = res;
    return true;
 }
@@ -1066,6 +1077,18 @@ zink_kopper_update(struct pipe_screen *pscreen, struct pipe_resource *pres, int 
       cdt->is_kill = true;
       return false;
    }
+
+   if (cdt->caps.currentExtent.width == 0xFFFFFFFF && cdt->caps.currentExtent.height == 0xFFFFFFFF) {
+      /*
+         currentExtent is the current width and height of the surface, or the special value (0xFFFFFFFF,
+         0xFFFFFFFF) indicating that the surface size will be determined by the extent of a swapchain
+         targeting the surface.
+       */
+      *w = res->base.b.width0;
+      *h = res->base.b.height0;
+      return true;
+   }
+
    *w = cdt->caps.currentExtent.width;
    *h = cdt->caps.currentExtent.height;
    return true;

@@ -1,27 +1,9 @@
-/**********************************************************
- * Copyright 2008-2023 VMware, Inc.  All rights reserved.
- *
- * Permission is hereby granted, free of charge, to any person
- * obtaining a copy of this software and associated documentation
- * files (the "Software"), to deal in the Software without
- * restriction, including without limitation the rights to use, copy,
- * modify, merge, publish, distribute, sublicense, and/or sell copies
- * of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be
- * included in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- *
- **********************************************************/
+/*
+ * Copyright (c) 2008-2024 Broadcom. All Rights Reserved.
+ * The term “Broadcom” refers to Broadcom Inc.
+ * and/or its subsidiaries.
+ * SPDX-License-Identifier: MIT
+ */
 
 #include "git_sha1.h" /* For MESA_GIT_SHA1 */
 #include "compiler/nir/nir.h"
@@ -43,6 +25,7 @@
 #include "svga_resource.h"
 #include "svga_debug.h"
 
+#include "vm_basic_types.h"
 #include "svga3d_shaderdefs.h"
 #include "VGPU10ShaderTokens.h"
 
@@ -368,7 +351,7 @@ svga_get_param(struct pipe_screen *screen, enum pipe_cap param)
       /* According to the spec, max varyings does not include the components
        * for position, so remove one count from the max for position.
        */
-      return sws->have_vgpu10 ? VGPU10_MAX_FS_INPUTS-1 : 10;
+      return sws->have_vgpu10 ? VGPU10_MAX_PS_INPUTS-1 : 10;
    case PIPE_CAP_BUFFER_MAP_PERSISTENT_COHERENT:
       return sws->have_coherent;
 
@@ -404,14 +387,8 @@ svga_get_param(struct pipe_screen *screen, enum pipe_cap param)
       return sws->have_gl43 ? SVGA_MAX_ATOMIC_BUFFERS : 0;
    case PIPE_CAP_MIN_MAP_BUFFER_ALIGNMENT:
       return 64;
-   case PIPE_CAP_VERTEX_BUFFER_STRIDE_4BYTE_ALIGNED_ONLY:
-      return sws->have_vgpu10 ? 0 : 1;
-   case PIPE_CAP_VERTEX_ATTRIB_ELEMENT_ALIGNED_ONLY:
-      /* This CAP cannot be used with any other alignment-requiring CAPs */
-      return sws->have_vgpu10 ? 1 : 0;
-   case PIPE_CAP_VERTEX_BUFFER_OFFSET_4BYTE_ALIGNED_ONLY:
-   case PIPE_CAP_VERTEX_ELEMENT_SRC_OFFSET_4BYTE_ALIGNED_ONLY:
-      return sws->have_vgpu10 ? 0 : 1;
+   case PIPE_CAP_VERTEX_INPUT_ALIGNMENT:
+      return sws->have_vgpu10 ? PIPE_VERTEX_INPUT_ALIGNMENT_ELEMENT : PIPE_VERTEX_INPUT_ALIGNMENT_4BYTE;
    case PIPE_CAP_MAX_VERTEX_ATTRIB_STRIDE:
       return 2048;
    case PIPE_CAP_MAX_VIEWPORTS:
@@ -656,7 +633,7 @@ vgpu10_get_shader_param(struct pipe_screen *screen,
       return 64;
    case PIPE_SHADER_CAP_MAX_INPUTS:
       if (shader == PIPE_SHADER_FRAGMENT)
-         return VGPU10_MAX_FS_INPUTS;
+         return VGPU10_MAX_PS_INPUTS;
       else if (shader == PIPE_SHADER_GEOMETRY)
          return svgascreen->max_gs_inputs;
       else if (shader == PIPE_SHADER_TESS_CTRL)
@@ -667,7 +644,7 @@ vgpu10_get_shader_param(struct pipe_screen *screen,
          return svgascreen->max_vs_inputs;
    case PIPE_SHADER_CAP_MAX_OUTPUTS:
       if (shader == PIPE_SHADER_FRAGMENT)
-         return VGPU10_MAX_FS_OUTPUTS;
+         return VGPU10_MAX_PS_OUTPUTS;
       else if (shader == PIPE_SHADER_GEOMETRY)
          return VGPU10_MAX_GS_OUTPUTS;
       else if (shader == PIPE_SHADER_TESS_CTRL)
@@ -753,6 +730,7 @@ static const nir_shader_compiler_options svga_vgpu9_fragment_compiler_options = 
    .lower_bitops = true,
    .force_indirect_unrolling = nir_var_all,
    .force_indirect_unrolling_sampler = true,
+   .no_integers = true,
 };
 
 static const nir_shader_compiler_options svga_vgpu9_vertex_compiler_options = {
@@ -760,6 +738,7 @@ static const nir_shader_compiler_options svga_vgpu9_vertex_compiler_options = {
    .lower_bitops = true,
    .force_indirect_unrolling = nir_var_function_temp,
    .force_indirect_unrolling_sampler = true,
+   .no_integers = true,
 };
 
 static const nir_shader_compiler_options svga_vgpu10_compiler_options = {

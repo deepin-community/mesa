@@ -34,7 +34,7 @@ brw_fs_opt_split_virtual_grfs(fs_visitor &s)
 
    /* Count the total number of registers */
    unsigned reg_count = 0;
-   unsigned vgrf_to_reg[num_vars];
+   unsigned *vgrf_to_reg = new unsigned[num_vars];
    for (unsigned i = 0; i < num_vars; i++) {
       vgrf_to_reg[i] = reg_count;
       reg_count += s.alloc.sizes[i];
@@ -49,18 +49,21 @@ brw_fs_opt_split_virtual_grfs(fs_visitor &s)
    bool *split_points = new bool[reg_count];
    memset(split_points, 0, reg_count * sizeof(*split_points));
 
-   /* Mark all used registers as fully splittable */
+   /* Mark all used registers as fully splittable following the physical
+    * register size.
+    */
+   const unsigned reg_inc = reg_unit(s.devinfo);
    foreach_block_and_inst(block, fs_inst, inst, s.cfg) {
       if (inst->dst.file == VGRF) {
          unsigned reg = vgrf_to_reg[inst->dst.nr];
-         for (unsigned j = 1; j < s.alloc.sizes[inst->dst.nr]; j++)
+         for (unsigned j = reg_inc; j < s.alloc.sizes[inst->dst.nr]; j += reg_inc)
             split_points[reg + j] = true;
       }
 
       for (unsigned i = 0; i < inst->sources; i++) {
          if (inst->src[i].file == VGRF) {
             unsigned reg = vgrf_to_reg[inst->src[i].nr];
-            for (unsigned j = 1; j < s.alloc.sizes[inst->src[i].nr]; j++)
+            for (unsigned j = reg_inc; j < s.alloc.sizes[inst->src[i].nr]; j += reg_inc)
                split_points[reg + j] = true;
          }
       }
@@ -150,7 +153,7 @@ brw_fs_opt_split_virtual_grfs(fs_visitor &s)
                reg = vgrf_to_reg[inst->dst.nr] + reg_offset + size_written / REG_SIZE;
                fs_inst *undef =
                   ibld.UNDEF(
-                     byte_offset(fs_reg(VGRF, new_virtual_grf[reg], inst->dst.type),
+                     byte_offset(brw_vgrf(new_virtual_grf[reg], inst->dst.type),
                                  new_reg_offset[reg] * REG_SIZE));
                undef->size_written =
                   MIN2(inst->size_written - size_written, undef->size_written);
@@ -203,6 +206,7 @@ cleanup:
    delete[] vgrf_has_split;
    delete[] new_virtual_grf;
    delete[] new_reg_offset;
+   delete[] vgrf_to_reg;
 
    return progress;
 }

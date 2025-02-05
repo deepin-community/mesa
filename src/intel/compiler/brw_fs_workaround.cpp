@@ -103,7 +103,7 @@ brw_fs_workaround_memory_fence_before_eot(fs_visitor &s)
       const fs_builder ibld(&s, block, inst);
       const fs_builder ubld = ibld.exec_all().group(1, 0);
 
-      fs_reg dst = ubld.vgrf(BRW_REGISTER_TYPE_UD);
+      brw_reg dst = ubld.vgrf(BRW_TYPE_UD);
       fs_inst *dummy_fence = ubld.emit(SHADER_OPCODE_MEMORY_FENCE,
                                        dst, brw_vec8_grf(0, 0),
                                        /* commit enable */ brw_imm_ud(1),
@@ -220,7 +220,8 @@ brw_fs_workaround_nomask_control_flow(fs_visitor &s)
              * safely omit the predication for.
              */
             if (depth && inst->force_writemask_all &&
-                is_send(inst) && !inst->predicate) {
+                is_send(inst) && !inst->predicate &&
+                !inst->has_no_mask_send_params) {
                /* We need to load the execution mask into the flag register by
                 * using a builder with channel group matching the whole shader
                 * (rather than the default which is derived from the original
@@ -229,15 +230,15 @@ brw_fs_workaround_nomask_control_flow(fs_visitor &s)
                 */
                const fs_builder ubld = fs_builder(&s, block, inst)
                                        .exec_all().group(s.dispatch_width, 0);
-               const fs_reg flag = retype(brw_flag_reg(0, 0),
-                                          BRW_REGISTER_TYPE_UD);
+               const brw_reg flag = retype(brw_flag_reg(0, 0),
+                                          BRW_TYPE_UD);
 
                /* Due to the lack of flag register allocation we need to save
                 * and restore the flag register if it's live.
                 */
                const bool save_flag = flag_liveout &
                                       brw_fs_flag_mask(flag, s.dispatch_width / 8);
-               const fs_reg tmp = ubld.group(8, 0).vgrf(flag.type);
+               const brw_reg tmp = ubld.group(8, 0).vgrf(flag.type);
 
                if (save_flag) {
                   ubld.group(8, 0).UNDEF(tmp);
@@ -271,3 +272,90 @@ brw_fs_workaround_nomask_control_flow(fs_visitor &s)
    return progress;
 }
 
+/**
+ * flags_read() and flags_written() return flag access with byte granularity,
+ * but for Flag Register PRM lists "Access Granularity: Word", so we can assume
+ * accessing any part of a word will clear its register dependency.
+ */
+static unsigned
+bytes_bitmask_to_words(unsigned b)
+{
+   unsigned first_byte_mask = b & 0x55555555;
+   unsigned second_byte_mask = b & 0xaaaaaaaa;
+   return first_byte_mask |
+          (first_byte_mask << 1) |
+          second_byte_mask |
+          (second_byte_mask >> 1);
+}
+
+/**
+ * WaClearArfDependenciesBeforeEot
+ *
+ * Flag register dependency not cleared after EOT, so we have to source them
+ * before EOT. We can do this with simple `mov(1) nullUD, f{0,1}UD`
+ *
+ * To avoid emitting MOVs when it's not needed, check if each block  reads all
+ * the flags it sets. We might falsely determine register as unread if it'll be
+ * accessed inside the next blocks, but this still should be good enough.
+ */
+bool
+brw_fs_workaround_source_arf_before_eot(fs_visitor &s)
+{
+   bool progress = false;
+
+   if (s.devinfo->ver != 9)
+      return false;
+
+   unsigned flags_unread = 0;
+
+   foreach_block(block, s.cfg) {
+      unsigned flags_unread_in_block = 0;
+
+      foreach_inst_in_block(fs_inst, inst, block) {
+         /* Instruction can read and write to the same flag, so the order is important */
+         flags_unread_in_block &= ~bytes_bitmask_to_words(inst->flags_read(s.devinfo));
+         flags_unread_in_block |= bytes_bitmask_to_words(inst->flags_written(s.devinfo));
+
+         /* HALT does not start its block even though it can leave a dependency */
+         if (inst->opcode == BRW_OPCODE_HALT ||
+             inst->opcode == SHADER_OPCODE_HALT_TARGET) {
+            flags_unread |= flags_unread_in_block;
+            flags_unread_in_block = 0;
+         }
+      }
+
+      flags_unread |= flags_unread_in_block;
+
+      if ((flags_unread & 0x0f) && (flags_unread & 0xf0))
+         break;
+   }
+
+   if (flags_unread) {
+      int eot_count = 0;
+
+      foreach_block_and_inst_safe(block, fs_inst, inst, s.cfg)
+      {
+         if (!inst->eot)
+            continue;
+
+         /* Currently, we always emit only one EOT per program,
+          * this WA should be updated if it ever changes.
+          */
+         assert(++eot_count == 1);
+
+         const fs_builder ibld(&s, block, inst);
+         const fs_builder ubld = ibld.exec_all().group(1, 0);
+
+         if (flags_unread & 0x0f)
+            ubld.MOV(ubld.null_reg_ud(), retype(brw_flag_reg(0, 0), BRW_TYPE_UD));
+
+         if (flags_unread & 0xf0)
+            ubld.MOV(ubld.null_reg_ud(), retype(brw_flag_reg(1, 0), BRW_TYPE_UD));
+      }
+
+      progress = true;
+      s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS);
+   }
+
+   return progress;
+}
