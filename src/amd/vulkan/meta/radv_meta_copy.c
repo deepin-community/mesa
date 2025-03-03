@@ -55,18 +55,18 @@ blit_surf_for_image_level_layer(struct radv_image *image, VkImageLayout layout, 
 static bool
 alloc_transfer_temp_bo(struct radv_cmd_buffer *cmd_buffer)
 {
-   if (cmd_buffer->transfer.copy_temp)
-      return true;
-
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   const VkResult r =
-      radv_bo_create(device, &cmd_buffer->vk.base, RADV_SDMA_TRANSFER_TEMP_BYTES, 4096, RADEON_DOMAIN_VRAM,
-                     RADEON_FLAG_NO_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING, RADV_BO_PRIORITY_SCRATCH, 0, true,
-                     &cmd_buffer->transfer.copy_temp);
 
-   if (r != VK_SUCCESS) {
-      vk_command_buffer_set_error(&cmd_buffer->vk, r);
-      return false;
+   if (!cmd_buffer->transfer.copy_temp) {
+      const VkResult r =
+         radv_bo_create(device, &cmd_buffer->vk.base, RADV_SDMA_TRANSFER_TEMP_BYTES, 4096, RADEON_DOMAIN_VRAM,
+                        RADEON_FLAG_NO_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING, RADV_BO_PRIORITY_SCRATCH, 0,
+                        true, &cmd_buffer->transfer.copy_temp);
+
+      if (r != VK_SUCCESS) {
+         vk_command_buffer_set_error(&cmd_buffer->vk, r);
+         return false;
+      }
    }
 
    radv_cs_add_buffer(device->ws, cmd_buffer->cs, cmd_buffer->transfer.copy_temp);
@@ -234,9 +234,9 @@ radv_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer, const VkCopyBufferToIm
    if (radv_is_format_emulated(pdev, dst_image->vk.format)) {
       cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_PS_PARTIAL_FLUSH |
                                       radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                                                            VK_ACCESS_TRANSFER_WRITE_BIT, dst_image) |
+                                                            VK_ACCESS_TRANSFER_WRITE_BIT, 0, dst_image, NULL) |
                                       radv_dst_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                                                            VK_ACCESS_TRANSFER_READ_BIT, dst_image);
+                                                            VK_ACCESS_TRANSFER_READ_BIT, 0, dst_image, NULL);
 
       const enum util_format_layout format_layout = vk_format_description(dst_image->vk.format)->layout;
       for (unsigned r = 0; r < pCopyBufferToImageInfo->regionCount; r++) {
@@ -590,7 +590,7 @@ copy_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_image, VkI
 
          uint32_t htile_value = radv_get_htile_initial_value(device, dst_image);
 
-         cmd_buffer->state.flush_bits |= radv_clear_htile(cmd_buffer, dst_image, &range, htile_value);
+         cmd_buffer->state.flush_bits |= radv_clear_htile(cmd_buffer, dst_image, &range, htile_value, false);
       }
    }
 
@@ -614,9 +614,9 @@ radv_CmdCopyImage2(VkCommandBuffer commandBuffer, const VkCopyImageInfo2 *pCopyI
    if (radv_is_format_emulated(pdev, dst_image->vk.format)) {
       cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_PS_PARTIAL_FLUSH |
                                       radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                                                            VK_ACCESS_TRANSFER_WRITE_BIT, dst_image) |
+                                                            VK_ACCESS_TRANSFER_WRITE_BIT, 0, dst_image, NULL) |
                                       radv_dst_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                                                            VK_ACCESS_TRANSFER_READ_BIT, dst_image);
+                                                            VK_ACCESS_TRANSFER_READ_BIT, 0, dst_image, NULL);
 
       const enum util_format_layout format_layout = vk_format_description(dst_image->vk.format)->layout;
       for (unsigned r = 0; r < pCopyImageInfo->regionCount; r++) {
