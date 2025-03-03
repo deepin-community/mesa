@@ -180,7 +180,7 @@ nvk_CopyMemoryToImageEXT(VkDevice _device,
 {
    VK_FROM_HANDLE(nvk_image, dst_image, info->dstImage);
 
-   VkResult result;
+   VkResult result = VK_SUCCESS;
 
    /* From the EXT spec:
     * VK_HOST_IMAGE_COPY_MEMCPY_EXT specifies that no memory layout swizzling is
@@ -306,7 +306,7 @@ nvk_CopyImageToMemoryEXT(VkDevice _device,
 {
    VK_FROM_HANDLE(nvk_image, image, info->srcImage);
 
-   VkResult result;
+   VkResult result = VK_SUCCESS;
 
    const bool use_memcpy = info->flags &
       VK_HOST_IMAGE_COPY_MEMCPY_EXT;
@@ -322,7 +322,7 @@ nvk_CopyImageToMemoryEXT(VkDevice _device,
 }
 
 static VkResult
-nvk_copy_image_to_image(struct nvk_device *device,
+nvk_copy_image_to_image(struct nvk_device *dev,
                         struct nvk_image *src,
                         struct nvk_image *dst,
                         const VkImageCopy2 *info)
@@ -470,7 +470,7 @@ nvk_copy_image_to_image(struct nvk_device *device,
              dst_extent_B.depth * dst_extent_B.array_len);
       const size_t tmp_size_B =
          src_extent_B.depth * src_extent_B.array_len * tmp_layer_stride_B;
-      void *tmp_mem = vk_alloc(&device->vk.alloc, tmp_size_B, 8,
+      void *tmp_mem = vk_alloc(&dev->vk.alloc, tmp_size_B, 8,
                                VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
 
       const struct nil_Extent4D_Pixels src_level_extent_px =
@@ -527,7 +527,7 @@ nvk_copy_image_to_image(struct nvk_device *device,
          dst_ptr += dst_img_plane->nil.array_stride_B;
       }
 
-      vk_free(&device->vk.alloc, tmp_mem);
+      vk_free(&dev->vk.alloc, tmp_mem);
    }
 
    nvk_image_plane_unmap(src_img_plane);
@@ -544,7 +544,7 @@ nvk_CopyImageToImageEXT(VkDevice _device,
    VK_FROM_HANDLE(nvk_image, src, pCopyImageToImageInfo->srcImage);
    VK_FROM_HANDLE(nvk_image, dst, pCopyImageToImageInfo->dstImage);
 
-   VkResult result;
+   VkResult result = VK_SUCCESS;
 
    for (unsigned r = 0; r < pCopyImageToImageInfo->regionCount; r++) {
       result = nvk_copy_image_to_image(device, src, dst,

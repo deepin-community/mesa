@@ -881,13 +881,20 @@ disk_cache_write_item_to_disk(struct disk_cache_put_job *dc_job,
 char *
 disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
                               const char *driver_id,
+                              const char *cache_dir_name_custom,
                               enum disk_cache_type cache_type)
 {
-   char *cache_dir_name = CACHE_DIR_NAME;
-   if (cache_type == DISK_CACHE_SINGLE_FILE)
-      cache_dir_name = CACHE_DIR_NAME_SF;
-   else if (cache_type == DISK_CACHE_DATABASE)
-      cache_dir_name = CACHE_DIR_NAME_DB;
+   char *cache_dir_name;
+
+   if (cache_dir_name_custom) {
+      cache_dir_name = (char *)cache_dir_name_custom;
+   } else {
+      cache_dir_name = CACHE_DIR_NAME;
+      if (cache_type == DISK_CACHE_SINGLE_FILE)
+         cache_dir_name = CACHE_DIR_NAME_SF;
+      else if (cache_type == DISK_CACHE_DATABASE)
+         cache_dir_name = CACHE_DIR_NAME_DB;
+   }
 
    char *path = secure_getenv("MESA_SHADER_CACHE_DIR");
 
@@ -1005,7 +1012,10 @@ disk_cache_enabled()
                  "use MESA_SHADER_CACHE_DISABLE instead ***\n");
    }
 
-   if (debug_get_bool_option(envvar_name, disable_by_default))
+   if (debug_get_bool_option(envvar_name, disable_by_default) ||
+       /* MESA_GLSL_DISABLE_IO_OPT must disable the cache to get expected
+        * results because it only takes effect on a cache miss. */
+       debug_get_bool_option("MESA_GLSL_DISABLE_IO_OPT", false))
       return false;
 
    return true;
@@ -1055,7 +1065,7 @@ void
 disk_cache_touch_cache_user_marker(char *path)
 {
    char *marker_path = NULL;
-   asprintf(&marker_path, "%s/marker", path);
+   UNUSED int _unused = asprintf(&marker_path, "%s/marker", path);
    if (!marker_path)
       return;
 
@@ -1203,7 +1213,7 @@ delete_dir(const char* path)
       if (strcmp(p->d_name, ".") == 0 || strcmp(p->d_name, "..") == 0)
          continue;
 
-      asprintf(&entry_path, "%s/%s", path, p->d_name);
+      UNUSED int _unused = asprintf(&entry_path, "%s/%s", path, p->d_name);
       if (!entry_path)
          continue;
 
@@ -1228,7 +1238,7 @@ void
 disk_cache_delete_old_cache(void)
 {
    void *ctx = ralloc_context(NULL);
-   char *dirname = disk_cache_generate_cache_dir(ctx, NULL, NULL, DISK_CACHE_MULTI_FILE);
+   char *dirname = disk_cache_generate_cache_dir(ctx, NULL, NULL, NULL, DISK_CACHE_MULTI_FILE);
    if (!dirname)
       goto finish;
 

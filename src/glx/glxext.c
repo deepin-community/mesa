@@ -28,7 +28,7 @@
 #include "glxextensions.h"
 
 #include "util/u_debug.h"
-#ifndef GLX_USE_APPLEGL
+#if defined(GLX_DIRECT_RENDERING) && (!defined(GLX_USE_APPLEGL) || defined(GLX_USE_APPLE))
 #include "dri_common.h"
 #endif
 
@@ -41,6 +41,7 @@
 #include <xcb/xcb.h>
 #include <xcb/glx.h>
 #include "dri_util.h"
+#include "pipe/p_screen.h"
 #if defined(GLX_DIRECT_RENDERING) && (!defined(GLX_USE_APPLEGL) || defined(GLX_USE_APPLE))
 #include <dlfcn.h>
 #endif
@@ -790,6 +791,7 @@ bind_extensions(struct glx_screen *psc, const char *driverName)
       __glXEnableDirectExtension(psc, "GLX_INTEL_swap_event");
    }
 
+#if defined(GLX_DIRECT_RENDERING) && (!defined(GLX_USE_APPLEGL) || defined(GLX_USE_APPLE))
    mask = driGetAPIMask(psc->frontend_screen);
 
    __glXEnableDirectExtension(psc, "GLX_ARB_create_context");
@@ -806,7 +808,7 @@ bind_extensions(struct glx_screen *psc, const char *driverName)
                                  "GLX_EXT_create_context_es2_profile");
    }
 
-   if (dri_get_screen_param(psc->frontend_screen, PIPE_CAP_DEVICE_RESET_STATUS_QUERY))
+   if (dri_get_pipe_screen(psc->frontend_screen)->caps.device_reset_status_query)
       __glXEnableDirectExtension(psc,
                                  "GLX_ARB_create_context_robustness");
 
@@ -846,6 +848,7 @@ bind_extensions(struct glx_screen *psc, const char *driverName)
          psc->keep_native_window_glx_drawable = keep_native_window_glx_drawable;
       }
    }
+#endif
 }
 
 
@@ -1039,6 +1042,7 @@ __glXInitialize(Display * dpy)
    if (glx_direct)
       glx_driver |= GLX_DRIVER_SW;
 
+#if !defined(GLX_USE_APPLE)
    if (!dpyPriv->has_explicit_modifiers && glx_accel && !debug_get_bool_option("LIBGL_KOPPER_DRI2", false)) {
       if (glx_driver & GLX_DRIVER_ZINK_YES) {
          /* only print error if zink was explicitly requested */
@@ -1049,6 +1053,7 @@ __glXInitialize(Display * dpy)
       /* if no dri3 and not using dri2, disable zink */
       glx_driver &= ~GLX_DRIVER_ZINK_INFER;
    }
+#endif
 
 #ifdef GLX_USE_WINDOWSGL
    if (glx_direct && glx_accel)
@@ -1074,6 +1079,13 @@ __glXInitialize(Display * dpy)
 
 #if defined(GLX_USE_APPLEGL) && !defined(GLX_USE_APPLE)
    glx_driver |= GLX_DRIVER_SW;
+#endif
+
+#if defined(GLX_USE_APPLEGL) && !defined(GLX_USE_APPLE)
+   if (!applegl_create_display(dpyPriv)) {
+      free(dpyPriv);
+      return NULL;
+   }
 #endif
 
    if (!AllocAndFetchScreenConfigs(dpy, dpyPriv, glx_driver, !env)) {

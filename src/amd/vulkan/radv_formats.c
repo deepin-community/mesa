@@ -627,10 +627,10 @@ radv_get_modifier_flags(struct radv_physical_device *pdev, VkFormat format, uint
          return 0;
 
       /* Only disable support for STORAGE_IMAGE on modifiers that
-       * do not support DCC image stores.
+       * do not support DCC image stores or when explicitly disabled.
        */
       if (!ac_modifier_supports_dcc_image_stores(pdev->info.gfx_level, modifier) ||
-          radv_is_atomic_format_supported(format))
+          radv_is_atomic_format_supported(format) || instance->drirc.disable_dcc_stores)
          features &= ~VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT;
 
       if (instance->debug_flags & (RADV_DEBUG_NO_DCC | RADV_DEBUG_NO_DISPLAY_DCC))
@@ -674,8 +674,14 @@ radv_list_drm_format_modifiers(struct radv_physical_device *pdev, VkFormat forma
       if (!features)
          continue;
 
-      unsigned planes =
-         vk_format_get_plane_count(format) + ac_modifier_has_dcc(mods[i]) + ac_modifier_has_dcc_retile(mods[i]);
+      unsigned planes = vk_format_get_plane_count(format);
+
+      if (pdev->info.gfx_level < GFX12) {
+         /* DCC is transparent to the userspace driver on GFX12 so it doesn't
+          * need additional planes.
+          */
+         planes += ac_modifier_has_dcc(mods[i]) + ac_modifier_has_dcc_retile(mods[i]);
+      }
 
       vk_outarray_append_typed(VkDrmFormatModifierPropertiesEXT, &out, out_props)
       {
@@ -725,8 +731,14 @@ radv_list_drm_format_modifiers_2(struct radv_physical_device *pdev, VkFormat for
       if (!features)
          continue;
 
-      unsigned planes =
-         vk_format_get_plane_count(format) + ac_modifier_has_dcc(mods[i]) + ac_modifier_has_dcc_retile(mods[i]);
+      unsigned planes = vk_format_get_plane_count(format);
+
+      if (pdev->info.gfx_level < GFX12) {
+         /* DCC is transparent to the userspace driver on GFX12 so it doesn't
+          * need additional planes.
+          */
+         planes += ac_modifier_has_dcc(mods[i]) + ac_modifier_has_dcc_retile(mods[i]);
+      }
 
       vk_outarray_append_typed(VkDrmFormatModifierProperties2EXT, &out, out_props)
       {
@@ -1219,7 +1231,7 @@ radv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
           *    vkGetPhysicalDeviceImageFormatProperties2 returns
           *    VK_ERROR_FORMAT_NOT_SUPPORTED.
           */
-         result = vk_errorf(pdev, VK_ERROR_FORMAT_NOT_SUPPORTED, "unsupported VkExternalMemoryTypeFlagBitsKHR 0x%x",
+         result = vk_errorf(pdev, VK_ERROR_FORMAT_NOT_SUPPORTED, "unsupported VkExternalMemoryHandleTypeFlagBits 0x%x",
                             external_info->handleType);
          goto fail;
       }

@@ -497,7 +497,7 @@ static bool si_is_buffer_idle(struct si_context *sctx, struct si_resource *buf,
                               unsigned usage)
 {
    return !si_cs_is_buffer_referenced(sctx, buf->buf, usage) &&
-          sctx->ws->buffer_wait(sctx->ws, buf->buf, 0, usage);
+          sctx->ws->buffer_wait(sctx->ws, buf->buf, 0, usage | RADEON_USAGE_DISALLOW_SLOW_REPLY);
 }
 
 void si_barrier_before_internal_op(struct si_context *sctx, unsigned flags,
@@ -676,6 +676,11 @@ static void si_memory_barrier(struct pipe_context *ctx, unsigned flags)
    if (flags & (PIPE_BARRIER_VERTEX_BUFFER | PIPE_BARRIER_SHADER_BUFFER | PIPE_BARRIER_TEXTURE |
                 PIPE_BARRIER_IMAGE | PIPE_BARRIER_STREAMOUT_BUFFER | PIPE_BARRIER_GLOBAL_BUFFER))
       sctx->barrier_flags |= SI_BARRIER_INV_VMEM;
+
+   /* Unlike LLVM, ACO may use SMEM for SSBOs and global access. */
+   if (sctx->screen->use_aco &&
+       (flags & (PIPE_BARRIER_SHADER_BUFFER | PIPE_BARRIER_GLOBAL_BUFFER)))
+      sctx->barrier_flags |= SI_BARRIER_INV_SMEM;
 
    if (flags & (PIPE_BARRIER_INDEX_BUFFER | PIPE_BARRIER_INDIRECT_BUFFER))
       sctx->barrier_flags |= SI_BARRIER_PFP_SYNC_ME;

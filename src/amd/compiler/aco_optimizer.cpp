@@ -1149,9 +1149,13 @@ apply_extract(opt_ctx& ctx, aco_ptr<Instruction>& instr, unsigned idx, ssa_info&
       instr.reset(mad);
    } else if (can_use_SDWA(ctx.program->gfx_level, instr, true) &&
               (tmp.type() == RegType::vgpr || ctx.program->gfx_level >= GFX9)) {
-      convert_to_SDWA(ctx.program->gfx_level, instr);
-      instr->sdwa().sel[idx] = apply_extract_twice(sel, instr->operands[idx].getTemp(),
-                                                   instr->sdwa().sel[idx], Temp(0, v1));
+      if (instr->isSDWA()) {
+         instr->sdwa().sel[idx] = apply_extract_twice(sel, instr->operands[idx].getTemp(),
+                                                      instr->sdwa().sel[idx], Temp(0, v1));
+      } else {
+         convert_to_SDWA(ctx.program->gfx_level, instr);
+         instr->sdwa().sel[idx] = sel;
+      }
    } else if (instr->isVALU()) {
       if (sel.offset()) {
          instr->valu().opsel[idx] = true;
@@ -1882,6 +1886,7 @@ label_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
       /* TODO: try to move the negate/abs modifier to the consumer instead */
       bool uses_mods = instr->usesModifiers();
       bool fp16 = instr->opcode == aco_opcode::v_mul_f16;
+      unsigned denorm_mode = fp16 ? ctx.fp_mode.denorm16_64 : ctx.fp_mode.denorm32;
 
       for (unsigned i = 0; i < 2; i++) {
          if (instr->operands[!i].isConstant() && instr->operands[i].isTemp()) {
@@ -1910,8 +1915,12 @@ label_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
                   ctx.info[instr->definitions[0].tempId()].set_abs(other);
                else if (!abs && neg && other.type() == RegType::vgpr)
                   ctx.info[instr->definitions[0].tempId()].set_neg(other);
-               else if (!abs && !neg)
-                  ctx.info[instr->definitions[0].tempId()].set_fcanonicalize(other);
+               else if (!abs && !neg) {
+                  if (denorm_mode == fp_denorm_keep || ctx.info[other.id()].is_canonicalized())
+                     ctx.info[instr->definitions[0].tempId()].set_temp(other);
+                  else
+                     ctx.info[instr->definitions[0].tempId()].set_fcanonicalize(other);
+               }
             } else if (uses_mods || (instr->definitions[0].isSZPreserve() &&
                                      instr->opcode != aco_opcode::v_mul_legacy_f32)) {
                continue; /* omod uses a legacy multiplication. */
@@ -1920,7 +1929,7 @@ label_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
                          !instr->definitions[0].isInfPreserve()) ||
                         instr->opcode == aco_opcode::v_mul_legacy_f32)) { /* 0.0 */
                ctx.info[instr->definitions[0].tempId()].set_constant(ctx.program->gfx_level, 0u);
-            } else if ((fp16 ? ctx.fp_mode.denorm16_64 : ctx.fp_mode.denorm32) != fp_denorm_flush) {
+            } else if (denorm_mode != fp_denorm_flush) {
                /* omod has no effect if denormals are enabled. */
                continue;
             } else if (instr->operands[!i].constantValue() ==

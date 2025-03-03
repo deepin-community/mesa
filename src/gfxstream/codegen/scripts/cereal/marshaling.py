@@ -195,6 +195,7 @@ class VulkanMarshalingCodegen(VulkanTypeIterator):
             checkName = "check_%s" % vulkanType.paramName
             self.cgen.stmt("%s %s" % (
                 self.cgen.makeCTypeDecl(vulkanType, useParamName = False), checkName))
+            self.cgen.stmt("(void)%s" % checkName)
             checkAccess = checkName
             addrExpr = "&" + checkAccess
             sizeExpr = self.cgen.sizeofExpr(vulkanType)
@@ -763,7 +764,7 @@ class VulkanMarshaling(VulkanWrapperGenerator):
             self.module.appendHeader(
                 self.cgenHeader.makeFuncDecl(marshalPrototype))
 
-            if name in CUSTOM_MARSHAL_TYPES:
+            if name in CUSTOM_MARSHAL_TYPES and CUSTOM_MARSHAL_TYPES[name].get("marshaling"):
                 self.module.appendImpl(
                     self.cgenImpl.makeFuncImpl(
                         marshalPrototype, structMarshalingCustom))
@@ -838,7 +839,7 @@ class VulkanMarshaling(VulkanWrapperGenerator):
             self.module.appendHeader(
                 self.cgenHeader.makeFuncDecl(unmarshalPrototype))
 
-            if name in CUSTOM_MARSHAL_TYPES:
+            if name in CUSTOM_MARSHAL_TYPES and CUSTOM_MARSHAL_TYPES[name].get("unmarshaling"):
                 self.module.appendImpl(
                     self.cgenImpl.makeFuncImpl(
                         unmarshalPrototype, structUnmarshalingCustom))

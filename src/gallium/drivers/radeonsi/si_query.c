@@ -518,7 +518,8 @@ void si_query_buffer_reset(struct si_context *sctx, struct si_query_buffer *buff
 
    /* Discard even the oldest buffer if it can't be mapped without a stall. */
    if (si_cs_is_buffer_referenced(sctx, buffer->buf->buf, RADEON_USAGE_READWRITE) ||
-       !sctx->ws->buffer_wait(sctx->ws, buffer->buf->buf, 0, RADEON_USAGE_READWRITE)) {
+       !sctx->ws->buffer_wait(sctx->ws, buffer->buf->buf, 0,
+                              RADEON_USAGE_READWRITE | RADEON_USAGE_DISALLOW_SLOW_REPLY)) {
       si_resource_reference(&buffer->buf, NULL);
    }
 }
@@ -838,7 +839,7 @@ static void si_query_hw_do_emit_start(struct si_context *sctx, struct si_query_h
          struct pipe_shader_buffer sbuf;
          sbuf.buffer = &buffer->b.b;
          sbuf.buffer_offset = query->buffer.results_end;
-         sbuf.buffer_size = buffer->bo_size;
+         sbuf.buffer_size = buffer->bo_size - sbuf.buffer_offset;
          si_set_internal_shader_buffer(sctx, SI_GS_QUERY_EMULATED_COUNTERS_BUF, &sbuf);
          SET_FIELD(sctx->current_gs_state, GS_STATE_PIPELINE_STATS_EMU, 1);
 
@@ -918,7 +919,7 @@ static void si_query_hw_emit_start(struct si_context *sctx, struct si_query_hw *
    si_update_prims_generated_query_state(sctx, query->b.type, 1);
    si_update_hw_pipeline_stats(sctx, query->b.type, 1);
 
-   si_need_gfx_cs_space(sctx, 0);
+   si_need_gfx_cs_space(sctx, 0, 0);
 
    va = query->buffer.buf->gpu_address + query->buffer.results_end;
    si_query_hw_do_emit_start(sctx, query, query->buffer.buf, va);
@@ -1014,7 +1015,7 @@ static void si_query_hw_emit_stop(struct si_context *sctx, struct si_query_hw *q
 
    /* The queries which need begin already called this in begin_query. */
    if (query->flags & SI_QUERY_HW_FLAG_NO_START) {
-      si_need_gfx_cs_space(sctx, 0);
+      si_need_gfx_cs_space(sctx, 0, 0);
       if (!si_query_buffer_alloc(sctx, &query->buffer, si_query_hw_prepare_buffer,
                                  query->result_size))
          return;
@@ -1727,7 +1728,7 @@ void si_resume_queries(struct si_context *sctx)
    struct si_query *query;
 
    /* Check CS space here. Resuming must not be interrupted by flushes. */
-   si_need_gfx_cs_space(sctx, 0);
+   si_need_gfx_cs_space(sctx, 0, 0);
 
    LIST_FOR_EACH_ENTRY (query, &sctx->active_queries, active_list)
       query->ops->resume(sctx, query);

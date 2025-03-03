@@ -1781,7 +1781,8 @@ nvk_flush_ts_state(struct nvk_cmd_buffer *cmd)
 static void
 nvk_flush_vp_state(struct nvk_cmd_buffer *cmd)
 {
-   const struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
+   struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
+   struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    const struct vk_dynamic_graphics_state *dyn =
       &cmd->vk.dynamic_graphics_state;
@@ -1890,13 +1891,16 @@ nvk_flush_vp_state(struct nvk_cmd_buffer *cmd)
    }
 
    if (BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_VP_SCISSORS)) {
+      const uint32_t sr_max =
+         nvk_image_max_dimension(&pdev->info, VK_IMAGE_TYPE_2D);
+
       for (unsigned i = 0; i < dyn->vp.scissor_count; i++) {
          const VkRect2D *s = &dyn->vp.scissors[i];
 
-         const uint32_t xmin = MIN2(16384, s->offset.x);
-         const uint32_t xmax = MIN2(16384, s->offset.x + s->extent.width);
-         const uint32_t ymin = MIN2(16384, s->offset.y);
-         const uint32_t ymax = MIN2(16384, s->offset.y + s->extent.height);
+         const uint32_t xmin = MIN2(sr_max, s->offset.x);
+         const uint32_t xmax = MIN2(sr_max, s->offset.x + s->extent.width);
+         const uint32_t ymin = MIN2(sr_max, s->offset.y);
+         const uint32_t ymax = MIN2(sr_max, s->offset.y + s->extent.height);
 
          P_MTHD(p, NV9097, SET_SCISSOR_ENABLE(i));
          P_NV9097_SET_SCISSOR_ENABLE(p, i, V_TRUE);
@@ -2177,8 +2181,8 @@ nvk_flush_rs_state(struct nvk_cmd_buffer *cmd)
          unreachable("Unsupported depth bias representation");
       }
       /* TODO: The blob multiplies by 2 for some reason. We don't. */
-      P_IMMD(p, NV9097, SET_DEPTH_BIAS, fui(dyn->rs.depth_bias.constant));
-      P_IMMD(p, NV9097, SET_SLOPE_SCALE_DEPTH_BIAS, fui(dyn->rs.depth_bias.slope));
+      P_IMMD(p, NV9097, SET_DEPTH_BIAS, fui(dyn->rs.depth_bias.constant_factor));
+      P_IMMD(p, NV9097, SET_SLOPE_SCALE_DEPTH_BIAS, fui(dyn->rs.depth_bias.slope_factor));
       P_IMMD(p, NV9097, SET_DEPTH_BIAS_CLAMP, fui(dyn->rs.depth_bias.clamp));
    }
 
@@ -4578,7 +4582,7 @@ nvk_CmdBeginTransformFeedbackEXT(VkCommandBuffer commandBuffer,
    }
 
    for (uint32_t i = 0; i < counterBufferCount; ++i) {
-      if (pCounterBuffers[i] == VK_NULL_HANDLE)
+      if (pCounterBuffers == NULL || pCounterBuffers[i] == VK_NULL_HANDLE)
          continue;
 
       VK_FROM_HANDLE(nvk_buffer, buffer, pCounterBuffers[i]);
@@ -4618,7 +4622,7 @@ nvk_CmdEndTransformFeedbackEXT(VkCommandBuffer commandBuffer,
    P_IMMD(p, NV9097, SET_STREAM_OUTPUT, ENABLE_FALSE);
 
    for (uint32_t i = 0; i < counterBufferCount; ++i) {
-      if (pCounterBuffers[i] == VK_NULL_HANDLE)
+      if (pCounterBuffers == NULL || pCounterBuffers[i] == VK_NULL_HANDLE)
          continue;
 
       VK_FROM_HANDLE(nvk_buffer, buffer, pCounterBuffers[i]);

@@ -41,6 +41,7 @@
 #define AV1_PRIMARY_REF_NONE    AV1_REFS_PER_FRAME
 #define AV1_SUPERRES_DENOM_MIN  9
 #define AV1_SUPERRES_NUM        8
+#define H264_CHROMA_FORMAT_IDC_420 1
 
 /**
  * Create a VdpDecoder.
@@ -362,6 +363,7 @@ vlVdpDecoderRenderH264(struct pipe_h264_picture_desc *picture,
 
    VDPAU_MSG(VDPAU_TRACE, "[VDPAU] Decoding H264\n");
 
+   picture->pps->sps->chroma_format_idc = H264_CHROMA_FORMAT_IDC_420;
    picture->pps->sps->mb_adaptive_frame_field_flag = picture_info->mb_adaptive_frame_field_flag;
    picture->pps->sps->frame_mbs_only_flag = picture_info->frame_mbs_only_flag;
    picture->pps->sps->log2_max_frame_num_minus4 = picture_info->log2_max_frame_num_minus4;
@@ -653,6 +655,10 @@ vlVdpDecoderRenderAV1(struct pipe_av1_picture_desc *picture,
       picture_info->enable_order_hint;
    picture->picture_parameter.seq_info_fields.film_grain_params_present =
       picture_info->enable_fgs;
+   picture->picture_parameter.seq_info_fields.subsampling_x =
+      picture_info->subsampling_x;
+   picture->picture_parameter.seq_info_fields.subsampling_y =
+      picture_info->subsampling_y;
 
    picture->picture_parameter.current_frame_id = target;
    picture->picture_parameter.frame_width = picture_info->width;
