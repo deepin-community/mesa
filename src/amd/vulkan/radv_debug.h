@@ -57,9 +57,8 @@ enum {
    RADV_DEBUG_NO_RT = 1ull << 41,
    RADV_DEBUG_NO_MESH_SHADER = 1ull << 42,
    RADV_DEBUG_NO_NGG_GS = 1ull << 43,
-   RADV_DEBUG_NO_GS_FAST_LAUNCH_2 = 1ull << 44,
-   RADV_DEBUG_NO_ESO = 1ull << 45,
-   RADV_DEBUG_PSO_CACHE_STATS = 1ull << 46,
+   RADV_DEBUG_NO_ESO = 1ull << 44,
+   RADV_DEBUG_PSO_CACHE_STATS = 1ull << 45,
 };
 
 enum {
@@ -82,12 +81,17 @@ enum {
    RADV_PERFTEST_VIDEO_ENCODE = 1u << 16,
 };
 
+enum {
+   RADV_TRAP_EXCP_MEM_VIOL = 1u << 0,
+   RADV_TRAP_EXCP_FLOAT_DIV_BY_ZERO = 1u << 1,
+   RADV_TRAP_EXCP_FLOAT_OVERFLOW = 1u << 2,
+   RADV_TRAP_EXCP_FLOAT_UNDERFLOW = 1u << 3,
+};
+
 bool radv_init_trace(struct radv_device *device);
 void radv_finish_trace(struct radv_device *device);
 
-void radv_check_gpu_hangs(struct radv_queue *queue, const struct radv_winsys_submit_info *submit_info);
-
-void radv_print_spirv(const char *data, uint32_t size, FILE *fp);
+VkResult radv_check_gpu_hangs(struct radv_queue *queue, const struct radv_winsys_submit_info *submit_info);
 
 void radv_dump_enabled_options(const struct radv_device *device, FILE *f);
 
@@ -106,5 +110,16 @@ radv_device_fault_detection_enabled(const struct radv_device *device)
 
    return instance->debug_flags & RADV_DEBUG_HANG;
 }
+
+struct radv_trace_data {
+   uint32_t primary_id;
+   uint32_t secondary_id;
+   uint64_t gfx_ring_pipeline;
+   uint64_t comp_ring_pipeline;
+   uint64_t vertex_descriptors;
+   uint64_t vertex_prolog;
+   uint64_t descriptor_sets[MAX_SETS];
+   VkDispatchIndirectCommand indirect_dispatch;
+};
 
 #endif /* RADV_DEBUG_H */

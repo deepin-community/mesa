@@ -14,7 +14,6 @@
       agx_builder *A = agx_test_builder(mem_ctx);                              \
       agx_builder *B = agx_test_builder(mem_ctx);                              \
                                                                                \
-      A->shader->scratch_size = 2000;                                          \
       agx_emit_parallel_copies(A, copies, ARRAY_SIZE(copies));                 \
                                                                                \
       {                                                                        \
@@ -24,21 +23,6 @@
                                                                                \
       ASSERT_SHADER_EQUAL(A->shader, B->shader);                               \
    } while (0)
-
-static inline void
-extr_swap(agx_builder *b, agx_index x)
-{
-   x.size = AGX_SIZE_32;
-   agx_extr_to(b, x, x, x, agx_immediate(16), 0);
-}
-
-static inline void
-xor_swap(agx_builder *b, agx_index x, agx_index y)
-{
-   agx_xor_to(b, x, x, y);
-   agx_xor_to(b, y, x, y);
-   agx_xor_to(b, x, x, y);
-}
 
 class LowerParallelCopy : public testing::Test {
  protected:
@@ -163,7 +147,7 @@ TEST_F(LowerParallelCopy, Swap)
    };
 
    CASE(test_1, {
-      xor_swap(b, agx_register(0, AGX_SIZE_32), agx_register(2, AGX_SIZE_32));
+      agx_swap(b, agx_register(0, AGX_SIZE_32), agx_register(2, AGX_SIZE_32));
    });
 
    struct agx_copy test_2[] = {
@@ -171,7 +155,9 @@ TEST_F(LowerParallelCopy, Swap)
       {.dest = 1, .src = agx_register(0, AGX_SIZE_16)},
    };
 
-   CASE(test_2, { extr_swap(b, agx_register(0, AGX_SIZE_16)); });
+   CASE(test_2, {
+      agx_swap(b, agx_register(0, AGX_SIZE_16), agx_register(1, AGX_SIZE_16));
+   });
 }
 
 TEST_F(LowerParallelCopy, Cycle3)
@@ -183,8 +169,8 @@ TEST_F(LowerParallelCopy, Cycle3)
    };
 
    CASE(test, {
-      extr_swap(b, agx_register(0, AGX_SIZE_16));
-      xor_swap(b, agx_register(1, AGX_SIZE_16), agx_register(2, AGX_SIZE_16));
+      agx_swap(b, agx_register(0, AGX_SIZE_16), agx_register(1, AGX_SIZE_16));
+      agx_swap(b, agx_register(1, AGX_SIZE_16), agx_register(2, AGX_SIZE_16));
    });
 }
 
@@ -214,8 +200,8 @@ TEST_F(LowerParallelCopy, TwoSwaps)
    };
 
    CASE(test, {
-      xor_swap(b, agx_register(4, AGX_SIZE_32), agx_register(2, AGX_SIZE_32));
-      xor_swap(b, agx_register(6, AGX_SIZE_32), agx_register(2, AGX_SIZE_32));
+      agx_swap(b, agx_register(4, AGX_SIZE_32), agx_register(2, AGX_SIZE_32));
+      agx_swap(b, agx_register(6, AGX_SIZE_32), agx_register(2, AGX_SIZE_32));
    });
 }
 
@@ -270,46 +256,32 @@ TEST_F(LowerParallelCopy, StackCopies)
                  agx_register(22, AGX_SIZE_32));
 
       /* Vectorized stack->stack copy */
-      agx_mov_to(b, agx_memory_register(1000, AGX_SIZE_32),
-                 agx_register(0, AGX_SIZE_32));
-
-      agx_mov_to(b, agx_register(0, AGX_SIZE_32),
+      agx_mov_to(b, agx_register(2, AGX_SIZE_32),
                  agx_memory_register(12, AGX_SIZE_32));
 
       agx_mov_to(b, agx_memory_register(0, AGX_SIZE_32),
-                 agx_register(0, AGX_SIZE_32));
-
-      agx_mov_to(b, agx_register(0, AGX_SIZE_32),
-                 agx_memory_register(1000, AGX_SIZE_32));
+                 agx_register(2, AGX_SIZE_32));
 
       /* Stack swap: 32-bit */
-      agx_index temp1 = agx_register(0, AGX_SIZE_32);
-      agx_index temp2 = agx_register(2, AGX_SIZE_32);
+      agx_index temp1 = agx_register(4, AGX_SIZE_32);
+      agx_index temp2 = agx_register(6, AGX_SIZE_32);
       agx_index spilled_gpr_vec2 = agx_register(0, AGX_SIZE_32);
-      agx_index scratch_vec2 = agx_memory_register(1000, AGX_SIZE_32);
       spilled_gpr_vec2.channels_m1++;
-      scratch_vec2.channels_m1++;
 
-      agx_mov_to(b, scratch_vec2, spilled_gpr_vec2);
       agx_mov_to(b, temp1, agx_memory_register(2, AGX_SIZE_32));
       agx_mov_to(b, temp2, agx_memory_register(804, AGX_SIZE_32));
       agx_mov_to(b, agx_memory_register(804, AGX_SIZE_32), temp1);
       agx_mov_to(b, agx_memory_register(2, AGX_SIZE_32), temp2);
-      agx_mov_to(b, spilled_gpr_vec2, scratch_vec2);
 
       /* Stack swap: 16-bit */
       spilled_gpr_vec2.size = AGX_SIZE_16;
-      scratch_vec2.size = AGX_SIZE_16;
       temp1.size = AGX_SIZE_16;
       temp2.size = AGX_SIZE_16;
-      temp2.value = 1;
 
-      agx_mov_to(b, scratch_vec2, spilled_gpr_vec2);
       agx_mov_to(b, temp1, agx_memory_register(807, AGX_SIZE_16));
       agx_mov_to(b, temp2, agx_memory_register(808, AGX_SIZE_16));
       agx_mov_to(b, agx_memory_register(808, AGX_SIZE_16), temp1);
       agx_mov_to(b, agx_memory_register(807, AGX_SIZE_16), temp2);
-      agx_mov_to(b, spilled_gpr_vec2, scratch_vec2);
    });
 }
 

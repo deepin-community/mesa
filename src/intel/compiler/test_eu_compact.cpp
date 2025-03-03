@@ -97,8 +97,8 @@ clear_pad_bits(const struct brw_isa_info *isa, brw_inst *inst)
 
    if (brw_inst_opcode(isa, inst) != BRW_OPCODE_SEND &&
        brw_inst_opcode(isa, inst) != BRW_OPCODE_SENDC &&
-       brw_inst_src0_reg_file(devinfo, inst) != BRW_IMMEDIATE_VALUE &&
-       brw_inst_src1_reg_file(devinfo, inst) != BRW_IMMEDIATE_VALUE) {
+       brw_inst_src0_reg_file(devinfo, inst) != IMM &&
+       brw_inst_src1_reg_file(devinfo, inst) != IMM) {
       brw_inst_set_bits(inst, 127, 111, 0);
    }
 }
@@ -133,8 +133,8 @@ skip_bit(const struct brw_isa_info *isa, brw_inst *src, int bit)
    /* sometimes these are pad bits. */
    if (brw_inst_opcode(isa, src) != BRW_OPCODE_SEND &&
        brw_inst_opcode(isa, src) != BRW_OPCODE_SENDC &&
-       brw_inst_src0_reg_file(devinfo, src) != BRW_IMMEDIATE_VALUE &&
-       brw_inst_src1_reg_file(devinfo, src) != BRW_IMMEDIATE_VALUE &&
+       brw_inst_src0_reg_file(devinfo, src) != IMM &&
+       brw_inst_src1_reg_file(devinfo, src) != IMM &&
        bit >= 121) {
       return true;
    }
@@ -214,7 +214,8 @@ INSTANTIATE_TEST_SUITE_P(
       CompactParams{ 90,  BRW_ALIGN_1 }, CompactParams{ 90, BRW_ALIGN_16 },
       CompactParams{ 110, BRW_ALIGN_1 },
       CompactParams{ 120, BRW_ALIGN_1 },
-      CompactParams{ 125, BRW_ALIGN_1 }
+      CompactParams{ 125, BRW_ALIGN_1 },
+      CompactParams{ 200, BRW_ALIGN_1 }
    ),
    get_compact_params_name);
 
@@ -237,8 +238,8 @@ TEST_P(Instructions, ADD_GRF_GRF_IMM)
 
 TEST_P(Instructions, ADD_GRF_GRF_IMM_d)
 {
-   struct brw_reg g0 = retype(brw_vec8_grf(0, 0), BRW_REGISTER_TYPE_D);
-   struct brw_reg g2 = retype(brw_vec8_grf(2, 0), BRW_REGISTER_TYPE_D);
+   struct brw_reg g0 = retype(brw_vec8_grf(0, 0), BRW_TYPE_D);
+   struct brw_reg g2 = retype(brw_vec8_grf(2, 0), BRW_TYPE_D);
 
    brw_ADD(p, g0, g2, brw_imm_d(1));
 }

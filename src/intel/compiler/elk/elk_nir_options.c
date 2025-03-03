@@ -7,6 +7,7 @@
 
 #define COMMON_OPTIONS                                                        \
    .compact_arrays = true,                                                    \
+   .discard_is_demote = true,                                                 \
    .has_uclz = true,                                                          \
    .lower_fdiv = true,                                                        \
    .lower_scmp = true,                                                        \
@@ -25,6 +26,7 @@
    .vectorize_io = true,                                                      \
    .vectorize_tess_levels = true,                                             \
    .use_interpolated_input_intrinsics = true,                                 \
+   .scalarize_ddx = true,                                                     \
    .lower_insert_byte = true,                                                 \
    .lower_insert_word = true,                                                 \
    .vertex_id_zero_based = true,                                              \

@@ -68,8 +68,6 @@ struct radv_sqtt_shaders_reloc {
 struct radv_graphics_pipeline {
    struct radv_pipeline base;
 
-   struct radv_pipeline_layout layout;
-
    bool uses_drawid;
    bool uses_baseinstance;
 
@@ -88,19 +86,13 @@ struct radv_graphics_pipeline {
 
    VkShaderStageFlags active_stages;
 
-   /* Used for rbplus */
-   uint32_t col_format_non_compacted;
-
    struct radv_dynamic_state dynamic_state;
 
-   struct radv_vs_input_state vs_input_state;
+   struct radv_vertex_input_state vertex_input;
 
    struct radv_multisample_state ms;
    struct radv_ia_multi_vgt_param_helpers ia_multi_vgt_param;
    uint32_t binding_stride[MAX_VBS];
-   uint8_t attrib_bindings[MAX_VERTEX_ATTRIBS];
-   uint32_t attrib_ends[MAX_VERTEX_ATTRIBS];
-   uint32_t attrib_index_offset[MAX_VERTEX_ATTRIBS];
    uint32_t db_render_control;
 
    /* Last pre-PS API stage */
@@ -108,8 +100,6 @@ struct radv_graphics_pipeline {
 
    unsigned rast_prim;
 
-   /* For vk_graphics_pipeline_state */
-   void *state_data;
 
    /* Custom blend mode for internal operations. */
    unsigned custom_blend_mode;
@@ -117,14 +107,20 @@ struct radv_graphics_pipeline {
    /* Whether the pipeline uses out-of-order rasterization. */
    bool uses_out_of_order_rast;
 
+   /* Whether the pipeline uses VRS. */
+   bool uses_vrs;
+
    /* Whether the pipeline uses a VRS attachment. */
    bool uses_vrs_attachment;
 
-   /* For graphics pipeline library */
-   bool retain_shaders;
+   /* Whether the pipeline uses VRS coarse shading internally. */
+   bool uses_vrs_coarse_shading;
 
    /* For relocation of shaders with RGP. */
    struct radv_sqtt_shaders_reloc *sqtt_shaders_reloc;
+
+   /* Whether the pipeline imported binaries. */
+   bool has_pipeline_binaries;
 };
 
 RADV_DECL_PIPELINE_DOWNCAST(graphics, RADV_PIPELINE_GRAPHICS)
@@ -142,6 +138,11 @@ struct radv_graphics_lib_pipeline {
    struct radv_graphics_pipeline base;
 
    struct vk_graphics_pipeline_state graphics_state;
+
+   /* For vk_graphics_pipeline_state */
+   void *state_data;
+
+   struct radv_pipeline_layout layout;
 
    VkGraphicsPipelineLibraryFlagsEXT lib_flags;
 
@@ -182,6 +183,28 @@ radv_conv_prim_to_gs_out(uint32_t topology, bool is_ngg)
       return V_028A6C_TRISTRIP;
    case V_008958_DI_PT_RECTLIST:
       return is_ngg ? V_028A6C_RECTLIST : V_028A6C_TRISTRIP;
+   default:
+      assert(0);
+      return 0;
+   }
+}
+
+static inline uint32_t
+radv_conv_gl_prim_to_gs_out(unsigned gl_prim)
+{
+   switch (gl_prim) {
+   case MESA_PRIM_POINTS:
+      return V_028A6C_POINTLIST;
+   case MESA_PRIM_LINES:
+   case MESA_PRIM_LINE_STRIP:
+   case MESA_PRIM_LINES_ADJACENCY:
+      return V_028A6C_LINESTRIP;
+
+   case MESA_PRIM_TRIANGLES:
+   case MESA_PRIM_TRIANGLE_STRIP_ADJACENCY:
+   case MESA_PRIM_TRIANGLE_STRIP:
+   case MESA_PRIM_QUADS:
+      return V_028A6C_TRISTRIP;
    default:
       assert(0);
       return 0;
@@ -534,14 +557,8 @@ radv_normalize_blend_factor(VkBlendOp op, VkBlendFactor *src_factor, VkBlendFact
    }
 }
 
-bool radv_pipeline_has_ngg(const struct radv_graphics_pipeline *pipeline);
-
-bool radv_pipeline_has_gs_copy_shader(const struct radv_pipeline *pipeline);
-
 void radv_blend_remove_dst(VkBlendOp *func, VkBlendFactor *src_factor, VkBlendFactor *dst_factor,
                            VkBlendFactor expected_dst, VkBlendFactor replacement_src);
-
-unsigned radv_compact_spi_shader_col_format(uint32_t spi_shader_col_format);
 
 unsigned radv_format_meta_fs_key(struct radv_device *device, VkFormat format);
 
@@ -555,6 +572,7 @@ struct radv_shader *radv_get_shader(struct radv_shader *const *shaders, gl_shade
 struct radv_ps_epilog_state {
    uint8_t color_attachment_count;
    VkFormat color_attachment_formats[MAX_RTS];
+   uint8_t color_attachment_mappings[MAX_RTS];
 
    uint32_t color_write_mask;
    uint32_t color_blend_enable;
@@ -579,34 +597,6 @@ void radv_graphics_shaders_compile(struct radv_device *device, struct vk_pipelin
                                    struct radv_shader **shaders, struct radv_shader_binary **binaries,
                                    struct radv_shader **gs_copy_shader, struct radv_shader_binary **gs_copy_binary);
 
-void radv_emit_blend_state(struct radeon_cmdbuf *ctx_cs, const struct radv_shader *ps, uint32_t spi_shader_col_format,
-                           uint32_t cb_shader_mask);
-
-void radv_emit_vgt_gs_mode(const struct radv_device *device, struct radeon_cmdbuf *ctx_cs,
-                           const struct radv_shader *last_vgt_api_shader);
-
-void radv_emit_vertex_shader(const struct radv_device *device, struct radeon_cmdbuf *ctx_cs, struct radeon_cmdbuf *cs,
-                             const struct radv_shader *vs, const struct radv_shader *next_stage);
-
-void radv_emit_tess_ctrl_shader(const struct radv_device *device, struct radeon_cmdbuf *cs,
-                                const struct radv_shader *tcs);
-
-void radv_emit_tess_eval_shader(const struct radv_device *device, struct radeon_cmdbuf *ctx_cs,
-                                struct radeon_cmdbuf *cs, const struct radv_shader *tes, const struct radv_shader *gs);
-
-void radv_emit_geometry_shader(const struct radv_device *device, struct radeon_cmdbuf *ctx_cs, struct radeon_cmdbuf *cs,
-                               const struct radv_shader *gs, const struct radv_shader *es,
-                               const struct radv_shader *gs_copy_shader);
-
-void radv_emit_mesh_shader(const struct radv_device *device, struct radeon_cmdbuf *ctx_cs, struct radeon_cmdbuf *cs,
-                           const struct radv_shader *ms);
-
-void radv_emit_ps_inputs(const struct radv_device *device, struct radeon_cmdbuf *cs,
-                         const struct radv_shader *last_vgt_shader, const struct radv_shader *ps);
-
-void radv_emit_fragment_shader(const struct radv_device *device, struct radeon_cmdbuf *ctx_cs, struct radeon_cmdbuf *cs,
-                               const struct radv_shader *ps);
-
 struct radv_vgt_shader_key {
    uint8_t tess : 1;
    uint8_t gs : 1;
@@ -620,23 +610,8 @@ struct radv_vgt_shader_key {
    uint8_t vs_wave32 : 1;
 };
 
-void radv_emit_vgt_reuse(const struct radv_device *device, struct radeon_cmdbuf *ctx_cs, const struct radv_shader *tes,
-                         const struct radv_vgt_shader_key *key);
-
 struct radv_vgt_shader_key radv_get_vgt_shader_key(const struct radv_device *device, struct radv_shader **shaders,
                                                    const struct radv_shader *gs_copy_shader);
-
-void radv_emit_vgt_shader_config(const struct radv_device *device, struct radeon_cmdbuf *ctx_cs,
-                                 const struct radv_vgt_shader_key *key);
-
-void radv_emit_vgt_gs_out(const struct radv_device *device, struct radeon_cmdbuf *ctx_cs,
-                          uint32_t vgt_gs_out_prim_type);
-
-void gfx103_emit_vgt_draw_payload_cntl(struct radeon_cmdbuf *ctx_cs, const struct radv_shader *mesh_shader,
-                                       bool enable_vrs);
-
-void gfx103_emit_vrs_state(const struct radv_device *device, struct radeon_cmdbuf *ctx_cs, const struct radv_shader *ps,
-                           bool enable_vrs, bool enable_vrs_coarse_shading, bool force_vrs_per_vertex);
 
 uint32_t radv_get_vgt_gs_out(struct radv_shader **shaders, uint32_t primitive_topology);
 
@@ -649,7 +624,6 @@ struct radv_graphics_pipeline_create_info {
    bool db_stencil_clear;
    bool depth_compress_disable;
    bool stencil_compress_disable;
-   bool resummarize_enable;
    uint32_t custom_blend_mode;
 };
 
@@ -661,5 +635,27 @@ VkResult radv_graphics_pipeline_create(VkDevice device, VkPipelineCache cache,
 void radv_destroy_graphics_pipeline(struct radv_device *device, struct radv_graphics_pipeline *pipeline);
 
 void radv_destroy_graphics_lib_pipeline(struct radv_device *device, struct radv_graphics_lib_pipeline *pipeline);
+
+struct radv_graphics_pipeline_state {
+   struct vk_graphics_pipeline_state vk;
+   void *vk_data;
+
+   bool compilation_required;
+
+   struct radv_shader_stage *stages;
+
+   struct radv_graphics_pipeline_key key;
+
+   struct radv_pipeline_layout layout;
+};
+
+void radv_graphics_pipeline_hash(const struct radv_device *device, const struct radv_graphics_pipeline_state *gfx_state,
+                                 unsigned char *hash);
+
+VkResult radv_generate_graphics_pipeline_state(struct radv_device *device,
+                                               const VkGraphicsPipelineCreateInfo *pCreateInfo,
+                                               struct radv_graphics_pipeline_state *gfx_state);
+
+void radv_graphics_pipeline_state_finish(struct radv_device *device, struct radv_graphics_pipeline_state *gfx_state);
 
 #endif /* RADV_PIPELINE_GRAPHICS_H */

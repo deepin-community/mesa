@@ -61,6 +61,7 @@ enum etna_feature {
    ETNA_FEATURE_RS_NEW_BASEADDR,
    ETNA_FEATURE_PE_NO_ALPHA_TEST,
    ETNA_FEATURE_SH_NO_ONECONST_LIMIT,
+   ETNA_FEATURE_COMPUTE_ONLY,
    ETNA_FEATURE_DEC400,
    ETNA_FEATURE_VIP_V7,
    ETNA_FEATURE_NN_XYDP0,
@@ -92,6 +93,8 @@ struct etna_core_npu_info {
    unsigned on_chip_sram_size;         /* Size of on-chip SRAM */
    unsigned axi_sram_size;             /* Size of SRAM behind AXI */
    unsigned nn_zrl_bits;               /* Number of bits for zero run-length compression */
+   unsigned nn_input_buffer_depth;     /* Input buffer size, determines tile size */
+   unsigned nn_accum_buffer_depth;     /* Accumulation buffer size, determines tile size */
 };
 
 struct etna_core_info {
@@ -100,6 +103,8 @@ struct etna_core_info {
    uint32_t product_id;
    uint32_t eco_id;
    uint32_t customer_id;
+
+   int8_t halti; /* HALTI (gross architecture) level. -1 for pre-HALTI. */
 
    enum etna_core_type type;
 

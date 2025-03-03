@@ -403,7 +403,7 @@ isolate_phi_nodes_block(nir_shader *shader, nir_block *block, void *dead_ctx)
          entry->dest_is_reg = false;
          nir_def_init(&pcopy->instr, &entry->dest.def,
                       phi->def.num_components, phi->def.bit_size);
-         entry->dest.def.divergent = nir_src_is_divergent(src->src);
+         entry->dest.def.divergent = nir_src_is_divergent(&src->src);
 
          /* We're adding a source to a live instruction so we need to use
           * nir_instr_init_src()
@@ -1051,8 +1051,7 @@ nir_convert_from_ssa_impl(nir_function_impl *impl,
    }
 
    /* Mark metadata as dirty before we ask for liveness analysis */
-   nir_metadata_preserve(impl, nir_metadata_block_index |
-                                  nir_metadata_dominance);
+   nir_metadata_preserve(impl, nir_metadata_control_flow);
 
    nir_metadata_require(impl, nir_metadata_instr_index |
                                  nir_metadata_live_defs |
@@ -1072,8 +1071,7 @@ nir_convert_from_ssa_impl(nir_function_impl *impl,
       resolve_parallel_copies_block(block, &state);
    }
 
-   nir_metadata_preserve(impl, nir_metadata_block_index |
-                                  nir_metadata_dominance);
+   nir_metadata_preserve(impl, nir_metadata_control_flow);
 
    /* Clean up dead instructions and the hash tables */
    nir_instr_free_list(&state.dead_instrs);

@@ -445,7 +445,7 @@ VkResult pvr_CreateDescriptorSetLayout(
           VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO);
 
    vk_foreach_struct_const (ext, pCreateInfo->pNext) {
-      pvr_debug_ignored_stype(ext->sType);
+      vk_debug_ignored_stype(ext->sType);
    }
 
    if (pCreateInfo->bindingCount == 0) {
@@ -1281,7 +1281,7 @@ pvr_AllocateDescriptorSets(VkDevice _device,
    uint32_t i;
 
    vk_foreach_struct_const (ext, pAllocateInfo->pNext) {
-      pvr_debug_ignored_stype(ext->sType);
+      vk_debug_ignored_stype(ext->sType);
    }
 
    for (i = 0; i < pAllocateInfo->descriptorSetCount; i++) {
@@ -1683,7 +1683,7 @@ static void pvr_write_buffer_descriptor(const struct pvr_device_info *dev_info,
        * compiler change to allow us to skip the range check.
        */
       secondary[PVR_DESC_IMAGE_SECONDARY_OFFSET_WIDTH(dev_info)] =
-         (uint32_t)(bview->range / vk_format_get_blocksize(bview->format));
+         (uint32_t)(bview->vk.elements);
       secondary[PVR_DESC_IMAGE_SECONDARY_OFFSET_HEIGHT(dev_info)] = 1;
    }
 }
@@ -1831,7 +1831,7 @@ static void pvr_write_descriptor_set(struct pvr_device *device,
       return;
 
    vk_foreach_struct_const (ext, write_set->pNext) {
-      pvr_debug_ignored_stype(ext->sType);
+      vk_debug_ignored_stype(ext->sType);
    }
 
    switch (write_set->descriptorType) {

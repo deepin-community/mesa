@@ -1,24 +1,6 @@
 /*
- * Copyright (C) 2012 Rob Clark <robclark@freedesktop.org>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Copyright © 2012 Rob Clark <robclark@freedesktop.org>
+ * SPDX-License-Identifier: MIT
  *
  * Authors:
  *    Rob Clark <robclark@freedesktop.org>
@@ -435,7 +417,6 @@ fd_try_shadow_resource(struct fd_context *ctx, struct fd_resource *rsc,
     * should empty/destroy rsc->batches hashset)
     */
    fd_bc_invalidate_resource(rsc, false);
-   rebind_resource(rsc);
 
    fd_screen_lock(ctx->screen);
 
@@ -476,6 +457,8 @@ fd_try_shadow_resource(struct fd_context *ctx, struct fd_resource *rsc,
    SWAP(rsc->track, shadow->track);
 
    fd_screen_unlock(ctx->screen);
+
+   rebind_resource(rsc);
 
    struct pipe_blit_info blit = {};
    blit.dst.resource = prsc;
@@ -758,8 +741,8 @@ invalidate_resource(struct fd_resource *rsc, unsigned usage) assert_dt
    unsigned op = translate_usage(usage);
 
    if (needs_flush || resource_busy(rsc, op)) {
-      rebind_resource(rsc);
       realloc_bo(rsc, fd_bo_size(rsc->bo));
+      rebind_resource(rsc);
    } else {
       util_range_set_empty(&rsc->valid_buffer_range);
    }
@@ -1261,6 +1244,10 @@ get_best_layout(struct fd_screen *screen,
       return LINEAR;
 
    if (tmpl->target == PIPE_BUFFER)
+      return LINEAR;
+
+   if ((tmpl->usage == PIPE_USAGE_STAGING) &&
+       !util_format_is_depth_or_stencil(tmpl->format))
       return LINEAR;
 
    if (tmpl->bind & PIPE_BIND_LINEAR) {
