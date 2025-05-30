@@ -1,3 +1,9 @@
+mesa (24.3.0-1deepin2) unstable; urgency=medium
+
+  * feat: add sw64 support.
+
+ -- hudeng <hudeng@deepin.org>  Fri, 30 May 2025 11:02:17 +0800
+
 mesa (24.3.0-1deepin1) unstable; urgency=medium
 
   * Add deepin patches
