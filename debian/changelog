@@ -1,3 +1,9 @@
+mesa (24.3.0-1deepin4) unstable; urgency=medium
+
+  * fix: add more patches to fix zink on img gpu
+
+ -- Chang Yang <yangchang@deepin.org>  Thu, 19 Jun 2025 16:03:36 +0800
+
 mesa (24.3.0-1deepin3) unstable; urgency=medium
 
   * feat: add sw64 support.

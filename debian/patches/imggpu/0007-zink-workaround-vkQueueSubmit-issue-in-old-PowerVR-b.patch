@@ -1,0 +1,126 @@
+From d57b862e9e183384ef5d2066d7473bc040c0e22d Mon Sep 17 00:00:00 2001
+From: Icenowy Zheng <uwu@icenowy.me>
+Date: Mon, 26 May 2025 15:37:53 +0800
+Subject: [PATCH 7/8] zink: workaround vkQueueSubmit issue in old PowerVR blobs
+
+PowerVR Vulkan closed drivers built from DDK earlier than 24.1 is known
+to crash when any VkSubmitInfo passed to vkQueueSubmit contains no
+command buffers.
+
+Workaround this issue by creating a reusable dummy command buffer (which
+contains no real commands) and assign it to VkSubmitInfo's not intended
+to have commands.
+
+Signed-off-by: Icenowy Zheng <uwu@icenowy.me>
+---
+ src/gallium/drivers/zink/zink_batch.c  | 31 +++++++++++++++++++++++++-
+ src/gallium/drivers/zink/zink_screen.c |  9 ++++++++
+ src/gallium/drivers/zink/zink_types.h  |  2 ++
+ 3 files changed, 41 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/zink/zink_batch.c b/src/gallium/drivers/zink/zink_batch.c
+index 851270a08a9..bc01abb5db1 100644
+--- a/src/gallium/drivers/zink/zink_batch.c
++++ b/src/gallium/drivers/zink/zink_batch.c
+@@ -93,6 +93,16 @@ zink_reset_batch_state(struct zink_context *ctx, struct zink_batch_state *bs)
+    if (result != VK_SUCCESS)
+       mesa_loge("ZINK: vkResetCommandPool failed (%s)", vk_Result_to_str(result));
+ 
++   if (screen->driver_workarounds.broken_submit) {
++      /* Refill the dummy command buffer used for workarounds */
++      VkCommandBufferBeginInfo cbbi_dummy = {0};
++      cbbi_dummy.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
++      cbbi_dummy.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
++
++      VKSCR(BeginCommandBuffer)(bs->dummy_cmdbuf, &cbbi_dummy);
++      VKSCR(EndCommandBuffer)(bs->dummy_cmdbuf);
++   }
++
+    /* unref/reset all used resources */
+    reset_obj_list(screen, bs, &bs->real_objs);
+    reset_obj_list(screen, bs, &bs->slab_objs);
+@@ -356,7 +366,7 @@ create_batch_state(struct zink_context *ctx)
+    cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandPool = bs->cmdpool;
+-   cbai.commandBufferCount = 2;
++   cbai.commandBufferCount = screen->driver_workarounds.broken_submit ? 3 : 2;
+ 
+    VRAM_ALLOC_LOOP(result,
+       VKSCR(AllocateCommandBuffers)(screen->dev, &cbai, cmdbufs),
+@@ -368,6 +378,16 @@ create_batch_state(struct zink_context *ctx)
+ 
+    bs->cmdbuf = cmdbufs[0];
+    bs->reordered_cmdbuf = cmdbufs[1];
++   if (screen->driver_workarounds.broken_submit) {
++      bs->dummy_cmdbuf = cmdbufs[2];
++
++      VkCommandBufferBeginInfo cbbi_dummy = {0};
++      cbbi_dummy.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
++      cbbi_dummy.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
++
++      VKSCR(BeginCommandBuffer)(cmdbufs[2], &cbbi_dummy);
++      VKSCR(EndCommandBuffer)(cmdbufs[2]);
++   }
+ 
+    cbai.commandPool = bs->unsynchronized_cmdpool;
+    cbai.commandBufferCount = 1;
+@@ -749,6 +769,15 @@ submit_queue(void *data, void *gdata, int thread_index)
+    if (!si[ZINK_SUBMIT_SIGNAL].signalSemaphoreCount)
+       num_si--;
+ 
++   if (screen->driver_workarounds.broken_submit) {
++      for(unsigned i = 0; i < num_si; i++) {
++         if(!submit[i].commandBufferCount) {
++            submit[i].commandBufferCount = 1;
++            submit[i].pCommandBuffers = &bs->dummy_cmdbuf;
++	 }
++      }
++   }
++
+    simple_mtx_lock(&screen->queue_lock);
+    VRAM_ALLOC_LOOP(result,
+       VKSCR(QueueSubmit)(screen->queue, num_si, submit, VK_NULL_HANDLE),
+diff --git a/src/gallium/drivers/zink/zink_screen.c b/src/gallium/drivers/zink/zink_screen.c
+index 683ca416258..df5a0c82c0f 100644
+--- a/src/gallium/drivers/zink/zink_screen.c
++++ b/src/gallium/drivers/zink/zink_screen.c
+@@ -2928,6 +2928,15 @@ init_driver_workarounds(struct zink_screen *screen)
+        screen->info.feats.features.geometryShader)
+       screen->driver_workarounds.no_linesmooth = true;
+ 
++   /*
++    * VkSubmitInfo pCommandBuffers couldn't be NULL on Imagination
++    * proprietary drivers prior to 24.1@6554834.
++    */
++   if (zink_driverid(screen) ==
++       VK_DRIVER_ID_IMAGINATION_PROPRIETARY &&
++       screen->info.props.driverVersion < 6554834)
++      screen->driver_workarounds.broken_submit = true;
++
+    /* This is a workarround for the lack of
+     * gl_PointSize + glPolygonMode(..., GL_LINE), in the imagination
+     * proprietary driver.
+diff --git a/src/gallium/drivers/zink/zink_types.h b/src/gallium/drivers/zink/zink_types.h
+index 00fcab41188..724e3e4f04f 100644
+--- a/src/gallium/drivers/zink/zink_types.h
++++ b/src/gallium/drivers/zink/zink_types.h
+@@ -591,6 +591,7 @@ struct zink_batch_state {
+    VkCommandPool cmdpool;
+    VkCommandBuffer cmdbuf;
+    VkCommandBuffer reordered_cmdbuf;
++   VkCommandBuffer dummy_cmdbuf;
+    VkCommandPool unsynchronized_cmdpool;
+    VkCommandBuffer unsynchronized_cmdbuf;
+    VkSemaphore signal_semaphore; //external signal semaphore
+@@ -1557,6 +1558,7 @@ struct zink_screen {
+       bool inconsistent_interpolation;
+       bool can_2d_view_sparse;
+       bool general_depth_layout;
++      bool broken_submit;
+       unsigned z16_unscaled_bias;
+       unsigned z24_unscaled_bias;
+    } driver_workarounds;
+-- 
+2.49.0
+
