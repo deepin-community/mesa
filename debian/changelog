@@ -1,3 +1,10 @@
+mesa (24.3.0-1deepin2) unstable; urgency=medium
+
+  * fix: backport patch to fix zink on img gpu based on
+    commit: 82dda2180624dea25887af405840297b593af71f
+
+ -- Chang Yang <yangchang@deepin.org>  Thu, 19 Jun 2025 11:35:54 +0800
+
 mesa (24.3.0-1deepin1) unstable; urgency=medium
 
   * Add deepin patches
