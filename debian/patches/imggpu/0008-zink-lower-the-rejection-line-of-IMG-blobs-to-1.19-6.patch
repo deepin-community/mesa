@@ -1,0 +1,29 @@
+From 9df886398b095fb22158c13f02397f3b3306bc31 Mon Sep 17 00:00:00 2001
+From: Icenowy Zheng <uwu@icenowy.me>
+Date: Mon, 26 May 2025 15:41:46 +0800
+Subject: [PATCH 8/8] zink: lower the rejection line of IMG blobs to
+ 1.19@6345021
+
+As the vkQueueSubmit issue is worked around, Zink could work now down to
+IMG DDK 1.19@6345021 (as tested on StarFive JH7110).
+
+Lower the rejection line to this version now.
+
+Signed-off-by: Icenowy Zheng <uwu@icenowy.me>
+---
+ src/gallium/drivers/zink/zink_screen.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+--- a/src/gallium/drivers/zink/zink_screen.c
++++ b/src/gallium/drivers/zink/zink_screen.c
+@@ -3481,8 +3481,8 @@
+       goto fail;
+    }
+ 
+-   /* Reject IMG blobs with DDK below 24.1@6554834 if not forced */
+-   if (zink_driverid(screen) == VK_DRIVER_ID_IMAGINATION_PROPRIETARY && screen->info.props.driverVersion < 6554834) {
++   /* Reject IMG blobs with DDK below 1.19@6345021 if not forced */
++   if (zink_driverid(screen) == VK_DRIVER_ID_IMAGINATION_PROPRIETARY && screen->info.props.driverVersion < 6345021) {
+       debug_printf("zink: Imagination proprietary driver is too old to be supported, expect failure\n");
+       if (screen->driver_name_is_inferred)
+          goto fail;

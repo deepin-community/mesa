@@ -2,4 +2,11 @@ path_max.diff
 src_glx_dri_common.h.diff
 0001-fix-meson.build-more-Gallium-Vulkan-drivers-for-on-a.patch
 0002-add-zx-s-driver-to-mesa-s-driver-map-list-and-export.patch
-1001-zink-do-not-use-demote-on-IMG-blobs.patch
+imggpu/0001-zink-emit-consts-as-uint-only-on-IMG-proprietary-dri.patch
+imggpu/0002-zink-use-lazy-descriptors-for-IMG-proprietary-driver.patch
+imggpu/0003-zink-Do-not-use-demote-on-IMG-blobs.patch
+imggpu/0004-zink-don-t-assert-geometryShader-for-IMG-proprietary.patch
+imggpu/0005-zink-reject-IMG-blob-24.1-6554834-unless-enforced.patch
+imggpu/0006-Revert-zink-reject-Imagination-proprietary-driver-w-.patch
+imggpu/0007-zink-workaround-vkQueueSubmit-issue-in-old-PowerVR-b.patch
+imggpu/0008-zink-lower-the-rejection-line-of-IMG-blobs-to-1.19-6.patch

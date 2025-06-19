@@ -1,0 +1,41 @@
+From 356cf5d7645a2021c8ee8b2f8c3e6bb859de0737 Mon Sep 17 00:00:00 2001
+From: Icenowy Zheng <uwu@icenowy.me>
+Date: Fri, 29 Nov 2024 16:10:29 +0800
+Subject: [PATCH 6/8] Revert "zink: reject Imagination proprietary driver w/o
+ geometryShader"
+
+This reverts commit ca087e202766872085d6d02363fd7f4961feba48.
+
+It's discovered that the newest Rogue proprietary Vulkan driver does not
+prevent us from running Zink (aside from an assert of geometryShader,
+which is already changed to an if clause), and which fails previously is
+because of some bugs in old driver blobs.
+
+As the faulty blob versions are rejected now, revert this commit to
+accept Rogue drivers.
+
+Signed-off-by: Icenowy Zheng <uwu@icenowy.me>
+---
+ src/gallium/drivers/zink/zink_screen.c | 6 ------
+ 1 file changed, 6 deletions(-)
+
+diff --git a/src/gallium/drivers/zink/zink_screen.c b/src/gallium/drivers/zink/zink_screen.c
+index ec21ef12346..683ca416258 100644
+--- a/src/gallium/drivers/zink/zink_screen.c
++++ b/src/gallium/drivers/zink/zink_screen.c
+@@ -3472,12 +3472,6 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
+       goto fail;
+    }
+ 
+-   if (zink_driverid(screen) == VK_DRIVER_ID_IMAGINATION_PROPRIETARY && !screen->info.feats.features.geometryShader) {
+-      if (!screen->driver_name_is_inferred)
+-         mesa_loge("zink: Imagination proprietary driver w/o geometryShader is unsupported");
+-      goto fail;
+-   }
+-
+    /* Reject IMG blobs with DDK below 24.1@6554834 if not forced */
+    if (zink_driverid(screen) == VK_DRIVER_ID_IMAGINATION_PROPRIETARY && screen->info.props.driverVersion < 6554834) {
+       debug_printf("zink: Imagination proprietary driver is too old to be supported, expect failure\n");
+-- 
+2.49.0
+
