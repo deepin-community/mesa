@@ -1,3 +1,9 @@
+mesa (24.3.0-1deepin4) unstable; urgency=medium
+
+  * Fallback llvm-17.
+
+ -- lichenggang <lichenggang@deepin.org>  Wed, 23 Jul 2025 16:21:01 +0800
+
 mesa (24.3.0-1deepin3) unstable; urgency=medium
 
   * feat: add sw64 support.
