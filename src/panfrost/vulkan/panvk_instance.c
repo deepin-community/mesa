@@ -39,12 +39,17 @@ static const struct debug_control panvk_debug_options[] = {
    {"no_known_warn", PANVK_DEBUG_NO_KNOWN_WARN},
    {"cs", PANVK_DEBUG_CS},
    {"copy_gfx", PANVK_DEBUG_COPY_GFX},
+   {"force_simultaneous", PANVK_DEBUG_FORCE_SIMULTANEOUS},
+   {"implicit_others_inv", PANVK_DEBUG_IMPLICIT_OTHERS_INV},
    {NULL, 0}};
 
 VKAPI_ATTR VkResult VKAPI_CALL
 panvk_EnumerateInstanceVersion(uint32_t *pApiVersion)
 {
-   *pApiVersion = panvk_get_vk_version();
+   uint32_t version_override = vk_get_version_override();
+   *pApiVersion = version_override ? version_override :
+      VK_MAKE_API_VERSION(0, 1, 4, VK_HEADER_VERSION);
+
    return VK_SUCCESS;
 }
 
@@ -56,6 +61,9 @@ static const struct vk_instance_extension_table panvk_instance_extensions = {
    .KHR_get_physical_device_properties2 = true,
 #ifdef PANVK_USE_WSI_PLATFORM
    .KHR_surface = true,
+#endif
+#ifdef VK_USE_PLATFORM_DISPLAY_KHR
+   .EXT_direct_mode_display = true,
 #endif
 #ifdef VK_USE_PLATFORM_WAYLAND_KHR
    .KHR_wayland_surface = true,

@@ -685,7 +685,8 @@ create_shared_block(struct ntv_context *ctx, unsigned bit_size)
    }
 
    ctx->shared_block_arr_type[idx] = array;
-   spirv_builder_emit_array_stride(&ctx->builder, array, bit_size / 8);
+   if (ctx->sinfo->have_workgroup_memory_explicit_layout)
+      spirv_builder_emit_array_stride(&ctx->builder, array, bit_size / 8);
 
    /* Create wrapper struct for Block, Offset and Aliased decorations. */
    SpvId block = spirv_builder_type_struct(&ctx->builder, &array, 1);
@@ -1201,7 +1202,6 @@ emit_image(struct ntv_context *ctx, struct nir_variable *var, SpvId image_type)
    if (glsl_type_is_array(var->type)) {
       var_type = spirv_builder_type_array(&ctx->builder, var_type,
                                               emit_uint_const(ctx, 32, glsl_get_aoa_size(var->type)));
-      spirv_builder_emit_array_stride(&ctx->builder, var_type, sizeof(void*));
    }
    SpvId pointer_type = spirv_builder_type_pointer(&ctx->builder,
                                                    SpvStorageClassUniformConstant,
@@ -2180,7 +2180,10 @@ emit_load_const(struct ntv_context *ctx, nir_load_const_instr *load_const)
          components[i] = spirv_builder_const_bool(&ctx->builder,
                                                   load_const->value[i].b);
    } else {
-      atype = infer_nir_alu_type_from_uses_ssa(&load_const->def);
+      if (ctx->sinfo->broken_arbitary_type_const)
+         atype = nir_type_uint;
+      else
+         atype = infer_nir_alu_type_from_uses_ssa(&load_const->def);
       for (int i = 0; i < num_components; i++) {
          switch (atype) {
          case nir_type_uint: {
@@ -3162,6 +3165,7 @@ emit_is_helper_invocation(struct ntv_context *ctx, nir_intrinsic_instr *intr)
 {
    spirv_builder_emit_extension(&ctx->builder,
                                 "SPV_EXT_demote_to_helper_invocation");
+   spirv_builder_emit_cap(&ctx->builder, SpvCapabilityDemoteToHelperInvocation);
    SpvId result = spirv_is_helper_invocation(&ctx->builder);
    store_def(ctx, intr->def.index, result, nir_type_bool);
 }

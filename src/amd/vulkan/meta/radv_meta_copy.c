@@ -55,18 +55,18 @@ blit_surf_for_image_level_layer(struct radv_image *image, VkImageLayout layout, 
 static bool
 alloc_transfer_temp_bo(struct radv_cmd_buffer *cmd_buffer)
 {
-   if (cmd_buffer->transfer.copy_temp)
-      return true;
-
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   const VkResult r =
-      radv_bo_create(device, &cmd_buffer->vk.base, RADV_SDMA_TRANSFER_TEMP_BYTES, 4096, RADEON_DOMAIN_VRAM,
-                     RADEON_FLAG_NO_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING, RADV_BO_PRIORITY_SCRATCH, 0, true,
-                     &cmd_buffer->transfer.copy_temp);
 
-   if (r != VK_SUCCESS) {
-      vk_command_buffer_set_error(&cmd_buffer->vk, r);
-      return false;
+   if (!cmd_buffer->transfer.copy_temp) {
+      const VkResult r =
+         radv_bo_create(device, &cmd_buffer->vk.base, RADV_SDMA_TRANSFER_TEMP_BYTES, 4096, RADEON_DOMAIN_VRAM,
+                        RADEON_FLAG_NO_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING, RADV_BO_PRIORITY_SCRATCH, 0,
+                        true, &cmd_buffer->transfer.copy_temp);
+
+      if (r != VK_SUCCESS) {
+         vk_command_buffer_set_error(&cmd_buffer->vk, r);
+         return false;
+      }
    }
 
    radv_cs_add_buffer(device->ws, cmd_buffer->cs, cmd_buffer->transfer.copy_temp);
@@ -231,14 +231,14 @@ radv_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer, const VkCopyBufferToIm
                            &pCopyBufferToImageInfo->pRegions[r]);
    }
 
-   if (radv_is_format_emulated(pdev, dst_image->vk.format)) {
+   if (radv_is_format_emulated(pdev, dst_image->vk.format) && cmd_buffer->qf != RADV_QUEUE_TRANSFER) {
       cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_PS_PARTIAL_FLUSH |
                                       radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                                                            VK_ACCESS_TRANSFER_WRITE_BIT, dst_image) |
+                                                            VK_ACCESS_TRANSFER_WRITE_BIT, 0, dst_image, NULL) |
                                       radv_dst_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                                                            VK_ACCESS_TRANSFER_READ_BIT, dst_image);
+                                                            VK_ACCESS_TRANSFER_READ_BIT, 0, dst_image, NULL);
 
-      const enum util_format_layout format_layout = vk_format_description(dst_image->vk.format)->layout;
+      const enum util_format_layout format_layout = radv_format_description(dst_image->vk.format)->layout;
       for (unsigned r = 0; r < pCopyBufferToImageInfo->regionCount; r++) {
          if (format_layout == UTIL_FORMAT_LAYOUT_ASTC) {
             radv_meta_decode_astc(cmd_buffer, dst_image, pCopyBufferToImageInfo->dstImageLayout,
@@ -405,6 +405,31 @@ transfer_copy_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_i
    }
 }
 
+static VkFormat
+radv_get_compat_color_ds_format(VkFormat format)
+{
+   switch (format) {
+   case VK_FORMAT_R8_UNORM:
+   case VK_FORMAT_R8_SNORM:
+   case VK_FORMAT_R8_UINT:
+   case VK_FORMAT_R8_SINT:
+      return VK_FORMAT_R8_UINT;
+      break;
+   case VK_FORMAT_R16_SFLOAT:
+   case VK_FORMAT_R16_UNORM:
+   case VK_FORMAT_R16_SNORM:
+   case VK_FORMAT_R16_UINT:
+   case VK_FORMAT_R16_SINT:
+      return VK_FORMAT_R16_UNORM;
+   case VK_FORMAT_R32_SFLOAT:
+   case VK_FORMAT_R32_SINT:
+   case VK_FORMAT_R32_UINT:
+      return VK_FORMAT_R32_SFLOAT;
+   default:
+      unreachable("invalid color format for color to depth/stencil image copy.");
+   }
+}
+
 static void
 copy_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_image, VkImageLayout src_image_layout,
            struct radv_image *dst_image, VkImageLayout dst_image_layout, const VkImageCopy2 *region)
@@ -512,6 +537,13 @@ copy_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_image, VkI
       radv_describe_barrier_end(cmd_buffer);
    }
 
+   /* Select a compatible color format for color<->depth/stencil copies. */
+   if (vk_format_is_color(src_image->vk.format) && vk_format_is_depth_or_stencil(dst_image->vk.format)) {
+      b_src.format = radv_get_compat_color_ds_format(src_image->vk.format);
+   } else if (vk_format_is_depth_or_stencil(src_image->vk.format) && vk_format_is_color(dst_image->vk.format)) {
+      b_dst.format = radv_get_compat_color_ds_format(dst_image->vk.format);
+   }
+
    /**
     * From the Vulkan 1.0.6 spec: 18.4 Copying Data Between Buffers and Images
     *    imageExtent is the size in texels of the image to copy in width, height
@@ -590,7 +622,7 @@ copy_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_image, VkI
 
          uint32_t htile_value = radv_get_htile_initial_value(device, dst_image);
 
-         cmd_buffer->state.flush_bits |= radv_clear_htile(cmd_buffer, dst_image, &range, htile_value);
+         cmd_buffer->state.flush_bits |= radv_clear_htile(cmd_buffer, dst_image, &range, htile_value, false);
       }
    }
 
@@ -611,14 +643,14 @@ radv_CmdCopyImage2(VkCommandBuffer commandBuffer, const VkCopyImageInfo2 *pCopyI
                  &pCopyImageInfo->pRegions[r]);
    }
 
-   if (radv_is_format_emulated(pdev, dst_image->vk.format)) {
+   if (radv_is_format_emulated(pdev, dst_image->vk.format) && cmd_buffer->qf != RADV_QUEUE_TRANSFER) {
       cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_PS_PARTIAL_FLUSH |
                                       radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                                                            VK_ACCESS_TRANSFER_WRITE_BIT, dst_image) |
+                                                            VK_ACCESS_TRANSFER_WRITE_BIT, 0, dst_image, NULL) |
                                       radv_dst_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                                                            VK_ACCESS_TRANSFER_READ_BIT, dst_image);
+                                                            VK_ACCESS_TRANSFER_READ_BIT, 0, dst_image, NULL);
 
-      const enum util_format_layout format_layout = vk_format_description(dst_image->vk.format)->layout;
+      const enum util_format_layout format_layout = radv_format_description(dst_image->vk.format)->layout;
       for (unsigned r = 0; r < pCopyImageInfo->regionCount; r++) {
          VkExtent3D dst_extent = pCopyImageInfo->pRegions[r].extent;
          if (src_image->vk.format != dst_image->vk.format) {

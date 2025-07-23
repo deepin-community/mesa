@@ -72,7 +72,7 @@ impl BarPropPass {
         ssa.file() == RegFile::Bar || self.ssa_map.contains_key(ssa)
     }
 
-    fn map_bar<'a>(&'a self, ssa: &'a SSAValue) -> Option<&SSAValue> {
+    fn map_bar<'a>(&'a self, ssa: &'a SSAValue) -> Option<&'a SSAValue> {
         let mut ssa = ssa;
         let mut last_bar = None;
         loop {
@@ -182,7 +182,7 @@ impl BarPropPass {
                     }
                     Op::BMov(op) => {
                         assert!(!op.clear);
-                        assert!(op.src.src_mod.is_none());
+                        assert!(op.src.is_unmodified());
                         let dst = op.dst.as_ssa().unwrap();
                         let src = op.src.as_ssa().unwrap();
                         assert!(dst.comps() == 1 && src.comps() == 1);

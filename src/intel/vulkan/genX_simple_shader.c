@@ -38,6 +38,9 @@ genX(emit_simpler_shader_init_fragment)(struct anv_simple_shader *state)
 {
    assert(state->cmd_buffer && state->cmd_buffer->state.current_pipeline == _3D);
 
+   /* Wa_16013994831 - Turn preemption on if it was previous left disabled. */
+   genX(cmd_buffer_set_preemption)(state->cmd_buffer, true);
+
    struct anv_batch *batch = state->batch;
    struct anv_device *device = state->device;
    const struct brw_wm_prog_data *prog_data =
@@ -208,6 +211,10 @@ genX(emit_simpler_shader_init_fragment)(struct anv_simple_shader *state)
          brw_wm_prog_data_prog_offset(prog_data, ps, 2);
 #endif
 
+#if GFX_VER >= 30
+      ps.RegistersPerThread = ptl_register_blocks(prog_data->base.grf_used);
+#endif
+
       ps.MaximumNumberofThreadsPerPSD = device->info->max_threads_per_psd - 1;
    }
 
@@ -367,7 +374,6 @@ genX(emit_simpler_shader_init_fragment)(struct anv_simple_shader *state)
    state->cmd_buffer->state.gfx.dirty |= ~(ANV_CMD_DIRTY_INDEX_BUFFER |
                                            ANV_CMD_DIRTY_XFB_ENABLE |
                                            ANV_CMD_DIRTY_OCCLUSION_QUERY_ACTIVE |
-                                           ANV_CMD_DIRTY_FS_MSAA_FLAGS |
                                            ANV_CMD_DIRTY_RESTART_INDEX);
    state->cmd_buffer->state.push_constants_dirty |= VK_SHADER_STAGE_FRAGMENT_BIT;
    state->cmd_buffer->state.gfx.push_constant_stages = VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -395,6 +401,11 @@ genX(emit_simpler_shader_init_compute)(struct anv_simple_shader *state)
       }
    }
 #endif
+
+   if (state->cmd_buffer) {
+      state->cmd_buffer->state.push_constants_dirty |= VK_SHADER_STAGE_COMPUTE_BIT;
+      state->cmd_buffer->state.compute.pipeline_dirty = true;
+   }
 }
 
 /** Initialize a simple shader emission */
@@ -599,6 +610,9 @@ genX(emit_simple_shader_dispatch)(struct anv_simple_shader *state,
             .SharedLocalMemorySize             = intel_compute_slm_encode_size(GFX_VER,
                                                                                prog_data->base.total_shared),
             .NumberOfBarriers                  = prog_data->uses_barrier,
+#if GFX_VER >= 30
+            .RegistersPerThread = ptl_register_blocks(prog_data->base.grf_used),
+#endif
          },
       };
 
@@ -688,6 +702,9 @@ genX(emit_simple_shader_dispatch)(struct anv_simple_shader *state,
          .ThreadPreemptionDisable               = true,
 #endif
          .NumberofThreadsinGPGPUThreadGroup     = dispatch.threads,
+#if GFX_VER >= 30
+         .RegistersPerThread = ptl_register_blocks(prog_data->base.grf_used),
+#endif
       };
       GENX(INTERFACE_DESCRIPTOR_DATA_pack)(batch, iface_desc_state.map, &iface_desc);
       anv_batch_emit(batch, GENX(MEDIA_INTERFACE_DESCRIPTOR_LOAD), mid) {

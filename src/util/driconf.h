@@ -269,11 +269,14 @@
    DRI_CONF_OPT_I(override_vram_size, -1, -1, 2147483647, \
                   "Override the VRAM size advertised to the application in MiB (-1 = default)")
 
-#define DRI_CONF_FORCE_GL_NAMES_REUSE(def) \
-   DRI_CONF_OPT_B(force_gl_names_reuse, def, "Force GL names reuse")
+#define DRI_CONF_FORCE_GL_NAMES_REUSE() \
+   DRI_CONF_OPT_I(reuse_gl_names, -1, -1, 1, "GL names reuse: 1=enable, 0=disable, -1=default")
 
 #define DRI_CONF_FORCE_GL_MAP_BUFFER_SYNCHRONIZED(def) \
    DRI_CONF_OPT_B(force_gl_map_buffer_synchronized, def, "Override GL_MAP_UNSYNCHRONIZED_BIT.")
+
+#define DRI_CONF_FORCE_GL_DEPTH_COMPONENT_TYPE_INT(def) \
+   DRI_CONF_OPT_B(force_gl_depth_component_type_int, def, "Override GL_DEPTH_COMPONENT type from unsigned short to unsigned int")
 
 #define DRI_CONF_TRANSCODE_ETC(def) \
    DRI_CONF_OPT_B(transcode_etc, def, "Transcode ETC formats to DXTC if unsupported")
@@ -492,6 +495,10 @@
    DRI_CONF_OPT_B(allow_multisampled_copyteximage, def, \
                   "Allow CopyTexSubImage and other to copy sampled framebuffer")
 
+#define DRI_CONF_CUSTOM_BORDER_COLORS_WITHOUT_FORMAT(def) \
+   DRI_CONF_OPT_B(custom_border_colors_without_format, def, \
+                  "Enable custom border colors without format")
+
 #define DRI_CONF_NO_FP16(def) \
    DRI_CONF_OPT_B(no_fp16, def, \
                   "Disable 16-bit float support")
@@ -696,6 +703,14 @@
    DRI_CONF_OPT_B(radv_disable_dcc_mips, def, \
                   "Disable DCC for color images with mips")
 
+#define DRI_CONF_RADV_DISABLE_DCC_STORES(def) \
+   DRI_CONF_OPT_B(radv_disable_dcc_stores, def, \
+                  "Disable DCC for color storage images on GFX10-GFX11.5")
+
+#define DRI_CONF_RADV_LOWER_TERMINATE_TO_DISCARD(def) \
+   DRI_CONF_OPT_B(radv_lower_terminate_to_discard, def, \
+                  "Lower terminate to discard (which is implicitly demote)")
+
 #define DRI_CONF_RADV_DISABLE_ANISO_SINGLE_LEVEL(def) \
   DRI_CONF_OPT_B(radv_disable_aniso_single_level, def, \
                  "Disable anisotropic filtering for single level images")
@@ -770,6 +785,14 @@
 #define DRI_CONF_RADV_DISABLE_NGG_GS(def) \
    DRI_CONF_OPT_B(radv_disable_ngg_gs, def, "Disable NGG GS on GFX10/GFX10.3.")
 
+#define DRI_CONF_RADV_FORCE_64K_SPARSE_ALIGNMENT(def) \
+   DRI_CONF_OPT_B(radv_force_64k_sparse_alignment, def, \
+                  "Force the alignment of sparse buffers to 64KiB")
+
+#define DRI_CONF_RADV_DISABLE_HIZ_HIS_GFX12(def) \
+   DRI_CONF_OPT_B(radv_disable_hiz_his_gfx12, def, \
+                  "Disable HiZ/HiS on GFX12 (RDNA4) to workaround a hw bug that causes random GPU hangs")
+
 /**
  * \brief ANV specific configuration options
  */
@@ -781,6 +804,10 @@
 #define DRI_CONF_ANV_ASSUME_FULL_SUBGROUPS_WITH_BARRIER(def) \
    DRI_CONF_OPT_B(anv_assume_full_subgroups_with_barrier, def, \
                   "Assume full subgroups requirement for compute shaders that use control barriers")
+
+#define DRI_CONF_ANV_ASSUME_FULL_SUBGROUPS_WITH_SHARED_MEMORY(def) \
+   DRI_CONF_OPT_B(anv_assume_full_subgroups_with_shared_memory, def, \
+                  "Allow assuming full subgroups requirement for shaders using shared memory even when it's not specified explicitly")
 
 #define DRI_CONF_ANV_SAMPLE_MASK_OUT_OPENGL_BEHAVIOUR(def) \
    DRI_CONF_OPT_B(anv_sample_mask_out_opengl_behaviour, def, \
@@ -827,9 +854,9 @@
    DRI_CONF_OPT_B(anv_disable_fcv, def, \
                   "Disable FCV optimization")
 
-#define DRI_CONF_ANV_DISABLE_XE2_CCS(def) \
-   DRI_CONF_OPT_B(anv_disable_xe2_ccs, def, \
-                  "Disable CCS optimization on Xe2")
+#define DRI_CONF_ANV_ENABLE_BUFFER_COMP(def) \
+   DRI_CONF_OPT_B(anv_enable_buffer_comp, def, \
+                  "Enable CCS on buffers where possible")
 
 #define DRI_CONF_ANV_EXTERNAL_MEMORY_IMPLICIT_SYNC(def) \
    DRI_CONF_OPT_B(anv_external_memory_implicit_sync, def, "Implicit sync on external BOs")
@@ -840,6 +867,10 @@
 #define DRI_CONF_ANV_FAKE_NONLOCAL_MEMORY(def) \
    DRI_CONF_OPT_B(anv_fake_nonlocal_memory, def, \
                   "Present host-visible device-local memory types as non device-local")
+
+#define DRI_CONF_ANV_UPPER_BOUND_DESCRIPTOR_POOL_SAMPLER(def) \
+   DRI_CONF_OPT_B(anv_upper_bound_descriptor_pool_sampler, def, \
+                  "Overallocate samplers in descriptor pools to workaround app bug")
 
 /**
  * \brief HASVK specific configuration options

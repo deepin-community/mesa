@@ -865,7 +865,6 @@ glx@glx-visuals-depth -pixmap,Crash
 glx@glx-visuals-stencil,Crash
 glx@glx-visuals-stencil -pixmap,Crash
 
-glx@glx_arb_create_context_es2_profile@invalid opengl es version,Fail
 glx@glx_arb_create_context_no_error@no error,Fail
 
 glx@glx_ext_import_context@free context,Fail
@@ -1005,9 +1004,6 @@ spec@arb_framebuffer_no_attachments@arb_framebuffer_no_attachments-atomic@MS4,Fa
 
 spec@arb_get_program_binary@restore-sso-program,Fail
 spec@arb_occlusion_query@occlusion_query_meta_no_fragments,Fail
-
-spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceindex,Fail
-spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceindex@'vs_input2[1][0]' on GL_PROGRAM_INPUT,Fail
 
 spec@arb_provoking_vertex@arb-provoking-vertex-clipped-geometry-flatshading,Fail
 spec@arb_provoking_vertex@arb-provoking-vertex-render,Fail
@@ -1232,8 +1228,6 @@ spec@nv_primitive_restart@primitive-restart-draw-mode-triangle_strip,Fail
 spec@nv_primitive_restart@primitive-restart-draw-mode-triangles,Fail
 spec@nv_read_depth@read_depth_gles3,Fail
 
-spec@oes_texture_view@rendering-formats,Fail
-spec@oes_texture_view@rendering-formats@clear GL_RGBA8_SNORM as GL_R32F,Fail
 spec@!opengl 1.0@depth-clear-precision-check,Fail
 spec@!opengl 1.0@depth-clear-precision-check@depth32,Fail
 spec@arb_texture_buffer_object@texture-buffer-size-clamp,Fail
@@ -1269,3 +1263,9 @@ dEQP-GLES31.functional.geometry_shading.query.primitives_generated_no_geometry,F
 dEQP-GLES2.functional.rasterization.interpolation.projected.line_loop_wide,Fail
 dEQP-GLES31.functional.texture.filtering.cube_array.formats.rgba4_nearest_mipmap_linear,Fail
 dEQP-GLES3.functional.rasterization.interpolation.basic.lines_wide,Fail
+
+# since hetzner migration
+spec@!opengl 2.0@vertex-program-two-side enabled front back front2 back2,Fail
+spec@!opengl 2.0@vertex-program-two-side enabled front back front2 back2@gs-out and fs,Fail
+spec@!opengl 2.0@vertex-program-two-side enabled front2 back2,Fail
+spec@!opengl 2.0@vertex-program-two-side enabled front2 back2@gs-out and fs,Fail

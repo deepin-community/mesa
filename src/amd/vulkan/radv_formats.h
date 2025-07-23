@@ -20,7 +20,7 @@
 #include "vk_format.h"
 
 static inline enum pipe_format
-radv_format_to_pipe_format(enum VkFormat vkformat)
+radv_format_to_pipe_format(VkFormat vkformat)
 {
    switch (vkformat) {
    case VK_FORMAT_R10X6_UNORM_PACK16:
@@ -32,6 +32,12 @@ radv_format_to_pipe_format(enum VkFormat vkformat)
    default:
       return vk_format_to_pipe_format(vkformat);
    }
+}
+
+static inline const struct util_format_description *
+radv_format_description(VkFormat format)
+{
+   return util_format_description(radv_format_to_pipe_format(format));
 }
 
 /**
