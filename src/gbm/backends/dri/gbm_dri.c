@@ -899,14 +899,8 @@ gbm_dri_bo_create(struct gbm_device *gbm,
       dri_use |= __DRI_IMAGE_USE_LINEAR;
    if (usage & GBM_BO_USE_PROTECTED)
       dri_use |= __DRI_IMAGE_USE_PROTECTED;
-   if (usage & GBM_BO_USE_FRONT_RENDERING) {
-      assert (!(usage & GBM_BO_EXPLICIT_FLUSH));
+   if (usage & GBM_BO_USE_FRONT_RENDERING)
       dri_use |= __DRI_IMAGE_USE_FRONT_RENDERING;
-   }
-   if (usage & GBM_BO_EXPLICIT_FLUSH) {
-      assert (!(usage & GBM_BO_USE_FRONT_RENDERING));
-      dri_use |= __DRI_IMAGE_USE_BACKBUFFER;
-   }
 
    /* Gallium drivers requires shared in order to get the handle/stride */
    dri_use |= __DRI_IMAGE_USE_SHARE;
@@ -1084,10 +1078,16 @@ gbm_dri_surface_create(struct gbm_device *gbm,
 		       uint32_t format, uint32_t flags,
                        const uint64_t *modifiers, const unsigned count)
 {
+   struct gbm_dri_device *dri = gbm_dri_device(gbm);
    struct gbm_dri_surface *surf;
 
    if (count)
       assert(modifiers);
+
+   if (count > 0 && !dri->screen->base.screen->resource_create_with_modifiers) {
+      errno = ENOSYS;
+      return NULL;
+   }
 
    /* It's acceptable to create an image with INVALID modifier in the list,
     * but it cannot be on the only modifier (since it will certainly fail
@@ -1110,7 +1110,7 @@ gbm_dri_surface_create(struct gbm_device *gbm,
    surf->base.v0.width = width;
    surf->base.v0.height = height;
    surf->base.v0.format = core->v0.format_canonicalize(format);
-   surf->base.v0.flags = flags | GBM_BO_EXPLICIT_FLUSH;
+   surf->base.v0.flags = flags;
    if (!modifiers) {
       assert(!count);
       return &surf->base;
@@ -1215,9 +1215,9 @@ dri_device_create(int fd, uint32_t gbm_backend_version)
    struct dri_screen *screen = dri->screen;
    struct pipe_screen *pscreen = screen->base.screen;
 #ifdef HAVE_LIBDRM
-   if (pscreen->get_param(pscreen, PIPE_CAP_DMABUF) & DRM_PRIME_CAP_IMPORT)
+   if (pscreen->caps.dmabuf & DRM_PRIME_CAP_IMPORT)
       dri->has_dmabuf_import = true;
-   if (pscreen->get_param(pscreen, PIPE_CAP_DMABUF) & DRM_PRIME_CAP_EXPORT)
+   if (pscreen->caps.dmabuf & DRM_PRIME_CAP_EXPORT)
       dri->has_dmabuf_export = true;
 #endif
    dri->has_compression_modifiers = pscreen->query_compression_rates &&

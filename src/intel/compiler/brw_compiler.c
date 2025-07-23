@@ -62,6 +62,7 @@ const struct nir_shader_compiler_options brw_scalar_nir_options = {
    .lower_pack_snorm_4x8 = true,
    .lower_pack_unorm_2x16 = true,
    .lower_pack_unorm_4x8 = true,
+   .lower_pack_64_4x16 = true,
    .lower_scmp = true,
    .lower_to_scalar = true,
    .lower_uadd_carry = true,
@@ -75,11 +76,13 @@ const struct nir_shader_compiler_options brw_scalar_nir_options = {
    .lower_usub_borrow = true,
    .max_unroll_iterations = 32,
    .support_16bit_alu = true,
-   .use_interpolated_input_intrinsics = true,
-   .vectorize_io = true,
    .vectorize_tess_levels = true,
    .vertex_id_zero_based = true,
    .scalarize_ddx = true,
+   .support_indirect_inputs = (uint8_t)BITFIELD_MASK(PIPE_SHADER_TYPES),
+   .support_indirect_outputs = (uint8_t)BITFIELD_MASK(PIPE_SHADER_TYPES),
+   .per_view_unique_driver_locations = true,
+   .compact_view_index = true,
 };
 
 struct brw_compiler *

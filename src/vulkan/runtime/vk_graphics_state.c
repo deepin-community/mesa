@@ -607,9 +607,9 @@ vk_rasterization_state_init(struct vk_rasterization_state *rs,
    rs->depth_bias.enable = rs_info->depthBiasEnable;
    if ((rs_info->depthBiasEnable || IS_DYNAMIC(RS_DEPTH_BIAS_ENABLE)) &&
        !IS_DYNAMIC(RS_DEPTH_BIAS_FACTORS)) {
-      rs->depth_bias.constant = rs_info->depthBiasConstantFactor;
+      rs->depth_bias.constant_factor = rs_info->depthBiasConstantFactor;
       rs->depth_bias.clamp = rs_info->depthBiasClamp;
-      rs->depth_bias.slope = rs_info->depthBiasSlopeFactor;
+      rs->depth_bias.slope_factor = rs_info->depthBiasSlopeFactor;
    }
    rs->line.width = rs_info->lineWidth;
 
@@ -1142,6 +1142,7 @@ vk_dynamic_graphics_state_init_ial(struct vk_dynamic_graphics_state *dst,
                                    const struct vk_input_attachment_location_state *ial)
 {
    if (IS_NEEDED(INPUT_ATTACHMENT_MAP)) {
+      dst->ial.color_attachment_count = ial->color_attachment_count;
       typed_memcpy(dst->ial.color_map, ial->color_map, MESA_VK_MAX_COLOR_ATTACHMENTS);
       dst->ial.depth_att = ial->depth_att;
       dst->ial.stencil_att = ial->stencil_att;
@@ -1751,7 +1752,10 @@ vk_graphics_pipeline_state_fill(const struct vk_device *device,
       vk_find_struct_const(info->pNext, PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR);
 
    const VkRenderingInputAttachmentIndexInfoKHR *ial_info =
-      vk_find_struct_const(info->pNext, RENDERING_INPUT_ATTACHMENT_INDEX_INFO_KHR);
+      !driver_rp ? vk_get_pipeline_rendering_ial_info(info)
+                 : vk_find_struct_const(
+                      info->pNext, RENDERING_INPUT_ATTACHMENT_INDEX_INFO_KHR);
+
    const VkRenderingAttachmentLocationInfoKHR *cal_info =
       vk_find_struct_const(info->pNext, RENDERING_ATTACHMENT_LOCATION_INFO_KHR);
 
@@ -2149,9 +2153,9 @@ vk_dynamic_graphics_state_copy(struct vk_dynamic_graphics_state *dst,
    COPY_IF_SET(RS_PROVOKING_VERTEX, rs.provoking_vertex);
    COPY_IF_SET(RS_RASTERIZATION_STREAM, rs.rasterization_stream);
    COPY_IF_SET(RS_DEPTH_BIAS_ENABLE, rs.depth_bias.enable);
-   COPY_IF_SET(RS_DEPTH_BIAS_FACTORS, rs.depth_bias.constant);
+   COPY_IF_SET(RS_DEPTH_BIAS_FACTORS, rs.depth_bias.constant_factor);
    COPY_IF_SET(RS_DEPTH_BIAS_FACTORS, rs.depth_bias.clamp);
-   COPY_IF_SET(RS_DEPTH_BIAS_FACTORS, rs.depth_bias.slope);
+   COPY_IF_SET(RS_DEPTH_BIAS_FACTORS, rs.depth_bias.slope_factor);
    COPY_IF_SET(RS_DEPTH_BIAS_FACTORS, rs.depth_bias.representation);
    COPY_IF_SET(RS_DEPTH_BIAS_FACTORS, rs.depth_bias.exact);
    COPY_IF_SET(RS_LINE_WIDTH, rs.line.width);
@@ -2245,6 +2249,14 @@ vk_dynamic_graphics_state_copy(struct vk_dynamic_graphics_state *dst,
       COPY_ARRAY(CB_BLEND_CONSTANTS, cb.blend_constants, 4);
 
    COPY_IF_SET(RP_ATTACHMENTS, rp.attachments);
+
+   if (IS_SET_IN_SRC(INPUT_ATTACHMENT_MAP)) {
+      COPY_MEMBER(INPUT_ATTACHMENT_MAP, ial.color_attachment_count);
+      COPY_ARRAY(INPUT_ATTACHMENT_MAP, ial.color_map,
+                 MESA_VK_MAX_COLOR_ATTACHMENTS);
+      COPY_MEMBER(INPUT_ATTACHMENT_MAP, ial.depth_att);
+      COPY_MEMBER(INPUT_ATTACHMENT_MAP, ial.stencil_att);
+   }
 
    if (IS_SET_IN_SRC(COLOR_ATTACHMENT_MAP)) {
       COPY_ARRAY(COLOR_ATTACHMENT_MAP, cal.color_map,
@@ -3106,11 +3118,11 @@ vk_common_CmdSetDepthBias2EXT(
    struct vk_dynamic_graphics_state *dyn = &cmd->dynamic_graphics_state;
 
    SET_DYN_VALUE(dyn, RS_DEPTH_BIAS_FACTORS,
-                 rs.depth_bias.constant, pDepthBiasInfo->depthBiasConstantFactor);
+                 rs.depth_bias.constant_factor, pDepthBiasInfo->depthBiasConstantFactor);
    SET_DYN_VALUE(dyn, RS_DEPTH_BIAS_FACTORS,
                  rs.depth_bias.clamp, pDepthBiasInfo->depthBiasClamp);
    SET_DYN_VALUE(dyn, RS_DEPTH_BIAS_FACTORS,
-                 rs.depth_bias.slope, pDepthBiasInfo->depthBiasSlopeFactor);
+                 rs.depth_bias.slope_factor, pDepthBiasInfo->depthBiasSlopeFactor);
 
    /** From the Vulkan 1.3.254 spec:
     *

@@ -274,6 +274,8 @@ struct r600_rasterizer_state {
 	unsigned			pa_su_sc_mode_cntl;
 	float				offset_units;
 	float				offset_scale;
+	float				line_width;
+	float				max_point_size;
 	bool				offset_enable;
 	bool				offset_units_unscaled;
 	bool				scissor_enable;
@@ -417,6 +419,7 @@ struct r600_fetch_shader {
 	unsigned			offset;
 	uint32_t                        buffer_mask;
 	unsigned                        strides[PIPE_MAX_ATTRIBS];
+	uint8_t				width_correction[PIPE_MAX_ATTRIBS];
 };
 
 struct r600_shader_state {
@@ -591,6 +594,7 @@ struct r600_context {
 	bool cmd_buf_is_compute;
 	struct pipe_resource *append_fence;
 	uint32_t append_fence_id;
+	bool cayman_dealloc_state;
 };
 
 static inline void r600_emit_command_buffer(struct radeon_cmdbuf *cs,

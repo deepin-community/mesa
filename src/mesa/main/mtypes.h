@@ -889,6 +889,8 @@ struct gl_sampler_object
 
    uint8_t glclamp_mask; /**< mask of GL_CLAMP wraps active */
 
+   bool DeletePending; /**< true if sampler object is removed from the hash */
+
    /** GL_ARB_bindless_texture */
    bool HandleAllocated;
    struct util_dynarray Handles;
@@ -932,6 +934,7 @@ struct gl_texture_object
    GLboolean _IsFloat;         /**< GL_OES_float_texture */
    GLboolean _IsHalfFloat;     /**< GL_OES_half_float_texture */
    bool HandleAllocated;       /**< GL_ARB_bindless_texture */
+   bool DeletePending;         /**< true if texture object is removed from the hash */
 
    /* This should not be restored by glPopAttrib: */
    bool StencilSampling;       /**< Should we sample stencil instead of depth? */
@@ -1852,6 +1855,17 @@ struct gl_transform_feedback_object
    GLboolean EverBound; /**< Has this object been bound? */
 
    /**
+    * Primitive mode from glBeginTransformFeedback.
+    *
+    * The spec doesn't list the primitive mode as part of transform feedback
+    * objects, but it has to be because when transform feedback is resumed,
+    * all draws must be validated against the primitive type that transform
+    * feedback began with instead of whatever last transform feedback object
+    * happened to be used.
+    */
+   GLenum16 Mode;
+
+   /**
     * GLES: if Active is true, remaining number of primitives which can be
     * rendered without overflow.  This is necessary to track because GLES
     * requires us to generate INVALID_OPERATION if a call to glDrawArrays or
@@ -2381,6 +2395,9 @@ struct gl_shared_state
    GLint RefCount;			   /**< Reference count */
    bool DisplayListsAffectGLThread;
 
+   /* Whether the next glGen returns the lowest unused GL ID. */
+   bool ReuseGLNames;
+
    struct _mesa_HashTable DisplayList;	   /**< Display lists hash table */
    struct _mesa_HashTable TexObjects;	   /**< Texture objects hash table */
 
@@ -2672,10 +2689,14 @@ struct gl_framebuffer
     */
    bool _HasAttachments;
 
-   GLbitfield _IntegerBuffers;  /**< Which color buffers are integer valued */
-   GLbitfield _BlendForceAlphaToOne;  /**< Which color buffers need blend factor adjustment */
-   GLbitfield _IsRGB;  /**< Which color buffers have an RGB base format? */
-   GLbitfield _FP32Buffers; /**< Which color buffers are FP32 */
+   GLbitfield _IntegerBuffers;  /**< Which color buffer attachments are integer valued */
+   GLbitfield _IntegerDrawBuffers;  /**< Which color draw buffers are integer valued */
+   GLbitfield _BlendForceAlphaToOne;  /**< Which color attachments need blend factor adjustment */
+   GLbitfield _BlendForceAlphaToOneDraw;  /**< Which color buffers need blend factor adjustment */
+   GLbitfield _IsRGB;  /**< Which color attachments have an RGB base format? */
+   GLbitfield _IsRGBDraw;  /**< Which color buffers have an RGB base format? */
+   GLbitfield _FP32Buffers; /**< Which color attachments are FP32 */
+   GLbitfield _FP32DrawBuffers; /**< Which color buffers are FP32 */
 
    /* ARB_color_buffer_float */
    GLboolean _AllColorBuffersFixedPoint; /* no integer, no float */

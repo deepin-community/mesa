@@ -163,6 +163,8 @@ PUBLIC void
 kopperSetSwapInterval(struct dri_drawable *drawable, int interval);
 PUBLIC int
 kopperQueryBufferAge(struct dri_drawable *drawable);
+PUBLIC void
+kopperQuerySurfaceSize(struct dri_drawable *drawable, int *width, int *height);
 
 PUBLIC void
 driswCopySubBuffer(struct dri_drawable *drawable, int x, int y, int w, int h);
@@ -337,6 +339,4 @@ dri_set_blob_cache_funcs(struct dri_screen *screen, __DRIblobCacheSet set,
 
 PUBLIC struct pipe_screen *
 dri_get_pipe_screen(struct dri_screen *driScreen);
-PUBLIC int
-dri_get_screen_param(struct dri_screen *driScreen, enum pipe_cap param);
 #endif /* _DRI_UTIL_H_ */

@@ -379,9 +379,12 @@ zink_create_surface(struct pipe_context *pctx,
 
    csurf->needs_mutable = needs_mutable;
    if (needs_mutable) {
-      pipe_resource_reference(&csurf->base.texture, pres);
+      struct pipe_resource *ref = NULL;
+      pipe_resource_reference(&ref, pres);
       init_pipe_surface_info(pctx, &csurf->base, templ, pres);
    }
+   /* this may or may not be set previously depending whether templ->texture is set */
+   csurf->base.texture = pres;
 
    if (templ->nr_samples && !screen->info.have_EXT_multisampled_render_to_single_sampled) {
       /* transient fb attachment: not cached */
@@ -396,7 +399,7 @@ zink_create_surface(struct pipe_context *pctx,
 
       ivci.image = transient->obj->image;
       struct zink_surface *tsurf = create_surface(pctx, &transient->base.b, templ, &ivci, true);
-      pipe_resource_reference((struct pipe_resource**)&transient, NULL);
+      zink_resource_reference(&transient, NULL);
       if (unlikely(!tsurf)) {
          mesa_loge("ZINK: failed to create transient surface!");
          goto fail;

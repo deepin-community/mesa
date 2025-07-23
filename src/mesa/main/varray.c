@@ -3198,7 +3198,7 @@ vertex_array_vertex_buffer(struct gl_context *ctx,
    struct gl_buffer_object *current_buf =
       vao->BufferBinding[VERT_ATTRIB_GENERIC(bindingIndex)].BufferObj;
 
-   if (current_buf && buffer == current_buf->Name) {
+   if (_mesa_is_same_buffer_object(current_buf, buffer)) {
       vbo = current_buf;
    } else if (buffer != 0) {
       vbo = _mesa_lookup_bufferobj(ctx, buffer);
@@ -3459,7 +3459,7 @@ vertex_array_vertex_buffers(struct gl_context *ctx,
 
          if (buffers[i] == 0)
             vbo = NULL;
-         else if (binding->BufferObj && binding->BufferObj->Name == buffers[i])
+         else if (_mesa_is_same_buffer_object(binding->BufferObj, buffers[i]))
             vbo = binding->BufferObj;
          else {
             bool error;
@@ -4169,7 +4169,7 @@ _mesa_init_varray(struct gl_context *ctx)
    _mesa_set_draw_vao(ctx, ctx->Array.VAO);
    ctx->Array.ActiveTexture = 0;   /* GL_ARB_multitexture */
 
-   _mesa_InitHashTable(&ctx->Array.Objects);
+   _mesa_InitHashTable(&ctx->Array.Objects, ctx->Shared->ReuseGLNames);
 }
 
 

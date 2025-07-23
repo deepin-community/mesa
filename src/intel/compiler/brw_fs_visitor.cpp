@@ -29,7 +29,7 @@
  */
 #include "brw_eu.h"
 #include "brw_fs.h"
-#include "brw_fs_builder.h"
+#include "brw_builder.h"
 #include "brw_nir.h"
 #include "compiler/glsl_types.h"
 #include "dev/intel_device_info.h"
@@ -43,8 +43,6 @@ fs_visitor::emit_urb_writes(const brw_reg &gs_vertex_count)
    int starting_urb_offset = 0;
    const struct brw_vue_prog_data *vue_prog_data =
       brw_vue_prog_data(this->prog_data);
-   const GLbitfield64 psiz_mask =
-      VARYING_BIT_LAYER | VARYING_BIT_VIEWPORT | VARYING_BIT_PSIZ | VARYING_BIT_PRIMITIVE_SHADING_RATE;
    const struct intel_vue_map *vue_map = &vue_prog_data->vue_map;
    bool flush;
    brw_reg sources[8];
@@ -64,7 +62,7 @@ fs_visitor::emit_urb_writes(const brw_reg &gs_vertex_count)
       unreachable("invalid stage");
    }
 
-   const fs_builder bld = fs_builder(this).at_end();
+   const brw_builder bld = brw_builder(this).at_end();
 
    brw_reg per_slot_offsets;
 
@@ -122,16 +120,40 @@ fs_visitor::emit_urb_writes(const brw_reg &gs_vertex_count)
       switch (varying) {
       case VARYING_SLOT_PSIZ: {
          /* The point size varying slot is the vue header and is always in the
-          * vue map.  But often none of the special varyings that live there
-          * are written and in that case we can skip writing to the vue
-          * header, provided the corresponding state properly clamps the
-          * values further down the pipeline. */
-         if ((vue_map->slots_valid & psiz_mask) == 0) {
-            assert(length == 0);
-            urb_offset++;
-            break;
-         }
-
+          * vue map. If anything in the header is going to be read back by HW,
+          * we need to initialize it, in particular the viewport & layer
+          * values.
+          *
+          * SKL PRMs, Volume 7: 3D-Media-GPGPU, Vertex URB Entry (VUE)
+          * Formats:
+          *
+          *    "VUEs are written in two ways:
+          *
+          *       - At the top of the 3D Geometry pipeline, the VF's
+          *         InputAssembly function creates VUEs and initializes them
+          *         from data extracted from Vertex Buffers as well as
+          *         internally generated data.
+          *
+          *       - VS, GS, HS and DS threads can compute, format, and write
+          *         new VUEs as thread output."
+          *
+          *    "Software must ensure that any VUEs subject to readback by the
+          *     3D pipeline start with a valid Vertex Header. This extends to
+          *     all VUEs with the following exceptions:
+          *
+          *       - If the VS function is enabled, the VF-written VUEs are not
+          *         required to have Vertex Headers, as the VS-incoming
+          *         vertices are guaranteed to be consumed by the VS (i.e.,
+          *         the VS thread is responsible for overwriting the input
+          *         vertex data).
+          *
+          *       - If the GS FF is enabled, neither VF-written VUEs nor VS
+          *         thread-generated VUEs are required to have Vertex Headers,
+          *         as the GS will consume all incoming vertices.
+          *
+          *       - If Rendering is disabled, VertexHeaders are not required
+          *         anywhere."
+          */
          brw_reg zero = brw_vgrf(alloc.allocate(dispatch_width / 8),
                                 BRW_TYPE_UD);
          bld.MOV(zero, brw_imm_ud(0u));
@@ -202,7 +224,7 @@ fs_visitor::emit_urb_writes(const brw_reg &gs_vertex_count)
          break;
       }
 
-      const fs_builder abld = bld.annotate("URB write");
+      const brw_builder abld = bld.annotate("URB write");
 
       /* If we've queued up 8 registers of payload (2 VUE slots), if this is
        * the last slot or if we need to flush (see BAD_FILE varying case
@@ -329,7 +351,7 @@ fs_visitor::emit_urb_writes(const brw_reg &gs_vertex_count)
 void
 fs_visitor::emit_cs_terminate()
 {
-   const fs_builder ubld = fs_builder(this).at_end().exec_all();
+   const brw_builder ubld = brw_builder(this).at_end().exec_all();
 
    /* We can't directly send from g0, since sends with EOT have to use
     * g112-127. So, copy it to a virtual register, The register allocator will
@@ -464,7 +486,6 @@ fs_visitor::init()
 
    this->uniforms = 0;
    this->last_scratch = 0;
-   this->push_constant_loc = NULL;
 
    memset(&this->shader_stats, 0, sizeof(this->shader_stats));
 
@@ -472,6 +493,8 @@ fs_visitor::init()
    this->spilled_any_registers = false;
 
    this->phase = BRW_SHADER_PHASE_INITIAL;
+
+   this->next_address_register_nr = 1;
 }
 
 fs_visitor::~fs_visitor()

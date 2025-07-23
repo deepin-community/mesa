@@ -64,8 +64,7 @@ visit_vulkan_resource_index(nir_builder *b, apply_layout_state *state, nir_intri
    unsigned stride;
 
    nir_def *set_ptr;
-   if (layout->binding[binding].type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
-       layout->binding[binding].type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC) {
+   if (vk_descriptor_type_is_dynamic(layout->binding[binding].type)) {
       unsigned idx = state->layout->set[desc_set].dynamic_offset_start + layout->binding[binding].dynamic_offset_offset;
       set_ptr = get_scalar_arg(b, 1, state->args->ac.push_constants);
       offset = state->layout->push_constant_size + idx * 16;
@@ -209,16 +208,14 @@ get_sampler_desc(nir_builder *b, apply_layout_state *state, nir_deref_instr *der
     * index or if all samplers in the array are the same. Note that indexing is forbidden with
     * embedded samplers.
     */
-   if (desc_type == AC_DESC_SAMPLER && binding->immutable_samplers_offset &&
-       (!indirect || binding->immutable_samplers_equal)) {
+   if (desc_type == AC_DESC_SAMPLER && binding->immutable_samplers_offset && !indirect) {
       unsigned constant_index = 0;
-      if (!binding->immutable_samplers_equal) {
-         while (deref->deref_type != nir_deref_type_var) {
-            assert(deref->deref_type == nir_deref_type_array);
-            unsigned array_size = MAX2(glsl_get_aoa_size(deref->type), 1);
-            constant_index += nir_src_as_uint(deref->arr.index) * array_size;
-            deref = nir_deref_instr_parent(deref);
-         }
+
+      while (deref->deref_type != nir_deref_type_var) {
+         assert(deref->deref_type == nir_deref_type_array);
+         unsigned array_size = MAX2(glsl_get_aoa_size(deref->type), 1);
+         constant_index += nir_src_as_uint(deref->arr.index) * array_size;
+         deref = nir_deref_instr_parent(deref);
       }
 
       uint32_t dword0_mask =
@@ -365,15 +362,31 @@ load_push_constant(nir_builder *b, apply_layout_state *state, nir_intrinsic_inst
 
    const unsigned max_push_constant = sizeof(state->args->ac.inline_push_const_mask) * 8u;
 
+   nir_component_mask_t comps_read = nir_def_components_read(&intrin->def);
+
    nir_def *data[NIR_MAX_VEC_COMPONENTS * 2];
    unsigned num_loads = 0;
    for (unsigned start = 0; start < count;) {
+      if (!(comps_read & BITFIELD64_BIT(start >> (bit_size == 64 ? 1 : 0)))) {
+         data[num_loads++] = nir_undef(b, 1, 32);
+         start += 1;
+         continue;
+      }
+
       /* Try to use inline push constants when possible. */
       unsigned inline_idx = const_offset + start;
       if (const_offset != -1 && inline_idx < max_push_constant &&
           (state->args->ac.inline_push_const_mask & BITFIELD64_BIT(inline_idx))) {
          inline_idx = util_bitcount64(state->args->ac.inline_push_const_mask & BITFIELD64_MASK(inline_idx));
          data[num_loads++] = get_scalar_arg(b, 1, state->args->ac.inline_push_consts[inline_idx]);
+         start += 1;
+         continue;
+      }
+
+      if (!state->args->ac.push_constants.used) {
+         /* Assume this is an inlined push constant load which was expanded to include dwords which are not inlined. */
+         assert(const_offset != -1);
+         data[num_loads++] = nir_undef(b, 1, 32);
          start += 1;
          continue;
       }

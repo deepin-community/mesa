@@ -820,7 +820,8 @@ anv_sparse_bind_trtt(struct anv_device *device,
 
    /* This is not an error, the application is simply trying to reset state
     * that was already there. */
-   if (n_l3l2_binds == 0 && n_l1_binds == 0)
+   if (n_l3l2_binds == 0 && n_l1_binds == 0 &&
+       sparse_submit->wait_count == 0 && sparse_submit->signal_count == 0)
       goto out_dynarrays;
 
    anv_genX(device->info, write_trtt_entries)(&submit->base,
@@ -1583,7 +1584,7 @@ anv_sparse_image_check_support(struct anv_physical_device *pdevice,
       }
    }
 
-   const struct anv_format *anv_format = anv_get_format(vk_format);
+   const struct anv_format *anv_format = anv_get_format(pdevice, vk_format);
    if (!anv_format)
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 

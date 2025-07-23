@@ -291,6 +291,27 @@ verify_parameter_modes(_mesa_glsl_parse_state *state,
          var->data.must_be_shader_input = 1;
       }
 
+      /* GLSL spec prohibits using bias with anything else than fragment stage,
+       * this starts already at GLSL 1.30 but here is a quote from latest 4.60
+       * spec, Section 8.9 "Texture Functions":
+       *
+       *    "... the bias parameter is optional for fragment shaders. The bias
+       *     parameter is not accepted in any other shader stage."
+       *
+       * Mesa has drirc "allow_vertex_texture_bias" to allow bias in vertex
+       * stage, additionally GL_NV_compute_shader_derivatives makes it possible
+       * to use bias in compute shaders.
+       */
+      if (sig->is_builtin() &&
+          strcmp(formal->name, "bias") == 0 &&
+          state->stage != MESA_SHADER_FRAGMENT &&
+          !state->NV_compute_shader_derivatives_enable &&
+          (!(state->allow_vertex_texture_bias &&
+             state->stage == MESA_SHADER_VERTEX))) {
+         _mesa_glsl_error(&loc, state,
+                          "bias parameter may only be used in fragment stage");
+      }
+
       /* Verify that 'out' and 'inout' actual parameters are lvalues. */
       if (formal->data.mode == ir_var_function_out
           || formal->data.mode == ir_var_function_inout) {
@@ -843,11 +864,11 @@ no_matching_function_error(const char *name,
                            exec_list *actual_parameters,
                            _mesa_glsl_parse_state *state)
 {
-   gl_shader *sh = _mesa_glsl_get_builtin_function_shader();
+   struct glsl_symbol_table *symb = _mesa_glsl_get_builtin_function_symbols();
 
    if (!function_exists(state, state->symbols, name)
        && (!state->uses_builtin_functions
-           || !function_exists(state, sh->symbols, name))) {
+           || !function_exists(state, symb, name))) {
       _mesa_glsl_error(loc, state, "no function with name '%s'", name);
    } else {
       char *str = prototype_string(NULL, name, actual_parameters);
@@ -861,8 +882,7 @@ no_matching_function_error(const char *name,
                                 state->symbols->get_function(name));
 
       if (state->uses_builtin_functions) {
-         print_function_prototypes(state, loc,
-                                   sh->symbols->get_function(name));
+         print_function_prototypes(state, loc, symb->get_function(name));
       }
    }
 }

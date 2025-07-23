@@ -77,7 +77,9 @@ enum radv_dynamic_state_bits {
    RADV_DYNAMIC_COLOR_ATTACHMENT_MAP = 1ull << 51,
    RADV_DYNAMIC_INPUT_ATTACHMENT_MAP = 1ull << 52,
    RADV_DYNAMIC_DEPTH_CLAMP_RANGE = 1ull << 53,
-   RADV_DYNAMIC_ALL = (1ull << 54) - 1,
+   RADV_DYNAMIC_VIEWPORT_WITH_COUNT = 1ull << 54,
+   RADV_DYNAMIC_SCISSOR_WITH_COUNT = 1ull << 55,
+   RADV_DYNAMIC_ALL = (1ull << 56) - 1,
 };
 
 enum radv_cmd_dirty_bits {
@@ -92,7 +94,7 @@ enum radv_cmd_dirty_bits {
    RADV_CMD_DIRTY_DB_SHADER_CONTROL = 1ull << 8,
    RADV_CMD_DIRTY_STREAMOUT_ENABLE = 1ull << 9,
    RADV_CMD_DIRTY_GRAPHICS_SHADERS = 1ull << 10,
-   RADV_CMD_DIRTY_COLOR_OUTPUT = 1ull << 11,
+   RADV_CMD_DIRTY_FRAGMENT_OUTPUT = 1ull << 11,
    RADV_CMD_DIRTY_FBFETCH_OUTPUT = 1ull << 12,
    RADV_CMD_DIRTY_FS_STATE = 1ull << 13,
    RADV_CMD_DIRTY_NGG_STATE = 1ull << 14,
@@ -164,6 +166,9 @@ struct radv_streamout_state {
 
    /* State of VGT_STRMOUT_(CONFIG|EN) */
    bool streamout_enabled;
+
+   /* VA of the streamout state (GFX12+). */
+   uint64_t state_va;
 };
 
 /**
@@ -204,6 +209,7 @@ struct radv_rendering_state {
    struct radv_attachment color_att[MAX_RTS];
    struct radv_attachment ds_att;
    VkImageAspectFlags ds_att_aspects;
+   bool has_hiz_his; /* GFX12+ */
    struct radv_attachment vrs_att;
    VkExtent2D vrs_texel_size;
 };
@@ -375,12 +381,12 @@ struct radv_cmd_state {
    unsigned active_occlusion_queries;
    bool perfect_occlusion_queries_enabled;
    unsigned active_pipeline_queries;
-   unsigned active_pipeline_gds_queries;
+   unsigned active_emulated_pipeline_queries;
    unsigned active_pipeline_ace_queries; /* Task shader invocations query */
    unsigned active_prims_gen_queries;
    unsigned active_prims_xfb_queries;
-   unsigned active_prims_gen_gds_queries;
-   unsigned active_prims_xfb_gds_queries;
+   unsigned active_emulated_prims_gen_queries;
+   unsigned active_emulated_prims_xfb_queries;
    uint32_t trace_id;
    uint32_t last_ia_multi_vgt_param;
    uint32_t last_ge_cntl;
@@ -401,7 +407,8 @@ struct radv_cmd_state {
    /* Conditional rendering info. */
    uint8_t predication_op; /* 32-bit or 64-bit predicate value */
    int predication_type;   /* -1: disabled, 0: normal, 1: inverted */
-   uint64_t predication_va;
+   uint64_t user_predication_va;     /* User predication VA. */
+   uint64_t emulated_predication_va; /* Emulated VA if no 32-bit predication support. */
    uint64_t mec_inv_pred_va;  /* For inverted predication when using MEC. */
    bool mec_inv_pred_emitted; /* To ensure we don't have to repeat inverting the VA. */
 
@@ -459,6 +466,7 @@ struct radv_cmd_state {
    unsigned tess_lds_size;
 
    unsigned spi_shader_col_format;
+   unsigned spi_shader_z_format;
    unsigned cb_shader_mask;
 
    struct radv_multisample_state ms;
@@ -482,6 +490,8 @@ struct radv_cmd_state {
    bool uses_vrs_coarse_shading;
    bool uses_dynamic_patch_control_points;
    bool uses_fbfetch_output;
+
+   uint64_t shader_query_buf_va; /* GFX12+ */
 };
 
 struct radv_enc_state {
@@ -737,10 +747,12 @@ void radv_update_color_clear_metadata(struct radv_cmd_buffer *cmd_buffer, const 
 unsigned radv_instance_rate_prolog_index(unsigned num_attributes, uint32_t instance_rate_inputs);
 
 enum radv_cmd_flush_bits radv_src_access_flush(struct radv_cmd_buffer *cmd_buffer, VkPipelineStageFlags2 src_stages,
-                                               VkAccessFlags2 src_flags, const struct radv_image *image);
+                                               VkAccessFlags2 src_flags, VkAccessFlags3KHR src3_flags,
+                                               const struct radv_image *image, const VkImageSubresourceRange *range);
 
 enum radv_cmd_flush_bits radv_dst_access_flush(struct radv_cmd_buffer *cmd_buffer, VkPipelineStageFlags2 dst_stages,
-                                               VkAccessFlags2 dst_flags, const struct radv_image *image);
+                                               VkAccessFlags2 dst_flags, VkAccessFlags3KHR dst3_flags,
+                                               const struct radv_image *image, const VkImageSubresourceRange *range);
 
 struct radv_resolve_barrier {
    VkPipelineStageFlags2 src_stage_mask;

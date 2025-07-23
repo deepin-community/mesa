@@ -30,6 +30,7 @@ GfxStreamConnectionManager::~GfxStreamConnectionManager() {}
 
 bool GfxStreamConnectionManager::initialize() {
     switch (mTransportType) {
+#ifdef GFXSTREAM_ENABLE_GUEST_GOLDFISH
         case GFXSTREAM_TRANSPORT_ADDRESS_SPACE: {
             mStream = createGoldfishAddressSpaceStream(STREAM_BUFFER_SIZE);
             if (!mStream) {
@@ -38,6 +39,7 @@ bool GfxStreamConnectionManager::initialize() {
             }
             break;
         }
+#endif
         case GFXSTREAM_TRANSPORT_QEMU_PIPE: {
             mStream = new QemuPipeStream(STREAM_BUFFER_SIZE);
             if (mStream->connect() < 0) {
@@ -68,6 +70,11 @@ bool GfxStreamConnectionManager::initialize() {
             // Use kCapsetGfxStreamVulkan for now, Ranchu HWC needs to be modified to pass in
             // right capset.
             auto device = VirtGpuDevice::getInstance(kCapsetGfxStreamVulkan);
+            if (!device) {
+                mesa_logd("Failed to get VirtGpuDevice\n");
+                return false;
+            }
+
             mDescriptor = device->getDeviceHandle();
             mStream = createVirtioGpuAddressSpaceStream(kCapsetGfxStreamVulkan);
             if (!mStream) {

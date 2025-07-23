@@ -594,6 +594,7 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
       case nir_op_fabs:
       case nir_op_fexp2:
       case nir_op_frcp:
+      case nir_op_frsq:
       case nir_op_fneg:
       case nir_op_fsat:
       case nir_op_fsign:
@@ -1048,14 +1049,25 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
       break;
    }
 
-   case nir_op_frcp:
-      r = (struct ssa_result_range){
-         unpack_data(src_res[0]).range,
-         false,
-         false, /* Various cases can result in NaN, so assume the worst. */
-         false  /*    "      "    "     "    "  "    "    "    "    "    */
-      };
+   case nir_op_frcp: {
+      const struct ssa_result_range left = unpack_data(src_res[0]);
+
+      /* Only rcp(NaN) is NaN. */
+      r.is_a_number = left.is_a_number;
+
+      /* rcp can be zero for large values if denorms are flushed, or for Inf.
+       * Also, rcp(-0) is -Inf and rcp(+0) is Inf.
+       */
+      if (left.range == gt_zero)
+         r.range = ge_zero;
+      else if (left.range == lt_zero)
+         r.range = le_zero;
+
+      if (left.range == gt_zero || left.range == lt_zero || left.range == ne_zero)
+         r.is_finite = left.is_a_number;
+
       break;
+   }
 
    case nir_op_mov:
       r = unpack_data(src_res[0]);
@@ -1110,9 +1122,27 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
       break;
 
    case nir_op_fsqrt:
-   case nir_op_frsq:
       r = (struct ssa_result_range){ ge_zero, false, false, false };
       break;
+
+   case nir_op_frsq: {
+      const struct ssa_result_range left = unpack_data(src_res[0]);
+
+      /* rsq(NaN) and rsq(< 0) is NaN. */
+      if (left.range == eq_zero || left.range == ge_zero || left.range == gt_zero)
+         r.is_a_number = left.is_a_number;
+
+      /* rsq(-0) is -Inf and rsq(+0) is +Inf */
+      if (left.range == gt_zero || left.range == ne_zero) {
+         if (left.is_finite)
+            r.range = gt_zero;
+         else
+            r.range = ge_zero;
+         r.is_finite = r.is_a_number;
+      }
+
+      break;
+   }
 
    case nir_op_ffloor: {
       const struct ssa_result_range left = unpack_data(src_res[0]);
@@ -1720,8 +1750,6 @@ get_alu_uub(struct analysis_state *state, struct uub_query q, uint32_t *result, 
    case nir_op_b32csel:
    case nir_op_ubfe:
    case nir_op_bfm:
-   case nir_op_fmul:
-   case nir_op_fmulz:
    case nir_op_extract_u8:
    case nir_op_extract_i8:
    case nir_op_extract_u16:
@@ -1734,9 +1762,18 @@ get_alu_uub(struct analysis_state *state, struct uub_query q, uint32_t *result, 
    case nir_op_u2u8:
    case nir_op_u2u16:
    case nir_op_u2u32:
-   case nir_op_f2u32:
       if (nir_scalar_chase_alu_src(q.scalar, 0).def->bit_size > 32) {
          /* If src is >32 bits, return max */
+         return;
+      }
+      break;
+   case nir_op_fsat:
+   case nir_op_fmul:
+   case nir_op_fmulz:
+   case nir_op_f2u32:
+   case nir_op_f2i32:
+      if (nir_scalar_chase_alu_src(q.scalar, 0).def->bit_size != 32) {
+         /* Only 32bit floats support for now, return max */
          return;
       }
       break;
@@ -1833,6 +1870,7 @@ get_alu_uub(struct analysis_state *state, struct uub_query q, uint32_t *result, 
       break;
    }
    /* limited floating-point support for f2u32(fmul(load_input(), <constant>)) */
+   case nir_op_f2i32:
    case nir_op_f2u32:
       /* infinity/NaN starts at 0x7f800000u, negative numbers at 0x80000000 */
       if (src[0] < 0x7f800000u) {
@@ -1852,6 +1890,9 @@ get_alu_uub(struct analysis_state *state, struct uub_query q, uint32_t *result, 
          float max_f = ceilf(src0_f) * ceilf(src1_f);
          memcpy(result, &max_f, 4);
       }
+      break;
+   case nir_op_fsat:
+      *result = 0x3f800000u;
       break;
    case nir_op_u2u1:
    case nir_op_u2u8:

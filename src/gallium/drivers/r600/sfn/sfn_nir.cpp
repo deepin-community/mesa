@@ -732,10 +732,6 @@ r600_lower_and_optimize_nir(nir_shader *sh,
                             enum amd_gfx_level gfx_level,
                             struct pipe_stream_output_info *so_info)
 {
-   bool lower_64bit =
-      gfx_level < CAYMAN &&
-      (sh->options->lower_int64_options || sh->options->lower_doubles_options) &&
-      ((sh->info.bit_sizes_float | sh->info.bit_sizes_int) & 64);
 
    r600::sort_uniforms(sh);
    NIR_PASS_V(sh, r600_nir_fix_kcache_indirect_access);
@@ -761,8 +757,20 @@ r600_lower_and_optimize_nir(nir_shader *sh,
               nir_lower_io,
               io_modes,
               r600_glsl_type_size,
-              nir_lower_io_lower_64bit_to_32);
+              (nir_lower_io_options)
+              (nir_lower_io_lower_64bit_to_32 |
+               nir_lower_io_use_interpolated_input_intrinsics));
 
+   if (sh->info.stage == MESA_SHADER_VERTEX || sh->info.stage == MESA_SHADER_TESS_EVAL)
+      NIR_PASS(_, sh, nir_move_output_stores_to_end);
+
+   nir_shader_gather_info(sh, nir_shader_get_entrypoint(sh));
+
+   bool lower_64bit_io_to_vec2 = (sh->info.bit_sizes_float | sh->info.bit_sizes_int) & 64;
+   bool lower_64bit =
+      gfx_level < CAYMAN &&
+      (sh->options->lower_int64_options || sh->options->lower_doubles_options) &&
+      lower_64bit_io_to_vec2;
    if (sh->info.stage == MESA_SHADER_FRAGMENT)
       NIR_PASS_V(sh, r600_lower_fs_pos_input);
 
@@ -811,7 +819,7 @@ r600_lower_and_optimize_nir(nir_shader *sh,
    NIR_PASS_V(sh, r600_nir_lower_int_tg4);
    NIR_PASS_V(sh, r600::r600_nir_lower_tex_to_backend, gfx_level);
 
-   if ((sh->info.bit_sizes_float | sh->info.bit_sizes_int) & 64) {
+   if (lower_64bit_io_to_vec2) {
       NIR_PASS_V(sh, r600::r600_nir_split_64bit_io);
       NIR_PASS_V(sh, r600::r600_split_64bit_alu_and_phi);
       NIR_PASS_V(sh, nir_split_64bit_vec3_and_vec4);
@@ -824,7 +832,7 @@ r600_lower_and_optimize_nir(nir_shader *sh,
    if (lower_64bit)
       NIR_PASS_V(sh, r600::r600_nir_64_to_vec2);
 
-   if ((sh->info.bit_sizes_float | sh->info.bit_sizes_int) & 64)
+   if (lower_64bit_io_to_vec2)
       NIR_PASS_V(sh, r600::r600_split_64bit_uniforms_and_ubo);
 
    /* Lower to scalar to let some optimization work out better */
@@ -863,7 +871,7 @@ r600_lower_and_optimize_nir(nir_shader *sh,
    NIR_PASS_V(sh, nir_lower_bool_to_int32);
 
    NIR_PASS_V(sh, nir_lower_locals_to_regs, 32);
-   NIR_PASS_V(sh, nir_convert_from_ssa, true);
+   NIR_PASS_V(sh, nir_convert_from_ssa, true, false);
    NIR_PASS_V(sh, nir_opt_dce);
 }
 

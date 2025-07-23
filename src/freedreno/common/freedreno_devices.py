@@ -103,7 +103,7 @@ class GPUInfo(Struct):
                  tile_max_w, tile_max_h, num_vsc_pipes,
                  cs_shared_mem_size, num_sp_cores, wave_granularity, fibers_per_sp,
                  highest_bank_bit = 0, ubwc_swizzle = 0x7, macrotile_mode = 0,
-                 threadsize_base = 64, max_waves = 16):
+                 threadsize_base = 64, max_waves = 16, compute_lb_size = 0):
         self.chip          = chip.value
         self.gmem_align_w  = gmem_align_w
         self.gmem_align_h  = gmem_align_h
@@ -139,9 +139,13 @@ class A6xxGPUInfo(GPUInfo):
         if chip == CHIP.A6XX:
             tile_max_w   = 1024 # max_bitfield_val(5, 0, 5)
             tile_max_h   = max_bitfield_val(14, 8, 4) # 1008
+            compute_lb_size = 0
         else:
             tile_max_w   = 1728
             tile_max_h   = 1728
+            # on a7xx the compute_lb_size is 40KB for all known parts for now.
+            # We have a parameter for it in case some low-end parts cut it down.
+            compute_lb_size = 40 * 1024
 
         super().__init__(chip, gmem_align_w = 16, gmem_align_h = 4,
                          tile_align_w = tile_align_w,
@@ -157,7 +161,8 @@ class A6xxGPUInfo(GPUInfo):
                          ubwc_swizzle = ubwc_swizzle,
                          macrotile_mode = macrotile_mode,
                          threadsize_base    = threadsize_base,
-                         max_waves    = max_waves)
+                         max_waves    = max_waves,
+                         compute_lb_size = compute_lb_size)
 
         self.num_ccu = num_ccu
 
@@ -400,6 +405,7 @@ a6xx_gen3 = A6XXProps(
         has_per_view_viewport = True,
         has_scalar_alu = True,
         has_early_preamble = True,
+        prede_nop_quirk = True,
     )
 
 a6xx_gen4 = A6XXProps(
@@ -416,7 +422,7 @@ a6xx_gen4 = A6XXProps(
         has_cp_reg_write = False,
         has_8bpp_ubwc = False,
         has_lpac = True,
-        has_shading_rate = True,
+        has_legacy_pipeline_shading_rate = True,
         has_getfiberid = True,
         has_dp2acc = True,
         has_dp4acc = True,
@@ -427,9 +433,13 @@ a6xx_gen4 = A6XXProps(
         has_scalar_alu = True,
         has_isam_v = True,
         has_ssbo_imm_offsets = True,
+        has_ubwc_linear_mipmap_fallback = True,
         # TODO: there seems to be a quirk where at least rcp can't be in an
         # early preamble. a660 at least is affected.
         #has_early_preamble = True,
+        prede_nop_quirk = True,
+        predtf_nop_quirk = True,
+        has_sad = True,
     )
 
 add_gpus([
@@ -842,7 +852,6 @@ a7xx_base = A6XXProps(
         has_separate_chroma_filter = True,
         has_sample_locations = True,
         has_lpac = True,
-        has_shading_rate = True,
         has_getfiberid = True,
         has_dp2acc = True,
         has_dp4acc = True,
@@ -857,12 +866,18 @@ a7xx_base = A6XXProps(
         has_isam_v = True,
         has_ssbo_imm_offsets = True,
         has_early_preamble = True,
+        has_attachment_shading_rate = True,
+        has_ubwc_linear_mipmap_fallback = True,
+        prede_nop_quirk = True,
+        predtf_nop_quirk = True,
+        has_sad = True,
     )
 
 a7xx_gen1 = A7XXProps(
         supports_ibo_ubwc = True,
         fs_must_have_non_zero_constlen_quirk = True,
         enable_tp_ubwc_flag_hint = True,
+        reading_shading_rate_requires_smask_quirk = True,
     )
 
 a7xx_gen2 = A7XXProps(
@@ -875,6 +890,9 @@ a7xx_gen2 = A7XXProps(
         # this hint set. Match them for better compatibility by default.
         enable_tp_ubwc_flag_hint = False,
         has_64b_ssbo_atomics = True,
+        has_primitive_shading_rate = True,
+        reading_shading_rate_requires_smask_quirk = True,
+        has_ray_intersection = True,
     )
 
 a7xx_gen3 = A7XXProps(
@@ -895,6 +913,11 @@ a7xx_gen3 = A7XXProps(
         ubwc_coherency_quirk = True,
         has_persistent_counter = True,
         has_64b_ssbo_atomics = True,
+        has_primitive_shading_rate = True,
+        has_ray_intersection = True,
+        has_sw_fuse = True,
+        has_rt_workaround = True,
+        has_alias_rt=True,
     )
 
 a730_magic_regs = dict(
@@ -950,11 +973,6 @@ a730_raw_magic_regs = [
         [A6XXRegs.REG_A7XX_RB_UNKNOWN_8E79,   0x00000000],
         [A6XXRegs.REG_A7XX_RB_UNKNOWN_8899,   0x00000000],
         [A6XXRegs.REG_A7XX_RB_UNKNOWN_88F5,   0x00000000],
-
-        # Shading rate group
-        [A6XXRegs.REG_A6XX_RB_UNKNOWN_88F4,   0x00000000],
-        [A6XXRegs.REG_A7XX_HLSQ_UNKNOWN_A9AD, 0x00000000],
-        [A6XXRegs.REG_A7XX_GRAS_UNKNOWN_80F4, 0x00000000],
     ]
 
 a740_magic_regs = dict(
@@ -1021,12 +1039,7 @@ a740_raw_magic_regs = [
         [A6XXRegs.REG_A7XX_RB_UNKNOWN_88F5,   0x00000000],
         [A6XXRegs.REG_A7XX_RB_UNKNOWN_8C34,   0x00000000],
 
-        # Shading rate group
-        [A6XXRegs.REG_A6XX_RB_UNKNOWN_88F4,   0x00000000],
-        [A6XXRegs.REG_A7XX_HLSQ_UNKNOWN_A9AD, 0x00000000],
         [A6XXRegs.REG_A7XX_GRAS_UNKNOWN_8008, 0x00000000],
-        [A6XXRegs.REG_A7XX_GRAS_UNKNOWN_80F4, 0x00000000],
-        [A6XXRegs.REG_A7XX_GRAS_UNKNOWN_80F5, 0x00000000],
     ]
 
 add_gpus([
@@ -1137,11 +1150,7 @@ add_gpus([
             [A6XXRegs.REG_A7XX_RB_UNKNOWN_88F5,   0x00000000],
             [A6XXRegs.REG_A7XX_RB_UNKNOWN_8C34,   0x00000000],
 
-            # Shading rate group
-            [A6XXRegs.REG_A6XX_RB_UNKNOWN_88F4,   0x00000000],
-            [A6XXRegs.REG_A7XX_HLSQ_UNKNOWN_A9AD, 0x00000000],
             [A6XXRegs.REG_A7XX_GRAS_UNKNOWN_8008, 0x00000000],
-            [A6XXRegs.REG_A7XX_GRAS_UNKNOWN_80F4, 0x00000000],
         ],
     ))
 
@@ -1238,12 +1247,6 @@ add_gpus([
             [A6XXRegs.REG_A7XX_RB_UNKNOWN_8E79,   0x00000000],
             [A6XXRegs.REG_A7XX_RB_UNKNOWN_8899,   0x00000000],
             [A6XXRegs.REG_A7XX_RB_UNKNOWN_88F5,   0x00000000],
-
-            # Shading rate group
-            [A6XXRegs.REG_A6XX_RB_UNKNOWN_88F4,   0x00000000],
-            [A6XXRegs.REG_A7XX_HLSQ_UNKNOWN_A9AD, 0x00000000],
-            [A6XXRegs.REG_A7XX_GRAS_UNKNOWN_80F4, 0x00000000],
-            [A6XXRegs.REG_A7XX_GRAS_UNKNOWN_80F5, 0x00000000],
         ],
     ))
 
@@ -1349,11 +1352,7 @@ add_gpus([
             [A6XXRegs.REG_A7XX_RB_UNKNOWN_88F5,   0x00000000],
             [A6XXRegs.REG_A7XX_RB_UNKNOWN_8C34,   0x00000000],
 
-            # Shading rate group
-            [A6XXRegs.REG_A6XX_RB_UNKNOWN_88F4,   0x00000000],
-            [A6XXRegs.REG_A7XX_HLSQ_UNKNOWN_A9AD, 0x00000000],
             [A6XXRegs.REG_A7XX_GRAS_UNKNOWN_8008, 0x00000000],
-            [A6XXRegs.REG_A7XX_GRAS_UNKNOWN_80F4, 0x00000000],
 
             [0x930a, 0],
             [0x960a, 1],
