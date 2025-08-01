@@ -25,8 +25,7 @@
  *
  */
 
-#ifndef BRW_FS_LIVE_VARIABLES_H
-#define BRW_FS_LIVE_VARIABLES_H
+#pragma once
 
 #include "brw_ir_analysis.h"
 #include "brw_ir_fs.h"
@@ -112,6 +111,8 @@ public:
    int num_vgrfs;
    int bitset_words;
 
+   unsigned max_vgrf_size;
+
    /** @{
     * Final computed live ranges for each var (each component of each virtual
     * GRF).
@@ -144,5 +145,3 @@ protected:
 };
 
 } /* namespace brw */
-
-#endif /* BRW_FS_LIVE_VARIABLES_H */

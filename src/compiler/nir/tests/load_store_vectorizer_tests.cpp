@@ -71,7 +71,7 @@ protected:
 
    static bool mem_vectorize_callback(unsigned align_mul, unsigned align_offset,
                                       unsigned bit_size,
-                                      unsigned num_components, unsigned hole_size,
+                                      unsigned num_components, int64_t hole_size,
                                       nir_intrinsic_instr *low, nir_intrinsic_instr *high,
                                       void *data);
    static void shared_type_info(const struct glsl_type *type, unsigned *size, unsigned *align);
@@ -83,7 +83,7 @@ protected:
    std::map<unsigned, nir_def*> res_map;
    unsigned max_components = 4;
    bool overfetch = false;
-   unsigned max_hole_size = 0;
+   int64_t max_hole_size = 0;
 };
 
 std::string
@@ -340,13 +340,11 @@ bool nir_load_store_vectorize_test::test_alu_def(
 
 bool nir_load_store_vectorize_test::mem_vectorize_callback(
    unsigned align_mul, unsigned align_offset, unsigned bit_size,
-   unsigned num_components, unsigned hole_size,
+   unsigned num_components, int64_t hole_size,
    nir_intrinsic_instr *low, nir_intrinsic_instr *high,
    void *data)
 {
    nir_load_store_vectorize_test *test = (nir_load_store_vectorize_test *)data;
-
-   assert(hole_size <= 4);
 
    if (hole_size > test->max_hole_size ||
        (!test->overfetch && !nir_num_components_valid(num_components)))
@@ -755,6 +753,20 @@ TEST_F(nir_load_store_vectorize_test, ssbo_store_intersecting)
    ASSERT_EQ(nir_const_value_as_uint(cv[0], 32), 0x10);
    ASSERT_EQ(nir_const_value_as_uint(cv[1], 32), 0x20);
    ASSERT_EQ(nir_const_value_as_uint(cv[2], 32), 0x21);
+}
+
+TEST_F(nir_load_store_vectorize_test, gitlab_issue_12946)
+{
+   create_store(nir_var_mem_ssbo, 0, 0, 0x1, 32, 2, 0x3);
+   create_store(nir_var_mem_ssbo, 0, 3, 0x2, 32, 1, 0x1);
+
+   nir_validate_shader(b->shader, NULL);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_store_ssbo), 2);
+
+   /* The original issue was the crash when running the pass. */
+   EXPECT_TRUE(run_vectorizer(nir_var_mem_ssbo));
+
+   EXPECT_EQ(count_intrinsics(nir_intrinsic_store_ssbo), 2);
 }
 
 TEST_F(nir_load_store_vectorize_test, ssbo_store_identical)

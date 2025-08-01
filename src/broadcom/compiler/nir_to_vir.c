@@ -1469,6 +1469,8 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
                         uint32_t mask = bit_size == 16 ? 0xffff : 0xff;
                         result = vir_AND(c, src[0], vir_uniform_ui(c, mask));
                         result = sign_extend(c, result, bit_size, 32);
+                } else {
+                        result = src[0];
                 }
                 result = vir_ITOF(c, result);
                 vir_set_pack(c->defs[result.index], V3D_QPU_PACK_L);
@@ -1481,6 +1483,8 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
                 if (bit_size < 32) {
                         uint32_t mask = bit_size == 16 ? 0xffff : 0xff;
                         result = vir_AND(c, src[0], vir_uniform_ui(c, mask));
+                } else {
+                        result = src[0];
                 }
                 result = vir_UTOF(c, result);
                 vir_set_pack(c->defs[result.index], V3D_QPU_PACK_L);
@@ -2085,12 +2089,12 @@ static bool
 mem_vectorize_callback(unsigned align_mul, unsigned align_offset,
                        unsigned bit_size,
                        unsigned num_components,
-                       unsigned hole_size,
+                       int64_t hole_size,
                        nir_intrinsic_instr *low,
                        nir_intrinsic_instr *high,
                        void *data)
 {
-        if (hole_size || !nir_num_components_valid(num_components))
+        if (hole_size > 0 || !nir_num_components_valid(num_components))
                 return false;
 
         /* TMU general access only supports 32-bit vectors */
@@ -2768,7 +2772,7 @@ ntq_emit_load_input(struct v3d_compile *c, nir_intrinsic_instr *instr)
 {
         /* XXX: Use ldvpmv (uniform offset) or ldvpmd (non-uniform offset).
          *
-         * Right now the driver sets PIPE_SHADER_CAP_INDIRECT_INPUT_ADDR even
+         * Right now the driver sets support_indirect_inputs even
          * if we don't support non-uniform offsets because we also set the
          * lower_all_io_to_temps option in the NIR compiler. This ensures that
          * any indirect indexing on in/out variables is turned into indirect

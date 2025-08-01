@@ -823,7 +823,7 @@ vk_pipeline_precompile_shader(struct vk_device *device,
    const struct vk_device_shader_ops *ops = device->shader_ops;
    VkResult result;
 
-   struct vk_pipeline_robustness_state rs;
+   struct vk_pipeline_robustness_state rs = { 0 };
    vk_pipeline_robustness_state_fill(device, &rs,
                                      pipeline_info_pNext,
                                      info->pNext);
@@ -1188,7 +1188,7 @@ vk_graphics_pipeline_compile_shaders(struct vk_device *device,
       /* Don't try to re-compile any fast-link shaders */
       if (!(pipeline->base.flags &
             VK_PIPELINE_CREATE_2_LINK_TIME_OPTIMIZATION_BIT_EXT)) {
-         assert(partition[p + 1] == partition[p] + 1);
+         assert(ops->link_geom_stages || partition[p + 1] == partition[p] + 1);
          if (stages[partition[p]].shader != NULL)
             continue;
       }

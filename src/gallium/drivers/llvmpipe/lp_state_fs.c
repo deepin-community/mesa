@@ -1101,7 +1101,6 @@ generate_fs_loop(struct gallivm_state *gallivm,
    params.info = &shader->info.base;
    params.ssbo_ptr = ssbo_ptr;
    params.image = image;
-   params.aniso_filter_table = lp_jit_resources_aniso_filter_table(gallivm, resources_type, resources_ptr);
 
    /* Build the actual shader */
    lp_build_nir_soa(gallivm, nir, &params, outputs);
@@ -1154,6 +1153,7 @@ generate_fs_loop(struct gallivm_state *gallivm,
          if (!key->multisample) {
             lp_build_alpha_to_coverage(gallivm, type,
                                        &mask, alpha,
+                                       key->blend.alpha_to_coverage_dither,
                                        (depth_mode & LATE_DEPTH_TEST) != 0);
          } else {
             lp_build_sample_alpha_to_coverage(gallivm, type, key->coverage_samples, num_loop,

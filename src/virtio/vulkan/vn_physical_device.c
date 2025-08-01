@@ -492,6 +492,7 @@ vn_physical_device_init_properties(struct vn_physical_device *physical_dev)
       VkPhysicalDeviceTexelBufferAlignmentProperties texel_buffer_alignment;
 
       /* KHR */
+      VkPhysicalDeviceMaintenance5PropertiesKHR maintenance_5;
       VkPhysicalDevicePushDescriptorPropertiesKHR push_descriptor;
       VkPhysicalDeviceFragmentShadingRatePropertiesKHR fragment_shading_rate;
 
@@ -552,6 +553,7 @@ vn_physical_device_init_properties(struct vn_physical_device *physical_dev)
    }
 
    /* KHR */
+   VN_ADD_PNEXT_EXT(props2, MAINTENANCE_5_PROPERTIES_KHR, local_props.maintenance_5, exts->KHR_maintenance5);
    VN_ADD_PNEXT_EXT(props2, FRAGMENT_SHADING_RATE_PROPERTIES_KHR, local_props.fragment_shading_rate, exts->KHR_fragment_shading_rate);
    VN_ADD_PNEXT_EXT(props2, PUSH_DESCRIPTOR_PROPERTIES_KHR, local_props.push_descriptor, exts->KHR_push_descriptor);
 
@@ -614,6 +616,7 @@ vn_physical_device_init_properties(struct vn_physical_device *physical_dev)
 
    /* KHR */
    VN_SET_VK_PROPS_EXT(props, &local_props.fragment_shading_rate, exts->KHR_fragment_shading_rate);
+   VN_SET_VK_PROPS_EXT(props, &local_props.maintenance_5, exts->KHR_maintenance5);
    VN_SET_VK_PROPS_EXT(props, &local_props.push_descriptor, exts->KHR_push_descriptor);
 
    /* EXT */
@@ -978,6 +981,17 @@ vn_physical_device_get_passthrough_extensions(
    const struct vn_physical_device *physical_dev,
    struct vk_device_extension_table *exts)
 {
+#if DETECT_OS_ANDROID || defined(VN_USE_WSI_PLATFORM)
+   /* WSI support currently requires semaphore sync fd import for
+    * VK_KHR_synchronization2 for code simplicity. This requirement can be
+    * dropped by implementing external semaphore purely on the driver side
+    * (aka no corresponding renderer side object).
+    */
+   const bool can_sync2 = physical_dev->renderer_sync_fd.semaphore_importable;
+#else
+   static const bool can_sync2 = true;
+#endif
+
    *exts = (struct vk_device_extension_table){
       /* promoted to VK_VERSION_1_1 */
       .KHR_16bit_storage = true,
@@ -1033,11 +1047,7 @@ vn_physical_device_get_passthrough_extensions(
       .KHR_shader_integer_dot_product = true,
       .KHR_shader_non_semantic_info = true,
       .KHR_shader_terminate_invocation = true,
-      /* Our implementation requires semaphore sync fd import
-       * for VK_KHR_synchronization2.
-       */
-      .KHR_synchronization2 =
-         physical_dev->renderer_sync_fd.semaphore_importable,
+      .KHR_synchronization2 = can_sync2,
       .KHR_zero_initialize_workgroup_memory = true,
       .EXT_4444_formats = true,
       .EXT_extended_dynamic_state = true,
@@ -1500,6 +1510,10 @@ enumerate_physical_devices(struct vn_instance *instance,
    struct vn_physical_device *physical_devs = NULL;
    VkResult result;
 
+   if (!instance->renderer) {
+       *out_count = 0;
+       return VK_SUCCESS;
+   }
    uint32_t count = 0;
    result = vn_call_vkEnumeratePhysicalDevices(
       ring, vn_instance_to_handle(instance), &count, NULL);
@@ -2106,6 +2120,9 @@ vn_image_get_image_format_key(
             _mesa_sha1_update(&sha1_ctx, &src->sType,
                               sizeof(VkStructureType));
             break;
+         case VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_USAGE_ANDROID:
+            /* no need to update cache key since handled outside the cache */
+            break;
          default:
             physical_dev->image_format_cache.debug.cache_skip_count++;
             return false;
@@ -2181,6 +2198,9 @@ vn_image_init_format_from_cache(
                      .combinedImageSamplerDescriptorCount;
                break;
             }
+            case VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_USAGE_ANDROID:
+               /* no-op here since handled outside the cache */
+               break;
             default:
                unreachable("unexpected format props pNext");
             }
@@ -2255,6 +2275,9 @@ vn_image_store_format_in_cache(
                *((struct VkSamplerYcbcrConversionImageFormatProperties *)src);
             break;
          }
+         case VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_USAGE_ANDROID:
+            /* no-op here since handled outside the cache */
+            break;
          default:
             unreachable("unexpected format props pNext");
          }

@@ -1876,6 +1876,12 @@ texture_formats_agree(GLenum internalFormat,
    if (_mesa_is_ycbcr_format(internalFormat) != _mesa_is_ycbcr_format(format))
       return false;
 
+   if ((_mesa_is_depth_format(internalFormat) ||
+        _mesa_is_stencil_format(internalFormat)) &&
+       _mesa_is_color_format(format)) {
+      return false;
+   }
+
    return true;
 }
 
@@ -3074,9 +3080,12 @@ lookup_texture_ext_dsa(struct gl_context *ctx, GLenum target, GLuint texture,
       texObj = ctx->Shared->DefaultTex[targetIndex];
       assert(texObj);
    } else {
-      texObj = _mesa_lookup_texture(ctx, texture);
+      _mesa_HashLockMutex(&ctx->Shared->TexObjects);
+
+      texObj = _mesa_lookup_texture_locked(ctx, texture);
       if (!texObj && _mesa_is_desktop_gl_core(ctx)) {
          _mesa_error(ctx, GL_INVALID_OPERATION, "%s(non-gen name)", caller);
+         _mesa_HashUnlockMutex(&ctx->Shared->TexObjects);
          return NULL;
       }
 
@@ -3084,12 +3093,14 @@ lookup_texture_ext_dsa(struct gl_context *ctx, GLenum target, GLuint texture,
          texObj = _mesa_new_texture_object(ctx, texture, boundTarget);
          if (!texObj) {
             _mesa_error(ctx, GL_OUT_OF_MEMORY, "%s", caller);
+            _mesa_HashUnlockMutex(&ctx->Shared->TexObjects);
             return NULL;
          }
 
          /* insert into hash table */
-         _mesa_HashInsert(&ctx->Shared->TexObjects, texObj->Name, texObj);
+         _mesa_HashInsertLocked(&ctx->Shared->TexObjects, texObj->Name, texObj);
       }
+      _mesa_HashUnlockMutex(&ctx->Shared->TexObjects);
 
       if (texObj->Target != boundTarget) {
          _mesa_error(ctx, GL_INVALID_OPERATION, "%s(%s != %s)",
@@ -5250,9 +5261,23 @@ check_clear_tex_image(struct gl_context *ctx,
       return false;
    }
 
-   if (_mesa_is_compressed_format(ctx, internalFormat)) {
+   if (_mesa_is_compressed_format(ctx, internalFormat) ||
+       _mesa_is_generic_compressed_format(ctx, internalFormat)) {
       _mesa_error(ctx, GL_INVALID_OPERATION,
                   "%s(compressed texture)", function);
+      return false;
+   }
+
+   /* This is a special case where we might throw GL_INVALID_ENUM
+    * below but should do GL_INVALID_OPERATION with glClearTexImage.
+    */
+   if (_mesa_is_color_format(internalFormat) &&
+       _mesa_is_depthstencil_format(format)) {
+      _mesa_error(ctx, GL_INVALID_OPERATION,
+                  "%s(incompatible internalFormat = %s, format = %s)",
+                  function,
+                  _mesa_enum_to_string(internalFormat),
+                  _mesa_enum_to_string(format));
       return false;
    }
 
@@ -5403,12 +5428,19 @@ _mesa_ClearTexSubImage(GLuint texture, GLint level,
       maxDepth = numImages;
    }
 
+   /* Nothing to clear, skip. */
+   if (width == 0 || height == 0 || depth == 0)
+      goto out;
+
+   if (width < 0 || height < 0 || depth < 0) {
+      _mesa_error(ctx, GL_INVALID_VALUE,
+                  "glClearSubTexImage(invalid dimensions)");
+      goto out;
+   }
+
    if (xoffset < -(GLint) texImages[0]->Border ||
        yoffset < -(GLint) texImages[0]->Border ||
        zoffset < minDepth ||
-       width < 0 ||
-       height < 0 ||
-       depth < 0 ||
        xoffset + width > texImages[0]->Width ||
        yoffset + height > texImages[0]->Height ||
        zoffset + depth > maxDepth) {

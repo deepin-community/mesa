@@ -167,7 +167,7 @@ vn_instance_init_renderer(struct vn_instance *instance)
          vn_log(instance, "wire format version %d != %d",
                 renderer_info->wire_format_version, version);
       }
-      return VK_ERROR_INITIALIZATION_FAILED;
+      goto out_renderer_destroy;
    }
 
    version = vn_info_vk_xml_version();
@@ -183,7 +183,7 @@ vn_instance_init_renderer(struct vn_instance *instance)
                 VK_VERSION_MINOR(VN_MIN_RENDERER_VERSION),
                 VK_VERSION_PATCH(VN_MIN_RENDERER_VERSION));
       }
-      return VK_ERROR_INITIALIZATION_FAILED;
+      goto out_renderer_destroy;
    }
 
    uint32_t spec_version =
@@ -212,6 +212,12 @@ vn_instance_init_renderer(struct vn_instance *instance)
    }
 
    return VK_SUCCESS;
+
+out_renderer_destroy:
+   vn_renderer_destroy(instance->renderer, alloc);
+   /* needed by stub instance creation */
+   instance->renderer = NULL;
+   return VK_ERROR_INITIALIZATION_FAILED;
 }
 
 /* instance commands */
@@ -276,6 +282,7 @@ vn_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
       return vn_error(NULL, result);
    }
 
+   VkInstance instance_handle = vn_instance_to_handle(instance);
    /* ring_idx = 0 reserved for CPU timeline */
    instance->ring_idx_used_mask = 0x1;
 
@@ -294,6 +301,11 @@ vn_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
    }
 
    result = vn_instance_init_renderer(instance);
+   if (result == VK_ERROR_INITIALIZATION_FAILED) {
+      assert(!instance->renderer);
+      *pInstance = instance_handle;
+      return VK_SUCCESS;
+   }
    if (result != VK_SUCCESS)
       goto out_mtx_destroy;
 
@@ -333,7 +345,6 @@ vn_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
       local_create_info.pApplicationInfo = &local_app_info;
    }
 
-   VkInstance instance_handle = vn_instance_to_handle(instance);
    result = vn_call_vkCreateInstance(instance->ring.ring, pCreateInfo, NULL,
                                      &instance_handle);
    if (result != VK_SUCCESS)
@@ -392,11 +403,13 @@ vn_DestroyInstance(VkInstance _instance,
 {
    VN_TRACE_FUNC();
    struct vn_instance *instance = vn_instance_from_handle(_instance);
-   const VkAllocationCallbacks *alloc =
-      pAllocator ? pAllocator : &instance->base.base.alloc;
+   const VkAllocationCallbacks *alloc = pAllocator;
 
    if (!instance)
       return;
+
+   if (!alloc)
+      alloc = &instance->base.base.alloc;
 
    if (instance->physical_device.initialized) {
       for (uint32_t i = 0; i < instance->physical_device.device_count; i++)
@@ -407,16 +420,18 @@ vn_DestroyInstance(VkInstance _instance,
    mtx_destroy(&instance->physical_device.mutex);
    mtx_destroy(&instance->ring_idx_mutex);
 
-   vn_call_vkDestroyInstance(instance->ring.ring, _instance, NULL);
+   if (instance->renderer) {
+      vn_call_vkDestroyInstance(instance->ring.ring, _instance, NULL);
 
-   vn_instance_fini_ring(instance);
+      vn_instance_fini_ring(instance);
 
-   vn_renderer_shmem_pool_fini(instance->renderer,
-                               &instance->reply_shmem_pool);
+      vn_renderer_shmem_pool_fini(instance->renderer,
+                                  &instance->reply_shmem_pool);
 
-   vn_renderer_shmem_pool_fini(instance->renderer, &instance->cs_shmem_pool);
+      vn_renderer_shmem_pool_fini(instance->renderer, &instance->cs_shmem_pool);
 
-   vn_renderer_destroy(instance->renderer, alloc);
+      vn_renderer_destroy(instance->renderer, alloc);
+   }
 
    driDestroyOptionCache(&instance->dri_options);
    driDestroyOptionInfo(&instance->available_dri_options);

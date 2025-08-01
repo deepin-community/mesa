@@ -248,6 +248,19 @@ _mesa_target_allows_setting_sampler_parameters(GLenum target)
    }
 }
 
+static bool
+is_valid_texture_tiling(struct gl_context *ctx, GLenum tiling)
+{
+   switch (tiling) {
+   case GL_OPTIMAL_TILING_EXT:
+   case GL_LINEAR_TILING_EXT:
+      return true;
+   case GL_CONST_BW_TILING_MESA:
+      return _mesa_has_MESA_texture_const_bandwidth(ctx);
+   default:
+      return false;
+   }
+}
 
 /**
  * Set an integer-valued texture parameter
@@ -655,9 +668,11 @@ set_tex_parameteri(struct gl_context *ctx,
       goto invalid_pname;
 
    case GL_TEXTURE_TILING_EXT:
-      if (ctx->Extensions.EXT_memory_object && !texObj->Immutable) {
-            texObj->TextureTiling = params[0];
+      if (_mesa_has_EXT_memory_object(ctx) && !texObj->Immutable) {
+         if (!is_valid_texture_tiling(ctx, params[0]))
+            goto invalid_param;
 
+         texObj->TextureTiling = params[0];
          return GL_TRUE;
       }
       goto invalid_pname;
@@ -875,7 +890,13 @@ set_tex_parameterf(struct gl_context *ctx,
       return GL_TRUE;
 
    case GL_TEXTURE_TILING_EXT:
-      if (ctx->Extensions.EXT_memory_object) {
+      if (_mesa_has_EXT_memory_object(ctx)) {
+         if (!is_valid_texture_tiling(ctx, (GLenum)params[0])) {
+            _mesa_error(ctx, GL_INVALID_VALUE, "glTex%sParameter(param)",
+                        suffix);
+            return GL_FALSE;
+         }
+
          texObj->TextureTiling = params[0];
          return GL_TRUE;
       }
@@ -1956,8 +1977,15 @@ get_tex_level_parameter_buffer(struct gl_context *ctx,
          *params = bo->Name;
          break;
       case GL_TEXTURE_WIDTH:
-         *params = ((texObj->BufferSize == -1) ? bo->Size : texObj->BufferSize)
-            / bytes;
+         /* From OpenGL 4.6 spec "8.9 Buffer Textures":
+          *
+          *    "The number of texels in the texture image is then clamped to an
+          *     implementation-dependent limit, the value of
+          *     MAX_TEXTURE_BUFFER_SIZE."
+          */
+         *params = CLAMP(((texObj->BufferSize == -1) ?
+                           bo->Size : texObj->BufferSize) / bytes,
+                         0, ctx->Const.MaxTextureBufferSize);
          break;
       case GL_TEXTURE_HEIGHT:
       case GL_TEXTURE_DEPTH:
@@ -2503,7 +2531,7 @@ get_tex_parameterfv(struct gl_context *ctx,
          break;
 
       case GL_TEXTURE_TILING_EXT:
-         if (!ctx->Extensions.EXT_memory_object)
+         if (!_mesa_has_EXT_memory_object(ctx))
             goto invalid_pname;
          *params = ENUM_TO_FLOAT(obj->TextureTiling);
          break;
@@ -2715,7 +2743,7 @@ get_tex_parameteriv(struct gl_context *ctx,
          break;
 
       case GL_TEXTURE_CUBE_MAP_SEAMLESS:
-         if (_mesa_has_AMD_seamless_cubemap_per_texture(ctx))
+         if (!_mesa_has_AMD_seamless_cubemap_per_texture(ctx))
             goto invalid_pname;
          *params = (GLint) obj->Sampler.Attrib.CubeMapSeamless;
          break;
@@ -2788,7 +2816,7 @@ get_tex_parameteriv(struct gl_context *ctx,
          break;
 
       case GL_TEXTURE_TILING_EXT:
-         if (!ctx->Extensions.EXT_memory_object)
+         if (!_mesa_has_EXT_memory_object(ctx))
             goto invalid_pname;
          *params = (GLint) obj->TextureTiling;
          break;

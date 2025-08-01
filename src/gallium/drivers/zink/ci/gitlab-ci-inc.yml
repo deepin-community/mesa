@@ -167,6 +167,8 @@
     CROSVM_GALLIUM_DRIVER: "llvmpipe"
     CROSVM_VK_DRIVER: "lvp"
     CROSVM_GPU_ARGS: "vulkan=true,gles=false,backend=virglrenderer,egl=true,surfaceless=true,fixed-blob-mapping=false"
+  tags:
+    - kvm
 
 .zink-anv-adl-test:
   extends:
@@ -188,9 +190,24 @@
     VK_DRIVER: intel
     GPU_VERSION: zink-anv-tgl
 
+.zink-anv-tgl-trace-test:
+  extends:
+    - .lava-piglit-traces:x86_64
+    - .lava-acer-cp514-2h-1130g7-volteer:x86_64
+    - .anv-test
+    - .zink-anv-rules
+    - .zink-trace-test
+    # Add .lava-traces-base again to override .anv-test setting the
+    # HWCI_TEST_SCRIPT, but .lava-piglit-traces having to come first to get
+    # dependencies right.
+    - .lava-traces-base
+  variables:
+    VK_DRIVER: intel
+    GPU_VERSION: zink-anv-tgl
+
 .zink-nvk-test-valve:
   extends:
-    - .b2c-x86_64-test-gl
+    - .b2c-x86_64-test-gl-manual
     - .nvk-vkcts
     - .zink-test
   variables:

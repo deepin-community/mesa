@@ -46,19 +46,6 @@ radv_descriptor_type_buffer_count(VkDescriptorType type)
    }
 }
 
-static bool
-has_equal_immutable_samplers(const VkSampler *samplers, uint32_t count)
-{
-   if (!samplers)
-      return false;
-   for (uint32_t i = 1; i < count; ++i) {
-      if (memcmp(radv_sampler_from_handle(samplers[0])->state, radv_sampler_from_handle(samplers[i])->state, 16)) {
-         return false;
-      }
-   }
-   return true;
-}
-
 static uint32_t
 radv_descriptor_alignment(VkDescriptorType type)
 {
@@ -245,7 +232,7 @@ radv_CreateDescriptorSetLayout(VkDevice _device, const VkDescriptorSetLayoutCrea
          switch (binding->descriptorType) {
          case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
          case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
-            assert(!(pCreateInfo->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR));
+            assert(!(pCreateInfo->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT));
             set_layout->binding[b].dynamic_offset_count = 1;
             set_layout->dynamic_shader_stages |= binding->stageFlags;
             if (binding->stageFlags & RADV_RT_STAGE_BITS)
@@ -317,26 +304,9 @@ radv_CreateDescriptorSetLayout(VkDevice _device, const VkDescriptorSetLayoutCrea
             set_layout->binding[b].immutable_samplers_offset = samplers_offset;
             set_layout->has_immutable_samplers = true;
 
-            /* Do not optimize space for descriptor buffers and embedded samplers, otherwise the set
-             * layout size/offset are incorrect.
-             */
-            if (!(pCreateInfo->flags & (VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT |
-                                        VK_DESCRIPTOR_SET_LAYOUT_CREATE_EMBEDDED_IMMUTABLE_SAMPLERS_BIT_EXT))) {
-               set_layout->binding[b].immutable_samplers_equal =
-                  has_equal_immutable_samplers(binding->pImmutableSamplers, binding->descriptorCount);
-            }
-
             for (uint32_t i = 0; i < binding->descriptorCount; i++)
                memcpy(samplers + 4 * i, &radv_sampler_from_handle(binding->pImmutableSamplers[i])->state, 16);
 
-            /* Don't reserve space for the samplers if they're not accessed. */
-            if (set_layout->binding[b].immutable_samplers_equal) {
-               if (binding->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &&
-                   max_sampled_image_descriptors <= 2)
-                  set_layout->binding[b].size -= 32;
-               else if (binding->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER)
-                  set_layout->binding[b].size -= 16;
-            }
             samplers += 4 * binding->descriptorCount;
             samplers_offset += 4 * sizeof(uint32_t) * binding->descriptorCount;
 
@@ -437,16 +407,10 @@ radv_GetDescriptorSetLayoutSupport(VkDevice device, const VkDescriptorSetLayoutC
             descriptor_size = 64;
             break;
          case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
-            if (!has_equal_immutable_samplers(binding->pImmutableSamplers, descriptor_count)) {
-               descriptor_size = 64;
-            } else {
-               descriptor_size = 96;
-            }
+            descriptor_size = 96;
             break;
          case VK_DESCRIPTOR_TYPE_SAMPLER:
-            if (!has_equal_immutable_samplers(binding->pImmutableSamplers, descriptor_count)) {
-               descriptor_size = 16;
-            }
+            descriptor_size = 16;
             break;
          case VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK:
             descriptor_size = descriptor_count;
@@ -712,7 +676,7 @@ radv_descriptor_set_create(struct radv_device *device, struct radv_descriptor_po
 
    if (layout->has_immutable_samplers) {
       for (unsigned i = 0; i < layout->binding_count; ++i) {
-         if (!layout->binding[i].immutable_samplers_offset || layout->binding[i].immutable_samplers_equal)
+         if (!layout->binding[i].immutable_samplers_offset)
             continue;
 
          unsigned offset = layout->binding[i].offset / 4;
@@ -1007,7 +971,7 @@ radv_AllocateDescriptorSets(VkDevice _device, const VkDescriptorSetAllocateInfo 
             variable_count = &zero;
       }
 
-      assert(!(layout->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR));
+      assert(!(layout->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT));
 
       result = radv_descriptor_set_create(device, pool, layout, variable_count, &set);
       if (result != VK_SUCCESS)
@@ -1276,8 +1240,7 @@ radv_update_descriptor_sets_impl(struct radv_device *device, struct radv_cmd_buf
        * allocated, so if we are writing push descriptors we have to copy the
        * immutable samplers into them now.
        */
-      const bool copy_immutable_samplers =
-         cmd_buffer && binding_layout->immutable_samplers_offset && !binding_layout->immutable_samplers_equal;
+      const bool copy_immutable_samplers = cmd_buffer && binding_layout->immutable_samplers_offset;
       const uint32_t *samplers = radv_immutable_samplers(set->header.layout, binding_layout);
       const VkWriteDescriptorSetAccelerationStructureKHR *accel_structs = NULL;
 
@@ -1299,7 +1262,7 @@ radv_update_descriptor_sets_impl(struct radv_device *device, struct radv_cmd_buf
          case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC: {
             unsigned idx = writeset->dstArrayElement + j;
             idx += binding_layout->dynamic_offset_offset;
-            assert(!(set->header.layout->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR));
+            assert(!(set->header.layout->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT));
             write_dynamic_buffer_descriptor(device, set->header.dynamic_descriptors + idx, buffer_list,
                                             writeset->pBufferInfo + j);
             break;
@@ -1393,9 +1356,7 @@ radv_update_descriptor_sets_impl(struct radv_device *device, struct radv_cmd_buf
       size_t copy_size = MIN2(src_binding_layout->size, dst_binding_layout->size);
 
       for (j = 0; j < copyset->descriptorCount; ++j) {
-         switch (src_binding_layout->type) {
-         case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
-         case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC: {
+         if (vk_descriptor_type_is_dynamic(src_binding_layout->type)) {
             unsigned src_idx = copyset->srcArrayElement + j;
             unsigned dst_idx = copyset->dstArrayElement + j;
             struct radv_descriptor_range *src_range, *dst_range;
@@ -1405,11 +1366,9 @@ radv_update_descriptor_sets_impl(struct radv_device *device, struct radv_cmd_buf
             src_range = src_set->header.dynamic_descriptors + src_idx;
             dst_range = dst_set->header.dynamic_descriptors + dst_idx;
             *dst_range = *src_range;
-            break;
-         }
-         default:
+         } else
             memcpy(dst_ptr, src_ptr, copy_size);
-         }
+
          src_ptr += src_binding_layout->size / 4;
          dst_ptr += dst_binding_layout->size / 4;
 
@@ -1497,20 +1456,17 @@ radv_CreateDescriptorUpdateTemplate(VkDevice _device, const VkDescriptorUpdateTe
 
       /* dst_offset is an offset into dynamic_descriptors when the descriptor
          is dynamic, and an offset into mapped_ptr otherwise */
-      switch (entry->descriptorType) {
-      case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
-      case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+      if (vk_descriptor_type_is_dynamic(entry->descriptorType)) {
          assert(pCreateInfo->templateType == VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET);
          dst_offset = binding_layout->dynamic_offset_offset + entry->dstArrayElement;
          dst_stride = 0; /* Not used */
-         break;
-      default:
+      } else {
          switch (entry->descriptorType) {
          case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
          case VK_DESCRIPTOR_TYPE_SAMPLER:
             /* Immutable samplers are copied into push descriptors when they are pushed */
             if (pCreateInfo->templateType == VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_PUSH_DESCRIPTORS_KHR &&
-                binding_layout->immutable_samplers_offset && !binding_layout->immutable_samplers_equal) {
+                binding_layout->immutable_samplers_offset) {
                immutable_samplers = radv_immutable_samplers(set_layout, binding_layout) + entry->dstArrayElement * 4;
             }
             break;
@@ -1524,7 +1480,6 @@ radv_CreateDescriptorUpdateTemplate(VkDevice _device, const VkDescriptorUpdateTe
             dst_offset += binding_layout->size * entry->dstArrayElement / 4;
 
          dst_stride = binding_layout->size / 4;
-         break;
       }
 
       templ->entry[i] = (struct radv_descriptor_update_template_entry){
@@ -1582,7 +1537,7 @@ radv_update_descriptor_set_with_template_impl(struct radv_device *device, struct
          case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
          case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC: {
             const unsigned idx = templ->entry[i].dst_offset + j;
-            assert(!(set->header.layout->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR));
+            assert(!(set->header.layout->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT));
             write_dynamic_buffer_descriptor(device, set->header.dynamic_descriptors + idx, buffer_list,
                                             (struct VkDescriptorBufferInfo *)pSrc);
             break;
@@ -1653,27 +1608,6 @@ radv_UpdateDescriptorSetWithTemplate(VkDevice _device, VkDescriptorSet descripto
    VK_FROM_HANDLE(radv_descriptor_set, set, descriptorSet);
 
    radv_update_descriptor_set_with_template_impl(device, NULL, set, descriptorUpdateTemplate, pData);
-}
-
-VKAPI_ATTR void VKAPI_CALL
-radv_GetDescriptorSetLayoutHostMappingInfoVALVE(VkDevice _device,
-                                                const VkDescriptorSetBindingReferenceVALVE *pBindingReference,
-                                                VkDescriptorSetLayoutHostMappingInfoVALVE *pHostMapping)
-{
-   struct radv_descriptor_set_layout *set_layout =
-      radv_descriptor_set_layout_from_handle(pBindingReference->descriptorSetLayout);
-
-   const struct radv_descriptor_set_binding_layout *binding_layout = set_layout->binding + pBindingReference->binding;
-
-   pHostMapping->descriptorOffset = binding_layout->offset;
-   pHostMapping->descriptorSize = binding_layout->size;
-}
-
-VKAPI_ATTR void VKAPI_CALL
-radv_GetDescriptorSetHostMappingVALVE(VkDevice _device, VkDescriptorSet descriptorSet, void **ppData)
-{
-   VK_FROM_HANDLE(radv_descriptor_set, set, descriptorSet);
-   *ppData = set->header.mapped_ptr;
 }
 
 /* VK_EXT_descriptor_buffer */

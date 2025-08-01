@@ -240,6 +240,10 @@ wsi_x11_connection_create(struct wsi_device *wsi_dev,
    bool has_dri3_v1_4 = false;
    bool has_present_v1_4 = false;
 
+   /* wsi_x11_get_connection may be called from a thread, but we will never end up here on a worker thread,
+    * since the connection will always be in the hash-map,
+    * so we will not violate Vulkan's rule on allocation callbacks w.r.t.
+    * when it is allowed to call the allocation callbacks. */
    struct wsi_x11_connection *wsi_conn =
       vk_alloc(&wsi_dev->instance_alloc, sizeof(*wsi_conn), 8,
                 VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
@@ -1805,8 +1809,9 @@ x11_queue_present(struct wsi_swapchain *anv_chain,
    if (status < 0)
       return status;
 
-   if (damage && damage->pRectangles && damage->rectangleCount > 0 &&
-      damage->rectangleCount <= MAX_DAMAGE_RECTS) {
+   if (chain->images[image_index].update_region != None &&
+       damage && damage->pRectangles && damage->rectangleCount > 0 &&
+       damage->rectangleCount <= MAX_DAMAGE_RECTS) {
       xcb_rectangle_t *rects = chain->images[image_index].rects;
 
       update_area = chain->images[image_index].update_region;
@@ -2068,6 +2073,7 @@ x11_image_init(VkDevice device_h, struct x11_swapchain *chain,
    if (result != VK_SUCCESS)
       return result;
 
+   image->update_region = None;
    if (chain->base.wsi->sw && !chain->has_mit_shm)
       return VK_SUCCESS;
 
@@ -2370,10 +2376,17 @@ wsi_x11_swapchain_query_dri3_modifiers_changed(struct x11_swapchain *chain)
       .explicit_sync = chain->base.image_info.explicit_sync,
    };
 
+   /* This is called from a thread, so we must not use an allocation callback from user.
+    * From spec:
+    * An implementation must only make calls into an application-provided allocator
+    * during the execution of an API command.
+    * An implementation must only make calls into an application-provided allocator
+    * from the same thread that called the provoking API command. */
+
    wsi_x11_get_dri3_modifiers(wsi_conn, chain->conn, chain->window, bit_depth, 32,
                               modifiers, num_modifiers,
                               &drm_image_params.num_modifier_lists,
-                              &wsi_device->instance_alloc);
+                              vk_default_allocator());
 
    drm_image_params.num_modifiers = num_modifiers;
    drm_image_params.modifiers = (const uint64_t **)modifiers;
@@ -2382,7 +2395,7 @@ wsi_x11_swapchain_query_dri3_modifiers_changed(struct x11_swapchain *chain)
    wsi_x11_recompute_dri3_modifier_hash(&hash, &drm_image_params);
 
    for (int i = 0; i < ARRAY_SIZE(modifiers); i++)
-      vk_free(&wsi_device->instance_alloc, modifiers[i]);
+      vk_free(vk_default_allocator(), modifiers[i]);
 
    return memcmp(hash, chain->dri3_modifier_hash, sizeof(hash)) != 0;
 }
