@@ -21,8 +21,7 @@
  * IN THE SOFTWARE.
  */
 
-#ifndef BRW_NIR_H
-#define BRW_NIR_H
+#pragma once
 
 #include "brw_reg.h"
 #include "compiler/nir/nir.h"
@@ -151,6 +150,13 @@ brw_nir_fs_needs_null_rt(const struct intel_device_info *devinfo,
    if (devinfo->ver < 11)
       return true;
 
+   /* Depth/Stencil needs a valid render target even if there is no color
+    * output.
+    */
+   if (nir->info.outputs_written & (BITFIELD_BIT(FRAG_RESULT_DEPTH) |
+                                    BITFIELD_BIT(FRAG_RESULT_STENCIL)))
+      return true;
+
    uint64_t relevant_outputs = 0;
    if (multisample_fbo)
       relevant_outputs |= BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK);
@@ -201,6 +207,8 @@ bool brw_nir_lower_mem_access_bit_sizes(nir_shader *shader,
                                         const struct
                                         intel_device_info *devinfo);
 
+bool brw_nir_lower_simd(nir_shader *nir, unsigned dispatch_width);
+
 void brw_postprocess_nir(nir_shader *nir,
                          const struct brw_compiler *compiler,
                          bool debug_enabled,
@@ -233,7 +241,7 @@ enum brw_reg_type brw_type_for_nir_type(const struct intel_device_info *devinfo,
 bool brw_nir_should_vectorize_mem(unsigned align_mul, unsigned align_offset,
                                   unsigned bit_size,
                                   unsigned num_components,
-                                  unsigned hole_size,
+                                  int64_t hole_size,
                                   nir_intrinsic_instr *low,
                                   nir_intrinsic_instr *high,
                                   void *data);
@@ -292,8 +300,9 @@ brw_nir_no_indirect_mask(const struct brw_compiler *compiler,
 
 bool brw_nir_uses_inline_data(nir_shader *shader);
 
+nir_shader *
+brw_nir_from_spirv(void *mem_ctx, const uint32_t *spirv, size_t spirv_size);
+
 #ifdef __cplusplus
 }
 #endif
-
-#endif /* BRW_NIR_H */

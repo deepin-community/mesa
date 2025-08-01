@@ -204,7 +204,11 @@ anv_nir_lower_multiview(nir_shader *shader, uint32_t view_mask,
     * implement multiview.
     */
    if (use_primitive_replication) {
-      bool progress = nir_lower_multiview(shader, view_mask);
+      nir_lower_multiview_options options = {
+         .view_mask = view_mask,
+         .allowed_per_view_outputs = VARYING_BIT_POS
+      };
+      bool progress = nir_lower_multiview(shader, options);
 
       if (progress) {
          nir_builder b = nir_builder_at(nir_before_impl(entrypoint));
@@ -327,17 +331,21 @@ anv_check_for_primitive_replication(struct anv_device *device,
    /* TODO: We should be able to support replication at 'geometry' stages
     * later than Vertex.  In that case only the last stage can refer to
     * gl_ViewIndex.
+    *
+    * If we have only vertex or only fragment (pipeline libraries), we also do
+    * not support primitive replication, because that would make use compute
+    * inconsistent VUE layout in each stage.
     */
-   if (stages & ~(VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT))
-      return false;
-
-   /* It's possible we have no vertex shader yet (with pipeline libraries) */
-   if (!(stages & VK_SHADER_STAGE_VERTEX_BIT))
+   if (stages != (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT))
       return false;
 
    int view_count = util_bitcount(view_mask);
    if (view_count == 1 || view_count > primitive_replication_max_views)
       return false;
 
-   return nir_can_lower_multiview(shaders[MESA_SHADER_VERTEX]);
+   nir_lower_multiview_options options = {
+      .view_mask = view_mask,
+      .allowed_per_view_outputs = VARYING_BIT_POS
+   };
+   return nir_can_lower_multiview(shaders[MESA_SHADER_VERTEX], options);
 }

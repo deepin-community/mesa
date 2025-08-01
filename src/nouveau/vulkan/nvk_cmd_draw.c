@@ -530,6 +530,7 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
       P_MTHD(p, NV9097, SET_VAB_MEMORY_AREA_A);
       P_NV9097_SET_VAB_MEMORY_AREA_A(p, vab_addr >> 32);
       P_NV9097_SET_VAB_MEMORY_AREA_B(p, vab_addr);
+      assert(dev->vab_memory->va->size_B == 256 * 1024);
       P_NV9097_SET_VAB_MEMORY_AREA_C(p, SIZE_BYTES_256K);
    }
 
@@ -825,10 +826,21 @@ nvk_cmd_set_sample_layout(struct nvk_cmd_buffer *cmd,
       P_INLINE_DATA(p, 0x003a003a);
       P_INLINE_DATA(p, 0x00c500c5);
       P_MTHD(p, NV9097, SET_MME_SHADOW_SCRATCH(NVK_MME_SCRATCH_SAMPLE_MASKS_4PASS_0));
-      P_INLINE_DATA(p, 0x00120081);
-      P_INLINE_DATA(p, 0x00280044);
-      P_INLINE_DATA(p, 0x00280012);
-      P_INLINE_DATA(p, 0x00810044);
+      if (nvk_cmd_buffer_3d_cls(cmd) >= MAXWELL_B) {
+         P_INLINE_DATA(p, 0x00120081);
+         P_INLINE_DATA(p, 0x00280044);
+         P_INLINE_DATA(p, 0x00280012);
+         P_INLINE_DATA(p, 0x00810044);
+      } else {
+         /* The samples map funny on Maxwell A and earlier.  We're not even
+          * guaranteed that pixld.my_index is any of the samples in the mask
+          * so just go with what we see the hardware kicking out.
+          */
+         P_INLINE_DATA(p, 0x00000012);
+         P_INLINE_DATA(p, 0x00280044);
+         P_INLINE_DATA(p, 0x00000000);
+         P_INLINE_DATA(p, 0x00810000);
+      }
       break;
 
    default:
@@ -849,7 +861,7 @@ nvk_GetRenderingAreaGranularityKHR(
 }
 
 static bool
-nvk_rendering_all_linear(const struct nvk_rendering_state *render)
+nvk_rendering_linear(const struct nvk_rendering_state *render)
 {
    /* Depth and stencil are never linear */
    if (render->depth_att.iview || render->stencil_att.iview)
@@ -862,10 +874,18 @@ nvk_rendering_all_linear(const struct nvk_rendering_state *render)
 
       const struct nvk_image *image = (struct nvk_image *)iview->vk.image;
       const uint8_t ip = iview->planes[0].image_plane;
+      const struct nvk_image_plane *plane = &image->planes[ip];
       const struct nil_image_level *level =
-         &image->planes[ip].nil.levels[iview->vk.base_mip_level];
+         &plane->nil.levels[iview->vk.base_mip_level];
 
       if (level->tiling.gob_type != NIL_GOB_TYPE_LINEAR)
+         return false;
+
+      /* We can't render to a linear image unless the address and row stride
+       * are multiples of 128B.  Fall back to tiled shadows in this case.
+       */
+      uint64_t addr = nvk_image_plane_base_address(plane) + level->offset_B;
+      if (addr % 128 != 0 || level->row_stride_B % 128 != 0)
          return false;
    }
 
@@ -914,7 +934,7 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       };
    }
 
-   render->all_linear = nvk_rendering_all_linear(render);
+   render->linear = nvk_rendering_linear(render);
 
    const VkRenderingAttachmentLocationInfoKHR ral_info = {
       .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_LOCATION_INFO_KHR,
@@ -959,7 +979,7 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
          const uint8_t ip = iview->planes[0].image_plane;
          const struct nvk_image_plane *plane = &image->planes[ip];
 
-         if (!render->all_linear &&
+         if (!render->linear &&
              plane->nil.levels[0].tiling.gob_type == NIL_GOB_TYPE_LINEAR)
             plane = &image->linear_tiled_shadow;
 
@@ -1028,7 +1048,12 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
             /* NVIDIA doesn't support linear array images */
             assert(iview->vk.base_array_layer == 0 && layer_count == 1);
 
+            /* The render hardware gets grumpy if things aren't 128B-aligned.
+             */
             uint32_t pitch = level->row_stride_B;
+            assert(addr % 128 == 0);
+            assert(pitch % 128 == 0);
+
             const enum pipe_format p_format =
                nvk_format_to_pipe_format(iview->vk.format);
             /* When memory layout is set to LAYOUT_PITCH, the WIDTH field
@@ -1153,7 +1178,9 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       P_IMMD(p, NV9097, SET_ZT_SELECT, 0 /* target_count */);
    }
 
-   if (render->fsr_att.iview) {
+   if (nvk_cmd_buffer_3d_cls(cmd) < TURING_A) {
+      assert(render->fsr_att.iview == NULL);
+   } else if (render->fsr_att.iview != NULL) {
       const struct nvk_image_view *iview = render->fsr_att.iview;
       const struct nvk_image *image = (struct nvk_image *)iview->vk.image;
 
@@ -1249,7 +1276,7 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
       const VkAttachmentLoadOp load_op =
          pRenderingInfo->pColorAttachments[i].loadOp;
-      if (!render->all_linear &&
+      if (!render->linear &&
           plane->nil.levels[0].tiling.gob_type == NIL_GOB_TYPE_LINEAR &&
           load_op == VK_ATTACHMENT_LOAD_OP_LOAD)
          nvk_linear_render_copy(cmd, iview, render->area, true);
@@ -1325,7 +1352,7 @@ nvk_CmdEndRendering(VkCommandBuffer commandBuffer)
          struct nvk_image *image = (struct nvk_image *)iview->vk.image;
          const uint8_t ip = iview->planes[0].image_plane;
          const struct nvk_image_plane *plane = &image->planes[ip];
-         if (!render->all_linear &&
+         if (!render->linear &&
              plane->nil.levels[0].tiling.gob_type == NIL_GOB_TYPE_LINEAR &&
              render->color_att[i].store_op == VK_ATTACHMENT_STORE_OP_STORE)
             nvk_linear_render_copy(cmd, iview, render->area, false);
@@ -1781,7 +1808,8 @@ nvk_flush_ts_state(struct nvk_cmd_buffer *cmd)
 static void
 nvk_flush_vp_state(struct nvk_cmd_buffer *cmd)
 {
-   const struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
+   struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
+   struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    const struct vk_dynamic_graphics_state *dyn =
       &cmd->vk.dynamic_graphics_state;
@@ -1890,13 +1918,16 @@ nvk_flush_vp_state(struct nvk_cmd_buffer *cmd)
    }
 
    if (BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_VP_SCISSORS)) {
+      const uint32_t sr_max =
+         nvk_image_max_dimension(&pdev->info, VK_IMAGE_TYPE_2D);
+
       for (unsigned i = 0; i < dyn->vp.scissor_count; i++) {
          const VkRect2D *s = &dyn->vp.scissors[i];
 
-         const uint32_t xmin = MIN2(16384, s->offset.x);
-         const uint32_t xmax = MIN2(16384, s->offset.x + s->extent.width);
-         const uint32_t ymin = MIN2(16384, s->offset.y);
-         const uint32_t ymax = MIN2(16384, s->offset.y + s->extent.height);
+         const uint32_t xmin = MIN2(sr_max, s->offset.x);
+         const uint32_t xmax = MIN2(sr_max, s->offset.x + s->extent.width);
+         const uint32_t ymin = MIN2(sr_max, s->offset.y);
+         const uint32_t ymax = MIN2(sr_max, s->offset.y + s->extent.height);
 
          P_MTHD(p, NV9097, SET_SCISSOR_ENABLE(i));
          P_NV9097_SET_SCISSOR_ENABLE(p, i, V_TRUE);
@@ -2177,8 +2208,8 @@ nvk_flush_rs_state(struct nvk_cmd_buffer *cmd)
          unreachable("Unsupported depth bias representation");
       }
       /* TODO: The blob multiplies by 2 for some reason. We don't. */
-      P_IMMD(p, NV9097, SET_DEPTH_BIAS, fui(dyn->rs.depth_bias.constant));
-      P_IMMD(p, NV9097, SET_SLOPE_SCALE_DEPTH_BIAS, fui(dyn->rs.depth_bias.slope));
+      P_IMMD(p, NV9097, SET_DEPTH_BIAS, fui(dyn->rs.depth_bias.constant_factor));
+      P_IMMD(p, NV9097, SET_SLOPE_SCALE_DEPTH_BIAS, fui(dyn->rs.depth_bias.slope_factor));
       P_IMMD(p, NV9097, SET_DEPTH_BIAS_CLAMP, fui(dyn->rs.depth_bias.clamp));
    }
 
@@ -4578,7 +4609,7 @@ nvk_CmdBeginTransformFeedbackEXT(VkCommandBuffer commandBuffer,
    }
 
    for (uint32_t i = 0; i < counterBufferCount; ++i) {
-      if (pCounterBuffers[i] == VK_NULL_HANDLE)
+      if (pCounterBuffers == NULL || pCounterBuffers[i] == VK_NULL_HANDLE)
          continue;
 
       VK_FROM_HANDLE(nvk_buffer, buffer, pCounterBuffers[i]);
@@ -4618,7 +4649,7 @@ nvk_CmdEndTransformFeedbackEXT(VkCommandBuffer commandBuffer,
    P_IMMD(p, NV9097, SET_STREAM_OUTPUT, ENABLE_FALSE);
 
    for (uint32_t i = 0; i < counterBufferCount; ++i) {
-      if (pCounterBuffers[i] == VK_NULL_HANDLE)
+      if (pCounterBuffers == NULL || pCounterBuffers[i] == VK_NULL_HANDLE)
          continue;
 
       VK_FROM_HANDLE(nvk_buffer, buffer, pCounterBuffers[i]);

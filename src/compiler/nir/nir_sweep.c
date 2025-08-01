@@ -47,15 +47,6 @@ sweep_block(nir_shader *nir, nir_block *block)
 {
    ralloc_steal(nir, block);
 
-   /* sweep_impl will mark all metadata invalid.  We can safely release all of
-    * this here.
-    */
-   ralloc_free(block->live_in);
-   block->live_in = NULL;
-
-   ralloc_free(block->live_out);
-   block->live_out = NULL;
-
    nir_foreach_instr(instr, block) {
       gc_mark_live(nir->gctx, instr);
 
@@ -141,6 +132,9 @@ sweep_function(nir_shader *nir, nir_function *f)
 {
    ralloc_steal(nir, f);
    ralloc_steal(nir, f->params);
+
+   for (unsigned i = 0; i < f->num_params; i++)
+      ralloc_steal(nir, (char *)f->params[i].name);
 
    if (f->impl)
       sweep_impl(nir, f->impl);

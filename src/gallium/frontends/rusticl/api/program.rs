@@ -15,7 +15,6 @@ use rusticl_proc_macros::cl_info_entrypoint;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::iter;
-use std::mem::MaybeUninit;
 use std::num::NonZeroUsize;
 use std::os::raw::c_char;
 use std::ptr;
@@ -23,57 +22,89 @@ use std::slice;
 use std::sync::Arc;
 
 #[cl_info_entrypoint(clGetProgramInfo)]
-impl CLInfo<cl_program_info> for cl_program {
-    fn query(&self, q: cl_program_info, vals: &[u8]) -> CLResult<Vec<MaybeUninit<u8>>> {
+unsafe impl CLInfo<cl_program_info> for cl_program {
+    fn query(&self, q: cl_program_info, v: CLInfoValue) -> CLResult<CLInfoRes> {
         let prog = Program::ref_from_raw(*self)?;
-        Ok(match q {
-            CL_PROGRAM_BINARIES => cl_prop::<Vec<*mut u8>>(prog.binaries(vals)?),
-            CL_PROGRAM_BINARY_SIZES => cl_prop::<Vec<usize>>(prog.bin_sizes()),
+
+        // CL_INVALID_PROGRAM_EXECUTABLE if param_name is CL_PROGRAM_NUM_KERNELS,
+        // CL_PROGRAM_KERNEL_NAMES, CL_PROGRAM_SCOPE_GLOBAL_CTORS_PRESENT, or
+        // CL_PROGRAM_SCOPE_GLOBAL_DTORS_PRESENT and a successful program executable has not been
+        // built for at least one device in the list of devices associated with program.
+        if matches!(
+            q,
+            CL_PROGRAM_NUM_KERNELS
+                | CL_PROGRAM_KERNEL_NAMES
+                | CL_PROGRAM_SCOPE_GLOBAL_CTORS_PRESENT
+                | CL_PROGRAM_SCOPE_GLOBAL_DTORS_PRESENT
+        ) && !prog.build_info().has_successful_build()
+        {
+            return Err(CL_INVALID_PROGRAM_EXECUTABLE);
+        }
+
+        match q {
+            CL_PROGRAM_BINARIES => {
+                let input = v.input::<*mut u8>()?;
+                // This query is a bit weird. At least the CTS is. We need to return the proper size
+                // of the buffer to hold all pointers, but when actually doing the query, we'd just
+                // parse the pointers out and write to them.
+                if !input.is_empty() {
+                    // SAFETY: Per spec it contains an array of pointers to write the binaries to,
+                    //         so we can assume the entire slice to be initialized.
+                    let input = unsafe { slice_assume_init_ref(input) };
+                    prog.binaries(input)?;
+                }
+                v.write_len_only::<&[*mut u8]>(prog.devs.len())
+            }
+            CL_PROGRAM_BINARY_SIZES => v.write::<Vec<usize>>(prog.bin_sizes()),
             CL_PROGRAM_CONTEXT => {
                 // Note we use as_ptr here which doesn't increase the reference count.
                 let ptr = Arc::as_ptr(&prog.context);
-                cl_prop::<cl_context>(cl_context::from_ptr(ptr))
+                v.write::<cl_context>(cl_context::from_ptr(ptr))
             }
-            CL_PROGRAM_DEVICES => cl_prop::<Vec<cl_device_id>>(
-                prog.devs
-                    .iter()
-                    .map(|&d| cl_device_id::from_ptr(d))
-                    .collect(),
-            ),
+            CL_PROGRAM_DEVICES => {
+                v.write_iter::<cl_device_id>(prog.devs.iter().map(|&d| cl_device_id::from_ptr(d)))
+            }
             CL_PROGRAM_IL => match &prog.src {
-                ProgramSourceType::Il(il) => to_maybeuninit_vec(il.to_bin().to_vec()),
-                _ => Vec::new(),
+                ProgramSourceType::Il(il) => v.write::<&[u8]>(il.to_bin()),
+                // The spec _requires_ that we don't touch the buffer here.
+                _ => v.write_len_only::<&[u8]>(0),
             },
-            CL_PROGRAM_KERNEL_NAMES => cl_prop::<&str>(&*prog.build_info().kernels().join(";")),
-            CL_PROGRAM_NUM_DEVICES => cl_prop::<cl_uint>(prog.devs.len() as cl_uint),
-            CL_PROGRAM_NUM_KERNELS => cl_prop::<usize>(prog.build_info().kernels().len()),
-            CL_PROGRAM_REFERENCE_COUNT => cl_prop::<cl_uint>(Program::refcnt(*self)?),
-            CL_PROGRAM_SCOPE_GLOBAL_CTORS_PRESENT => cl_prop::<cl_bool>(CL_FALSE),
-            CL_PROGRAM_SCOPE_GLOBAL_DTORS_PRESENT => cl_prop::<cl_bool>(CL_FALSE),
-            CL_PROGRAM_SOURCE => match &prog.src {
-                ProgramSourceType::Src(src) => cl_prop::<&CStr>(src.as_c_str()),
-                _ => Vec::new(),
-            },
+            CL_PROGRAM_KERNEL_NAMES => v.write::<&str>(&prog.build_info().kernels().join(";")),
+            CL_PROGRAM_NUM_DEVICES => v.write::<cl_uint>(prog.devs.len() as cl_uint),
+            CL_PROGRAM_NUM_KERNELS => v.write::<usize>(prog.build_info().kernels().len()),
+            CL_PROGRAM_REFERENCE_COUNT => v.write::<cl_uint>(Program::refcnt(*self)?),
+            CL_PROGRAM_SCOPE_GLOBAL_CTORS_PRESENT => v.write::<cl_bool>(CL_FALSE),
+            CL_PROGRAM_SCOPE_GLOBAL_DTORS_PRESENT => v.write::<cl_bool>(CL_FALSE),
+            CL_PROGRAM_SOURCE => v.write::<&CStr>(match &prog.src {
+                ProgramSourceType::Src(src) => src,
+                // need to return a null string if no source is available.
+                _ => c"",
+            }),
             // CL_INVALID_VALUE if param_name is not one of the supported values
-            _ => return Err(CL_INVALID_VALUE),
-        })
+            _ => Err(CL_INVALID_VALUE),
+        }
     }
 }
 
 #[cl_info_entrypoint(clGetProgramBuildInfo)]
-impl CLInfoObj<cl_program_build_info, cl_device_id> for cl_program {
-    fn query(&self, d: cl_device_id, q: cl_program_build_info) -> CLResult<Vec<MaybeUninit<u8>>> {
+unsafe impl CLInfoObj<cl_program_build_info, cl_device_id> for cl_program {
+    fn query(
+        &self,
+        d: cl_device_id,
+        q: cl_program_build_info,
+        v: CLInfoValue,
+    ) -> CLResult<CLInfoRes> {
         let prog = Program::ref_from_raw(*self)?;
         let dev = Device::ref_from_raw(d)?;
-        Ok(match q {
-            CL_PROGRAM_BINARY_TYPE => cl_prop::<cl_program_binary_type>(prog.bin_type(dev)),
-            CL_PROGRAM_BUILD_GLOBAL_VARIABLE_TOTAL_SIZE => cl_prop::<usize>(0),
-            CL_PROGRAM_BUILD_LOG => cl_prop::<&str>(&prog.log(dev)),
-            CL_PROGRAM_BUILD_OPTIONS => cl_prop::<&str>(&prog.options(dev)),
-            CL_PROGRAM_BUILD_STATUS => cl_prop::<cl_build_status>(prog.status(dev)),
+        match q {
+            CL_PROGRAM_BINARY_TYPE => v.write::<cl_program_binary_type>(prog.bin_type(dev)),
+            CL_PROGRAM_BUILD_GLOBAL_VARIABLE_TOTAL_SIZE => v.write::<usize>(0),
+            CL_PROGRAM_BUILD_LOG => v.write::<&str>(&prog.log(dev)),
+            CL_PROGRAM_BUILD_OPTIONS => v.write::<&str>(&prog.options(dev)),
+            CL_PROGRAM_BUILD_STATUS => v.write::<cl_build_status>(prog.status(dev)),
             // CL_INVALID_VALUE if param_name is not one of the supported values
-            _ => return Err(CL_INVALID_VALUE),
-        })
+            _ => Err(CL_INVALID_VALUE),
+        }
     }
 }
 
@@ -291,7 +322,6 @@ fn build_program(
     pfn_notify: Option<FuncProgramCB>,
     user_data: *mut ::std::os::raw::c_void,
 ) -> CLResult<()> {
-    let mut res = true;
     let p = Program::ref_from_raw(program)?;
     let devs = validate_devices(device_list, num_devices, &p.devs)?;
 
@@ -306,9 +336,8 @@ fn build_program(
 
     // CL_BUILD_PROGRAM_FAILURE if there is a failure to build the program executable. This error
     // will be returned if clBuildProgram does not return until the build has completed.
-    for dev in &devs {
-        res &= p.build(dev, c_string_to_string(options));
-    }
+    let options = c_string_to_string(options);
+    let res = p.build(&devs, &options);
 
     if let Some(cb) = cb_opt {
         cb.call(p);
@@ -388,8 +417,9 @@ fn compile_program(
 
     // CL_COMPILE_PROGRAM_FAILURE if there is a failure to compile the program source. This error
     // will be returned if clCompileProgram does not return until the compile has completed.
+    let options = c_string_to_string(options);
     for dev in &devs {
-        res &= p.compile(dev, c_string_to_string(options), &headers);
+        res &= p.compile(dev, &options, &headers);
     }
 
     if let Some(cb) = cb_opt {

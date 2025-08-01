@@ -11,6 +11,8 @@
 #include "nvk_physical_device.h"
 #include "nvkmd/nvkmd.h"
 
+#include "util/detect_os.h"
+#include "vk_android.h"
 #include "vk_enum_to_str.h"
 #include "vk_format.h"
 #include "nil.h"
@@ -19,7 +21,7 @@
 
 #include "clb097.h"
 #include "clb197.h"
-#include "clc097.h"
+#include "clc197.h"
 #include "clc597.h"
 
 static VkFormatFeatureFlags2
@@ -289,7 +291,12 @@ nvk_image_max_dimension(const struct nv_device_info *info,
    switch (image_type) {
    case VK_IMAGE_TYPE_1D:
    case VK_IMAGE_TYPE_2D:
-      return info->cls_eng3d >= PASCAL_A ? 0x8000 : 0x4000;
+      /* The render and texture units can support up to 16K all the way back
+       * to Kepler but the copy engine can't.  We can work around this by
+       * doing offset shenanigans in the copy code but that not currently
+       * implemented.
+       */
+      return info->cls_eng3d >= PASCAL_B ? 0x8000 : 0x4000;
    case VK_IMAGE_TYPE_3D:
       return 0x4000;
    default:
@@ -754,6 +761,20 @@ nvk_image_init(struct nvk_device *dev,
    }
 
    uint32_t explicit_row_stride_B = 0;
+
+   /* This section is removed by the optimizer for non-ANDROID builds */
+   if (vk_image_is_android_native_buffer(&image->vk)) {
+      VkImageDrmFormatModifierExplicitCreateInfoEXT eci;
+      VkSubresourceLayout a_plane_layouts[4];
+      VkResult result = vk_android_get_anb_layout(
+         pCreateInfo, &eci, a_plane_layouts, 4);
+      if (result != VK_SUCCESS)
+         return result;
+
+      image->vk.drm_format_mod = eci.drmFormatModifier;
+      explicit_row_stride_B = eci.pPlaneLayouts[0].rowPitch;
+   }
+
    if (image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
       /* Modifiers are not supported with YCbCr */
       assert(image->plane_count == 1);
@@ -1011,6 +1032,17 @@ nvk_CreateImage(VkDevice _device,
          return result;
       }
       shadow->addr = image->linear_tiled_shadow_mem->va->addr;
+   }
+
+   /* This section is removed by the optimizer for non-ANDROID builds */
+   if (vk_image_is_android_native_buffer(&image->vk)) {
+      result = vk_android_import_anb(&dev->vk, pCreateInfo, pAllocator,
+                                     &image->vk);
+      if (result != VK_SUCCESS) {
+         nvk_image_finish(dev, image, pAllocator);
+         vk_free2(&dev->vk.alloc, pAllocator, image);
+         return result;
+      }
    }
 
    *pImage = nvk_image_to_handle(image);
@@ -1369,6 +1401,16 @@ nvk_bind_image_memory(struct nvk_device *dev,
    VK_FROM_HANDLE(nvk_device_memory, mem, info->memory);
    VK_FROM_HANDLE(nvk_image, image, info->image);
    VkResult result;
+
+#if DETECT_OS_ANDROID
+   const VkNativeBufferANDROID *anb_info =
+      vk_find_struct_const(info->pNext, NATIVE_BUFFER_ANDROID);
+   if (anb_info != NULL && anb_info->handle != NULL) {
+      /* We do the actual bind the end of CreateImage() */
+      assert(mem == NULL);
+      return VK_SUCCESS;
+   }
+#endif
 
    /* Ignore this struct on Android, we cannot access swapchain structures there. */
 #ifdef NVK_USE_WSI_PLATFORM

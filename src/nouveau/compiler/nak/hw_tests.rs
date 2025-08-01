@@ -8,32 +8,12 @@ use crate::sm50::ShaderModel50;
 use crate::sm70::ShaderModel70;
 
 use acorn::Acorn;
+use compiler::bindings::MESA_SHADER_COMPUTE;
 use compiler::cfg::CFGBuilder;
 use nak_bindings::*;
+use std::mem::offset_of;
 use std::str::FromStr;
 use std::sync::OnceLock;
-
-// from https://internals.rust-lang.org/t/discussion-on-offset-of/7440/2
-macro_rules! offset_of {
-    ($Struct:path, $field:ident) => {{
-        // Using a separate function to minimize unhygienic hazards
-        // (e.g. unsafety of #[repr(packed)] field borrows).
-        // Uncomment `const` when `const fn`s can juggle pointers.
-
-        // const
-        fn offset() -> usize {
-            let u = std::mem::MaybeUninit::<$Struct>::uninit();
-            // Use pattern-matching to avoid accidentally going through Deref.
-            let &$Struct { $field: ref f, .. } = unsafe { &*u.as_ptr() };
-            let o =
-                (f as *const _ as usize).wrapping_sub(&u as *const _ as usize);
-            // Triple check that we are within `u` still.
-            assert!((0..=std::mem::size_of_val(&u)).contains(&o));
-            o
-        }
-        offset()
-    }};
-}
 
 struct RunSingleton {
     sm: Box<dyn ShaderModel + Send + Sync>,
@@ -76,7 +56,7 @@ pub struct TestShaderBuilder<'a> {
 }
 
 impl<'a> TestShaderBuilder<'a> {
-    pub fn new(sm: &'a dyn ShaderModel) -> TestShaderBuilder {
+    pub fn new(sm: &'a dyn ShaderModel) -> Self {
         let mut alloc = SSAValueAllocator::new();
         let mut label_alloc = LabelAllocator::new();
         let mut b = SSAInstrBuilder::new(sm, &mut alloc);
@@ -1187,4 +1167,26 @@ fn test_f2fp_pack_ab() {
     assert_eq!(data[2][2], 0x3dd30000);
     // { 1.455fp16, 0.0fp16 }
     assert_eq!(data[2][3], 0x3dd24000);
+}
+
+#[test]
+pub fn test_gpr_limit_from_local_size() {
+    let run = RunSingleton::get();
+    let b = TestShaderBuilder::new(run.sm.as_ref());
+    let mut bin = b.compile();
+
+    for local_size in 1..=1024 {
+        let info = &mut bin.bin.info;
+        let cs_info = unsafe {
+            assert_eq!(info.stage, MESA_SHADER_COMPUTE);
+            &mut info.__bindgen_anon_1.cs
+        };
+        cs_info.local_size = [local_size, 1, 1];
+        let num_gprs = gpr_limit_from_local_size(&cs_info.local_size);
+        info.num_gprs = num_gprs.try_into().unwrap();
+
+        run.run.run::<u8>(&bin, &mut [0; 4096]).unwrap_or_else(|_| {
+            panic!("Failed with local_size {local_size}, num_gprs {num_gprs}")
+        });
+    }
 }

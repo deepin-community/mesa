@@ -107,6 +107,10 @@ impl PipeScreen {
         unsafe { self.screen.as_ref() }
     }
 
+    pub fn caps(&self) -> &pipe_caps {
+        &self.screen().caps
+    }
+
     pub fn create_context(self: &Arc<Self>) -> Option<PipeContext> {
         PipeContext::new(
             unsafe {
@@ -245,6 +249,7 @@ impl PipeScreen {
         height: u16,
         depth: u16,
         array_size: u16,
+        support_image: bool,
     ) -> Option<PipeResource> {
         let mut tmpl = pipe_resource::default();
         let mut handle = winsys_handle {
@@ -263,6 +268,15 @@ impl PipeScreen {
         tmpl.depth0 = depth;
         tmpl.array_size = array_size;
 
+        if target == pipe_texture_target::PIPE_BUFFER {
+            tmpl.bind = PIPE_BIND_GLOBAL
+        } else {
+            tmpl.bind = PIPE_BIND_SAMPLER_VIEW;
+            if support_image {
+                tmpl.bind |= PIPE_BIND_SHADER_IMAGE;
+            }
+        }
+
         unsafe {
             PipeResource::new(
                 self.screen().resource_from_handle.unwrap()(
@@ -274,10 +288,6 @@ impl PipeScreen {
                 false,
             )
         }
-    }
-
-    pub fn param(&self, cap: pipe_cap) -> i32 {
-        unsafe { self.screen().get_param.unwrap()(self.screen.as_ptr(), cap) }
     }
 
     pub fn shader_param(&self, t: pipe_shader_type, cap: pipe_shader_cap) -> i32 {
@@ -295,7 +305,7 @@ impl PipeScreen {
         }
     }
 
-    pub fn driver_name(&self) -> String {
+    pub fn driver_name(&self) -> &CStr {
         self.ldev.driver_name()
     }
 
@@ -357,7 +367,7 @@ impl PipeScreen {
                 });
             if ptr.is_null() {
                 // this string is good enough to pass the CTS
-                CStr::from_bytes_with_nul(b"v0000-01-01-00\0").unwrap()
+                c"v0000-01-01-00"
             } else {
                 CStr::from_ptr(ptr)
             }
@@ -473,7 +483,6 @@ fn has_required_cbs(screen: *mut pipe_screen) -> bool {
         & has_required_feature!(screen, get_compiler_options)
         & has_required_feature!(screen, get_compute_param)
         & has_required_feature!(screen, get_name)
-        & has_required_feature!(screen, get_param)
         & has_required_feature!(screen, get_shader_param)
         & has_required_feature!(screen, is_format_supported)
         & has_required_feature!(screen, resource_create)

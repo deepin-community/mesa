@@ -120,7 +120,7 @@ fs_live_variables::setup_def_use()
             if (reg.file != VGRF)
                continue;
 
-            for (unsigned j = 0; j < regs_read(inst, i); j++) {
+            for (unsigned j = 0; j < regs_read(devinfo, inst, i); j++) {
                setup_one_read(bd, ip, reg);
                reg.offset += REG_SIZE;
             }
@@ -254,10 +254,13 @@ fs_live_variables::fs_live_variables(const fs_visitor *s)
 
    num_vgrfs = s->alloc.count;
    num_vars = 0;
+   max_vgrf_size = 0;
    var_from_vgrf = linear_alloc_array(lin_ctx, int, num_vgrfs);
    for (int i = 0; i < num_vgrfs; i++) {
       var_from_vgrf[i] = num_vars;
       num_vars += s->alloc.sizes[i];
+
+      max_vgrf_size = MAX2(max_vgrf_size, s->alloc.sizes[i]);
    }
 
    vgrf_from_var = linear_alloc_array(lin_ctx, int, num_vars);
@@ -342,7 +345,7 @@ fs_live_variables::validate(const fs_visitor *s) const
       for (unsigned i = 0; i < inst->sources; i++) {
          if (inst->src[i].file == VGRF &&
              !check_register_live_range(this, ip,
-                                        inst->src[i], regs_read(inst, i)))
+                                        inst->src[i], regs_read(devinfo, inst, i)))
             return false;
       }
 

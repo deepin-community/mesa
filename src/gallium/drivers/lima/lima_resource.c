@@ -72,8 +72,10 @@ lima_resource_create_scanout(struct pipe_screen *pscreen,
 
    scanout = renderonly_scanout_for_resource(&scanout_templat,
                                              screen->ro, &handle);
-   if (!scanout)
+   if (!scanout) {
+      FREE(res);
       return NULL;
+   }
 
    res->base = *templat;
    res->base.screen = pscreen;
@@ -708,7 +710,9 @@ lima_transfer_map(struct pipe_context *pctx,
       ptrans->layer_stride = res->levels[level].layer_stride;
 
       if ((usage & PIPE_MAP_WRITE) && (usage & PIPE_MAP_DIRECTLY))
-         panfrost_minmax_cache_invalidate(res->index_cache, ptrans->box.x, ptrans->box.width);
+         panfrost_minmax_cache_invalidate(res->index_cache,
+                                          util_format_get_blocksize(pres->format),
+                                          ptrans->box.x, ptrans->box.width);
 
       return bo->map + res->levels[level].offset +
          box->z * res->levels[level].layer_stride +
@@ -817,7 +821,9 @@ lima_transfer_unmap(struct pipe_context *pctx,
    if (trans->staging)
       free(trans->staging);
    if (ptrans->usage & PIPE_MAP_WRITE) {
-      panfrost_minmax_cache_invalidate(res->index_cache, ptrans->box.x, ptrans->box.width);
+      panfrost_minmax_cache_invalidate(res->index_cache,
+                                       util_format_get_blocksize(res->base.format),
+                                       ptrans->box.x, ptrans->box.width);
    }
 
    pipe_resource_reference(&ptrans->resource, NULL);

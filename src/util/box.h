@@ -59,7 +59,7 @@ u_box_2d_zslice(unsigned x, unsigned y, unsigned z,
 {
    box->x = x;
    box->y = y;
-   box->z = z;
+   box->z = (int16_t)z;
    box->width = w;
    box->height = h;
    box->depth = 1;
@@ -72,10 +72,10 @@ u_box_3d(unsigned x, unsigned y, unsigned z,
 {
    box->x = x;
    box->y = y;
-   box->z = z;
+   box->z = (int16_t)z;
    box->width = w;
    box->height = h;
-   box->depth = d;
+   box->depth = (int16_t)d;
 }
 
 /* Clips @dst to width @w and height @h.
@@ -192,6 +192,31 @@ u_box_union_2d(struct pipe_box *dst,
 
 /* Aliasing of @dst permitted. */
 static inline void
+u_box_intersect_2d(struct pipe_box *dst,
+                   const struct pipe_box *a, const struct pipe_box *b)
+{
+   int x, y;
+
+   x = MAX2(a->x, b->x);
+   y = MAX2(a->y, b->y);
+
+   dst->width = MIN2(a->x + a->width, b->x + b->width) - x;
+   dst->x = x;
+   if (dst->width <= 0) {
+      dst->x = 0;
+      dst->width = 0;
+   }
+
+   dst->height = MIN2(a->y + a->height, b->y + b->height) - y;
+   dst->y = y;
+   if (dst->height <= 0) {
+      dst->y = 0;
+      dst->height = 0;
+   }
+}
+
+/* Aliasing of @dst permitted. */
+static inline void
 u_box_union_3d(struct pipe_box *dst,
                const struct pipe_box *a, const struct pipe_box *b)
 {
@@ -203,10 +228,10 @@ u_box_union_3d(struct pipe_box *dst,
 
    dst->width = MAX2(a->x + a->width, b->x + b->width) - x;
    dst->height = MAX2(a->y + a->height, b->y + b->height) - y;
-   dst->depth = MAX2(a->z + a->depth, b->z + b->depth) - z;
+   dst->depth = (int16_t) (MAX2(a->z + a->depth, b->z + b->depth) - z);
    dst->x = x;
    dst->y = y;
-   dst->z = z;
+   dst->z = (int16_t)z;
 }
 
 static inline bool

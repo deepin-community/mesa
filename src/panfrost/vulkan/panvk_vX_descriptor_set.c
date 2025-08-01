@@ -33,13 +33,6 @@
 #include "panvk_priv_bo.h"
 #include "panvk_sampler.h"
 
-static inline const bool
-is_dynamic_buffer(VkDescriptorType type)
-{
-   return type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
-          type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
-}
-
 static void *
 get_desc_slot_ptr(struct panvk_descriptor_set *set, uint32_t binding,
                   uint32_t elem, VkDescriptorType type)
@@ -96,13 +89,16 @@ write_image_view_desc(struct panvk_descriptor_set *set,
    if (pImageInfo && pImageInfo->imageView != VK_NULL_HANDLE) {
       VK_FROM_HANDLE(panvk_image_view, view, pImageInfo->imageView);
 
-#if PAN_ARCH <= 7
+#if PAN_ARCH >= 9
+      if (type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+         write_desc(set, binding, elem, &view->descs.storage_tex, type);
+      else
+         write_desc(set, binding, elem, &view->descs.tex, type);
+#else
       if (type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
          write_desc(set, binding, elem, &view->descs.img_attrib_buf, type);
       else
          write_desc(set, binding, elem, &view->descs.tex, type);
-#else
-      write_desc(set, binding, elem, &view->descs.tex, type);
 #endif
    }
 }
@@ -246,7 +242,7 @@ panvk_per_arch(CreateDescriptorPool)(
 
    uint32_t desc_count = 0;
    for (unsigned i = 0; i < pCreateInfo->poolSizeCount; ++i) {
-      if (!is_dynamic_buffer(pCreateInfo->pPoolSizes[i].type))
+      if (!vk_descriptor_type_is_dynamic(pCreateInfo->pPoolSizes[i].type))
          desc_count += panvk_get_desc_stride(pCreateInfo->pPoolSizes[i].type) *
                        pCreateInfo->pPoolSizes[i].descriptorCount;
    }
@@ -329,7 +325,7 @@ panvk_desc_pool_allocate_set(struct panvk_descriptor_pool *pool,
 
       if ((layout->bindings[last_binding].flags &
            VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT_EXT) &&
-          !is_dynamic_buffer(layout->bindings[last_binding].type)) {
+          !vk_descriptor_type_is_dynamic(layout->bindings[last_binding].type)) {
          uint32_t desc_stride =
             panvk_get_desc_stride(layout->bindings[last_binding].type);
 

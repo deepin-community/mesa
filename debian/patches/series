@@ -1,5 +1,6 @@
 path_max.diff
 src_glx_dri_common.h.diff
-0001-fix-meson.build-more-Gallium-Vulkan-drivers-for-on-a.patch
-0002-add-zx-s-driver-to-mesa-s-driver-map-list-and-export.patch
-1001-zink-do-not-use-demote-on-IMG-blobs.patch
+disable_ppc64el_assembly.diff
+etnaviv-add-support-for-texelfetch.patch
+Revert-hasvk-elk-stop-turning-load_push_constants-in.patch
+kopper-Revert-kopper-Explicitly-choose-zink.patch
