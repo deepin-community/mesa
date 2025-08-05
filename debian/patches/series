@@ -15,4 +15,4 @@
 2001-update-to-mesa-24.0.9.patch
 3001-Revert-vulkan-wsi-use-can_present_on_device-for-Wayl.patch
 3002-Revert-vulkan-wsi-make-the-display-FD-available.patch
-9999-HACK-glxext-default-to-Zink.patch
+#9999-HACK-glxext-default-to-Zink.patch

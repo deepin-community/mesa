@@ -1,3 +1,9 @@
+mesa-pvr-ddk242 (24.0.1-1deepin2+really24.0.9) unstable; urgency=medium
+
+  * do not default glx to zink
+
+ -- Chang Yang <yangchang@deepin.org>  Tue, 05 Aug 2025 13:25:25 +0800
+
 mesa-pvr-ddk242 (24.0.1-1deepin1+really24.0.9) unstable; urgency=medium
 
   * update for upstream
