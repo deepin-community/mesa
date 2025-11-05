@@ -1,3 +1,9 @@
+mesa (24.3.0-1deepin6) unstable; urgency=medium
+
+  * feat: backport: radeonsi: enable ACO by default
+
+ -- Wentao Guan <guanwentao@uniontech.com>  Thu, 30 Oct 2025 19:51:14 +0800
+
 mesa (24.3.0-1deepin5) unstable; urgency=medium
 
   * fix: race condition of ORCJIT LLVMpipe

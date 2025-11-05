@@ -1,0 +1,86 @@
+From 1d7916b045b866de8d773a0f0eda01ffe018e6b7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Marek=20Ol=C5=A1=C3=A1k?= <marek.olsak@amd.com>
+Date: Thu, 30 Oct 2025 19:43:39 +0800
+Subject: [PATCH] BACKPORT: radeonsi: enable ACO by default
+
+NIR+ACO is the best SSA-based shader compiler for AMD GPUs that exists.
+
+There are many reasons why NIR+ACO is better than LLVM, and I have a long
+list that I've collected over the years, but the major ones are better GPU
+performance (faster GPU memory access thanks to better clauses and
+scheduling, a lot less SGPR/VGPR spilling, better loop support, slightly
+smaller shader binaries), 8x lower shader compile times, and smaller memory
+footprint of the IR.
+
+It also shows that NIR is a mature SSA-based shader compiler that helps
+drivers generate optimized code very quickly.
+
+And most importantly, radeonsi has slightly better Viewperf performance
+with NIR+ACO than LLVM, and that's difficult to ignore.
+
+Reviewed-by: Qiang Yu <yuq825@gmail.com>
+Reviewed-by: Pierre-Eric Pelloux-Prayer <pierre-eric.pelloux-prayer@amd.com>
+Part-of: <https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/38070>
+Signed-off-by: Wentao Guan <guanwentao@uniontech.com>
+---
+ docs/envvars.rst                       | 4 ++--
+ src/gallium/drivers/radeonsi/si_pipe.c | 7 ++-----
+ src/gallium/drivers/radeonsi/si_pipe.h | 2 +-
+ 3 files changed, 5 insertions(+), 8 deletions(-)
+
+diff --git a/docs/envvars.rst b/docs/envvars.rst
+index a8dcc8c..2f09503 100644
+--- a/docs/envvars.rst
++++ b/docs/envvars.rst
+@@ -1652,8 +1652,8 @@ RadeonSI driver environment variables
+       Use old-style monolithic shaders compiled on demand
+    ``nooptvariant``
+       Disable compiling optimized shader variants.
+-   ``useaco``
+-      Use ACO as shader compiler when possible
++   ``usellvm``
++      Use LLVM as shader compiler when possible
+    ``nowc``
+       Disable GTT write combining
+    ``check_vm``
+diff --git a/src/gallium/drivers/radeonsi/si_pipe.c b/src/gallium/drivers/radeonsi/si_pipe.c
+index 1e97b19..2a890a3 100644
+--- a/src/gallium/drivers/radeonsi/si_pipe.c
++++ b/src/gallium/drivers/radeonsi/si_pipe.c
+@@ -65,7 +65,6 @@ static const struct debug_named_value radeonsi_debug_options[] = {
+    {"checkir", DBG(CHECK_IR), "Enable additional sanity checks on shader IR"},
+    {"mono", DBG(MONOLITHIC_SHADERS), "Use old-style monolithic shaders compiled on demand"},
+    {"nooptvariant", DBG(NO_OPT_VARIANT), "Disable compiling optimized shader variants."},
+-   {"useaco", DBG(USE_ACO), "Use ACO as shader compiler when possible"},
+ 
+    /* Information logging options: */
+    {"info", DBG(INFO), "Print driver information"},
+@@ -1193,10 +1192,8 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
+    /* For GFX11.5, LLVM < 19 is missing a workaround that can cause GPU hangs. ACO is the only
+     * alternative that has the workaround and is always available.
+     */
+-   if (sscreen->info.gfx_level == GFX11_5 && LLVM_VERSION_MAJOR < 19)
+-      sscreen->use_aco = true;
+-   else
+-      sscreen->use_aco = (sscreen->debug_flags & DBG(USE_ACO));
++   sscreen->use_aco = support_aco && sscreen->info.has_image_opcodes &&
++                         !(sscreen->shader_debug_flags & DBG(USE_LLVM));
+ #else
+    sscreen->use_aco = true;
+ #endif
+diff --git a/src/gallium/drivers/radeonsi/si_pipe.h b/src/gallium/drivers/radeonsi/si_pipe.h
+index bc1535e..de2d37e 100644
+--- a/src/gallium/drivers/radeonsi/si_pipe.h
++++ b/src/gallium/drivers/radeonsi/si_pipe.h
+@@ -238,7 +238,7 @@ enum
+ 
+    DBG_TMZ,
+    DBG_SQTT,
+-   DBG_USE_ACO,
++   DBG_USE_LLVM,
+ 
+    DBG_COUNT
+ };
+-- 
+2.20.1
+
