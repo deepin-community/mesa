@@ -1,3 +1,9 @@
+mesa (24.3.0-1deepin6) unstable; urgency=medium
+
+  * perf: backport "nvk: Enable compression"
+
+ -- WangYuli <wangyl5933@chinaunicom.cn>  Fri, 19 Dec 2025 13:47:10 +0800
+
 mesa (24.3.0-1deepin5) unstable; urgency=medium
 
   * fix: race condition of ORCJIT LLVMpipe

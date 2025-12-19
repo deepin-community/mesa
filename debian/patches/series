@@ -4,3 +4,6 @@ src_glx_dri_common.h.diff
 0002-add-zx-s-driver-to-mesa-s-driver-map-list-and-export.patch
 1001-zink-do-not-use-demote-on-IMG-blobs.patch
 1002-gallivm-orcjit-put-object-cache-under-the-protect.patch
+backports/0001-deepin-nvk-Add-prerequisites-for-compression-support.patch
+backports/0002-nvk-Enable-compression.patch
+backports/0003-nvk-Disable-compression-for-image-import-export.patch
