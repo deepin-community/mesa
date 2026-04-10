@@ -1,3 +1,10 @@
+mesa (24.3.0-1deepin7) unstable; urgency=medium
+
+  * fix: backport EGL software fallback handling fix
+  * fix: avoid crash when swrast_loader is NULL
+
+ -- ChenZiyu <czy199896@163.com>  Fri, 10 Apr 2026 17:36:19 +0800
+
 mesa (24.3.0-1deepin6) unstable; urgency=medium
 
   * perf: backport "nvk: Enable compression"
