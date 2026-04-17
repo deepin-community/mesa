@@ -119,18 +119,19 @@ fd_batch_create(struct fd_context *ctx, bool nondraw)
 
    fd_reset_wfi(batch);
 
-   util_dynarray_init(&batch->draw_patches, NULL);
-   util_dynarray_init(&(batch->fb_read_patches), NULL);
+   batch->draw_patches = UTIL_DYNARRAY_INIT;
+   batch->fb_read_patches = UTIL_DYNARRAY_INIT;
 
    if (is_a2xx(ctx->screen)) {
-      util_dynarray_init(&batch->shader_patches, NULL);
-      util_dynarray_init(&batch->gmem_patches, NULL);
+      batch->shader_patches = UTIL_DYNARRAY_INIT;
+      batch->gmem_patches = UTIL_DYNARRAY_INIT;
    }
 
-   if (is_a3xx(ctx->screen))
-      util_dynarray_init(&batch->rbrc_patches, NULL);
+   if (is_a3xx(ctx->screen)) {
+      batch->rbrc_patches = UTIL_DYNARRAY_INIT;
+   }
 
-   util_dynarray_init(&batch->samples, NULL);
+   batch->samples = UTIL_DYNARRAY_INIT;
 
    u_trace_init(&batch->trace, &ctx->trace_context);
    batch->last_timestamp_cmd = NULL;
@@ -389,10 +390,10 @@ fd_batch_set_fb(struct fd_batch *batch, const struct pipe_framebuffer_state *pfb
 
    util_copy_framebuffer_state(&batch->framebuffer, pfb);
 
-   if (!pfb->zsbuf)
+   if (!pfb->zsbuf.texture)
       return;
 
-   struct fd_resource *zsbuf = fd_resource(pfb->zsbuf->texture);
+   struct fd_resource *zsbuf = fd_resource(pfb->zsbuf.texture);
 
    /* Switching back to a batch we'd previously started constructing shouldn't
     * result in a different lrz.  The dependency tracking should avoid another

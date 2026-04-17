@@ -7,7 +7,6 @@
 vulkan_lite_runtime_files = files(
   'rmv/vk_rmv_common.c',
   'rmv/vk_rmv_exporter.c',
-  'vk_acceleration_structure.c',
   'vk_blend.c',
   'vk_buffer.c',
   'vk_buffer_view.c',
@@ -277,6 +276,14 @@ vulkan_runtime_deps = [
 ]
 
 if prog_glslang.found()
+  if with_bvh
+    subdir('radix_sort')
+    vulkan_runtime_files += radix_sort_files
+    vulkan_runtime_files += radix_sort_spv
+    subdir('bvh')
+    vulkan_runtime_files += files('vk_acceleration_structure.c')
+    vulkan_runtime_files += bvh_spv
+  endif
   vulkan_runtime_files += files('vk_texcompress_astc.c')
   vulkan_runtime_files += custom_target(
     'astc_spv.h',
@@ -320,7 +327,10 @@ else
   )
 endif
 
-idep_vulkan_runtime_headers = idep_vulkan_lite_runtime_headers
+idep_vulkan_runtime_headers = [idep_vulkan_lite_runtime_headers]
+idep_vulkan_runtime_headers += declare_dependency(
+  include_directories : include_directories('bvh'),
+)
 
 idep_vulkan_runtime = declare_dependency(
   dependencies : [

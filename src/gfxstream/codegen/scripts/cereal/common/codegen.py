@@ -568,9 +568,14 @@ class CodeGen(object):
         if lenExpr == "null-terminated":
             return "strlen(%s)" % vulkanType.paramName(), None
         else:
-            deref = "*" if lenExprInfo.pointerIndirectionLevels > 0 else ""
-            lenAccessGuardExpr = "%s" % lenExpr if deref else None
-            return "(%s(%s))" % (deref, lenExpr), lenAccessGuardExpr
+            retVal = "%s" % lenExpr
+            needDeref = (lenExprInfo.pointerIndirectionLevels > 0)
+            lenAccessGuardExpr = retVal if needDeref else None
+            if not retVal.isalnum():
+                retVal = "(%s)" % (retVal)
+            if needDeref > 0:
+                retVal = "(*%s)" % retVal
+            return retVal, lenAccessGuardExpr
 
     def accessParameter(self, param, asPtr=True):
         if asPtr:
@@ -629,7 +634,9 @@ class CodeGen(object):
     def generalLengthAccessGuard(self, vulkanType, parentVarName="parent"):
         return self.makeLengthAccess(vulkanType, parentVarName)[1]
 
-    def vkApiCall(self, api, customPrefix="", globalStatePrefix="", customParameters=None, checkForDeviceLost=False, checkForOutOfMemory=False):
+    def vkApiCall(self, api, customPrefix="", globalStatePrefix="",
+                  customParameters=None, checkForDeviceLost=False,
+                  checkDispatcher=None):
         callLhs = None
 
         retTypeName = api.getRetTypeExpr()
@@ -637,8 +644,21 @@ class CodeGen(object):
 
         if retTypeName != "void":
             retVar = api.getRetVarExpr()
-            self.stmt("%s %s = (%s)0" % (retTypeName, retVar, retTypeName))
+            defaultReturn = "(%s)0" % retTypeName
+            if retTypeName == "VkResult":
+                # TODO: return a valid error code based on the call
+                # This is used to handle invalid dispatcher and snapshot states
+                deviceLostFunctions = ["vkQueueSubmit",
+                                       "vkQueueWaitIdle",
+                                       "vkWaitForFences"]
+                defaultReturn = "VK_ERROR_OUT_OF_HOST_MEMORY"
+                if api in deviceLostFunctions:
+                    defaultReturn = "VK_ERROR_DEVICE_LOST"
+            self.stmt("%s %s = %s" % (retTypeName, retVar, defaultReturn))
             callLhs = retVar
+
+        if (checkDispatcher):
+            self.beginIf(checkDispatcher)
 
         if customParameters is None:
             self.funcCall(
@@ -647,18 +667,11 @@ class CodeGen(object):
             self.funcCall(
                 callLhs, customPrefix + api.name, customParameters)
 
+        if (checkDispatcher):
+            self.endIf()
+
         if retTypeName == "VkResult" and checkForDeviceLost:
             self.stmt("if ((%s) == VK_ERROR_DEVICE_LOST) %sDeviceLost()" % (callLhs, globalStatePrefix))
-
-        if retTypeName == "VkResult" and checkForOutOfMemory:
-            if api.name == "vkAllocateMemory":
-                self.stmt(
-                    "%sCheckOutOfMemory(%s, opcode, context, std::make_optional<uint64_t>(pAllocateInfo->allocationSize))"
-                    % (globalStatePrefix, callLhs))
-            else:
-                self.stmt(
-                    "%sCheckOutOfMemory(%s, opcode, context)"
-                    % (globalStatePrefix, callLhs))
 
         return (retTypeName, retVar)
 
@@ -800,8 +813,10 @@ class CodeGen(object):
                 accessType.getForNonConstAccess(), useParamName=False)
 
         ptrCast = "(uintptr_t)" if needPtrCast else ""
-
-        streamNamespace = "android::base"
+        if variant == "guest":
+            streamNamespace = "gfxstream::aemu"
+        else:
+            streamNamespace = "gfxstream"
 
         if direction == "read":
             self.stmt("memcpy((%s*)&%s, %s, %s)" %

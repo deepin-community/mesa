@@ -22,8 +22,7 @@
  */
 
 #include "v3dv_private.h"
-#include "broadcom/common/v3d_macros.h"
-#include "broadcom/cle/v3dx_pack.h"
+#include "v3dv_format_table.h"
 #include "broadcom/compiler/v3d_compiler.h"
 
 /*

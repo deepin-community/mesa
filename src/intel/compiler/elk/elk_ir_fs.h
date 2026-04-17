@@ -22,8 +22,7 @@
  * IN THE SOFTWARE.
  */
 
-#ifndef ELK_IR_FS_H
-#define ELK_IR_FS_H
+#pragma once
 
 #include "elk_shader.h"
 
@@ -133,7 +132,7 @@ horiz_offset(const elk_fs_reg &reg, unsigned delta)
          }
       }
    }
-   unreachable("Invalid register file");
+   UNREACHABLE("Invalid register file");
 }
 
 static inline elk_fs_reg
@@ -725,5 +724,3 @@ is_coalescing_payload(const elk::simple_allocator &alloc, const elk_fs_inst *ins
 
 bool
 elk_has_bank_conflict(const struct elk_isa_info *isa, const elk_fs_inst *inst);
-
-#endif

@@ -41,7 +41,7 @@ extern "C" {
 #endif
 
 /* Size of cache keys in bytes. */
-#define CACHE_KEY_SIZE 20
+#define CACHE_KEY_SIZE SHA1_DIGEST_LENGTH
 
 #define CACHE_DIR_NAME "mesa_shader_cache"
 #define CACHE_DIR_NAME_SF "mesa_shader_cache_sf"
@@ -108,7 +108,7 @@ disk_cache_get_function_identifier(void *ptr, struct mesa_sha1 *ctx)
 {
    uint32_t timestamp;
 
-#ifdef HAVE_DL_ITERATE_PHDR
+#if HAVE_BUILD_ID
    const struct build_id_note *note = NULL;
    if ((note = build_id_find_nhdr_for_addr(ptr))) {
       _mesa_sha1_update(ctx, build_id_data(note), build_id_length(note));
@@ -164,6 +164,11 @@ disk_cache_get_function_identifier(void *ptr, struct mesa_sha1 *ctx)
 struct disk_cache *
 disk_cache_create(const char *gpu_name, const char *timestamp,
                   uint64_t driver_flags);
+
+struct disk_cache *
+disk_cache_create_custom(const char *gpu_name, const char *driver_id,
+                         uint64_t driver_flags, const char *cache_dir_name,
+                         uint32_t max_size);
 
 /**
  * Destroy a cache object, (freeing all associated resources).
@@ -270,6 +275,14 @@ disk_cache_set_callbacks(struct disk_cache *cache, disk_cache_put_cb put,
 static inline struct disk_cache *
 disk_cache_create(const char *gpu_name, const char *timestamp,
                   uint64_t driver_flags)
+{
+   return NULL;
+}
+
+static inline struct disk_cache *
+disk_cache_create_custom(const char *gpu_name, const char *driver_id,
+                         uint64_t driver_flags, const char *cache_dir_name,
+                         uint32_t max_size)
 {
    return NULL;
 }

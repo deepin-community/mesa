@@ -1113,10 +1113,8 @@ svga_texture_create(struct pipe_screen *screen,
    return &tex->b;
 
 fail:
-   if (tex->dirty)
-      FREE(tex->dirty);
-   if (tex->defined)
-      FREE(tex->defined);
+   FREE(tex->dirty);
+   FREE(tex->defined);
    FREE(tex);
 fail_notex:
    SVGA_STATS_TIME_POP(svgascreen->sws);
@@ -1318,7 +1316,7 @@ svga_texture_transfer_map_can_upload(const struct svga_screen *svgascreen,
    if (util_format_is_compressed(texture->format)) {
       /* XXX Need to take a closer look to see why texture upload
        * with 3D texture with compressed format fails
-       */ 
+       */
       if (texture->target == PIPE_TEXTURE_3D)
           return false;
    }
@@ -1336,7 +1334,7 @@ svga_texture_transfer_map_can_upload(const struct svga_screen *svgascreen,
  */
 static bool
 need_update_texture_resource(struct pipe_surface *surf,
-		             struct svga_texture *tex)
+                             struct svga_texture *tex)
 {
    struct svga_texture *stex = svga_texture(surf->texture);
    struct svga_surface *s = svga_surface(surf);
@@ -1353,7 +1351,7 @@ need_update_texture_resource(struct pipe_surface *surf,
  */
 static void
 svga_validate_texture_resource(struct svga_context *svga,
-		               struct svga_texture *tex)
+                               struct svga_texture *tex)
 {
    if (svga_was_texture_rendered_to(tex) == false)
       return;
@@ -1366,12 +1364,12 @@ svga_validate_texture_resource(struct svga_context *svga,
    for (unsigned i = 0; i < svga->state.hw_clear.num_rendertargets; i++) {
       s = svga->state.hw_clear.rtv[i];
       if (s && need_update_texture_resource(s, tex))
-         svga_propagate_surface(svga, s, true);
+         svga_propagate_surface(svga, svga_surface(s), true);
    }
 
    s = svga->state.hw_clear.dsv;
    if (s && need_update_texture_resource(s, tex))
-      svga_propagate_surface(svga, s, true);
+      svga_propagate_surface(svga, svga_surface(s), true);
 }
 
 
@@ -1459,7 +1457,7 @@ svga_texture_transfer_map_upload(struct svga_context *svga,
     * upload buffer manager code will try to allocate a new buffer
     * with the new buffer size.
     */
-   u_upload_alloc(svga->tex_upload, 0, upload_size, 16,
+   u_upload_alloc_ref(svga->tex_upload, 0, upload_size, 16,
                   &offset, &tex_buffer, &tex_map);
 
    if (!tex_map) {

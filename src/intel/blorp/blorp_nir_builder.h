@@ -21,6 +21,8 @@
  * IN THE SOFTWARE.
  */
 
+#include "dev/intel_device_info.h"
+
 #include "compiler/nir/nir_builder.h"
 #include "blorp_priv.h"
 
@@ -28,7 +30,7 @@ static inline void
 blorp_nir_init_shader(nir_builder *b,
                       struct blorp_context *blorp,
                       void *mem_ctx,
-                      gl_shader_stage stage,
+                      mesa_shader_stage stage,
                       const char *name)
 {
    const nir_shader_compiler_options *nir_options =
@@ -42,7 +44,8 @@ blorp_nir_init_shader(nir_builder *b,
 }
 
 static inline nir_def *
-blorp_nir_txf_ms_mcs(nir_builder *b, nir_def *xy_pos, nir_def *layer)
+blorp_nir_txf_ms_mcs(nir_builder *b, nir_def *xy_pos, nir_def *layer,
+                     const struct intel_device_info *devinfo)
 {
    nir_tex_instr *tex = nir_tex_instr_create(b->shader, 1);
    tex->op = nir_texop_txf_ms_mcs_intel;
@@ -61,7 +64,9 @@ blorp_nir_txf_ms_mcs(nir_builder *b, nir_def *xy_pos, nir_def *layer)
       tex->coord_components = 2;
       coord = nir_trim_vector(b, xy_pos, 2);
    }
-   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
+   tex->src[0] = nir_tex_src_for_ssa(
+      nir_tex_src_coord,
+      devinfo->verx10 >= 125 ? nir_u2u16(b, coord) : coord);
 
    /* Blorp only has one texture and it's bound at unit 0 */
    tex->texture_index = 0;
@@ -99,27 +104,6 @@ blorp_nir_mcs_is_clear_color(nir_builder *b,
                          nir_ieq_imm(b, nir_channel(b, mcs, 1), ~0));
 
    default:
-      unreachable("Invalid sample count");
+      UNREACHABLE("Invalid sample count");
    }
-}
-
-static inline nir_def *
-blorp_check_in_bounds(nir_builder *b,
-                      nir_def *bounds_rect,
-                      nir_def *pos)
-{
-   nir_def *x0 = nir_channel(b, bounds_rect, 0);
-   nir_def *x1 = nir_channel(b, bounds_rect, 1);
-   nir_def *y0 = nir_channel(b, bounds_rect, 2);
-   nir_def *y1 = nir_channel(b, bounds_rect, 3);
-
-   nir_def *c0 = nir_uge(b, nir_channel(b, pos, 0), x0);
-   nir_def *c1 = nir_ult(b, nir_channel(b, pos, 0), x1);
-   nir_def *c2 = nir_uge(b, nir_channel(b, pos, 1), y0);
-   nir_def *c3 = nir_ult(b, nir_channel(b, pos, 1), y1);
-
-   nir_def *in_bounds =
-      nir_iand(b, nir_iand(b, c0, c1), nir_iand(b, c2, c3));
-
-   return in_bounds;
 }

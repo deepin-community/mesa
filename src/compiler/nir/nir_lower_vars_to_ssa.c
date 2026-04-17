@@ -40,9 +40,9 @@ struct deref_node {
    nir_deref_path path;
    struct exec_node direct_derefs_link;
 
-   struct set *loads;
-   struct set *stores;
-   struct set *copies;
+   struct set loads;
+   struct set stores;
+   struct set copies;
 
    struct nir_phi_builder_value *pb_value;
 
@@ -70,7 +70,7 @@ struct lower_variables_state {
    nir_function_impl *impl;
 
    /* A hash table mapping variables to deref_node data */
-   struct hash_table *deref_var_nodes;
+   struct hash_table deref_var_nodes;
 
    /* A hash table mapping fully-qualified direct dereferences, i.e.
     * dereferences with no indirect or wildcard array dereferences, to
@@ -125,13 +125,13 @@ get_deref_node_for_var(nir_variable *var, struct lower_variables_state *state)
    struct deref_node *node;
 
    struct hash_entry *var_entry =
-      _mesa_hash_table_search(state->deref_var_nodes, var);
+      _mesa_hash_table_search(&state->deref_var_nodes, var);
 
    if (var_entry) {
       return var_entry->data;
    } else {
       node = deref_node_create(NULL, var->type, true, state->dead_ctx);
-      _mesa_hash_table_insert(state->deref_var_nodes, var, node);
+      _mesa_hash_table_insert(&state->deref_var_nodes, var, node);
       return node;
    }
 }
@@ -213,7 +213,7 @@ get_deref_node_recur(nir_deref_instr *deref,
       return parent->wildcard;
 
    default:
-      unreachable("Invalid deref type");
+      UNREACHABLE("Invalid deref type");
    }
 }
 
@@ -289,7 +289,7 @@ foreach_deref_node_worker(struct deref_node *node, nir_deref_instr **path,
    }
 
    default:
-      unreachable("Unsupported deref type");
+      UNREACHABLE("Unsupported deref type");
    }
 }
 
@@ -367,7 +367,7 @@ path_may_be_aliased_node(struct deref_node *node, nir_deref_instr **path,
    }
 
    default:
-      unreachable("Unsupported deref type");
+      UNREACHABLE("Unsupported deref type");
    }
 }
 
@@ -445,10 +445,10 @@ register_load_instr(nir_intrinsic_instr *load_instr,
       return true;
    }
 
-   if (node->loads == NULL)
-      node->loads = _mesa_pointer_set_create(state->dead_ctx);
+   if (node->loads.table == NULL)
+      _mesa_pointer_set_init(&node->loads, state->dead_ctx);
 
-   _mesa_set_add(node->loads, load_instr);
+   _mesa_set_add(&node->loads, load_instr);
 
    return false;
 }
@@ -472,10 +472,10 @@ register_store_instr(nir_intrinsic_instr *store_instr,
    if (node == NULL)
       return false;
 
-   if (node->stores == NULL)
-      node->stores = _mesa_pointer_set_create(state->dead_ctx);
+   if (node->stores.table == NULL)
+      _mesa_pointer_set_init(&node->stores, state->dead_ctx);
 
-   _mesa_set_add(node->stores, store_instr);
+   _mesa_set_add(&node->stores, store_instr);
 
    return false;
 }
@@ -490,10 +490,10 @@ register_copy_instr(nir_intrinsic_instr *copy_instr,
       if (node == NULL || node == UNDEF_NODE)
          continue;
 
-      if (node->copies == NULL)
-         node->copies = _mesa_pointer_set_create(state->dead_ctx);
+      if (node->copies.table == NULL)
+         _mesa_pointer_set_init(&node->copies, state->dead_ctx);
 
-      _mesa_set_add(node->copies, copy_instr);
+      _mesa_set_add(&node->copies, copy_instr);
    }
 }
 
@@ -553,12 +553,12 @@ static void
 lower_copies_to_load_store(struct deref_node *node,
                            struct lower_variables_state *state)
 {
-   if (!node->copies)
+   if (!node->copies.table)
       return;
 
    nir_builder b = nir_builder_create(state->impl);
 
-   set_foreach(node->copies, copy_entry) {
+   set_foreach(&node->copies, copy_entry) {
       nir_intrinsic_instr *copy = (void *)copy_entry->key;
 
       nir_lower_deref_copy_instr(&b, copy);
@@ -571,15 +571,15 @@ lower_copies_to_load_store(struct deref_node *node,
          if (arg_node == NULL || arg_node == node)
             continue;
 
-         struct set_entry *arg_entry = _mesa_set_search(arg_node->copies, copy);
+         struct set_entry *arg_entry = _mesa_set_search(&arg_node->copies, copy);
          assert(arg_entry);
-         _mesa_set_remove(arg_node->copies, arg_entry);
+         _mesa_set_remove(&arg_node->copies, arg_entry);
       }
 
       nir_instr_remove(&copy->instr);
    }
 
-   node->copies = NULL;
+   _mesa_set_fini(&node->copies, NULL);
 }
 
 static nir_def *
@@ -598,6 +598,16 @@ deref_vec_component(nir_deref_instr *deref)
       assert(glsl_type_is_vector_or_scalar(deref->type));
       return NULL;
    }
+}
+
+static ALWAYS_INLINE void
+nir_def_set_name(nir_shader *shader, nir_def *def, char *name)
+{
+   if (!name || likely(!shader->has_debug_info))
+      return;
+
+   nir_instr_debug_info *debug_info = nir_instr_get_debug_info(nir_def_instr(def));
+   debug_info->variable_name = name;
 }
 
 /* Performs variable renaming
@@ -638,6 +648,8 @@ rename_variables(struct lower_variables_state *state)
             nir_def *val =
                nir_phi_builder_value_get_block_def(node->pb_value, block);
 
+            nir_def_set_name(state->shader, val, nir_deref_instr_get_variable(deref)->name);
+
             /* As tempting as it is to just rewrite the uses of our load
              * instruction with the value we got out of the phi builder, we
              * can't do that without risking messing ourselves up.  In
@@ -657,6 +669,8 @@ rename_variables(struct lower_variables_state *state)
             b.cursor = nir_before_instr(&intrin->instr);
             val = nir_mov(&b, val);
 
+            nir_def_set_name(state->shader, val, nir_deref_instr_get_variable(deref)->name);
+
             assert(val->bit_size == intrin->def.bit_size);
 
             nir_def *comp = deref_vec_component(deref);
@@ -666,6 +680,8 @@ rename_variables(struct lower_variables_state *state)
                assert(intrin->def.num_components == 1);
                b.cursor = nir_before_instr(&intrin->instr);
                val = nir_vector_extract(&b, val, comp);
+
+               nir_def_set_name(state->shader, val, nir_deref_instr_get_variable(deref)->name);
             }
 
             nir_def_replace(&intrin->def, val);
@@ -688,6 +704,8 @@ rename_variables(struct lower_variables_state *state)
 
             if (!node->lower_to_ssa)
                continue;
+
+            nir_def_set_name(state->shader, value, nir_deref_instr_get_variable(deref)->name);
 
             assert(intrin->num_components ==
                    glsl_get_vector_elements(deref->type));
@@ -731,6 +749,8 @@ rename_variables(struct lower_variables_state *state)
                new_def = nir_vec_scalars(&b, srcs, intrin->num_components);
             }
 
+            nir_def_set_name(state->shader, new_def, nir_deref_instr_get_variable(deref)->name);
+
             nir_phi_builder_value_set_block_def(node->pb_value, block, new_def);
             nir_instr_remove(&intrin->instr);
             break;
@@ -773,13 +793,17 @@ rename_variables(struct lower_variables_state *state)
 static bool
 nir_lower_vars_to_ssa_impl(nir_function_impl *impl)
 {
+   /* Nothing to do... */
+   if (exec_list_is_empty(&impl->locals))
+      return nir_no_progress(impl);
+
    struct lower_variables_state state;
 
    state.shader = impl->function->shader;
    state.dead_ctx = ralloc_context(state.shader);
    state.impl = impl;
 
-   state.deref_var_nodes = _mesa_pointer_hash_table_create(state.dead_ctx);
+   _mesa_pointer_hash_table_init(&state.deref_var_nodes, state.dead_ctx);
    exec_list_make_empty(&state.direct_deref_nodes);
 
    /* Build the initial deref structures and direct_deref_nodes table */
@@ -813,8 +837,7 @@ nir_lower_vars_to_ssa_impl(nir_function_impl *impl)
    }
 
    if (!progress) {
-      nir_metadata_preserve(impl, nir_metadata_all);
-      return false;
+      return nir_no_progress(impl);
    }
 
    nir_metadata_require(impl, nir_metadata_dominance);
@@ -843,8 +866,8 @@ nir_lower_vars_to_ssa_impl(nir_function_impl *impl)
       assert(node->path.path[0]->var->constant_initializer == NULL &&
              node->path.path[0]->var->pointer_initializer == NULL);
 
-      if (node->stores) {
-         set_foreach(node->stores, store_entry) {
+      if (node->stores.table) {
+         set_foreach(&node->stores, store_entry) {
             nir_intrinsic_instr *store =
                (nir_intrinsic_instr *)store_entry->key;
             BITSET_SET(store_blocks, store->instr.block->index);
@@ -862,7 +885,7 @@ nir_lower_vars_to_ssa_impl(nir_function_impl *impl)
 
    nir_phi_builder_finish(state.phi_builder);
 
-   nir_metadata_preserve(impl, nir_metadata_control_flow);
+   nir_progress(true, impl, nir_metadata_control_flow);
 
    ralloc_free(state.dead_ctx);
 

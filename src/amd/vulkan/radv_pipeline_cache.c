@@ -11,13 +11,14 @@
 #include "util/mesa-sha1.h"
 #include "util/u_atomic.h"
 #include "util/u_debug.h"
+#include "nir.h"
 #include "nir_serialize.h"
 #include "radv_debug.h"
 #include "radv_descriptor_set.h"
 #include "radv_pipeline.h"
+#include "radv_pipeline_binary.h"
 #include "radv_pipeline_compute.h"
 #include "radv_pipeline_graphics.h"
-#include "radv_pipeline_binary.h"
 #include "radv_pipeline_rt.h"
 #include "radv_shader.h"
 #include "vk_pipeline.h"
@@ -56,6 +57,7 @@ radv_shader_destroy(struct vk_device *_device, struct vk_pipeline_cache_object *
    free(shader->disasm_string);
    free(shader->ir_string);
    free(shader->statistics);
+   free(shader->debug_info);
 
    vk_pipeline_cache_object_finish(&shader->base);
    free(shader);
@@ -93,7 +95,7 @@ radv_shader_cache_deserialize(struct vk_pipeline_cache *cache, const void *key_d
 void
 radv_shader_serialize(struct radv_shader *shader, struct blob *blob)
 {
-   size_t stats_size = shader->statistics ? aco_num_statistics * sizeof(uint32_t) : 0;
+   size_t stats_size = shader->statistics ? sizeof(struct amd_stats) : 0;
    size_t code_size = shader->code_size;
    uint32_t total_size = sizeof(struct radv_shader_binary_legacy) + code_size + stats_size;
 
@@ -134,6 +136,10 @@ radv_is_cache_disabled(const struct radv_device *device, const struct vk_pipelin
 
    /* The buffer address used for debug printf is hardcoded. */
    if (device->printf.buffer_addr)
+      return true;
+
+   /* The buffer address used for validating VAs is hardcoded. */
+   if (device->valid_vas_addr)
       return true;
 
    /* Pipeline caches can be disabled with RADV_DEBUG=nocache, with MESA_GLSL_CACHE_DISABLE=1 and
@@ -316,7 +322,7 @@ radv_report_pso_cache_stats(struct radv_device *device, const struct radv_pipeli
    fprintf(
       stderr,
       "radv: PSO cache stats: gfx (hits=%d, misses=%d), gfx_lib (hits=%d, misses=%d), compute (hits=%d, misses=%d), rt "
-      "(hits=%d, misses=%d)\nt",
+      "(hits=%d, misses=%d)\n",
       device->pso_cache_stats[RADV_PIPELINE_GRAPHICS].hits, device->pso_cache_stats[RADV_PIPELINE_GRAPHICS].misses,
       device->pso_cache_stats[RADV_PIPELINE_GRAPHICS_LIB].hits,
       device->pso_cache_stats[RADV_PIPELINE_GRAPHICS_LIB].misses, device->pso_cache_stats[RADV_PIPELINE_COMPUTE].hits,
@@ -333,7 +339,7 @@ radv_pipeline_cache_object_search(struct radv_device *device, struct vk_pipeline
    *found_in_application_cache = false;
 
    if (radv_is_cache_disabled(device, cache))
-      return false;
+      return NULL;
 
    bool *found = found_in_application_cache;
    if (!cache) {
@@ -347,7 +353,7 @@ radv_pipeline_cache_object_search(struct radv_device *device, struct vk_pipeline
    radv_report_pso_cache_stats(device, pipeline, !!object);
 
    if (!object)
-      return false;
+      return NULL;
 
    return container_of(object, struct radv_pipeline_cache_object, base);
 }
@@ -363,7 +369,7 @@ radv_graphics_pipeline_cache_search(struct radv_device *device, struct vk_pipeli
       return false;
 
    for (unsigned i = 0; i < pipeline_obj->num_shaders; i++) {
-      gl_shader_stage s = pipeline_obj->shaders[i]->info.stage;
+      mesa_shader_stage s = pipeline_obj->shaders[i]->info.stage;
       if (s == MESA_SHADER_VERTEX && i > 0) {
          /* The GS copy-shader is a VS placed after all other stages */
          assert(i == pipeline_obj->num_shaders - 1 && pipeline->base.shaders[MESA_SHADER_GEOMETRY]);
@@ -430,6 +436,10 @@ radv_pipeline_cache_insert(struct radv_device *device, struct vk_pipeline_cache 
    pipeline->cache_object = vk_pipeline_cache_add_object(cache, &pipeline_obj->base);
 }
 
+struct radv_ray_tracing_group_cache_data {
+   bool has_shader;
+};
+
 struct radv_ray_tracing_stage_cache_data {
    uint32_t stack_size : 31;
    uint32_t has_shader : 1;
@@ -441,13 +451,14 @@ struct radv_ray_tracing_pipeline_cache_data {
    uint32_t has_traversal_shader : 1;
    uint32_t is_library : 1;
    uint32_t num_stages;
+   uint32_t num_groups;
+   uint32_t traversal_stack_size;
    struct radv_ray_tracing_stage_cache_data stages[];
 };
 
 bool
 radv_ray_tracing_pipeline_cache_search(struct radv_device *device, struct vk_pipeline_cache *cache,
-                                       struct radv_ray_tracing_pipeline *pipeline,
-                                       bool *found_in_application_cache)
+                                       struct radv_ray_tracing_pipeline *pipeline, bool *found_in_application_cache)
 {
    struct radv_pipeline_cache_object *pipeline_obj;
 
@@ -456,12 +467,15 @@ radv_ray_tracing_pipeline_cache_search(struct radv_device *device, struct vk_pip
       return false;
 
    struct radv_ray_tracing_pipeline_cache_data *data = pipeline_obj->data;
+   struct radv_ray_tracing_group_cache_data *group_data = (void *)&data->stages[data->num_stages];
 
    bool complete = true;
    unsigned idx = 0;
 
-   if (data->has_traversal_shader)
+   if (data->has_traversal_shader) {
       pipeline->base.base.shaders[MESA_SHADER_INTERSECTION] = radv_shader_ref(pipeline_obj->shaders[idx++]);
+      pipeline->traversal_stack_size = data->traversal_stack_size;
+   }
 
    const uint32_t num_stages = data->num_stages;
    for (unsigned i = 0; i < num_stages; i++) {
@@ -477,6 +491,10 @@ radv_ray_tracing_pipeline_cache_search(struct radv_device *device, struct vk_pip
          complete &= pipeline->stages[i].nir != NULL;
       }
    }
+   for (unsigned i = 0; i < data->num_groups; ++i) {
+      if (group_data[i].has_shader)
+         pipeline->groups[i].ahit_isec_shader = radv_shader_ref(pipeline_obj->shaders[idx++]);
+   }
 
    assert(idx == pipeline_obj->num_shaders);
 
@@ -486,7 +504,8 @@ radv_ray_tracing_pipeline_cache_search(struct radv_device *device, struct vk_pip
 
 void
 radv_ray_tracing_pipeline_cache_insert(struct radv_device *device, struct vk_pipeline_cache *cache,
-                                       struct radv_ray_tracing_pipeline *pipeline, unsigned num_stages)
+                                       struct radv_ray_tracing_pipeline *pipeline, unsigned num_stages,
+                                       unsigned num_groups)
 {
    if (radv_is_cache_disabled(device, cache))
       return;
@@ -505,22 +524,29 @@ radv_ray_tracing_pipeline_cache_insert(struct radv_device *device, struct vk_pip
    unsigned num_shaders = pipeline->base.base.shaders[MESA_SHADER_INTERSECTION] ? 1 : 0;
    for (unsigned i = 0; i < num_stages; ++i)
       num_shaders += pipeline->stages[i].shader ? 1 : 0;
+   for (unsigned i = 0; i < num_groups; ++i)
+      num_shaders += pipeline->groups[i].ahit_isec_shader ? 1 : 0;
 
    uint32_t data_size = sizeof(struct radv_ray_tracing_pipeline_cache_data) +
-                        num_stages * sizeof(struct radv_ray_tracing_stage_cache_data);
+                        num_stages * sizeof(struct radv_ray_tracing_stage_cache_data) +
+                        num_groups * sizeof(struct radv_ray_tracing_group_cache_data);
 
    struct radv_pipeline_cache_object *pipeline_obj =
       radv_pipeline_cache_object_create(&device->vk, num_shaders, pipeline->base.base.sha1, data_size);
    struct radv_ray_tracing_pipeline_cache_data *data = pipeline_obj->data;
+   struct radv_ray_tracing_group_cache_data *group_data = (void *)&data->stages[num_stages];
 
    data->is_library = !!(pipeline->base.base.create_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR);
    data->has_traversal_shader = !!pipeline->base.base.shaders[MESA_SHADER_INTERSECTION];
 
    unsigned idx = 0;
-   if (data->has_traversal_shader)
+   if (data->has_traversal_shader) {
       pipeline_obj->shaders[idx++] = radv_shader_ref(pipeline->base.base.shaders[MESA_SHADER_INTERSECTION]);
+      data->traversal_stack_size = pipeline->traversal_stack_size;
+   }
 
    data->num_stages = num_stages;
+   data->num_groups = num_groups;
 
    for (unsigned i = 0; i < num_stages; ++i) {
       data->stages[i].stack_size = pipeline->stages[i].stack_size;
@@ -531,6 +557,12 @@ radv_ray_tracing_pipeline_cache_insert(struct radv_device *device, struct vk_pip
       if (pipeline->stages[i].shader)
          pipeline_obj->shaders[idx++] = radv_shader_ref(pipeline->stages[i].shader);
    }
+   for (unsigned i = 0; i < num_groups; ++i) {
+      if (pipeline->groups[i].ahit_isec_shader) {
+         group_data[i].has_shader = true;
+         pipeline_obj->shaders[idx++] = radv_shader_ref(pipeline->groups[i].ahit_isec_shader);
+      }
+   }
    assert(idx == num_shaders);
 
    /* Add the object to the cache */
@@ -538,7 +570,7 @@ radv_ray_tracing_pipeline_cache_insert(struct radv_device *device, struct vk_pip
 }
 
 nir_shader *
-radv_pipeline_cache_lookup_nir(struct radv_device *device, struct vk_pipeline_cache *cache, gl_shader_stage stage,
+radv_pipeline_cache_lookup_nir(struct radv_device *device, struct vk_pipeline_cache *cache, mesa_shader_stage stage,
                                const blake3_hash key)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
@@ -652,7 +684,7 @@ radv_pipeline_cache_get_binaries(struct radv_device *device, const VkAllocationC
    bool complete = true;
    bool is_rt = false;
    for (unsigned i = 0; i < pipeline_obj->num_shaders; i++) {
-      if (gl_shader_stage_is_rt(pipeline_obj->shaders[i]->info.stage)) {
+      if (mesa_shader_stage_is_rt(pipeline_obj->shaders[i]->info.stage)) {
          is_rt = true;
          break;
       }
@@ -703,7 +735,7 @@ radv_pipeline_cache_get_binaries(struct radv_device *device, const VkAllocationC
 
       for (unsigned i = 0; i < pipeline_obj->num_shaders; i++) {
          struct radv_shader *shader = pipeline_obj->shaders[i];
-         gl_shader_stage s = shader->info.stage;
+         mesa_shader_stage s = shader->info.stage;
 
          if (s == MESA_SHADER_VERTEX && i > 0) {
             /* The GS copy-shader is a VS placed after all other stages */

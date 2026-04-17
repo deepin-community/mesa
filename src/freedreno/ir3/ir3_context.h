@@ -48,6 +48,7 @@ struct ir3_context {
    struct ir3_instruction **outputs;
 
    struct ir3_block *block;    /* the current block */
+   struct ir3_builder build;
    struct ir3_block *in_block; /* block created for shader inputs */
 
    nir_function_impl *impl;
@@ -84,6 +85,8 @@ struct ir3_context {
    /* Compute shader inputs: */
    struct ir3_instruction *local_invocation_id, *work_group_id;
 
+   struct ir3_instruction *frag_shading_rate;
+
    /* mapping from nir_register to defining instruction: */
    struct hash_table *def_ht;
 
@@ -101,12 +104,7 @@ struct ir3_context {
     * src used for an array of vec1 cannot be also used for an
     * array of vec4.
     */
-   struct hash_table *addr0_ht[4];
-
-   /* The same for a1.x. We only support immediate values for a1.x, as this
-    * is the only use so far.
-    */
-   struct hash_table_u64 *addr1_ht;
+   struct hash_table *addr0_ht[8];
 
    struct hash_table *sel_cond_conversions;
    struct hash_table *predicate_conversions;
@@ -138,6 +136,8 @@ struct ir3_context {
 
    unsigned prefetch_limit;
 
+   bool has_relative_load_const_ir3;
+
    /* set if we encounter something we can't handle yet, so we
     * can bail cleanly and fallback to TGSI compiler f/e
     */
@@ -148,6 +148,9 @@ struct ir3_context_funcs {
    void (*emit_intrinsic_load_ssbo)(struct ir3_context *ctx,
                                     nir_intrinsic_instr *intr,
                                     struct ir3_instruction **dst);
+   void (*emit_intrinsic_load_uav)(struct ir3_context *ctx,
+                                   nir_intrinsic_instr *intr,
+                                   struct ir3_instruction **dst);
    void (*emit_intrinsic_store_ssbo)(struct ir3_context *ctx,
                                      nir_intrinsic_instr *intr);
    struct ir3_instruction *(*emit_intrinsic_atomic_ssbo)(
@@ -179,6 +182,13 @@ struct ir3_context *ir3_context_init(struct ir3_compiler *compiler,
                                      struct ir3_shader_variant *so);
 void ir3_context_free(struct ir3_context *ctx);
 
+static inline void
+ir3_context_set_block(struct ir3_context *ctx, struct ir3_block *block)
+{
+   ctx->block = block;
+   ctx->build = ir3_builder_at(ir3_before_terminator(block));
+}
+
 struct ir3_instruction **ir3_get_dst_ssa(struct ir3_context *ctx,
                                          nir_def *dst, unsigned n);
 struct ir3_instruction **ir3_get_def(struct ir3_context *ctx, nir_def *def,
@@ -195,23 +205,12 @@ ir3_get_src(struct ir3_context *ctx, nir_src *src)
 }
 
 void ir3_put_def(struct ir3_context *ctx, nir_def *def);
-struct ir3_instruction *ir3_create_collect(struct ir3_block *block,
-                                           struct ir3_instruction *const *arr,
-                                           unsigned arrsz);
-void ir3_split_dest(struct ir3_block *block, struct ir3_instruction **dst,
-                    struct ir3_instruction *src, unsigned base, unsigned n);
 void ir3_handle_bindless_cat6(struct ir3_instruction *instr, nir_src rsrc);
 void ir3_handle_nonuniform(struct ir3_instruction *instr,
                            nir_intrinsic_instr *intrin);
 void emit_intrinsic_image_size_tex(struct ir3_context *ctx,
                                    nir_intrinsic_instr *intr,
                                    struct ir3_instruction **dst);
-
-#define ir3_collect(block, ...)                                                \
-   ({                                                                          \
-      struct ir3_instruction *__arr[] = {__VA_ARGS__};                         \
-      ir3_create_collect(block, __arr, ARRAY_SIZE(__arr));                     \
-   })
 
 NORETURN void ir3_context_error(struct ir3_context *ctx, const char *format,
                                 ...);
@@ -224,8 +223,6 @@ NORETURN void ir3_context_error(struct ir3_context *ctx, const char *format,
 
 struct ir3_instruction *ir3_get_addr0(struct ir3_context *ctx,
                                       struct ir3_instruction *src, int align);
-struct ir3_instruction *ir3_get_addr1(struct ir3_context *ctx,
-                                      unsigned const_val);
 struct ir3_instruction *ir3_get_predicate(struct ir3_context *ctx,
                                           struct ir3_instruction *src);
 
@@ -253,7 +250,7 @@ utype_for_size(unsigned bit_size)
    case 8:
       return TYPE_U8;
    default:
-      unreachable("bad bitsize");
+      UNREACHABLE("bad bitsize");
       return ~0;
    }
 }

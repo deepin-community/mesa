@@ -1,3 +1,8 @@
+/*
+ * Copyright © 2021 Collabora, Ltd.
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "pan_pps_perf.h"
 
 #include <lib/kmod/pan_kmod.h>
@@ -29,18 +34,18 @@ PanfrostDevice::operator=(PanfrostDevice &&o)
 }
 
 PanfrostPerf::PanfrostPerf(const PanfrostDevice &dev)
-    : perf{reinterpret_cast<struct panfrost_perf *>(
-         rzalloc(nullptr, struct panfrost_perf))}
+    : perf{reinterpret_cast<struct pan_perf *>(
+         rzalloc(nullptr, struct pan_perf))}
 {
    assert(perf);
    assert(dev.fd >= 0);
-   panfrost_perf_init(perf, dev.fd);
+   pan_perf_init(perf, dev.fd);
 }
 
 PanfrostPerf::~PanfrostPerf()
 {
    if (perf) {
-      panfrost_perf_disable(perf);
+      pan_perf_disable(perf);
       ralloc_free(perf);
    }
 }
@@ -61,21 +66,21 @@ int
 PanfrostPerf::enable() const
 {
    assert(perf);
-   return panfrost_perf_enable(perf);
+   return pan_perf_enable(perf);
 }
 
 void
 PanfrostPerf::disable() const
 {
    assert(perf);
-   panfrost_perf_disable(perf);
+   pan_perf_disable(perf);
 }
 
 int
 PanfrostPerf::dump() const
 {
    assert(perf);
-   return panfrost_perf_dump(perf);
+   return pan_perf_dump(perf);
 }
 
 } // namespace pps

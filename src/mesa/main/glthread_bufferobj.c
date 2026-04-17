@@ -22,7 +22,7 @@
  */
 
 #include "main/glthread_marshal.h"
-#include "main/dispatch.h"
+#include "dispatch.h"
 #include "main/bufferobj.h"
 
 /**
@@ -62,8 +62,15 @@ new_upload_buffer(struct gl_context *ctx, GLsizeiptr size, uint8_t **ptr)
    return obj;
 }
 
+void GLAPIENTRY _mesa_InternalReleaseBufferMESA(GLvoid *buffer)
+{
+   GET_CURRENT_CONTEXT(ctx);
+   struct gl_buffer_object *buf = buffer;
+   _mesa_reference_buffer_object(ctx, &buf, NULL);
+}
+
 void
-_mesa_glthread_release_upload_buffer(struct gl_context *ctx)
+_mesa_glthread_release_upload_buffer(struct gl_context *ctx, bool async_release)
 {
    struct glthread_state *glthread = &ctx->GLThread;
 
@@ -72,7 +79,14 @@ _mesa_glthread_release_upload_buffer(struct gl_context *ctx)
                    -glthread->upload_buffer_private_refcount);
       glthread->upload_buffer_private_refcount = 0;
    }
-   _mesa_reference_buffer_object(ctx, &glthread->upload_buffer, NULL);
+
+   if (async_release) {
+      /* Defer to avoid calling tc_resource_release from this thread. */
+      _mesa_marshal_InternalReleaseBufferMESA(glthread->upload_buffer);
+      glthread->upload_buffer = NULL;
+   } else {
+      _mesa_reference_buffer_object(ctx, &glthread->upload_buffer, NULL);
+   }
 }
 
 void
@@ -113,7 +127,7 @@ _mesa_glthread_upload(struct gl_context *ctx, const void *data,
          return;
       }
 
-      _mesa_glthread_release_upload_buffer(ctx);
+      _mesa_glthread_release_upload_buffer(ctx, true);
 
       glthread->upload_buffer =
          new_upload_buffer(ctx, default_size, &glthread->upload_ptr);
@@ -354,7 +368,7 @@ uint32_t
 _mesa_unmarshal_NamedBufferData(struct gl_context *ctx,
                                 const struct marshal_cmd_NamedBufferData *restrict cmd)
 {
-   unreachable("never used - all BufferData variants use DISPATCH_CMD_BufferData");
+   UNREACHABLE("never used - all BufferData variants use DISPATCH_CMD_BufferData");
    return 0;
 }
 
@@ -362,7 +376,7 @@ uint32_t
 _mesa_unmarshal_NamedBufferDataEXT(struct gl_context *ctx,
                                    const struct marshal_cmd_NamedBufferDataEXT *restrict cmd)
 {
-   unreachable("never used - all BufferData variants use DISPATCH_CMD_BufferData");
+   UNREACHABLE("never used - all BufferData variants use DISPATCH_CMD_BufferData");
    return 0;
 }
 
@@ -472,7 +486,7 @@ uint32_t
 _mesa_unmarshal_NamedBufferSubData(struct gl_context *ctx,
                                    const struct marshal_cmd_NamedBufferSubData *restrict cmd)
 {
-   unreachable("never used - all BufferSubData variants use DISPATCH_CMD_BufferSubData");
+   UNREACHABLE("never used - all BufferSubData variants use DISPATCH_CMD_BufferSubData");
    return 0;
 }
 
@@ -480,7 +494,7 @@ uint32_t
 _mesa_unmarshal_NamedBufferSubDataEXT(struct gl_context *ctx,
                                       const struct marshal_cmd_NamedBufferSubDataEXT *restrict cmd)
 {
-   unreachable("never used - all BufferSubData variants use DISPATCH_CMD_BufferSubData");
+   UNREACHABLE("never used - all BufferSubData variants use DISPATCH_CMD_BufferSubData");
    return 0;
 }
 

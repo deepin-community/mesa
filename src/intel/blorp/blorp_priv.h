@@ -35,6 +35,9 @@
 extern "C" {
 #endif
 
+
+#define BLORP_INLINE_PARAM_THREAD_GROUP_ID_Z_DIMENSION (0)
+
 void blorp_init(struct blorp_context *blorp, void *driver_ctx,
                 struct isl_device *isl_dev, const struct blorp_config *config);
 
@@ -43,11 +46,12 @@ struct blorp_compiler {
    const struct elk_compiler *elk;
 
    const nir_shader_compiler_options *(*nir_options)(struct blorp_context *blorp,
-                                                     gl_shader_stage stage);
+                                                     mesa_shader_stage stage);
 
    struct blorp_program (*compile_fs)(struct blorp_context *blorp, void *mem_ctx,
                                       struct nir_shader *nir,
                                       bool multisample_fbo,
+                                      bool is_fast_clear,
                                       bool use_repclear);
    struct blorp_program (*compile_vs)(struct blorp_context *blorp, void *mem_ctx,
                                       struct nir_shader *nir);
@@ -97,10 +101,10 @@ struct blorp_surface_info
 
 void
 blorp_surface_info_init(struct blorp_batch *batch,
-                            struct blorp_surface_info *info,
-                            const struct blorp_surf *surf,
-                            unsigned int level, float layer,
-                            enum isl_format format, bool is_dest);
+                        struct blorp_surface_info *info,
+                        const struct blorp_surf *surf,
+                        unsigned int level, float layer,
+                        enum isl_format format, bool is_dest);
 void
 blorp_surf_convert_to_single_slice(const struct isl_device *isl_dev,
                                    struct blorp_surface_info *info);
@@ -160,10 +164,9 @@ struct blorp_surf_offset {
    uint32_t y;
 };
 
-struct blorp_wm_inputs
+/* Parameters used in blorp_blit.c. */
+struct blorp_wm_inputs_blit
 {
-   uint32_t clear_color[4];
-
    struct blorp_bounds_rect bounds_rect;
    struct blorp_rect_grid rect_grid;
    struct blorp_coord_transform coord_transform[2];
@@ -178,11 +181,25 @@ struct blorp_wm_inputs
     * for which the setting has no effect. Use the z-coordinate instead.
     */
    float src_z;
+};
+
+/* Parameters used in blorp_clear.c. */
+struct blorp_wm_inputs_clear {
+   uint32_t clear_color[4];
+   struct blorp_bounds_rect bounds_rect;
+};
+
+struct blorp_wm_inputs
+{
+   union {
+      struct blorp_wm_inputs_blit blit;
+      struct blorp_wm_inputs_clear clear;
+   };
 
    /* Note: Pad out to an integral number of registers when extending, but
     * make sure subgroup_id is the last 32-bit item.
     */
-   /* uint32_t pad[?]; */
+   uint32_t pad[4];
    uint32_t subgroup_id;
 };
 
@@ -234,39 +251,49 @@ enum blorp_shader_pipeline {
 struct blorp_params
 {
    enum blorp_op op;
+
    uint32_t x0;
    uint32_t y0;
    uint32_t x1;
    uint32_t y1;
    float z;
-   uint8_t stencil_mask;
-   uint8_t stencil_ref;
-   struct blorp_surface_info depth;
-   struct blorp_surface_info stencil;
-   uint32_t depth_format;
+
    struct blorp_surface_info src;
    struct blorp_surface_info dst;
-   enum isl_aux_op hiz_op;
+   struct blorp_surface_info depth;
+   struct blorp_surface_info stencil;
+
+   uint32_t depth_format;
+   uint8_t stencil_mask;
+   uint8_t stencil_ref;
+
    bool full_surface_hiz_op;
-   enum isl_aux_op fast_clear_op;
    uint8_t color_write_disable;
+   enum isl_aux_op fast_clear_op;
+   enum isl_aux_op hiz_op;
+
    struct blorp_wm_inputs wm_inputs;
    struct blorp_vs_inputs vs_inputs;
-   bool dst_clear_color_as_input;
+
    unsigned num_samples;
    unsigned num_draw_buffers;
    unsigned num_layers;
-   uint32_t vs_prog_kernel;
-   void *vs_prog_data;
-   uint32_t sf_prog_kernel;
-   void *sf_prog_data;
-   uint32_t wm_prog_kernel;
-   void *wm_prog_data;
-   uint32_t cs_prog_kernel;
-   void *cs_prog_data;
+   bool dst_clear_color_as_input;
 
    bool use_pre_baked_binding_table;
    uint32_t pre_baked_binding_table_offset;
+
+   uint32_t vs_prog_kernel;
+   uint32_t sf_prog_kernel;
+   uint32_t wm_prog_kernel;
+   uint32_t cs_prog_kernel;
+
+   /* These are pointers to struct {brw,elk}_stage_prog_data. */
+   void *vs_prog_data;
+   void *sf_prog_data;
+   void *wm_prog_data;
+   void *cs_prog_data;
+
    enum blorp_shader_type shader_type;
    enum blorp_shader_pipeline shader_pipeline;
 };
@@ -443,9 +470,11 @@ static inline struct blorp_program
 blorp_compile_fs(struct blorp_context *blorp, void *mem_ctx,
                  struct nir_shader *nir,
                  bool multisample_fbo,
+                 bool is_fast_clear,
                  bool use_repclear)
 {
-   return blorp->compiler->compile_fs(blorp, mem_ctx, nir, multisample_fbo, use_repclear);
+   return blorp->compiler->compile_fs(blorp, mem_ctx, nir, multisample_fbo,
+                                      is_fast_clear, use_repclear);
 }
 
 static inline struct blorp_program
@@ -471,9 +500,9 @@ blorp_get_cs_local_y(struct blorp_params *params)
 {
    uint32_t height = params->y1 - params->y0;
    uint32_t or_ys = params->y0 | params->y1;
-   if (height > 32 || (or_ys & 3) == 0) {
+   if (height > 32 || util_is_aligned(or_ys, 4)) {
       return 4;
-   } else if ((or_ys & 1) == 0) {
+   } else if (util_is_aligned(or_ys, 2)) {
       return 2;
    } else {
       return 1;
@@ -501,6 +530,42 @@ blorp_params_get_layer_offset_vs(struct blorp_batch *batch,
                                  struct blorp_params *params)
 {
    return batch->blorp->compiler->params_get_layer_offset_vs(batch, params);
+}
+
+/* This means: blorp_params->wm_inputs.blit should be used. */
+static inline bool
+blorp_op_type_is_blit(enum blorp_op op)
+{
+   switch (op) {
+   case BLORP_OP_BLIT:
+   case BLORP_OP_COPY:
+      return true;
+   default:
+      return false;
+   }
+}
+
+/* This means: blorp_params->wm_inputs.clear should be used. */
+static inline bool
+blorp_op_type_is_clear(enum blorp_op op)
+{
+   switch (op) {
+   case BLORP_OP_CCS_AMBIGUATE:
+   case BLORP_OP_CCS_COLOR_CLEAR:
+   case BLORP_OP_CCS_PARTIAL_RESOLVE:
+   case BLORP_OP_CCS_RESOLVE:
+   case BLORP_OP_HIZ_AMBIGUATE:
+   case BLORP_OP_HIZ_CLEAR:
+   case BLORP_OP_HIZ_RESOLVE:
+   case BLORP_OP_MCS_AMBIGUATE:
+   case BLORP_OP_MCS_COLOR_CLEAR:
+   case BLORP_OP_MCS_PARTIAL_RESOLVE:
+   case BLORP_OP_SLOW_COLOR_CLEAR:
+   case BLORP_OP_SLOW_DEPTH_CLEAR:
+      return true;
+   default:
+      return false;
+   }
 }
 
 /** \} */

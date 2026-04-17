@@ -108,6 +108,13 @@ vc4_map_usage_prep(struct pipe_context *pctx,
         MESA_TRACE_FUNC();
 
         if (usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE) {
+                /* Flush any pending write jobs before replacing the BO.
+                 * The RCL reads rsc->bo at job submit time, so if we
+                 * replace the BO first, a later flush of the pending
+                 * job would resolve the new BO instead of the old one,
+                 * corrupting the new data with a stale store.
+                 */
+                vc4_flush_jobs_writing_resource(vc4, prsc);
                 if (vc4_resource_bo_alloc(rsc)) {
                         /* If it might be bound as one of our vertex buffers,
                          * make sure we re-emit vertex buffer state.
@@ -294,10 +301,12 @@ vc4_resource_destroy(struct pipe_screen *pscreen,
 static uint64_t
 vc4_resource_modifier(struct vc4_resource *rsc)
 {
-        if (rsc->tiled)
+        if (rsc->tiled) {
+                assert(rsc->slices[0].tiling == VC4_TILING_FORMAT_T);
                 return DRM_FORMAT_MOD_BROADCOM_VC4_T_TILED;
-        else
+        } else {
                 return DRM_FORMAT_MOD_LINEAR;
+        }
 }
 
 static bool
@@ -376,7 +385,8 @@ vc4_resource_get_param(struct pipe_screen *pscreen,
 }
 
 static void
-vc4_setup_slices(struct vc4_resource *rsc, const char *caller)
+vc4_setup_slices(struct vc4_screen *screen, struct vc4_resource *rsc,
+                 const char *caller, bool force_format_t)
 {
         struct pipe_resource *prsc = &rsc->base;
         uint32_t width = prsc->width0;
@@ -414,7 +424,8 @@ vc4_setup_slices(struct vc4_resource *rsc, const char *caller)
                                 level_width = align(level_width, utile_w);
                         }
                 } else {
-                        if (vc4_size_is_lt(level_width, level_height,
+                        if (!force_format_t &&
+                            vc4_size_is_lt(level_width, level_height,
                                            rsc->cpp)) {
                                 slice->tiling = VC4_TILING_FORMAT_LT;
                                 level_width = align(level_width, utile_w);
@@ -431,6 +442,19 @@ vc4_setup_slices(struct vc4_resource *rsc, const char *caller)
                 slice->offset = offset;
                 slice->stride = (level_width * rsc->cpp *
                                  MAX2(prsc->nr_samples, 1));
+
+#ifdef USE_VC4_SIMULATOR
+                /* Ensure stride alignment matches the one required by the GPU
+                 * that drives the display.
+                 */
+                if (slice->tiling == VC4_TILING_FORMAT_LINEAR &&
+                    prsc->target == PIPE_TEXTURE_2D) {
+                       slice->stride =
+                              align(slice->stride,
+                                    vc4_simulator_get_raster_stride_align(screen->fd));
+                }
+#endif
+
                 slice->size = level_height * slice->stride;
 
                 offset += slice->size;
@@ -527,7 +551,6 @@ vc4_resource_create_with_modifiers(struct pipe_screen *pscreen,
         struct vc4_screen *screen = vc4_screen(pscreen);
         struct vc4_resource *rsc = vc4_resource_setup(pscreen, tmpl);
         struct pipe_resource *prsc = &rsc->base;
-        bool linear_ok = drm_find_modifier(DRM_FORMAT_MOD_LINEAR, modifiers, count);
         /* Use a tiled layout if we can, for better 3D performance. */
         bool should_tile = true;
 
@@ -565,13 +588,12 @@ vc4_resource_create_with_modifiers(struct pipe_screen *pscreen,
 
         /* No user-specified modifier; determine our own. */
         if (count == 1 && modifiers[0] == DRM_FORMAT_MOD_INVALID) {
-                linear_ok = true;
                 rsc->tiled = should_tile;
         } else if (should_tile &&
                    drm_find_modifier(DRM_FORMAT_MOD_BROADCOM_VC4_T_TILED,
                                  modifiers, count)) {
                 rsc->tiled = true;
-        } else if (linear_ok) {
+        } else if (drm_find_modifier(DRM_FORMAT_MOD_LINEAR, modifiers, count)) {
                 rsc->tiled = false;
         } else {
                 fprintf(stderr, "Unsupported modifier requested\n");
@@ -581,7 +603,7 @@ vc4_resource_create_with_modifiers(struct pipe_screen *pscreen,
         if (tmpl->target != PIPE_BUFFER)
                 rsc->vc4_format = get_resource_texture_format(prsc);
 
-        vc4_setup_slices(rsc, "create");
+        vc4_setup_slices(screen, rsc, "create", tmpl->bind & PIPE_BIND_SHARED);
         if (!vc4_resource_bo_alloc(rsc))
                 goto fail;
 
@@ -677,7 +699,7 @@ vc4_resource_from_handle(struct pipe_screen *pscreen,
         } else if (whandle->modifier != get_tiling.modifier) {
                 fprintf(stderr,
                         "Modifier 0x%llx vs. tiling (0x%llx) mismatch\n",
-                        (long long)whandle->modifier, get_tiling.modifier);
+                        (long long)whandle->modifier, (long long)get_tiling.modifier);
                 goto fail;
         }
 
@@ -696,7 +718,7 @@ vc4_resource_from_handle(struct pipe_screen *pscreen,
         }
 
         rsc->vc4_format = get_resource_texture_format(prsc);
-        vc4_setup_slices(rsc, "import");
+        vc4_setup_slices(screen, rsc, "import", true);
 
         if (whandle->offset != 0) {
                 if (rsc->tiled) {
@@ -755,46 +777,6 @@ fail:
         return NULL;
 }
 
-static struct pipe_surface *
-vc4_create_surface(struct pipe_context *pctx,
-                   struct pipe_resource *ptex,
-                   const struct pipe_surface *surf_tmpl)
-{
-        struct vc4_surface *surface = CALLOC_STRUCT(vc4_surface);
-        struct vc4_resource *rsc = vc4_resource(ptex);
-
-        if (!surface)
-                return NULL;
-
-        assert(surf_tmpl->u.tex.first_layer == surf_tmpl->u.tex.last_layer);
-
-        struct pipe_surface *psurf = &surface->base;
-        unsigned level = surf_tmpl->u.tex.level;
-
-        pipe_reference_init(&psurf->reference, 1);
-        pipe_resource_reference(&psurf->texture, ptex);
-
-        psurf->context = pctx;
-        psurf->format = surf_tmpl->format;
-        psurf->width = u_minify(ptex->width0, level);
-        psurf->height = u_minify(ptex->height0, level);
-        psurf->u.tex.level = level;
-        psurf->u.tex.first_layer = surf_tmpl->u.tex.first_layer;
-        psurf->u.tex.last_layer = surf_tmpl->u.tex.last_layer;
-        surface->offset = (rsc->slices[level].offset +
-                           psurf->u.tex.first_layer * rsc->cube_map_stride);
-        surface->tiling = rsc->slices[level].tiling;
-
-        return &surface->base;
-}
-
-static void
-vc4_surface_destroy(struct pipe_context *pctx, struct pipe_surface *psurf)
-{
-        pipe_resource_reference(&psurf->texture, NULL);
-        FREE(psurf);
-}
-
 static void
 vc4_dump_surface_non_msaa(struct pipe_surface *psurf)
 {
@@ -802,8 +784,8 @@ vc4_dump_surface_non_msaa(struct pipe_surface *psurf)
         struct vc4_resource *rsc = vc4_resource(prsc);
         uint32_t *map = vc4_bo_map(rsc->bo);
         uint32_t stride = rsc->slices[0].stride / 4;
-        uint32_t width = psurf->width;
-        uint32_t height = psurf->height;
+        unsigned width, height;
+        pipe_surface_size(psurf, &width, &height);
         uint32_t chunk_w = width / 79;
         uint32_t chunk_h = height / 40;
         uint32_t found_colors[10] = { 0 };
@@ -897,8 +879,10 @@ vc4_surface_msaa_get_sample(struct pipe_surface *psurf,
 {
         struct pipe_resource *prsc = psurf->texture;
         struct vc4_resource *rsc = vc4_resource(prsc);
+        unsigned width, height;
+        pipe_surface_size(psurf, &width, &height);
         uint32_t tile_w = 32, tile_h = 32;
-        uint32_t tiles_w = DIV_ROUND_UP(psurf->width, 32);
+        uint32_t tiles_w = DIV_ROUND_UP(width, 32);
 
         uint32_t tile_x = x / tile_w;
         uint32_t tile_y = y / tile_h;
@@ -969,23 +953,25 @@ static void
 vc4_dump_surface_msaa(struct pipe_surface *psurf)
 {
         uint32_t tile_w = 32, tile_h = 32;
-        uint32_t tiles_w = DIV_ROUND_UP(psurf->width, tile_w);
-        uint32_t tiles_h = DIV_ROUND_UP(psurf->height, tile_h);
+        unsigned width, height;
+        pipe_surface_size(psurf, &width, &height);
+        uint32_t tiles_w = DIV_ROUND_UP(width, tile_w);
+        uint32_t tiles_h = DIV_ROUND_UP(height, tile_h);
         uint32_t char_w = 140, char_h = 60;
         uint32_t char_w_per_tile = char_w / tiles_w - 1;
         uint32_t char_h_per_tile = char_h / tiles_h - 1;
 
         fprintf(stderr, "Surface: %dx%d (%dx MSAA)\n",
-                psurf->width, psurf->height, psurf->texture->nr_samples);
+                width, height, psurf->texture->nr_samples);
 
         for (int x = 0; x < (char_w_per_tile + 1) * tiles_w; x++)
                 fprintf(stderr, "-");
         fprintf(stderr, "\n");
 
-        for (int ty = 0; ty < psurf->height; ty += tile_h) {
+        for (int ty = 0; ty < height; ty += tile_h) {
                 for (int y = 0; y < char_h_per_tile; y++) {
 
-                        for (int tx = 0; tx < psurf->width; tx += tile_w) {
+                        for (int tx = 0; tx < width; tx += tile_w) {
                                 for (int x = 0; x < char_w_per_tile; x++) {
                                         uint32_t bx1 = (x * tile_w /
                                                         char_w_per_tile);
@@ -1027,11 +1013,60 @@ vc4_dump_surface(struct pipe_surface *psurf)
 }
 
 static void
-vc4_flush_resource(struct pipe_context *pctx, struct pipe_resource *resource)
+vc4_flush_resource(struct pipe_context *pctx, struct pipe_resource *prsc)
 {
         /* All calls to flush_resource are followed by a flush of the context,
-         * so there's nothing to do.
+         * so there's nothing to do. Still, if the resource is going to be
+         * shared and it is tiled, only T format is valid, so we need to
+         * convert it.
          */
+        struct vc4_resource *rsc = vc4_resource(prsc);
+        struct vc4_screen *screen = vc4_screen(prsc->screen);
+        if (rsc->tiled &&
+            (rsc->slices[0].tiling != VC4_TILING_FORMAT_T ||
+            !screen->has_tiling_ioctl)) {
+                /* Shared resources must be not mipmapped */
+                assert(prsc->last_level == 0);
+                /* Shared resources must not be multisampled */
+                assert(prsc->nr_samples <= 1);
+
+                struct pipe_resource ptmpl = *prsc;
+                ptmpl.bind |= PIPE_BIND_SHARED;
+                struct vc4_resource *new_rsc =
+                        vc4_resource(pctx->screen->resource_create(pctx->screen,
+                                                                   &ptmpl));
+                assert(new_rsc);
+
+                struct pipe_blit_info blit = { 0 };
+                u_box_3d(0, 0, 0,
+                         prsc->width0, prsc->height0, prsc->depth0,
+                         &blit.dst.box);
+                blit.src.box = blit.dst.box;
+                blit.dst.resource = &new_rsc->base;
+                blit.dst.format = new_rsc->base.format;
+                blit.dst.level = 0;
+                blit.src.resource = prsc;
+                blit.src.format = prsc->format;
+                blit.src.level = 0;
+                blit.mask = util_format_get_mask(blit.src.format);
+                blit.filter = PIPE_TEX_FILTER_NEAREST;
+
+                vc4_blit(pctx, &blit);
+
+                rsc->base.bind = new_rsc->base.bind;
+                /* Swap the BOs */
+                struct vc4_bo *old_bo = rsc->bo;
+                rsc->bo = new_rsc->bo;
+                new_rsc->bo = old_bo;
+
+                /* Copy the affected fields */
+                rsc->slices[0] = new_rsc->slices[0];
+                rsc->cube_map_stride = new_rsc->cube_map_stride;
+                rsc->tiled = new_rsc->tiled;
+
+                struct pipe_resource *new_prsc = (struct pipe_resource *)&new_rsc;
+                pipe_resource_reference(&new_prsc, NULL);
+        }
 }
 
 void
@@ -1113,12 +1148,6 @@ vc4_get_shadow_index_buffer(struct pipe_context *pctx,
         struct vc4_resource *orig = vc4_resource(info->index.resource);
         perf_debug("Fallback conversion for %d uint indices\n", count);
 
-        void *data;
-        struct pipe_resource *shadow_rsc = NULL;
-        u_upload_alloc(vc4->uploader, 0, count * 2, 4,
-                       shadow_offset, &shadow_rsc, &data);
-        uint16_t *dst = data;
-
         struct pipe_transfer *src_transfer = NULL;
         const uint32_t *src;
         if (info->has_user_indices) {
@@ -1129,6 +1158,20 @@ vc4_get_shadow_index_buffer(struct pipe_context *pctx,
                                             count * 4,
                                             PIPE_MAP_READ, &src_transfer);
         }
+
+        /* We need to do the upload alloc ref after the
+         * pipe_buffer_map_range() because there is a risk that the alloc
+         * frees and destroy its internal buffer, which might be the original
+         * base buffer we want to copy. Calling it afterwards, we guarantee
+         * that pipe_buffer_map_range() increases the reference counter so if
+         * upload alloc ref needs to unreference it, the buffer doesn't reach
+         * 0 refcounts and thus it won't be destroyed.
+         */
+        void *data;
+        struct pipe_resource *shadow_rsc = NULL;
+        u_upload_alloc_ref(vc4->uploader, 0, count * 2, 4,
+                       shadow_offset, &shadow_rsc, &data);
+        uint16_t *dst = data;
 
         for (int i = 0; i < count; i++) {
                 uint32_t src_index = src[i];
@@ -1187,8 +1230,6 @@ vc4_resource_context_init(struct pipe_context *pctx)
         pctx->texture_unmap = u_transfer_helper_transfer_unmap;
         pctx->buffer_subdata = u_default_buffer_subdata;
         pctx->texture_subdata = vc4_texture_subdata;
-        pctx->create_surface = vc4_create_surface;
-        pctx->surface_destroy = vc4_surface_destroy;
         pctx->resource_copy_region = util_resource_copy_region;
         pctx->blit = vc4_blit;
         pctx->flush_resource = vc4_flush_resource;

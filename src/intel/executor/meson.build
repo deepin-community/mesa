@@ -1,10 +1,6 @@
 # Copyright © 2024 Intel Corporation
 # SPDX-License-Identifier: MIT
 
-if not dep_lua.found()
-  subdir_done()
-endif
-
 executor_flags = [
   no_override_init_args,
   sse2_args,
@@ -17,7 +13,7 @@ executor_includes = [
 ]
 
 executor_hw_libs = []
-foreach v: ['90', '110', '120', '125', '200']
+foreach v: ['90', '110', '120', '125', '200', '300']
   executor_hw_libs += static_library(
     'executor_hw_ver@0@'.format(v),
     ['executor_genx.c', gen_xml_pack],
@@ -30,7 +26,9 @@ foreach v: ['90', '110', '120', '125', '200']
     dependencies: [
       dep_valgrind,
       idep_genxml,
+      idep_intel_dev,
     ],
+    build_by_default : false,
   )
 endforeach
 

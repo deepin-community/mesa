@@ -21,8 +21,7 @@
  * IN THE SOFTWARE.
  */
 
-#ifndef ELK_COMPILER_H
-#define ELK_COMPILER_H
+#pragma once
 
 #include <stdio.h>
 #include "c11/threads.h"
@@ -116,6 +115,9 @@ struct elk_compiler {
     * constant or data cache, UBOs must use VK_FORMAT_RAW.
     */
    bool indirect_ubos_use_sampler;
+
+   /** Whether we have an original 965G/GM clipping bug */
+   bool has_negative_rhw_bug;
 
    /**
     * Calling the ra_allocate function after each register spill can take
@@ -242,11 +244,11 @@ struct elk_base_prog_key {
 /**
  * OpenGL attribute slots fall in [0, VERT_ATTRIB_MAX - 1] with the range
  * [VERT_ATTRIB_GENERIC0, VERT_ATTRIB_MAX - 1] reserved for up to 16 user
- * input vertex attributes. In Vulkan, we expose up to 28 user vertex input
+ * input vertex attributes. In Vulkan, we expose up to 29 user vertex input
  * attributes that are mapped to slots also starting at VERT_ATTRIB_GENERIC0.
  */
 #define MAX_GL_VERT_ATTRIB     VERT_ATTRIB_MAX
-#define MAX_VK_VERT_ATTRIB     (VERT_ATTRIB_GENERIC0 + 28)
+#define MAX_VK_VERT_ATTRIB     (VERT_ATTRIB_GENERIC0 + 29)
 
 /**
  * Max number of binding table entries used for stream output.
@@ -315,7 +317,7 @@ struct elk_vs_prog_key {
     */
    unsigned nr_userclip_plane_consts:4;
 
-   uint32_t padding: 25;
+   uint32_t padding: 17;
 };
 
 /** The program key for Tessellation Control Shaders. */
@@ -488,13 +490,11 @@ struct elk_wm_prog_key {
    /* Some collection of ELK_WM_IZ_* */
    uint8_t iz_lookup;
    bool stats_wm:1;
-   bool flat_shade:1;
    unsigned nr_color_regions:5;
    bool emit_alpha_test:1;
    enum compare_func alpha_test_func:3; /* < For Gfx4/5 MRT alpha test */
    bool alpha_test_replicate_alpha:1;
    enum elk_sometimes alpha_to_coverage:2;
-   bool clamp_fragment_color:1;
 
    bool force_dual_color_blend:1;
 
@@ -516,7 +516,7 @@ struct elk_wm_prog_key {
    bool coherent_fb_fetch:1;
    bool ignore_sample_mask_out:1;
 
-   uint64_t padding:56;
+   uint64_t padding:58;
 };
 
 struct elk_cs_prog_key {
@@ -656,58 +656,12 @@ enum elk_param_builtin {
 #define ELK_PARAM_BUILTIN_CLIP_PLANE_COMP(param) \
    (((param) - ELK_PARAM_BUILTIN_CLIP_PLANE_0_X) & 0x3)
 
-enum elk_shader_reloc_id {
-   ELK_SHADER_RELOC_CONST_DATA_ADDR_LOW,
-   ELK_SHADER_RELOC_CONST_DATA_ADDR_HIGH,
-   ELK_SHADER_RELOC_SHADER_START_OFFSET,
-   ELK_SHADER_RELOC_DESCRIPTORS_ADDR_HIGH,
-};
-
-enum elk_shader_reloc_type {
-   /** An arbitrary 32-bit value */
-   ELK_SHADER_RELOC_TYPE_U32,
-   /** A MOV instruction with an immediate source */
-   ELK_SHADER_RELOC_TYPE_MOV_IMM,
-};
-
-/** Represents a code relocation
- *
- * Relocatable constants are immediates in the code which we want to be able
- * to replace post-compile with the actual value.
- */
-struct elk_shader_reloc {
-   /** The 32-bit ID of the relocatable constant */
-   uint32_t id;
-
-   /** Type of this relocation */
-   enum elk_shader_reloc_type type;
-
-   /** The offset in the shader to the relocated value
-    *
-    * For MOV_IMM relocs, this is an offset to the MOV instruction.  This
-    * allows us to do some sanity checking while we update the value.
-    */
-   uint32_t offset;
-
-   /** Value to be added to the relocated value before it is written */
-   uint32_t delta;
-};
-
-/** A value to write to a relocation */
-struct elk_shader_reloc_value {
-   /** The 32-bit ID of the relocatable constant */
-   uint32_t id;
-
-   /** The value with which to replace the relocated immediate */
-   uint32_t value;
-};
-
 struct elk_stage_prog_data {
    struct elk_ubo_range ubo_ranges[4];
 
    unsigned nr_params;       /**< number of float params/constants */
 
-   gl_shader_stage stage;
+   mesa_shader_stage stage;
 
    /* zero_push_reg is a bitfield which indicates what push registers (if any)
     * should be zeroed by SW at the start of the shader.  The corresponding
@@ -732,7 +686,7 @@ struct elk_stage_prog_data {
    unsigned const_data_offset;
 
    unsigned num_relocs;
-   const struct elk_shader_reloc *relocs;
+   const struct intel_shader_reloc *relocs;
 
    /** Does this program pull from any UBO or other constant buffers? */
    bool has_ubo_pull;
@@ -938,7 +892,7 @@ elk_fs_simd_width_for_ksp(unsigned ksp_idx, bool simd8_enabled,
    case 2:
       return (simd16_enabled && (simd32_enabled || simd8_enabled)) ? 16 : 0;
    default:
-      unreachable("Invalid KSP index");
+      UNREACHABLE("Invalid KSP index");
    }
 }
 
@@ -1190,7 +1144,7 @@ typedef enum
     ~VARYING_BIT_POS & ~VARYING_BIT_FACE)
 
 void elk_print_vue_map(FILE *fp, const struct intel_vue_map *vue_map,
-                       gl_shader_stage stage);
+                       mesa_shader_stage stage);
 
 /**
  * Convert a VUE slot number into a byte offset within the VUE.
@@ -1213,7 +1167,7 @@ elk_varying_to_offset(const struct intel_vue_map *vue_map, unsigned varying)
 void elk_compute_vue_map(const struct intel_device_info *devinfo,
                          struct intel_vue_map *vue_map,
                          uint64_t slots_valid,
-                         bool separate_shader,
+                         enum intel_vue_layout layout,
                          uint32_t pos_slots);
 
 void elk_compute_tess_vue_map(struct intel_vue_map *const vue_map,
@@ -1403,7 +1357,7 @@ DEFINE_PROG_DATA_DOWNCAST(tcs, prog_data->stage == MESA_SHADER_TESS_CTRL)
 DEFINE_PROG_DATA_DOWNCAST(tes, prog_data->stage == MESA_SHADER_TESS_EVAL)
 DEFINE_PROG_DATA_DOWNCAST(gs,  prog_data->stage == MESA_SHADER_GEOMETRY)
 DEFINE_PROG_DATA_DOWNCAST(wm,  prog_data->stage == MESA_SHADER_FRAGMENT)
-DEFINE_PROG_DATA_DOWNCAST(cs,  gl_shader_stage_uses_workgroup(prog_data->stage))
+DEFINE_PROG_DATA_DOWNCAST(cs,  mesa_shader_stage_uses_workgroup(prog_data->stage))
 
 DEFINE_PROG_DATA_DOWNCAST(vue, prog_data->stage == MESA_SHADER_VERTEX ||
                                prog_data->stage == MESA_SHADER_TESS_CTRL ||
@@ -1447,10 +1401,10 @@ uint64_t
 elk_get_compiler_config_value(const struct elk_compiler *compiler);
 
 unsigned
-elk_prog_data_size(gl_shader_stage stage);
+elk_prog_data_size(mesa_shader_stage stage);
 
 unsigned
-elk_prog_key_size(gl_shader_stage stage);
+elk_prog_key_size(mesa_shader_stage stage);
 
 struct elk_compile_params {
    void *mem_ctx;
@@ -1650,7 +1604,7 @@ elk_compile_ff_gs_prog(struct elk_compiler *compiler,
 		       unsigned *final_assembly_size);
 
 void elk_debug_key_recompile(const struct elk_compiler *c, void *log,
-                             gl_shader_stage stage,
+                             mesa_shader_stage stage,
                              const struct elk_base_prog_key *old_key,
                              const struct elk_base_prog_key *key);
 
@@ -1662,7 +1616,7 @@ void
 elk_write_shader_relocs(const struct elk_isa_info *isa,
                         void *program,
                         const struct elk_stage_prog_data *prog_data,
-                        struct elk_shader_reloc_value *values,
+                        struct intel_shader_reloc_value *values,
                         unsigned num_values);
 
 /**
@@ -1687,7 +1641,7 @@ elk_cs_get_dispatch_info(const struct intel_device_info *devinfo,
  */
 static inline bool
 elk_stage_has_packed_dispatch(ASSERTED const struct intel_device_info *devinfo,
-                              gl_shader_stage stage,
+                              mesa_shader_stage stage,
                               const struct elk_stage_prog_data *prog_data)
 {
    /* The code below makes assumptions about the hardware's thread dispatch
@@ -1762,5 +1716,3 @@ elk_compute_first_urb_slot_required(uint64_t inputs_read,
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
-
-#endif /* ELK_COMPILER_H */

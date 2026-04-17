@@ -148,7 +148,7 @@ struct d3d12_video_decoder
    {
       struct pipe_fence_handle *m_pBitstreamUploadGPUCompletionFence;
 
-      struct d3d12_fence m_FenceData;
+      d3d12_unique_fence m_fence;
 
       // In case of reconfigurations that trigger creation of new
       // decoder or decoderheap or reference frames allocations
@@ -246,7 +246,7 @@ d3d12_video_decoder_store_converted_dxva_picparams_from_pipe_input(struct d3d12_
                                                                    struct pipe_picture_desc *  picture,
                                                                    struct d3d12_video_buffer * pD3D12VideoBuffer);
 
-uint64_t
+size_t
 d3d12_video_decoder_pool_current_index(struct d3d12_video_decoder *pD3D12Dec);
 
 template <typename T>
@@ -267,19 +267,16 @@ d3d12_video_decoder_resolve_profile(d3d12_video_decode_profile_type profileType,
 void
 d3d12_video_decoder_store_dxva_picparams_in_picparams_buffer(struct d3d12_video_decoder *codec,
                                                              void *                      pDXVABuffer,
-                                                             uint64_t                    DXVABufferSize);
+                                                             size_t                      DXVABufferSize);
 void
 d3d12_video_decoder_store_dxva_qmatrix_in_qmatrix_buffer(struct d3d12_video_decoder *pD3D12Dec,
                                                          void *                      pDXVAStruct,
-                                                         uint64_t                    DXVAStructSize);
+                                                         size_t                      DXVAStructSize);
 void
 d3d12_video_decoder_prepare_dxva_slices_control(struct d3d12_video_decoder *pD3D12Dec, struct pipe_picture_desc *picture);
 
 bool
-d3d12_video_decoder_ensure_fence_finished(struct pipe_video_codec *codec, ID3D12Fence* fence, uint64_t fenceValueToWaitOn, uint64_t timeout_ns);
-
-bool
-d3d12_video_decoder_sync_completion(struct pipe_video_codec *codec, ID3D12Fence* fence, uint64_t fenceValueToWaitOn, uint64_t timeout_ns);
+d3d12_video_decoder_sync_completion(struct pipe_video_codec *codec, uint32_t frame_index, uint64_t timeout_ns);
 
 ///
 /// d3d12_video_decoder functions ends

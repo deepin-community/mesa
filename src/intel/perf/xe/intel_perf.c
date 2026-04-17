@@ -9,7 +9,7 @@
 #include <sys/stat.h>
 
 #include "perf/intel_perf.h"
-#include "intel_perf_common.h"
+#include "perf/intel_perf_common.h"
 #include "intel/common/intel_gem.h"
 #include "intel/common/xe/intel_device_query.h"
 #include "intel/common/xe/intel_queue.h"
@@ -17,6 +17,27 @@
 #include "drm-uapi/xe_drm.h"
 
 #define FIELD_PREP_ULL(_mask, _val) (((_val) << (ffsll(_mask) - 1)) & (_mask))
+
+/*
+ * EU stall data format for Xe2 arch GPUs (LNL, BMG).
+ */
+struct xe_eu_stall_data_xe2 {
+   uint64_t ip_addr:29;          /* Bits 0  to 28  */
+   uint64_t tdr_count:8;         /* Bits 29 to 36  */
+   uint64_t other_count:8;       /* Bits 37 to 44  */
+   uint64_t control_count:8;     /* Bits 45 to 52  */
+   uint64_t pipestall_count:8;   /* Bits 53 to 60  */
+   uint64_t send_count:8;        /* Bits 61 to 68  */
+   uint64_t dist_acc_count:8;    /* Bits 69 to 76  */
+   uint64_t sbid_count:8;        /* Bits 77 to 84  */
+   uint64_t sync_count:8;        /* Bits 85 to 92  */
+   uint64_t inst_fetch_count:8;  /* Bits 93 to 100 */
+   uint64_t active_count:8;      /* Bits 101 to 108 */
+   uint64_t ex_id:3;             /* Bits 109 to 111 */
+   uint64_t end_flag:1;          /* Bit  112 */
+   uint64_t unused_bits:15;
+   uint64_t unused[6];
+} __packed;
 
 uint64_t xe_perf_get_oa_format(struct intel_perf_config *perf)
 {
@@ -154,8 +175,8 @@ xe_remove_config(struct intel_perf_config *perf, int fd, uint64_t config_id)
 }
 
 static void
-oa_prop_set(struct drm_xe_ext_set_property *props, uint32_t *index,
-            enum drm_xe_oa_property_id prop_id, uint64_t value)
+xe_prop_set(struct drm_xe_ext_set_property *props, uint32_t *index,
+            uint32_t prop_id, uint64_t value)
 {
    if (*index > 0)
       props[*index - 1].base.next_extension = (uintptr_t)&props[*index];
@@ -164,6 +185,20 @@ oa_prop_set(struct drm_xe_ext_set_property *props, uint32_t *index,
    props[*index].property = prop_id;
    props[*index].value = value;
    *index = *index + 1;
+}
+
+static void
+oa_prop_set(struct drm_xe_ext_set_property *props, uint32_t *index,
+            enum drm_xe_oa_property_id prop_id, uint64_t value)
+{
+   xe_prop_set(props, index, (uint32_t)prop_id, value);
+}
+
+static void
+eu_stall_prop_set(struct drm_xe_ext_set_property *props, uint32_t *index,
+                  enum drm_xe_eu_stall_property_id prop_id, uint64_t value)
+{
+   xe_prop_set(props, index, (uint32_t)prop_id, value);
 }
 
 int
@@ -291,7 +326,7 @@ xe_perf_stream_set_metrics_id(int perf_stream_fd, int drm_fd,
 }
 
 static int
-xe_perf_stream_read_error(int perf_stream_fd, uint8_t *buffer, size_t buffer_len)
+xe_perf_stream_read_error(int perf_stream_fd, uint8_t *buffer)
 {
    struct drm_xe_oa_stream_status status = {};
    struct intel_perf_record_header *header;
@@ -316,7 +351,7 @@ xe_perf_stream_read_error(int perf_stream_fd, uint8_t *buffer, size_t buffer_len
    else if (status.oa_status & DRM_XE_OASTATUS_MMIO_TRG_Q_FULL)
       header->type = INTEL_PERF_RECORD_TYPE_MMIO_TRG_Q_FULL;
    else
-      unreachable("missing");
+      UNREACHABLE("missing");
 
    return header->type ? header->size : -1;
 }
@@ -341,7 +376,7 @@ xe_perf_stream_read_samples(struct intel_perf_config *perf_config, int perf_stre
 
    if (len <= 0) {
       if (errno == EIO)
-         return xe_perf_stream_read_error(perf_stream_fd, buffer, buffer_len);
+         return xe_perf_stream_read_error(perf_stream_fd, buffer);
 
       return len < 0 ? -errno : 0;
    }
@@ -368,4 +403,141 @@ xe_perf_stream_read_samples(struct intel_perf_config *perf_config, int perf_stre
    }
 
    return offset - buffer;
+}
+
+static int
+first_rendering_gt_id(int drm_fd) {
+   struct intel_query_engine_info *engine_info =
+      intel_engine_get_info(drm_fd, INTEL_KMD_TYPE_XE);
+   for (int i = 0; i < engine_info->num_engines; i++) {
+      if (engine_info->engines[i].engine_class == INTEL_ENGINE_CLASS_RENDER)
+         return engine_info->engines[i].gt_id;
+   }
+   return -1;
+}
+
+int
+xe_perf_eustall_stream_open(int drm_fd, uint32_t sample_rate,
+                            uint32_t min_event_count)
+{
+   struct drm_xe_ext_set_property props[DRM_XE_EU_STALL_PROP_WAIT_NUM_REPORTS + 1] = {};
+   struct drm_xe_observation_param observation_param = {
+      .observation_type = DRM_XE_OBSERVATION_TYPE_EU_STALL,
+      .observation_op = DRM_XE_OBSERVATION_OP_STREAM_OPEN,
+      .param = (uintptr_t)&props,
+   };
+   uint32_t i = 0;
+   int fd, flags;
+   int gt_id = first_rendering_gt_id(drm_fd);
+   assert(gt_id >= 0);
+
+   eu_stall_prop_set(props, &i, DRM_XE_EU_STALL_PROP_SAMPLE_RATE, sample_rate);
+   eu_stall_prop_set(props, &i, DRM_XE_EU_STALL_PROP_WAIT_NUM_REPORTS, min_event_count);
+   eu_stall_prop_set(props, &i, DRM_XE_EU_STALL_PROP_GT_ID, gt_id);
+
+   fd = intel_ioctl(drm_fd, DRM_IOCTL_XE_OBSERVATION, &observation_param);
+   if (fd < 0)
+      return -errno;
+
+   flags = fcntl(fd, F_GETFL, 0);
+   flags |= O_CLOEXEC | O_NONBLOCK;
+   if (fcntl(fd, F_SETFL, flags)) {
+      close(fd);
+      return -1;
+   }
+
+   return fd;
+}
+
+int
+xe_perf_eustall_stream_record_size(int drm_fd)
+{
+   int record_size;
+   struct drm_xe_query_eu_stall *eu_stall_data =
+      xe_device_query_alloc_fetch(drm_fd, DRM_XE_DEVICE_QUERY_EU_STALL, NULL);
+   if (!eu_stall_data)
+       return -errno;
+
+   assert(eu_stall_data->record_size > 0 &&
+          eu_stall_data->record_size < INT_MAX);
+   record_size = (int)eu_stall_data->record_size;
+   free(eu_stall_data);
+   return record_size;
+}
+
+int
+xe_perf_eustall_stream_sample_rate(int drm_fd)
+{
+   struct drm_xe_query_eu_stall *eu_stall_data =
+      xe_device_query_alloc_fetch(drm_fd, DRM_XE_DEVICE_QUERY_EU_STALL, NULL);
+   if (!eu_stall_data)
+       return -errno;
+
+   assert(eu_stall_data->sampling_rates[0] > 0 &&
+          eu_stall_data->sampling_rates[0] < INT_MAX);
+   /* pick slowest rate to reduce chance of overflow */
+   int idx_slowest = eu_stall_data->num_sampling_rates - 1;
+   int sampling_rate = (int)eu_stall_data->sampling_rates[idx_slowest];
+   free(eu_stall_data);
+   return sampling_rate;
+}
+
+int
+xe_perf_eustall_stream_read_samples(int perf_stream_fd, uint8_t *buffer,
+                                    size_t buffer_len, bool *overflow)
+{
+   int len;
+
+   *overflow = false;
+   do {
+      len = read(perf_stream_fd, buffer, buffer_len);
+      if (unlikely(len < 0 && errno == EIO))
+         *overflow = true;
+   } while (len < 0 && (errno == EINTR || errno == EIO));
+
+   if (unlikely(len < 0 && errno == EAGAIN))
+      len = 0;
+
+   return len < 0 ? -errno : len;
+}
+
+void
+xe_perf_eustall_accumulate_results(struct intel_perf_query_eustall_result *result,
+                                   const uint8_t *start, const uint8_t *end,
+                                   size_t record_size)
+{
+   const uint8_t *offset;
+   assert(((end - start) % record_size) == 0);
+
+   for (offset = start; offset < end; offset += record_size) {
+      const struct xe_eu_stall_data_xe2* stall_data =
+         (const struct xe_eu_stall_data_xe2*)offset;
+      struct intel_perf_query_eustall_event* stall_result;
+      uint64_t ip_addr = stall_data->ip_addr;
+      struct hash_entry *e = _mesa_hash_table_search(result->accumulator,
+                                                     (const void*)&ip_addr);
+      if (e) {
+         stall_result = e->data;
+      } else {
+         stall_result = calloc(1, sizeof(struct intel_perf_query_eustall_event));
+         stall_result->ip_addr = ip_addr;
+         _mesa_hash_table_insert(result->accumulator,
+                                 (const void*)&stall_result->ip_addr,
+                                 stall_result);
+      }
+      assert(stall_result->ip_addr == stall_data->ip_addr);
+
+      stall_result->tdr_count += stall_data->tdr_count;
+      stall_result->other_count += stall_data->other_count;
+      stall_result->control_count += stall_data->control_count;
+      stall_result->pipestall_count += stall_data->pipestall_count;
+      stall_result->send_count += stall_data->send_count;
+      stall_result->dist_acc_count += stall_data->dist_acc_count;
+      stall_result->sbid_count += stall_data->sbid_count;
+      stall_result->sync_count += stall_data->sync_count;
+      stall_result->inst_fetch_count += stall_data->inst_fetch_count;
+      stall_result->active_count += stall_data->active_count;
+
+      result->records_accumulated++;
+   }
 }

@@ -29,7 +29,7 @@
 
 #include <windows.h>
 
-#include "glapi/glapi.h"
+#include "glapi/glapi/glapi.h"
 #include "util/u_debug.h"
 #include "util/u_math.h"
 #include "util/u_memory.h"
@@ -103,8 +103,7 @@ init_screen(const struct stw_winsys *stw_winsys, HDC hdc)
    stw_dev->screen = screen;
    stw_dev->zink = !memcmp(screen->get_name(screen), "zink", 4);
 
-   stw_dev->max_2d_length = screen->get_param(screen,
-                                              PIPE_CAP_MAX_TEXTURE_2D_SIZE);
+   stw_dev->max_2d_length = screen->caps.max_texture_2d_size;
    return true;
 }
 
@@ -243,6 +242,7 @@ stw_cleanup(void)
       return;
    }
 
+   free(stw_dev->st_options.force_explicit_uniform_loc_zero);
    free(stw_dev->st_options.force_gl_vendor);
    free(stw_dev->st_options.force_gl_renderer);
    free(stw_dev->st_options.mesa_extension_override);

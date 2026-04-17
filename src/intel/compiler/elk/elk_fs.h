@@ -25,8 +25,7 @@
  *
  */
 
-#ifndef ELK_FS_H
-#define ELK_FS_H
+#pragma once
 
 #include "elk_shader.h"
 #include "elk_ir_fs.h"
@@ -383,18 +382,16 @@ public:
    };
 
    elk_cs_thread_payload &cs_payload() {
-      assert(gl_shader_stage_uses_workgroup(stage));
+      assert(mesa_shader_stage_uses_workgroup(stage));
       return *static_cast<elk_cs_thread_payload *>(this->payload_);
    }
 
    bool source_depth_to_render_target;
    bool runtime_check_aads_emit;
 
-   elk_fs_reg pixel_x;
-   elk_fs_reg pixel_y;
+   elk_fs_reg uw_pixel_x;
+   elk_fs_reg uw_pixel_y;
    elk_fs_reg pixel_z;
-   elk_fs_reg wpos_w;
-   elk_fs_reg pixel_w;
    elk_fs_reg delta_xy[ELK_BARYCENTRIC_MODE_COUNT];
    elk_fs_reg final_gs_vertex_count;
    elk_fs_reg control_data_bits;
@@ -448,7 +445,7 @@ public:
                 const struct elk_compile_params *params,
                 struct elk_stage_prog_data *prog_data,
                 bool runtime_check_aads_emit,
-                gl_shader_stage stage);
+                mesa_shader_stage stage);
    ~elk_fs_generator();
 
    void enable_debug(const char *shader_name);
@@ -524,11 +521,11 @@ private:
 
    unsigned dispatch_width; /**< 8, 16 or 32 */
 
-   exec_list discard_halt_patches;
+   brw_exec_list discard_halt_patches;
    bool runtime_check_aads_emit;
    bool debug_flag;
    const char *shader_name;
-   gl_shader_stage stage;
+   mesa_shader_stage stage;
    void *mem_ctx;
 };
 
@@ -588,5 +585,3 @@ int elk_get_subgroup_id_param_index(const intel_device_info *devinfo,
                                     const elk_stage_prog_data *prog_data);
 
 void nir_to_elk(elk_fs_visitor *s);
-
-#endif /* ELK_FS_H */

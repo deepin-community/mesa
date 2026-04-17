@@ -74,12 +74,7 @@ dri_init_options(struct dri_screen *screen)
 static unsigned
 dri_loader_get_cap(struct dri_screen *screen, enum dri_loader_cap cap)
 {
-   const __DRIdri2LoaderExtension *dri2_loader = screen->dri2.loader;
    const __DRIimageLoaderExtension *image_loader = screen->image.loader;
-
-   if (dri2_loader && dri2_loader->base.version >= 4 &&
-       dri2_loader->getCapability)
-      return dri2_loader->getCapability(screen->loaderPrivate, cap);
 
    if (image_loader && image_loader->base.version >= 2 &&
        image_loader->getCapability)
@@ -158,9 +153,11 @@ driCreateConfigs(enum pipe_format format,
    unsigned num_accum_bits = (enable_accum) ? 2 : 1;
    bool is_srgb;
    bool is_float;
+   bool is_unorm16;
 
    is_srgb = util_format_is_srgb(format);
    is_float = util_format_is_float(format);
+   is_unorm16 = util_format_is_unorm16(util_format_description(format));
 
    for (i = 0; i < 4; i++) {
       color_bits[i] =
@@ -173,7 +170,11 @@ driCreateConfigs(enum pipe_format format,
          shifts[i] = -1;
       }
 
-      if (is_float || color_bits[i] == 0)
+      /* is_float and is_unorm16 is only true on non-x11 target platforms, which
+       * don't actually use redMask, greenMask, ..., so avoid setting masks[]
+       * to prevent a meaningless "undefined behaviour" build warning.
+       */
+      if (is_float || is_unorm16 || color_bits[i] == 0)
          masks[i] = 0;
       else
          masks[i] = ((1u << color_bits[i]) - 1) << shifts[i];
@@ -329,6 +330,8 @@ dri_fill_in_modes(struct dri_screen *screen)
       PIPE_FORMAT_B5G6R5_UNORM,
       PIPE_FORMAT_R16G16B16A16_FLOAT,
       PIPE_FORMAT_R16G16B16X16_FLOAT,
+      PIPE_FORMAT_R16G16B16A16_UNORM,
+      PIPE_FORMAT_R16G16B16X16_UNORM,
       PIPE_FORMAT_RGBA8888_UNORM,
       PIPE_FORMAT_RGBX8888_UNORM,
       PIPE_FORMAT_RGBA8888_SRGB,
@@ -346,6 +349,7 @@ dri_fill_in_modes(struct dri_screen *screen)
    bool mixed_color_depth;
    bool allow_rgba_ordering;
    bool allow_rgb10;
+   bool allow_rgb16;
    bool allow_fp16;
 
    static const bool db_modes[] = { false, true };
@@ -355,6 +359,7 @@ dri_fill_in_modes(struct dri_screen *screen)
 
    allow_rgba_ordering = dri_loader_get_cap(screen, DRI_LOADER_CAP_RGBA_ORDERING);
    allow_rgb10 = driQueryOptionb(&screen->dev->option_cache, "allow_rgb10_configs");
+   allow_rgb16 = driQueryOptionb(&screen->dev->option_cache, "allow_rgb16_configs");
    allow_fp16 = dri_loader_get_cap(screen, DRI_LOADER_CAP_FP16);
 
 #define HAS_ZS(fmt) \
@@ -381,7 +386,7 @@ dri_fill_in_modes(struct dri_screen *screen)
 #undef HAS_ZS
 
    mixed_color_depth =
-      p_screen->get_param(p_screen, PIPE_CAP_MIXED_COLOR_DEPTH_BITS);
+      p_screen->caps.mixed_color_depth_bits;
 
    /* Add configs. */
    for (unsigned f = 0; f < ARRAY_SIZE(pipe_formats); f++) {
@@ -408,6 +413,16 @@ dri_fill_in_modes(struct dri_screen *screen)
                                          UTIL_FORMAT_COLORSPACE_RGB, 1) == 10 &&
           util_format_get_component_bits(pipe_formats[f],
                                          UTIL_FORMAT_COLORSPACE_RGB, 2) == 10)
+         continue;
+
+      /* Block RGB[A]16_UNORM formats, if forbidden by config */
+      if (!allow_rgb16 && !util_format_is_float(pipe_formats[f]) &&
+          util_format_get_component_bits(pipe_formats[f],
+                                         UTIL_FORMAT_COLORSPACE_RGB, 0) == 16 &&
+          util_format_get_component_bits(pipe_formats[f],
+                                         UTIL_FORMAT_COLORSPACE_RGB, 1) == 16 &&
+          util_format_get_component_bits(pipe_formats[f],
+                                         UTIL_FORMAT_COLORSPACE_RGB, 2) == 16)
          continue;
 
       if (!allow_fp16 && util_format_is_float(pipe_formats[f]))
@@ -579,6 +594,7 @@ dri_destroy_screen(struct dri_screen *screen)
 {
    dri_release_screen(screen);
 
+   free(screen->options.force_explicit_uniform_loc_zero);
    free(screen->options.force_gl_vendor);
    free(screen->options.force_gl_renderer);
    free(screen->options.mesa_extension_override);
@@ -606,11 +622,6 @@ dri_set_background_context(struct st_context *st,
                            struct util_queue_monitoring *queue_info)
 {
    struct dri_context *ctx = (struct dri_context *)st->frontend_context;
-   const __DRIbackgroundCallableExtension *backgroundCallable =
-      ctx->screen->dri2.backgroundCallable;
-
-   if (backgroundCallable)
-      backgroundCallable->setBackgroundContext(ctx->loaderPrivate);
 
    if (ctx->hud)
       hud_add_queue_for_monitoring(ctx->hud, queue_info);
@@ -627,7 +638,7 @@ dri_init_screen(struct dri_screen *screen,
    screen->base.set_background_context = dri_set_background_context;
    screen->base.validate_egl_image = dri_validate_egl_image;
 
-   if (pscreen->get_param(pscreen, PIPE_CAP_NPOT_TEXTURES))
+   if (pscreen->caps.npot_textures)
       screen->target = PIPE_TEXTURE_2D;
    else
       screen->target = PIPE_TEXTURE_RECT;
@@ -642,20 +653,18 @@ dri_init_screen(struct dri_screen *screen,
                          &screen->max_gl_es1_version,
                          &screen->max_gl_es2_version);
 
-   screen->throttle = pscreen->get_param(pscreen, PIPE_CAP_THROTTLE);
-   if (pscreen->get_param(pscreen, PIPE_CAP_DEVICE_PROTECTED_CONTEXT))
+   screen->throttle = pscreen->caps.throttle;
+   if (pscreen->caps.device_protected_context)
       screen->has_protected_context = true;
-   screen->has_reset_status_query = pscreen->get_param(pscreen, PIPE_CAP_DEVICE_RESET_STATUS_QUERY);
-
+   screen->has_reset_status_query = pscreen->caps.device_reset_status_query;
+   screen->has_multibuffer = has_multibuffer;
 
 #ifdef HAVE_LIBDRM
-   if (has_multibuffer) {
-      int dmabuf_caps = pscreen->get_param(pscreen, PIPE_CAP_DMABUF);
-      if (dmabuf_caps & DRM_PRIME_CAP_IMPORT)
-         screen->dmabuf_import = true;
-      if (screen->dmabuf_import && dmabuf_caps & DRM_PRIME_CAP_EXPORT)
-         screen->has_dmabuf = true;
-   }
+   unsigned dmabuf_caps = pscreen->caps.dmabuf;
+   if (dmabuf_caps & DRM_PRIME_CAP_IMPORT)
+      screen->dmabuf_import = true;
+   if (screen->dmabuf_import && dmabuf_caps & DRM_PRIME_CAP_EXPORT)
+      screen->has_dmabuf = true;
 #endif
 
    return dri_fill_in_modes(screen);

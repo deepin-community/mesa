@@ -44,6 +44,7 @@ struct rgp_shader_data {
    uint32_t is_combined;
    char rt_shader_name[32];
    uint32_t rt_stack_size;
+   uint32_t is_rt_traversal;
 };
 
 struct rgp_code_object_record {

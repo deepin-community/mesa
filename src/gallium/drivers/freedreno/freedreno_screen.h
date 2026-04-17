@@ -23,11 +23,20 @@
 #include "util/u_memory.h"
 #include "util/u_queue.h"
 
+#include "common/fd6_gmem_cache.h"
+
 #include "freedreno_batch_cache.h"
 #include "freedreno_gmem.h"
 #include "freedreno_util.h"
 
 struct fd_bo;
+
+enum fd_layout_type {
+   FD_LAYOUT_ERROR,
+   FD_LAYOUT_LINEAR,
+   FD_LAYOUT_TILED,
+   FD_LAYOUT_UBWC,
+};
 
 /* Potential reasons for needing to skip bypass path and use GMEM, the
  * generation backend can override this with screen->gmem_reason_mask
@@ -41,20 +50,6 @@ enum fd_gmem_reason {
    FD_GMEM_FB_READ = BIT(5),
 };
 
-/* Offset within GMEM of various "non-GMEM" things that GMEM is used to
- * cache.  These offsets differ for gmem vs sysmem rendering (in sysmem
- * mode, the entire GMEM can be used)
- */
-struct fd6_gmem_config {
-   /* Color/depth CCU cache: */
-   uint32_t color_ccu_offset;
-   uint32_t depth_ccu_offset;
-
-   /* Vertex attrib cache (a750+): */
-   uint32_t vpc_attr_buf_size;
-   uint32_t vpc_attr_buf_offset;
-};
-
 struct fd_screen {
    struct pipe_screen base;
 
@@ -66,6 +61,8 @@ struct fd_screen {
 
    uint64_t gmem_base;
    uint32_t gmemsize_bytes;
+
+   uint64_t uche_trap_base;
 
    const struct fd_dev_id *dev_id;
    uint8_t gen;      /* GPU (major) generation */
@@ -125,10 +122,10 @@ struct fd_screen {
     */
    struct fd_pipe *pipe;
 
-   uint32_t (*setup_slices)(struct fd_resource *rsc);
+   uint32_t (*layout_resource)(struct fd_resource *rsc, enum fd_layout_type type);
    unsigned (*tile_mode)(const struct pipe_resource *prsc);
-   int (*layout_resource_for_modifier)(struct fd_resource *rsc,
-                                       uint64_t modifier);
+   bool (*layout_resource_for_handle)(struct fd_resource *rsc,
+                                      struct winsys_handle *handle);
    bool (*is_format_supported)(struct pipe_screen *pscreen,
                                enum pipe_format fmt, uint64_t modifier);
 
@@ -156,10 +153,6 @@ struct fd_screen {
 
    struct renderonly *ro;
 
-   /* the blob seems to always use 8K factor and 128K param sizes, copy them */
-#define FD6_TESS_FACTOR_SIZE (8 * 1024)
-#define FD6_TESS_PARAM_SIZE (128 * 1024)
-#define FD6_TESS_BO_SIZE (FD6_TESS_FACTOR_SIZE + FD6_TESS_PARAM_SIZE)
    struct fd_bo *tess_bo;
 
    /* table with MESA_PRIM_COUNT+1 entries mapping MESA_PRIM_x to

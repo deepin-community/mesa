@@ -24,6 +24,10 @@ if cpu_family == 'x86_64'
     else
       files_blake3 += ['blake3_sse2_x86-64_windows_gnu.S', 'blake3_sse41_x86-64_windows_gnu.S', 'blake3_avx2_x86-64_windows_gnu.S', 'blake3_avx512_x86-64_windows_gnu.S']
     endif
+  # Disable blake assembly for x32, x86-64 with 32-bit pointers.
+  # GNU triplet is x86_64-linux-gnux32
+  elif cc.sizeof('void *') == 4
+    blake3_defs += blake3_x86_no_simd_defs
   else
     files_blake3 += ['blake3_sse2_x86-64_unix.S', 'blake3_sse41_x86-64_unix.S', 'blake3_avx2_x86-64_unix.S', 'blake3_avx512_x86-64_unix.S']
   endif
@@ -31,15 +35,16 @@ elif cpu_family == 'x86'
   # There are no assembly versions for 32-bit x86. Compiling the C versions require a different compilation flag per
   # file, which is not well supported by Meson. Leave SIMD support out for now.
   blake3_defs += blake3_x86_no_simd_defs
-elif cpu_family == 'aarch64'
+elif cpu_family == 'aarch64' and target_machine.endian() == 'little'
   files_blake3 += ['blake3_neon.c']
 endif
 
 blake3 = static_library(
   'blake3',
   files_blake3,
-  c_args : blake3_defs,
+  c_args : blake3_defs + cc.get_supported_arguments('-Wno-error'),
   gnu_symbol_visibility : 'hidden',
+  build_by_default : false,
 )
 
 idep_blake3 = declare_dependency(

@@ -185,12 +185,12 @@ etc2_build_shader(struct vk_device *dev, const struct nir_shader_compiler_option
    nir_variable *payload_var = nir_variable_create(b.shader, nir_var_shader_temp, glsl_vec4_type(), "payload");
    nir_push_if(&b, is_3d);
    {
-      nir_def *color = nir_txf_deref(&b, nir_build_deref_var(&b, input_img_3d), src_coord, nir_imm_int(&b, 0));
+      nir_def *color = nir_txf(&b, src_coord, .texture_deref = nir_build_deref_var(&b, input_img_3d), .lod = nir_imm_int(&b, 0));
       nir_store_var(&b, payload_var, color, 0xf);
    }
    nir_push_else(&b, NULL);
    {
-      nir_def *color = nir_txf_deref(&b, nir_build_deref_var(&b, input_img_2d), src_coord, nir_imm_int(&b, 0));
+      nir_def *color = nir_txf(&b, src_coord, .texture_deref = nir_build_deref_var(&b, input_img_2d), .lod = nir_imm_int(&b, 0));
       nir_store_var(&b, payload_var, color, 0xf);
    }
    nir_pop_if(&b, NULL);
@@ -437,6 +437,7 @@ etc2_init_pipeline(struct vk_device *device, struct vk_texcompress_etc2_state *e
 {
    const struct vk_device_dispatch_table *disp = &device->dispatch_table;
    VkDevice _device = vk_device_to_handle(device);
+   VkResult result;
 
    nir_shader *cs = etc2_build_shader(device, etc2->nir_options);
 
@@ -452,8 +453,11 @@ etc2_init_pipeline(struct vk_device *device, struct vk_texcompress_etc2_state *e
       .layout = etc2->pipeline_layout,
    };
 
-   return disp->CreateComputePipelines(_device, etc2->pipeline_cache, 1, &pipeline_create_info, etc2->allocator,
-                                       &etc2->pipeline);
+   result = disp->CreateComputePipelines(_device, etc2->pipeline_cache, 1, &pipeline_create_info, etc2->allocator,
+                                         &etc2->pipeline);
+
+   ralloc_free(cs);
+   return result;
 }
 
 static VkResult

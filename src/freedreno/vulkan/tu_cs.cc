@@ -9,6 +9,15 @@
 #include "tu_rmv.h"
 #include "tu_suballoc.h"
 
+/* There is a limit to IB size supported by HW,
+ * which appears to be 0x0fffff.
+ */
+inline uint32_t
+tu_sanitize_ib_size(uint32_t size)
+{
+   return MIN2(size, 0x0fffff);
+}
+
 /**
  * Initialize a command stream.
  */
@@ -176,7 +185,7 @@ tu_cs_add_bo(struct tu_cs *cs, uint32_t size)
    bos->bos[bos->bo_count++] = new_bo;
 
    cs->start = cs->cur = cs->reserved_end = (uint32_t *) new_bo->map;
-   cs->end = cs->start + new_bo->size / sizeof(uint32_t);
+   cs->end = cs->start + size;
 
    return VK_SUCCESS;
 }
@@ -290,6 +299,7 @@ tu_cs_set_writeable(struct tu_cs *cs, bool writeable)
    assert(cs->mode == TU_CS_MODE_GROW || cs->mode == TU_CS_MODE_SUB_STREAM);
 
    if (cs->writeable != writeable) {
+      assert(!cs->cond_stack_depth);
       if (cs->mode == TU_CS_MODE_GROW && !tu_cs_is_empty(cs))
          tu_cs_add_entry(cs);
       struct tu_bo_array *old_bos = cs->writeable ? &cs->read_write : &cs->read_only;
@@ -299,7 +309,8 @@ tu_cs_set_writeable(struct tu_cs *cs, bool writeable)
       cs->start = cs->cur = cs->reserved_end = new_bos->start;
       if (new_bos->bo_count) {
          struct tu_bo *bo = new_bos->bos[new_bos->bo_count - 1];
-         cs->end = (uint32_t *)bo->map + bo->size / sizeof(uint32_t);
+         cs->end = (uint32_t *) bo->map +
+                   tu_sanitize_ib_size(bo->size / sizeof(uint32_t));
       } else {
          cs->end = NULL;
       }
@@ -426,7 +437,7 @@ tu_cs_reserve_space(struct tu_cs *cs, uint32_t reserved_size)
 {
    if (tu_cs_get_space(cs) < reserved_size) {
       if (cs->mode == TU_CS_MODE_EXTERNAL) {
-         unreachable("cannot grow external buffer");
+         UNREACHABLE("cannot grow external buffer");
          return VK_ERROR_OUT_OF_HOST_MEMORY;
       }
 
@@ -467,10 +478,8 @@ tu_cs_reserve_space(struct tu_cs *cs, uint32_t reserved_size)
          tu_cs_emit(cs, RENDER_MODE_CP_COND_REG_EXEC_1_DWORDS(0));
       }
 
-      /* double the size for the next bo, also there is an upper
-       * bound on IB size, which appears to be 0x0fffff
-       */
-      new_size = MIN2(new_size << 1, 0x0fffff);
+      /* Double the size for the next bo. */
+      new_size = tu_sanitize_ib_size(new_size << 1);
       if (cs->next_bo_size < new_size)
          cs->next_bo_size = new_size;
    }
@@ -510,14 +519,15 @@ tu_cs_reset(struct tu_cs *cs)
       tu_bo_finish(cs->device, cs->read_write.bos[i]);
    }
 
-   cs->writeable = false;
+   assert(!cs->writeable);
 
    if (cs->read_only.bo_count) {
       cs->read_only.bos[0] = cs->read_only.bos[cs->read_only.bo_count - 1];
       cs->read_only.bo_count = 1;
 
       cs->start = cs->cur = cs->reserved_end = (uint32_t *) cs->read_only.bos[0]->map;
-      cs->end = cs->start + cs->read_only.bos[0]->size / sizeof(uint32_t);
+      cs->end = cs->start + tu_sanitize_ib_size(cs->read_only.bos[0]->size /
+                                                sizeof(uint32_t));
    }
 
    if (cs->read_write.bo_count) {
@@ -617,4 +627,10 @@ tu_cs_trace_end(struct u_trace_context *utctx, void *cs, const char *fmt, ...)
    va_start(args, fmt);
    tu_cs_emit_debug_magic_strv((struct tu_cs *) cs, CP_NOP_END, fmt, args);
    va_end(args);
+}
+
+tu_crb
+tu_cs::crb(uint32_t nregs)
+{
+   return tu_crb(this, nregs);
 }

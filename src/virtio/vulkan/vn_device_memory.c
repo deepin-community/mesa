@@ -12,6 +12,7 @@
 
 #include "venus-protocol/vn_protocol_driver_device_memory.h"
 #include "venus-protocol/vn_protocol_driver_transport.h"
+#include "vk_debug_utils.h"
 
 #include "vn_android.h"
 #include "vn_buffer.h"
@@ -88,7 +89,7 @@ vn_device_memory_bo_init(struct vn_device *dev, struct vn_device_memory *mem)
    if (result != VK_SUCCESS)
       return result;
 
-   const struct vk_device_memory *mem_vk = &mem->base.base;
+   const struct vk_device_memory *mem_vk = &mem->base.vk;
    const VkMemoryType *mem_type = &dev->physical_device->memory_properties
                                       .memoryTypes[mem_vk->memory_type_index];
    return vn_renderer_bo_create_from_device_memory(
@@ -109,7 +110,6 @@ VkResult
 vn_device_memory_import_dma_buf(struct vn_device *dev,
                                 struct vn_device_memory *mem,
                                 const VkMemoryAllocateInfo *alloc_info,
-                                bool force_unmappable,
                                 int fd)
 {
    const VkMemoryType *mem_type =
@@ -118,8 +118,8 @@ vn_device_memory_import_dma_buf(struct vn_device *dev,
 
    struct vn_renderer_bo *bo;
    VkResult result = vn_renderer_bo_create_from_dma_buf(
-      dev->renderer, alloc_info->allocationSize, fd,
-      force_unmappable ? 0 : mem_type->propertyFlags, &bo);
+      dev->renderer, alloc_info->allocationSize, fd, mem_type->propertyFlags,
+      &bo);
    if (result != VK_SUCCESS)
       return result;
 
@@ -154,7 +154,7 @@ vn_device_memory_alloc_guest_vram(struct vn_device *dev,
                                   struct vn_device_memory *mem,
                                   const VkMemoryAllocateInfo *alloc_info)
 {
-   const struct vk_device_memory *mem_vk = &mem->base.base;
+   const struct vk_device_memory *mem_vk = &mem->base.vk;
    const VkMemoryType *mem_type = &dev->physical_device->memory_properties
                                       .memoryTypes[mem_vk->memory_type_index];
    VkMemoryPropertyFlags flags = mem_type->propertyFlags;
@@ -287,7 +287,7 @@ vn_device_memory_alloc(struct vn_device *dev,
                        struct vn_device_memory *mem,
                        const VkMemoryAllocateInfo *alloc_info)
 {
-   struct vk_device_memory *mem_vk = &mem->base.base;
+   struct vk_device_memory *mem_vk = &mem->base.vk;
    const VkMemoryType *mem_type = &dev->physical_device->memory_properties
                                       .memoryTypes[mem_vk->memory_type_index];
 
@@ -323,10 +323,12 @@ vn_device_memory_emit_report(struct vn_device *dev,
                              bool is_alloc,
                              VkResult result)
 {
-   if (likely(!dev->memory_reports))
+   struct vk_device *dev_vk = &dev->base.vk;
+
+   if (likely(!dev_vk->memory_reports))
       return;
 
-   const struct vk_device_memory *mem_vk = &mem->base.base;
+   const struct vk_device_memory *mem_vk = &mem->base.vk;
    VkDeviceMemoryReportEventTypeEXT type;
    if (result != VK_SUCCESS) {
       type = VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATION_FAILED_EXT;
@@ -345,12 +347,12 @@ vn_device_memory_emit_report(struct vn_device *dev,
          : mem->base.id;
    const VkMemoryType *mem_type = &dev->physical_device->memory_properties
                                       .memoryTypes[mem_vk->memory_type_index];
-   vn_device_emit_device_memory_report(dev, type, mem_obj_id, mem_vk->size,
-                                       VK_OBJECT_TYPE_DEVICE_MEMORY,
-                                       (uintptr_t)mem, mem_type->heapIndex);
+   vk_emit_device_memory_report(dev_vk, type, mem_obj_id, mem_vk->size,
+                                VK_OBJECT_TYPE_DEVICE_MEMORY, (uintptr_t)mem,
+                                mem_type->heapIndex);
 }
 
-VkResult
+VKAPI_ATTR VkResult VKAPI_CALL
 vn_AllocateMemory(VkDevice device,
                   const VkMemoryAllocateInfo *pAllocateInfo,
                   const VkAllocationCallbacks *pAllocator,
@@ -358,42 +360,32 @@ vn_AllocateMemory(VkDevice device,
 {
    struct vn_device *dev = vn_device_from_handle(device);
 
-   const VkImportMemoryFdInfoKHR *import_fd_info = NULL;
-   const VkMemoryDedicatedAllocateInfo *dedicated_info = NULL;
-   vk_foreach_struct_const(pnext, pAllocateInfo->pNext) {
-      switch (pnext->sType) {
-      case VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR:
-         import_fd_info = (const void *)pnext;
-         break;
-      case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO:
-         dedicated_info = (const void *)pnext;
-         break;
-      default:
-         break;
-      }
-   }
-
    struct vn_device_memory *mem = vk_device_memory_create(
-      &dev->base.base, pAllocateInfo, pAllocator, sizeof(*mem));
+      &dev->base.vk, pAllocateInfo, pAllocator, sizeof(*mem));
    if (!mem)
       return vn_error(dev->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    vn_object_set_id(mem, vn_get_next_obj_id(), VK_OBJECT_TYPE_DEVICE_MEMORY);
 
+   const VkImportMemoryFdInfoKHR *import_fd_info =
+      vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_FD_INFO_KHR);
+
    VkResult result;
-   if (mem->base.base.ahardware_buffer) {
-      result = vn_android_device_import_ahb(dev, mem, dedicated_info);
+   if (mem->base.vk.ahardware_buffer) {
+      result = vn_android_device_import_ahb(dev, mem, pAllocateInfo);
    } else if (import_fd_info) {
-      result = vn_device_memory_import_dma_buf(dev, mem, pAllocateInfo, false,
+      result = vn_device_memory_import_dma_buf(dev, mem, pAllocateInfo,
                                                import_fd_info->fd);
    } else {
       result = vn_device_memory_alloc(dev, mem, pAllocateInfo);
+      if (result == VK_SUCCESS)
+         vn_wsi_memory_info_init(mem, pAllocateInfo);
    }
 
    vn_device_memory_emit_report(dev, mem, /* is_alloc */ true, result);
 
    if (result != VK_SUCCESS) {
-      vk_device_memory_destroy(&dev->base.base, pAllocator, &mem->base.base);
+      vk_device_memory_destroy(&dev->base.vk, pAllocator, &mem->base.vk);
       return vn_error(dev->instance, result);
    }
 
@@ -402,7 +394,7 @@ vn_AllocateMemory(VkDevice device,
    return VK_SUCCESS;
 }
 
-void
+VKAPI_ATTR void VKAPI_CALL
 vn_FreeMemory(VkDevice device,
               VkDeviceMemory memory,
               const VkAllocationCallbacks *pAllocator)
@@ -421,10 +413,10 @@ vn_FreeMemory(VkDevice device,
       vn_ring_wait_roundtrip(dev->primary_ring, mem->bo_roundtrip_seqno);
 
    vn_device_memory_free_simple(dev, mem);
-   vk_device_memory_destroy(&dev->base.base, pAllocator, &mem->base.base);
+   vk_device_memory_destroy(&dev->base.vk, pAllocator, &mem->base.vk);
 }
 
-uint64_t
+VKAPI_ATTR uint64_t VKAPI_CALL
 vn_GetDeviceMemoryOpaqueCaptureAddress(
    VkDevice device, const VkDeviceMemoryOpaqueCaptureAddressInfo *pInfo)
 {
@@ -433,19 +425,20 @@ vn_GetDeviceMemoryOpaqueCaptureAddress(
                                                         device, pInfo);
 }
 
-VkResult
-vn_MapMemory(VkDevice device,
-             VkDeviceMemory memory,
-             VkDeviceSize offset,
-             VkDeviceSize size,
-             VkMemoryMapFlags flags,
-             void **ppData)
+VKAPI_ATTR VkResult VKAPI_CALL
+vn_MapMemory2(VkDevice device,
+              const VkMemoryMapInfo *pMemoryMapInfo,
+              void **ppData)
 {
    VN_TRACE_FUNC();
    struct vn_device *dev = vn_device_from_handle(device);
-   struct vn_device_memory *mem = vn_device_memory_from_handle(memory);
-   const struct vk_device_memory *mem_vk = &mem->base.base;
+   struct vn_device_memory *mem =
+      vn_device_memory_from_handle(pMemoryMapInfo->memory);
+   const VkDeviceSize offset = pMemoryMapInfo->offset;
+   const VkDeviceSize size = pMemoryMapInfo->size;
+   const struct vk_device_memory *mem_vk = &mem->base.vk;
    const bool need_bo = !mem->base_bo;
+   void *placed_addr = NULL;
    void *ptr = NULL;
    VkResult result;
 
@@ -467,7 +460,14 @@ vn_MapMemory(VkDevice device,
          return vn_error(dev->instance, result);
    }
 
-   ptr = vn_renderer_bo_map(dev->renderer, mem->base_bo);
+   if (pMemoryMapInfo->flags & VK_MEMORY_MAP_PLACED_BIT_EXT) {
+      const VkMemoryMapPlacedInfoEXT *placed_info = vk_find_struct_const(
+         pMemoryMapInfo->pNext, MEMORY_MAP_PLACED_INFO_EXT);
+      assert(placed_info != NULL);
+      placed_addr = placed_info->pPlacedAddress;
+   }
+
+   ptr = vn_renderer_bo_map(dev->renderer, mem->base_bo, placed_addr);
    if (!ptr) {
       /* vn_renderer_bo_map implies a roundtrip on success, but not here. */
       if (need_bo) {
@@ -489,12 +489,13 @@ vn_MapMemory(VkDevice device,
    return VK_SUCCESS;
 }
 
-void
-vn_UnmapMemory(VkDevice device, VkDeviceMemory memory)
+VKAPI_ATTR VkResult VKAPI_CALL
+vn_UnmapMemory2(VkDevice device, const VkMemoryUnmapInfo *pMemoryUnmapInfo)
 {
+   return VK_SUCCESS;
 }
 
-VkResult
+VKAPI_ATTR VkResult VKAPI_CALL
 vn_FlushMappedMemoryRanges(VkDevice device,
                            uint32_t memoryRangeCount,
                            const VkMappedMemoryRange *pMemoryRanges)
@@ -515,7 +516,7 @@ vn_FlushMappedMemoryRanges(VkDevice device,
    return VK_SUCCESS;
 }
 
-VkResult
+VKAPI_ATTR VkResult VKAPI_CALL
 vn_InvalidateMappedMemoryRanges(VkDevice device,
                                 uint32_t memoryRangeCount,
                                 const VkMappedMemoryRange *pMemoryRanges)
@@ -537,7 +538,7 @@ vn_InvalidateMappedMemoryRanges(VkDevice device,
    return VK_SUCCESS;
 }
 
-void
+VKAPI_ATTR void VKAPI_CALL
 vn_GetDeviceMemoryCommitment(VkDevice device,
                              VkDeviceMemory memory,
                              VkDeviceSize *pCommittedMemoryInBytes)
@@ -547,7 +548,7 @@ vn_GetDeviceMemoryCommitment(VkDevice device,
                                        pCommittedMemoryInBytes);
 }
 
-VkResult
+VKAPI_ATTR VkResult VKAPI_CALL
 vn_GetMemoryFdKHR(VkDevice device,
                   const VkMemoryGetFdInfoKHR *pGetFdInfo,
                   int *pFd)
@@ -572,7 +573,6 @@ vn_GetMemoryFdKHR(VkDevice device,
 VkResult
 vn_get_memory_dma_buf_properties(struct vn_device *dev,
                                  int fd,
-                                 uint64_t *out_alloc_size,
                                  uint32_t *out_mem_type_bits)
 {
    VkDevice device = vn_device_to_handle(dev);
@@ -587,13 +587,8 @@ vn_get_memory_dma_buf_properties(struct vn_device *dev,
 
    vn_ring_roundtrip(dev->primary_ring);
 
-   VkMemoryResourceAllocationSizePropertiesMESA alloc_size_props = {
-      .sType =
-         VK_STRUCTURE_TYPE_MEMORY_RESOURCE_ALLOCATION_SIZE_PROPERTIES_MESA,
-   };
    VkMemoryResourcePropertiesMESA props = {
       .sType = VK_STRUCTURE_TYPE_MEMORY_RESOURCE_PROPERTIES_MESA,
-      .pNext = &alloc_size_props,
    };
    result = vn_call_vkGetMemoryResourcePropertiesMESA(
       dev->primary_ring, device, bo->res_id, &props);
@@ -603,13 +598,12 @@ vn_get_memory_dma_buf_properties(struct vn_device *dev,
       return result;
    }
 
-   *out_alloc_size = alloc_size_props.allocationSize;
    *out_mem_type_bits = props.memoryTypeBits;
 
    return VK_SUCCESS;
 }
 
-VkResult
+VKAPI_ATTR VkResult VKAPI_CALL
 vn_GetMemoryFdPropertiesKHR(VkDevice device,
                             VkExternalMemoryHandleTypeFlagBits handleType,
                             int fd,
@@ -617,15 +611,13 @@ vn_GetMemoryFdPropertiesKHR(VkDevice device,
 {
    VN_TRACE_FUNC();
    struct vn_device *dev = vn_device_from_handle(device);
-   uint64_t alloc_size = 0;
    uint32_t mem_type_bits = 0;
    VkResult result = VK_SUCCESS;
 
    if (handleType != VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT)
       return vn_error(dev->instance, VK_ERROR_INVALID_EXTERNAL_HANDLE);
 
-   result =
-      vn_get_memory_dma_buf_properties(dev, fd, &alloc_size, &mem_type_bits);
+   result = vn_get_memory_dma_buf_properties(dev, fd, &mem_type_bits);
    if (result != VK_SUCCESS)
       return vn_error(dev->instance, result);
 

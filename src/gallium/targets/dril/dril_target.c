@@ -25,7 +25,7 @@
 #include <dlfcn.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
-#include "gbm/main/gbm.h"
+#include <gbm.h>
 #include "drm-uapi/drm_fourcc.h"
 
 #define EGL_PLATFORM_GBM_MESA             0x31D7
@@ -70,6 +70,10 @@ static const struct gl_config drilConfigs[] = {
    CONFIG(PIPE_FORMAT_B8G8R8X8_UNORM),
    CONFIG(PIPE_FORMAT_R8G8B8A8_UNORM),
    CONFIG(PIPE_FORMAT_R8G8B8X8_UNORM),
+   CONFIG(PIPE_FORMAT_X8R8G8B8_UNORM),
+   CONFIG(PIPE_FORMAT_A8R8G8B8_UNORM),
+   CONFIG(PIPE_FORMAT_X8B8G8R8_UNORM),
+   CONFIG(PIPE_FORMAT_A8B8G8R8_UNORM),
    CONFIG(PIPE_FORMAT_B10G10R10A2_UNORM),
    CONFIG(PIPE_FORMAT_B10G10R10X2_UNORM),
    CONFIG(PIPE_FORMAT_R10G10B10A2_UNORM),
@@ -303,16 +307,20 @@ fourcc_to_pipe_format(int fourcc)
 {
    switch (fourcc) {
    case DRM_FORMAT_RGB565: return PIPE_FORMAT_B5G6R5_UNORM;
-   case DRM_FORMAT_XRGB8888: return PIPE_FORMAT_BGRX8888_UNORM;
-   case DRM_FORMAT_ARGB8888: return PIPE_FORMAT_BGRA8888_UNORM;
-   case DRM_FORMAT_ABGR8888: return PIPE_FORMAT_RGBA8888_UNORM;
-   case DRM_FORMAT_XBGR8888: return PIPE_FORMAT_RGBX8888_UNORM;
+   case DRM_FORMAT_XRGB8888: return PIPE_FORMAT_B8G8R8X8_UNORM;
+   case DRM_FORMAT_ARGB8888: return PIPE_FORMAT_B8G8R8A8_UNORM;
+   case DRM_FORMAT_ABGR8888: return PIPE_FORMAT_R8G8B8A8_UNORM;
+   case DRM_FORMAT_XBGR8888: return PIPE_FORMAT_R8G8B8X8_UNORM;
+   case DRM_FORMAT_BGRX8888: return PIPE_FORMAT_X8R8G8B8_UNORM;
+   case DRM_FORMAT_BGRA8888: return PIPE_FORMAT_A8R8G8B8_UNORM;
+   case DRM_FORMAT_RGBX8888: return PIPE_FORMAT_X8B8G8R8_UNORM;
+   case DRM_FORMAT_RGBA8888: return PIPE_FORMAT_A8B8G8R8_UNORM;
    case DRM_FORMAT_XRGB2101010: return PIPE_FORMAT_B10G10R10X2_UNORM;
    case DRM_FORMAT_ARGB2101010: return PIPE_FORMAT_B10G10R10A2_UNORM;
    case DRM_FORMAT_XBGR2101010: return PIPE_FORMAT_R10G10B10X2_UNORM;
    case DRM_FORMAT_ABGR2101010: return PIPE_FORMAT_R10G10B10A2_UNORM;
-   case DRM_FORMAT_XBGR16161616F: return PIPE_FORMAT_R16G16B16A16_FLOAT;
-   case DRM_FORMAT_ABGR16161616F: return PIPE_FORMAT_R16G16B16X16_FLOAT;
+   case DRM_FORMAT_XBGR16161616F: return PIPE_FORMAT_R16G16B16X16_FLOAT;
+   case DRM_FORMAT_ABGR16161616F: return PIPE_FORMAT_R16G16B16A16_FLOAT;
    case DRM_FORMAT_ARGB1555: return PIPE_FORMAT_B5G5R5A1_UNORM;
    case DRM_FORMAT_ABGR1555: return PIPE_FORMAT_R5G5B5A1_UNORM;
    case DRM_FORMAT_ARGB4444: return PIPE_FORMAT_B4G4R4A4_UNORM;
@@ -351,7 +359,7 @@ init_dri2_configs(int fd)
    /* dlopen/dlsym to avoid linkage */
    egl = dlopen("libEGL.so.1", RTLD_LAZY | RTLD_LOCAL);
    if (!egl)
-      return false;
+      return NULL;
 
    void * (*peglGetProcAddress)(const char *) = dlsym(egl, "eglGetProcAddress");
    EGLDisplay (*peglGetPlatformDisplayEXT)(EGLenum, void *, const EGLint *) = peglGetProcAddress("eglGetPlatformDisplayEXT");
@@ -446,6 +454,39 @@ out:
    return NULL;
 }
 
+static bool
+filter_rgba(enum pipe_format color_format)
+{
+   switch (color_format) {
+      case PIPE_FORMAT_B8G8R8A8_UNORM:
+      case PIPE_FORMAT_B8G8R8X8_UNORM:
+      case PIPE_FORMAT_R8G8B8A8_UNORM:
+      case PIPE_FORMAT_R8G8B8X8_UNORM:
+      case PIPE_FORMAT_B10G10R10A2_UNORM:
+      case PIPE_FORMAT_B10G10R10X2_UNORM:
+      case PIPE_FORMAT_R10G10B10A2_UNORM:
+      case PIPE_FORMAT_R10G10B10X2_UNORM:
+      case PIPE_FORMAT_B5G6R5_UNORM:
+      case PIPE_FORMAT_B5G5R5A1_UNORM:
+      case PIPE_FORMAT_B5G5R5X1_UNORM:
+      case PIPE_FORMAT_B4G4R4A4_UNORM:
+      case PIPE_FORMAT_B4G4R4X4_UNORM:
+      case PIPE_FORMAT_R5G6B5_UNORM:
+      case PIPE_FORMAT_R5G5B5A1_UNORM:
+      case PIPE_FORMAT_R5G5B5X1_UNORM:
+      case PIPE_FORMAT_R4G4B4A4_UNORM:
+      case PIPE_FORMAT_R4G4B4X4_UNORM:
+         return false;
+      /* RGBA modes that break some users */
+      case PIPE_FORMAT_X8R8G8B8_UNORM:
+      case PIPE_FORMAT_A8R8G8B8_UNORM:
+      case PIPE_FORMAT_X8B8G8R8_UNORM:
+      case PIPE_FORMAT_A8B8G8R8_UNORM:
+      default:
+         return true;
+   }
+}
+
 static __DRIscreen *
 drilCreateNewScreen(int scrn, int fd,
                     const __DRIextension **loader_extensions,
@@ -453,11 +494,21 @@ drilCreateNewScreen(int scrn, int fd,
                     const __DRIconfig ***driver_configs, void *data)
 {
    const __DRIconfig **configs = init_dri2_configs(fd);
-   if (!configs && fd == -1) {
+   if (!configs) {
+      if (fd != -1)
+         return NULL;
       // otherwise set configs to point to our config list
       configs = calloc(ARRAY_SIZE(drilConfigs) * 2 + 1, sizeof(void *));
       int c = 0;
       for (int i = 0; i < ARRAY_SIZE(drilConfigs); i++) {
+         /* If GBM init was successful, we'd be checking against a list
+          * of modes already pruned by DRI_LOADER_CAP_RGBA_ORDERING in
+          * dri_fill_in_modes. Let's just throw away RGBA ordered modes
+          * here for safety.
+          */
+         if (filter_rgba(drilConfigs[i].color_format))
+            continue;
+
          /* create normal config */
          configs[c++] = mem_dup(&drilConfigs[i], sizeof(drilConfigs[i]));
 
@@ -588,6 +639,7 @@ DEFINE_LOADER_DRM_ENTRYPOINT(v3d)
 DEFINE_LOADER_DRM_ENTRYPOINT(vc4)
 DEFINE_LOADER_DRM_ENTRYPOINT(panfrost)
 DEFINE_LOADER_DRM_ENTRYPOINT(panthor)
+DEFINE_LOADER_DRM_ENTRYPOINT(apple)
 DEFINE_LOADER_DRM_ENTRYPOINT(asahi)
 DEFINE_LOADER_DRM_ENTRYPOINT(etnaviv)
 DEFINE_LOADER_DRM_ENTRYPOINT(tegra)

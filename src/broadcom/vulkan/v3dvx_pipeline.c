@@ -22,12 +22,13 @@
  */
 
 #include "v3dv_private.h"
-#include "broadcom/common/v3d_macros.h"
-#include "broadcom/cle/v3dx_pack.h"
+#include "v3dv_format_table.h"
+#include "v3dvx_format_table.h"
 #include "broadcom/compiler/v3d_compiler.h"
 
-static uint8_t
-blend_factor(VkBlendFactor factor, bool dst_alpha_one, bool *needs_constants)
+static enum V3DX(Blend_Factor)
+blend_factor(VkBlendFactor factor, bool dst_alpha_one, bool *needs_constants,
+             bool *needs_dual_src)
 {
    switch (factor) {
    case VK_BLEND_FACTOR_ZERO:
@@ -52,13 +53,19 @@ blend_factor(VkBlendFactor factor, bool dst_alpha_one, bool *needs_constants)
    case VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA:
       return dst_alpha_one ? V3D_BLEND_FACTOR_ZERO :
                              V3D_BLEND_FACTOR_INV_DST_ALPHA;
+
+   /* For dual source blending we need to fallback to software as the hardware
+    * has no support for it.
+    */
    case VK_BLEND_FACTOR_SRC1_COLOR:
    case VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR:
    case VK_BLEND_FACTOR_SRC1_ALPHA:
    case VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA:
-      unreachable("Invalid blend factor: dual source blending not supported.");
+      assert(needs_dual_src);
+      *needs_dual_src = true;
+      return VK_BLEND_FACTOR_ZERO;
    default:
-      unreachable("Unknown blend factor.");
+      UNREACHABLE("Unknown blend factor.");
    }
 }
 
@@ -86,6 +93,8 @@ pack_blend(struct v3dv_pipeline *pipeline,
    assert(ri->color_attachment_count == cb_info->attachmentCount);
    pipeline->blend.needs_color_constants = false;
    uint32_t color_write_masks = 0;
+
+   bool needs_dual_src = false;
    for (uint32_t i = 0; i < ri->color_attachment_count; i++) {
       const VkPipelineColorBlendAttachmentState *b_state =
          &cb_info->pAttachments[i];
@@ -116,21 +125,29 @@ pack_blend(struct v3dv_pipeline *pipeline,
          config.color_blend_mode = b_state->colorBlendOp;
          config.color_blend_dst_factor =
             blend_factor(b_state->dstColorBlendFactor, dst_alpha_one,
-                         &pipeline->blend.needs_color_constants);
+                         &pipeline->blend.needs_color_constants,
+                         &needs_dual_src);
          config.color_blend_src_factor =
             blend_factor(b_state->srcColorBlendFactor, dst_alpha_one,
-                         &pipeline->blend.needs_color_constants);
+                         &pipeline->blend.needs_color_constants,
+                         &needs_dual_src);
 
          config.alpha_blend_mode = b_state->alphaBlendOp;
          config.alpha_blend_dst_factor =
             blend_factor(b_state->dstAlphaBlendFactor, dst_alpha_one,
-                         &pipeline->blend.needs_color_constants);
+                         &pipeline->blend.needs_color_constants,
+                         &needs_dual_src);
          config.alpha_blend_src_factor =
             blend_factor(b_state->srcAlphaBlendFactor, dst_alpha_one,
-                         &pipeline->blend.needs_color_constants);
+                         &pipeline->blend.needs_color_constants,
+                         &needs_dual_src);
       }
    }
 
+   /* We may want to fallback to software in other cases in the future such
+    * as for formats not supported by the blend hardware.
+    */
+   pipeline->blend.use_software = V3D_DBG(SOFT_BLEND) || needs_dual_src;
    pipeline->blend.color_write_masks = color_write_masks;
 }
 
@@ -191,7 +208,8 @@ pack_cfg_bits(struct v3dv_pipeline *pipeline,
          config.direct3d_provoking_vertex = true;
       }
 
-      config.blend_enable = pipeline->blend.enables != 0;
+      config.blend_enable = pipeline->blend.enables != 0 &&
+         !pipeline->blend.use_software;
 
 #if V3D_VERSION >= 71
       /* From the Vulkan spec:
@@ -227,7 +245,7 @@ pack_cfg_bits(struct v3dv_pipeline *pipeline,
    };
 }
 
-uint32_t
+enum V3DX(Stencil_Op)
 v3dX(translate_stencil_op)(VkStencilOp op)
 {
    switch (op) {
@@ -248,7 +266,7 @@ v3dX(translate_stencil_op)(VkStencilOp op)
    case VK_STENCIL_OP_DECREMENT_AND_WRAP:
       return V3D_STENCIL_OP_DECWRAP;
    default:
-      unreachable("bad stencil op");
+      UNREACHABLE("bad stencil op");
    }
 }
 
@@ -625,18 +643,13 @@ get_attr_type(const struct util_format_description *desc)
          attr_type = ATTRIBUTE_BYTE;
          break;
       default:
-         fprintf(stderr,
-                 "format %s unsupported\n",
-                 desc->name);
-         attr_type = ATTRIBUTE_BYTE;
+         mesa_loge("format %s unsupported\n", desc->name);
          abort();
       }
       break;
 
    default:
-      fprintf(stderr,
-              "format %s unsupported\n",
-              desc->name);
+      mesa_loge("format %s unsupported\n", desc->name);
       abort();
    }
 
@@ -769,14 +782,14 @@ v3dX(create_default_attribute_values)(struct v3dv_device *device,
    bo = v3dv_bo_alloc(device, size, "default_vi_attributes", true);
 
    if (!bo) {
-      fprintf(stderr, "failed to allocate memory for the default "
-              "attribute values\n");
+      mesa_loge("failed to allocate memory for the default "
+                "attribute values\n");
       return NULL;
    }
 
    bool ok = v3dv_bo_map(device, bo, size);
    if (!ok) {
-      fprintf(stderr, "failed to map default attribute values buffer\n");
+      mesa_loge("failed to map default attribute values buffer\n");
       return NULL;
    }
 

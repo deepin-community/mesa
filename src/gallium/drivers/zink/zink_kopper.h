@@ -29,6 +29,7 @@
 
 #include "kopper_interface.h"
 #include "util/u_queue.h"
+#include "util/set.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -49,6 +50,8 @@ struct kopper_swapchain_image {
    struct pipe_resource *readback;
    VkSemaphore acquire;
    VkImageLayout layout;
+
+   struct set surface_cache;
 };
 
 struct kopper_swapchain {
@@ -89,6 +92,8 @@ struct kopper_displaytarget
    struct kopper_swapchain *old_swapchain;
 
    struct kopper_loader_info info;
+
+   bool async; // True if submits should go through zink_screen::flush_queue
 
    VkSurfaceCapabilitiesKHR caps;
    VkImageFormatListCreateInfo format_list;

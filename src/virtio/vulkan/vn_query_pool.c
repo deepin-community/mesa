@@ -18,7 +18,7 @@
 
 /* query pool commands */
 
-VkResult
+VKAPI_ATTR VkResult VKAPI_CALL
 vn_CreateQueryPool(VkDevice device,
                    const VkQueryPoolCreateInfo *pCreateInfo,
                    const VkAllocationCallbacks *pAllocator,
@@ -26,7 +26,7 @@ vn_CreateQueryPool(VkDevice device,
 {
    struct vn_device *dev = vn_device_from_handle(device);
    const VkAllocationCallbacks *alloc =
-      pAllocator ? pAllocator : &dev->base.base.alloc;
+      pAllocator ? pAllocator : &dev->base.vk.alloc;
 
    struct vn_query_pool *pool =
       vk_zalloc(alloc, sizeof(*pool), VN_DEFAULT_ALIGN,
@@ -84,8 +84,38 @@ vn_CreateQueryPool(VkDevice device,
        */
       pool->result_array_size = 1;
       break;
+   case VK_QUERY_TYPE_MESH_PRIMITIVES_GENERATED_EXT:
+      /*
+       * Similar to primitives generated query, the mesh primitives generated
+       * query also writes one integer value.
+       */
+      pool->result_array_size = 1;
+      break;
+   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR:
+   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_SIZE_KHR:
+      /*
+       * The value written out is the number of bytes required by a compacted
+       * or a serialized acceleration structure correspondingly. So the query
+       * writes one integer value.
+       */
+      pool->result_array_size = 1;
+      break;
+   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SIZE_KHR:
+   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_BOTTOM_LEVEL_POINTERS_KHR:
+      /*
+       * The VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SIZE_KHR is to query the
+       * acceleration structure size on the device timeline.
+       *
+       * SERIALIZATION_BOTTOM_LEVEL_POINTERS is to query the number of bottom
+       * level acceleration structure pointers for serialization.
+       *
+       * So either of these queries only writes one integer value.
+       *
+       */
+      pool->result_array_size = 1;
+      break;
    default:
-      unreachable("bad query type");
+      UNREACHABLE("bad query type");
       break;
    }
 
@@ -98,17 +128,20 @@ vn_CreateQueryPool(VkDevice device,
     * value may either wrap or saturate.
     *
     * We detect the renderer side implementation to align with the
-    * implementation specific behavior.
+    * implementation specific behavior when maintenance7 is not enabled.
     */
-   switch (dev->physical_device->renderer_driver_id) {
-   case VK_DRIVER_ID_ARM_PROPRIETARY:
-   case VK_DRIVER_ID_MESA_LLVMPIPE:
-   case VK_DRIVER_ID_MESA_TURNIP:
-      pool->saturate_on_overflow = true;
-      break;
-   default:
-      break;
-   };
+   const struct vk_features *app_feats = &dev->base.vk.enabled_features;
+   if (!app_feats->maintenance7) {
+      switch (dev->physical_device->renderer_driver_id) {
+      case VK_DRIVER_ID_ARM_PROPRIETARY:
+      case VK_DRIVER_ID_MESA_LLVMPIPE:
+      case VK_DRIVER_ID_MESA_TURNIP:
+         pool->saturate_on_overflow = true;
+         break;
+      default:
+         break;
+      };
+   }
 
    VkQueryPool pool_handle = vn_query_pool_to_handle(pool);
    vn_async_vkCreateQueryPool(dev->primary_ring, device, pCreateInfo, NULL,
@@ -119,7 +152,7 @@ vn_CreateQueryPool(VkDevice device,
    return VK_SUCCESS;
 }
 
-void
+VKAPI_ATTR void VKAPI_CALL
 vn_DestroyQueryPool(VkDevice device,
                     VkQueryPool queryPool,
                     const VkAllocationCallbacks *pAllocator)
@@ -144,7 +177,7 @@ vn_DestroyQueryPool(VkDevice device,
    vk_free(alloc, pool);
 }
 
-void
+VKAPI_ATTR void VKAPI_CALL
 vn_ResetQueryPool(VkDevice device,
                   VkQueryPool queryPool,
                   uint32_t firstQuery,
@@ -266,7 +299,7 @@ vn_query_feedback_wait_ready(struct vn_device *dev,
    vn_relax_fini(&relax_state);
 }
 
-VkResult
+VKAPI_ATTR VkResult VKAPI_CALL
 vn_GetQueryPoolResults(VkDevice device,
                        VkQueryPool queryPool,
                        uint32_t firstQuery,

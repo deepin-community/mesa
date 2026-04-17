@@ -34,7 +34,7 @@ class Opcode(object):
    """
    def __init__(self, name, output_size, output_type, input_sizes,
                 input_types, is_conversion, algebraic_properties, const_expr,
-                description):
+                description, needs_dest_type):
       """Parameters:
 
       - name is the name of the opcode (prepend nir_op_ for the enum name)
@@ -46,6 +46,8 @@ class Opcode(object):
       - const_expr is an expression or series of statements that computes the
         constant value of the opcode given the constant values of its inputs.
       - Optional description of the opcode for documentation.
+      - needs_dest_type means const_expr depends on the destination type and
+        needs a formatting step.
 
       Constant expressions are formed from the variables src0, src1, ...,
       src(N-1), where N is the number of arguments.  The output of the
@@ -65,6 +67,13 @@ class Opcode(object):
       and the result will be equivalent to "dst = <expression>" for
       per-component instructions and "dst.x = dst.y = ... = <expression>"
       for non-per-component instructions.
+
+      The expression may set a poison = true flag to indicate that the
+      calculation invoked deferred undefined behavior (see
+      https://llvm.org/docs/UndefinedBehavior.html, which is similar to the
+      SPIRV 2.2.6 "Validity and Defined Behavior" definition.).  For
+      non-per-component opcodes, poison_mask must be set to the undefined
+      components, instead.
       """
       assert isinstance(name, str)
       assert isinstance(output_size, int)
@@ -77,6 +86,7 @@ class Opcode(object):
       assert isinstance(algebraic_properties, str)
       assert isinstance(const_expr, str)
       assert len(input_sizes) == len(input_types)
+      assert len(input_sizes) == 2 or "associative" not in algebraic_properties
       assert 0 <= output_size <= 5 or (output_size == 8) or (output_size == 16)
       for size in input_sizes:
          assert 0 <= size <= 5 or (size == 8) or (size == 16)
@@ -92,6 +102,12 @@ class Opcode(object):
       self.algebraic_properties = algebraic_properties
       self.const_expr = const_expr
       self.description = description
+      self.needs_dest_type = needs_dest_type
+
+   def render(self, dest_type):
+      if self.needs_dest_type:
+         return self.const_expr.format(dest_type=dest_type)
+      return self.const_expr
 
 # helper variables for strings
 tfloat = "float"
@@ -149,17 +165,19 @@ def type_base_type(type_):
 # sources.
 _2src_commutative = "2src_commutative "
 associative = "associative "
+inexact_associative = "inexact_associative "
 selection = "selection "
 
 # global dictionary of opcodes
 opcodes = {}
 
 def opcode(name, output_size, output_type, input_sizes, input_types,
-           is_conversion, algebraic_properties, const_expr, description = ""):
+           is_conversion, algebraic_properties, const_expr, description = "",
+           needs_dest_type=False):
    assert name not in opcodes
    opcodes[name] = Opcode(name, output_size, output_type, input_sizes,
                           input_types, is_conversion, algebraic_properties,
-                          const_expr, description)
+                          const_expr, description, needs_dest_type)
 
 def unop_convert(name, out_type, in_type, const_expr, description = ""):
    opcode(name, 0, out_type, [0], [in_type], False, "", const_expr, description)
@@ -198,6 +216,10 @@ def unop_numeric_convert(name, out_type, in_type, const_expr, description = ""):
 
 unop("mov", tuint, "src0")
 
+# Flush subnormal values to zero with the same sign if required by
+# the float controls execution mode. Any NaN might return a different NaN.
+unop("fcanonicalize", tfloat, "src0")
+
 unop("ineg", tint, "src0 == u_intN_min(bit_size) ? src0 : -src0")
 unop("fneg", tfloat, "-src0")
 unop("inot", tint, "~src0", description = "Invert every bit of the integer")
@@ -225,7 +247,7 @@ OpenCL.
 unop("isign", tint, "(src0 == 0) ? 0 : ((src0 > 0) ? 1 : -1)")
 unop("iabs", tint, "(src0 < 0) ? -src0 : src0")
 unop("fabs", tfloat, "fabs(src0)")
-unop("fsat", tfloat, ("fmin(fmax(src0, 0.0), 1.0)"))
+unop("fsat", tfloat, ("util_min_num(util_max_num(src0, 0.0), 1.0)"))
 unop("frcp", tfloat, "bit_size == 64 ? 1.0 / src0 : 1.0f / src0")
 unop("frsq", tfloat, "bit_size == 64 ? 1.0 / sqrt(src0) : 1.0f / sqrtf(src0)")
 unop("fsqrt", tfloat, "bit_size == 64 ? sqrt(src0) : sqrtf(src0)")
@@ -246,7 +268,7 @@ for src_t in [tint, tuint, tfloat, tbool]:
    for dst_t in dst_types:
       for dst_bit_size in type_sizes(dst_t):
           if dst_bit_size == 16 and dst_t == tfloat and src_t == tfloat:
-              rnd_modes = ['_rtne', '_rtz', '']
+              rnd_modes = ['_rtne', '_rtz', '_ru', '_rd', '']
               for rnd_mode in rnd_modes:
                   if rnd_mode == '_rtne':
                       conv_expr = """
@@ -264,6 +286,22 @@ for src_t in [tint, tuint, tfloat, tbool]:
                          dst = _mesa_half_to_float(_mesa_double_to_float16_rtz(src0));
                       } else if (bit_size > 16) {
                          dst = _mesa_half_to_float(_mesa_float_to_float16_rtz(src0));
+                      } else {
+                         dst = src0;
+                      }
+                      """
+                  elif rnd_mode == '_ru':
+                      conv_expr = """
+                      if (bit_size > 16) {
+                         dst = _mesa_half_to_float(_mesa_float_to_float16_ru(src0));
+                      } else {
+                         dst = src0;
+                      }
+                      """
+                  elif rnd_mode == '_rd':
+                      conv_expr = """
+                      if (bit_size > 16) {
+                         dst = _mesa_half_to_float(_mesa_float_to_float16_rd(src0));
                       } else {
                          dst = src0;
                       }
@@ -302,6 +340,26 @@ for src_t in [tint, tuint, tfloat, tbool]:
               unop_numeric_convert("{0}2{1}{2}".format(src_t[0], dst_t[0],
                                                        dst_bit_size),
                                    dst_t + str(dst_bit_size), src_t, conv_expr)
+          elif src_t == tfloat and dst_t in [tint, tuint]:
+              # SPIRV specifies that OpConvertFToU and OpConvertFToS are UB if
+              # the input is out of range of the output.  glsl 4.60 just says
+              # "It is undefined to convert a negative floating-point value to
+              # an uint.", but we define the NIR opcodes the SPIRV way.
+              if dst_t == tuint:
+                   min = "0.0"
+                   max = "u_uintN_max({})".format(dst_bit_size)
+              else:
+                   min = "u_intN_min({})".format(dst_bit_size)
+                   max = "u_intN_max({})".format(dst_bit_size)
+              conv_expr = f"""
+                dst = src0;
+                if (src0 < {min} || src0 > {max}) {{
+                   poison = true;
+                }}
+              """
+              unop_numeric_convert("{0}2{1}{2}".format(src_t[0], dst_t[0],
+                                                       dst_bit_size),
+                                   dst_t + str(dst_bit_size), src_t, conv_expr)
           else:
               conv_expr = "src0 != 0" if dst_t == tbool else "src0"
               unop_numeric_convert("{0}2{1}{2}".format(src_t[0], dst_t[0],
@@ -326,6 +384,21 @@ unop_numeric_convert_mp("f2u", tuint16, tfloat32)
 unop_numeric_convert_mp("i2f", tfloat16, tint32)
 unop_numeric_convert_mp("u2f", tfloat16, tuint32)
 
+unop_numeric_convert("f2i32_rtne", tint32, tfloat32, "(int32_t)_mesa_roundevenf(src0)")
+
+# Note: 64-bit integers are intentionally not supported. Casting u_uintN_max
+# (and related signed values) to double is precisely representable for upto
+# 32-bit integers. To support these opcodes for 64-bit integers would require
+# a more complex implementation.
+for bits in (8, 16, 32):
+    unop_numeric_convert(f"f2u{bits}_sat", f"uint{bits}", tfloat,
+                         f"(uint{bits}_t)fmin(fmax(src0, 0.0), (double)u_uintN_max({bits}))",
+                         "Convert float to uint with clamping to uint range. NaN becomes zero.")
+
+    unop_numeric_convert(f"f2i{bits}_sat", f"int{bits}", tfloat,
+                         f"(int{bits}_t) isnan(src0) ? 0.0 : fmin(fmax(src0, (double)u_intN_min({bits})), (double)u_intN_max({bits}))",
+                         "Convert float to int with clamping to int range. NaN becomes zero.")
+
 # Unary floating-point rounding operations.
 
 
@@ -335,7 +408,7 @@ unop("ffloor", tfloat, "bit_size == 64 ? floor(src0) : floorf(src0)")
 unop("ffract", tfloat, "src0 - (bit_size == 64 ? floor(src0) : floorf(src0))")
 unop("fround_even", tfloat, "bit_size == 64 ? _mesa_roundeven(src0) : _mesa_roundevenf(src0)")
 
-unop("fquantize2f16", tfloat, "(fabs(src0) < ldexpf(1.0, -14)) ? copysignf(0.0f, src0) : _mesa_half_to_float(_mesa_float_to_half(src0))")
+unop("fquantize2f16", tfloat32, "(fabsf(src0) < ldexpf(1.0, -14)) ? copysignf(0.0f, src0) : _mesa_half_to_float(_mesa_float_to_half(src0))")
 
 # Trigonometric operations.
 
@@ -366,7 +439,7 @@ dst.x |= ((uint32_t) pack_fmt_1x8(src0.w)) << 24;
 def unpack_2x16(fmt):
    unop_horiz("unpack_" + fmt + "_2x16", 2, tfloat32, 1, tuint32, """
 dst.x = unpack_fmt_1x16((uint16_t)(src0.x & 0xffff));
-dst.y = unpack_fmt_1x16((uint16_t)(src0.x << 16));
+dst.y = unpack_fmt_1x16((uint16_t)(src0.x >> 16));
 """.replace("fmt", fmt))
 
 def unpack_4x8(fmt):
@@ -459,11 +532,11 @@ unop_convert("unpack_64_2x32_split_y", tuint32, tuint64, "src0 >> 32")
 # Bit operations, part of ARB_gpu_shader5.
 
 
-unop("bitfield_reverse", tuint32, """
+unop("bitfield_reverse", tuint, """
 /* we're not winning any awards for speed here, but that's ok */
 dst = 0;
-for (unsigned bit = 0; bit < 32; bit++)
-   dst |= ((src0 >> bit) & 1) << (31 - bit);
+for (unsigned bit = 0; bit < bit_size; bit++)
+   dst |= ((src0 >> bit) & 1) << ((bit_size - 1) - bit);
 """)
 unop_convert("bit_count", tuint32, tuint, """
 dst = 0;
@@ -521,7 +594,7 @@ dst = -1;
 /* We are looking for the highest bit that's not the same as the sign bit. */
 uint32_t sign = src0 & 0x80000000u;
 for (int bit = 0; bit < 32; bit++) {
-   if (((src0 << bit) & 0x80000000u) != sign) {
+   if ((((uint32_t)src0 << bit) & 0x80000000u) != sign) {
       dst = bit;
       break;
    }
@@ -541,14 +614,14 @@ for (unsigned bit = 0; bit < bit_size; bit++) {
 unop_reduce("fsum", 1, tfloat, tfloat, "{src}", "{src0} + {src1}", "{src}",
             description = "Sum of vector components")
 
-def binop_convert(name, out_type, in_type1, alg_props, const_expr, description="", in_type2=None):
+def binop_convert(name, out_type, in_type1, alg_props, const_expr, description="", in_type2=None, needs_dest_type=False):
    if in_type2 is None:
       in_type2 = in_type1
    opcode(name, 0, out_type, [0, 0], [in_type1, in_type2],
-          False, alg_props, const_expr, description)
+          False, alg_props, const_expr, description, needs_dest_type)
 
-def binop(name, ty, alg_props, const_expr, description = ""):
-   binop_convert(name, ty, ty, alg_props, const_expr, description)
+def binop(name, ty, alg_props, const_expr, description = "", needs_dest_type=False):
+   binop_convert(name, ty, ty, alg_props, const_expr, description, needs_dest_type=needs_dest_type)
 
 def binop_compare(name, ty, alg_props, const_expr, description = "", ty2=None):
    binop_convert(name, tbool1, ty, alg_props, const_expr, description, ty2)
@@ -610,7 +683,7 @@ def binop_reduce_all_sizes(name, output_size, src_type, prereduce_expr,
    binop_reduce("b32" + name[1:], output_size, tbool32, src_type,
                 prereduce_expr, reduce_expr, final_expr, description)
 
-binop("fadd", tfloat, _2src_commutative + associative,"""
+binop("fadd", tfloat, _2src_commutative + inexact_associative,"""
 if (nir_is_rounding_mode_rtz(execution_mode, bit_size)) {
    if (bit_size == 64)
       dst = _mesa_double_add_rtz(src0, src1);
@@ -622,18 +695,29 @@ if (nir_is_rounding_mode_rtz(execution_mode, bit_size)) {
 """)
 binop("iadd", tint, _2src_commutative + associative, "(uint64_t)src0 + (uint64_t)src1")
 binop("iadd_sat", tint, _2src_commutative, """
-      src1 > 0 ?
-         (src0 + src1 < src0 ? u_intN_max(bit_size) : src0 + src1) :
-         (src0 < src0 + src1 ? u_intN_min(bit_size) : src0 + src1)
-""")
+      util_add_check_overflow({dest_type}, src0, src1) ?
+         (src1 < 0 ? u_intN_min(bit_size) : u_intN_max(bit_size)) : (src0 + src1)
+""", "", True)
 binop("uadd_sat", tuint, _2src_commutative,
-      "(src0 + src1) < src0 ? u_uintN_max(sizeof(src0) * 8) : (src0 + src1)")
+      "util_add_check_overflow({dest_type}, src0, src1) ? u_uintN_max(sizeof(src0) * 8) : (src0 + src1)",
+      "", True)
 binop("isub_sat", tint, "", """
-      src1 < 0 ?
-         (src0 - src1 < src0 ? u_intN_max(bit_size) : src0 - src1) :
-         (src0 < src0 - src1 ? u_intN_min(bit_size) : src0 - src1)
-""")
+      util_sub_check_overflow({dest_type}, src0, src1) ?
+         (src1 < 0 ? u_intN_max(bit_size) : u_intN_min(bit_size)) : (src0 - src1)
+""", "", True)
 binop("usub_sat", tuint, "", "src0 < src1 ? 0 : src0 - src1")
+
+opcode("uadd64_32", 2, tuint32, [1, 1, 1], [tuint32, tuint32, tuint32], False, "", """
+uint64_t sum = ((uint64_t)src1.x << 32 | (uint64_t)src0.x) + (uint64_t)src2.x;
+dst.x = sum & 0xffffffff;
+dst.y = sum >> 32;
+""")
+
+opcode("umad64_32", 2, tuint32, [1, 1, 1, 1], [tuint32, tuint32, tuint32, tuint32], False, "", """
+uint64_t sum = ((uint64_t)src0.x * (uint64_t)src1.x) + ((uint64_t)src3.x << 32 | (uint64_t)src2.x);
+dst.x = sum & 0xffffffff;
+dst.y = sum >> 32;
+""")
 
 binop("fsub", tfloat, "", """
 if (nir_is_rounding_mode_rtz(execution_mode, bit_size)) {
@@ -645,14 +729,14 @@ if (nir_is_rounding_mode_rtz(execution_mode, bit_size)) {
    dst = src0 - src1;
 }
 """)
-binop("isub", tint, "", "src0 - src1")
+binop("isub", tint, "", "(uint64_t)src0 - (uint64_t)src1", "", True)
 binop_convert("uabs_isub", tuint, tint, "", """
               src1 > src0 ? (uint64_t) src1 - (uint64_t) src0
                           : (uint64_t) src0 - (uint64_t) src1
 """)
 binop("uabs_usub", tuint, "", "(src1 > src0) ? (src1 - src0) : (src0 - src1)")
 
-binop("fmul", tfloat, _2src_commutative + associative, """
+binop("fmul", tfloat, _2src_commutative + inexact_associative, """
 if (nir_is_rounding_mode_rtz(execution_mode, bit_size)) {
    if (bit_size == 64)
       dst = _mesa_double_mul_rtz(src0, src1);
@@ -663,7 +747,7 @@ if (nir_is_rounding_mode_rtz(execution_mode, bit_size)) {
 }
 """)
 
-binop("fmulz", tfloat32, _2src_commutative + associative, """
+binop("fmulz", tfloat32, _2src_commutative + inexact_associative, """
 if (src0 == 0.0 || src1 == 0.0)
    dst = 0.0;
 else if (nir_is_rounding_mode_rtz(execution_mode, 32))
@@ -731,10 +815,12 @@ if (bit_size == 64) {
 }
 """, description = "High 32-bits of unsigned integer multiply")
 
-binop("umul_low", tuint32, _2src_commutative, """
-uint64_t mask = (1 << (bit_size / 2)) - 1;
-dst = ((uint64_t)src0 & mask) * ((uint64_t)src1 & mask);
-""", description = "Low 32-bits of unsigned integer multiply")
+binop("umul_16x16", tuint32, _2src_commutative,
+      "(uint32_t)(uint16_t)src0 * (uint32_t)(uint16_t)src1",
+      description = """
+Multiply low 16-bits of the sources, with zero extension, producing a 32-bit
+result
+      """)
 
 binop("imul_32x16", tint32, "", "src0 * (int16_t) src1",
       description = "Multiply 32-bits with low 16-bits, with sign extension")
@@ -742,15 +828,15 @@ binop("umul_32x16", tuint32, "", "src0 * (uint16_t) src1",
       description = "Multiply 32-bits with low 16-bits, with zero extension")
 
 binop("fdiv", tfloat, "", "src0 / src1")
-binop("idiv", tint, "", "src1 == 0 ? 0 : (src0 / src1)")
+binop("idiv", tint, "", "(src1 == 0 || (src0 == u_intN_min(bit_size) && src1 == -1)) ? 0 : (src0 / src1)")
 binop("udiv", tuint, "", "src1 == 0 ? 0 : (src0 / src1)")
 
 binop_convert("uadd_carry", tuint, tuint, _2src_commutative,
-              "src0 + src1 < src0",
+              "util_add_check_overflow({dest_type}, src0, src1)",
               description = """
 Return an integer (1 or 0) representing the carry resulting from the
 addition of the two unsigned arguments.
-              """)
+              """, needs_dest_type = True)
 
 binop_convert("usub_borrow", tuint, tuint, "", "src0 < src1", description = """
 Return an integer (1 or 0) representing the borrow resulting from the
@@ -793,10 +879,10 @@ binop("umod", tuint, "", "src1 == 0 ? 0 : src0 % src1")
 #
 # http://mathforum.org/library/drmath/view/52343.html
 
-binop("irem", tint, "", "src1 == 0 ? 0 : src0 % src1")
-binop("imod", tint, "",
-      "src1 == 0 ? 0 : ((src0 % src1 == 0 || (src0 >= 0) == (src1 >= 0)) ?"
-      "                 src0 % src1 : src0 % src1 + src1)")
+binop("irem", tint, "", "(src1 == 0 || (src0 == u_intN_min(bit_size) && src1 == -1)) ? 0 : src0 % src1")
+binop("imod", tint, "", "(src1 == 0 || (src0 == u_intN_min(bit_size) && src1 == -1)) ?"
+                        " 0 : ((src0 % src1 == 0 || (src0 >= 0) == (src1 >= 0)) ?"
+                        " src0 % src1 : src0 % src1 + src1)")
 binop("fmod", tfloat, "", "src0 - src1 * floorf(src0 / src1)")
 binop("frem", tfloat, "", "src0 - src1 * truncf(src0 / src1)")
 
@@ -872,6 +958,9 @@ opcode("ushr", 0, tuint, [0, 0], [tuint, tuint32], False, "",
        "src0 >> (src1 & (sizeof(src0) * 8 - 1))",
        description = "Unsigned right-shift." + shift_note)
 
+opcode("udiv_aligned_4", 0, tuint, [0], [tuint], False, "",
+       "src0 >> 2", description = "Divide a multiple of 4 by 4")
+
 opcode("urol", 0, tuint, [0, 0], [tuint, tuint32], False, "", """
    uint32_t rotate_mask = sizeof(src0) * 8 - 1;
    dst = (src0 << (src1 & rotate_mask)) |
@@ -914,25 +1003,10 @@ opcode("fdph_replicated", 0, tfloat, [3, 4], [tfloat, tfloat], False, "",
        "src0.x * src1.x + src0.y * src1.y + src0.z * src1.z + src1.w")
 
 # The C fmin/fmax functions have implementation-defined behaviour for signed
-# zeroes. However, SPIR-V requires:
-#
-#   fmin(-0, +0) = -0
-#   fmax(+0, -0) = +0
-#
-# The NIR opcodes match SPIR-V. Furthermore, the NIR opcodes are commutative, so
-# we must also ensure:
-#
-#   fmin(+0, -0) = -0
-#   fmax(-0, +0) = +0
-#
-# To implement the constant folding, when the sources are equal, we use the
-# min/max of the bit patterns which will order the signed zeroes while
-# preserving all other values.
-for op, macro in [("fmin", "MIN2"), ("fmax", "MAX2")]:
-    binop(op, tfloat, _2src_commutative + associative,
-          "bit_size == 64 ? " +
-          f"(src0 == src1 ? uid({macro}((int64_t)dui(src0), (int64_t)dui(src1))) : {op}(src0, src1)) :"
-          f"(src0 == src1 ? uif({macro}((int32_t)fui(src0), (int32_t)fui(src1))) : {op}f(src0, src1))")
+# zeroes. However, SPIR-V requires IEEE 754-2019 minimumNumber/maximumNumber:
+# -0 compares less than +0.
+binop("fmin", tfloat, _2src_commutative + associative, ("util_min_num(src0, src1)"))
+binop("fmax", tfloat, _2src_commutative + associative, ("util_max_num(src0, src1)"))
 
 binop("imin", tint, _2src_commutative + associative, "MIN2(src0, src1)")
 binop("umin", tuint, _2src_commutative + associative, "MIN2(src0, src1)")
@@ -942,10 +1016,10 @@ binop("umax", tuint, _2src_commutative + associative, "MAX2(src0, src1)")
 binop("fpow", tfloat, "", "bit_size == 64 ? pow(src0, src1) : powf(src0, src1)")
 
 binop_horiz("pack_half_2x16_split", 1, tuint32, 1, tfloat32, 1, tfloat32,
-            "pack_half_1x16(src0.x) | ((uint32_t)(pack_half_1x16(src1.x)) << 16)")
+            "pack_half_1x16(src0.x) | ((uint32_t)pack_half_1x16(src1.x) << 16)")
 
 binop_horiz("pack_half_2x16_rtz_split", 1, tuint32, 1, tfloat32, 1, tfloat32,
-            "pack_half_1x16_rtz(src0.x) | (uint32_t)(pack_half_1x16_rtz(src1.x) << 16)")
+            "pack_half_1x16_rtz(src0.x) | ((uint32_t)pack_half_1x16_rtz(src1.x) << 16)")
 
 binop_convert("pack_64_2x32_split", tuint64, tuint32, "",
               "src0 | ((uint64_t)src1 << 32)")
@@ -974,6 +1048,8 @@ if (!isnormal(dst))
    dst = copysignf(0.0f, src0);
 """)
 
+binop("fcopysign_pco", tfloat, "", "bit_size == 64 ? copysign(src0, src1) : copysignf(src0, src1)")
+
 binop_horiz("vec2", 2, tuint, 1, tuint, 1, tuint, """
 dst.x = src0.x;
 dst.y = src1.x;
@@ -981,17 +1057,32 @@ dst.y = src1.x;
 Combines the first component of each input to make a 2-component vector.
 """)
 
+def extract_insert_op(name, ty, expr):
+   if name.endswith("16"):
+     width = 16
+   else:
+     assert(name.endswith("8"))
+     width = 8;
+   binop(name, ty, "", f"""
+         if ((uint64_t)(src1 * {width}) >= bit_size) {{
+            dst = 0;
+            poison = true;
+         }} else {{
+            dst = {expr};
+         }}
+         """)
+
 # Byte extraction
-binop("extract_u8", tuint, "", "(uint8_t)(src0 >> (src1 * 8))")
-binop("extract_i8", tint, "", "(int8_t)(src0 >> (src1 * 8))")
+extract_insert_op("extract_u8", tuint, "(uint8_t)(src0 >> (src1 * 8))")
+extract_insert_op("extract_i8", tint, "(int8_t)(src0 >> (src1 * 8))")
 
 # Word extraction
-binop("extract_u16", tuint, "", "(uint16_t)(src0 >> (src1 * 16))")
-binop("extract_i16", tint, "", "(int16_t)(src0 >> (src1 * 16))")
+extract_insert_op("extract_u16", tuint, "(uint16_t)(src0 >> (src1 * 16))")
+extract_insert_op("extract_i16", tint, "(int16_t)(src0 >> (src1 * 16))")
 
 # Byte/word insertion
-binop("insert_u8", tuint, "", "(src0 & 0xff) << (src1 * 8)")
-binop("insert_u16", tuint, "", "(src0 & 0xffff) << (src1 * 16)")
+extract_insert_op("insert_u8", tuint, "(src0 & 0xff) << (src1 * 8)")
+extract_insert_op("insert_u16", tuint, "(src0 & 0xffff) << (src1 * 16)")
 
 
 def triop(name, ty, alg_props, const_expr, description = ""):
@@ -1038,10 +1129,10 @@ zero plus src2 if either src0 or src1 is zero.
 
 triop("flrp", tfloat, "", "src0 * (1 - src2) + src1 * src2")
 
-triop("iadd3", tint, _2src_commutative + associative, "src0 + src1 + src2",
+triop("iadd3", tint, _2src_commutative, "(uint64_t)src0 + (uint64_t)src1 + (uint64_t)src2",
       description = "Ternary addition")
 
-triop("imad", tint, _2src_commutative + associative, "src0 * src1 + src2",
+triop("imad", tint, _2src_commutative, "src0 * src1 + src2",
       description = "Integer multiply-add")
 
 csel_description = """
@@ -1063,6 +1154,8 @@ opcode("b16csel", 0, tuint, [0, 0, 0],
 opcode("b32csel", 0, tuint, [0, 0, 0],
        [tbool32, tuint, tuint], False, selection, "src0 ? src1 : src2",
        description = csel_description.format("a 32-bit", "0 vs ~0"))
+
+triop("icsel_eqz", tint, selection, "(src0 == 0) ? src1 : src2")
 
 triop("i32csel_gt", tint32, selection, "(src0 > 0) ? src1 : src2")
 triop("i32csel_ge", tint32, selection, "(src0 >= 0) ? src1 : src2")
@@ -1103,41 +1196,43 @@ if (bits == 0) {
 """)
 opcode("ibfe", 0, tint32,
        [0, 0, 0], [tint32, tuint32, tuint32], False, "", """
-int base = src0;
+uint32_t base = src0;
 unsigned offset = src1 & 0x1F;
 unsigned bits = src2 & 0x1F;
 if (bits == 0) {
    dst = 0;
 } else if (offset + bits < 32) {
-   dst = (base << (32 - bits - offset)) >> (32 - bits);
+   dst = util_mask_sign_extend(base >> offset, bits);
 } else {
-   dst = base >> offset;
+   dst = util_mask_sign_extend(base >> offset, 32 - offset);
 }
 """)
 
 # GLSL bitfieldExtract()
-opcode("ubitfield_extract", 0, tuint32,
-       [0, 0, 0], [tuint32, tint32, tint32], False, "", """
+opcode("ubitfield_extract", 0, tuint,
+       [0, 0, 0], [tuint, tint32, tint32], False, "", """
 unsigned base = src0;
 int offset = src1, bits = src2;
 if (bits == 0) {
    dst = 0;
-} else if (bits < 0 || offset < 0 || offset + bits > 32) {
+} else if (bits < 0 || offset < 0 || offset + bits > bit_size) {
    dst = 0; /* undefined per the spec */
+   poison = true;
 } else {
    dst = (base >> offset) & ((1ull << bits) - 1);
 }
 """)
-opcode("ibitfield_extract", 0, tint32,
-       [0, 0, 0], [tint32, tint32, tint32], False, "", """
+opcode("ibitfield_extract", 0, tint,
+       [0, 0, 0], [tint, tint32, tint32], False, "", """
 int base = src0;
 int offset = src1, bits = src2;
 if (bits == 0) {
    dst = 0;
-} else if (offset < 0 || bits < 0 || offset + bits > 32) {
+} else if (offset < 0 || bits < 0 || offset + bits > bit_size) {
    dst = 0;
+   poison = true;
 } else {
-   dst = (base << (32 - offset - bits)) >> (32 - bits); /* use sign-extending shift */
+   dst = (int32_t)((uint32_t)base << (32 - offset - bits)) >> (32 - bits); /* use sign-extending shift */
 }
 """)
 
@@ -1176,14 +1271,15 @@ def quadop_horiz(name, output_size, src1_size, src2_size, src3_size,
           [tuint, tuint, tuint, tuint],
           False, "", const_expr)
 
-opcode("bitfield_insert", 0, tuint32, [0, 0, 0, 0],
-       [tuint32, tuint32, tint32, tint32], False, "", """
+opcode("bitfield_insert", 0, tuint, [0, 0, 0, 0],
+       [tuint, tuint, tint32, tint32], False, "", """
 unsigned base = src0, insert = src1;
 int offset = src2, bits = src3;
 if (bits == 0) {
    dst = base;
 } else if (offset < 0 || bits < 0 || bits + offset > 32) {
    dst = 0;
+   poison = true;
 } else {
    unsigned mask = ((1ull << bits) - 1) << offset;
    dst = (base & ~mask) | ((insert << offset) & mask);
@@ -1258,7 +1354,7 @@ binop("amul", tint, _2src_commutative + associative, "src0 * src1")
 # multiplication (imul) on Freedreno backend..
 opcode("imadsh_mix16", 0, tint32,
        [0, 0, 0], [tint32, tint32, tint32], False, "", """
-dst = ((((src0 & 0x0000ffff) << 16) * (src1 & 0xffff0000)) >> 16) + src2;
+dst = (((int32_t)(((uint32_t)src0 & 0x0000ffff) << 16) * (src1 & 0xffff0000)) >> 16) + src2;
 """)
 
 # ir3-specific instruction that maps directly to ir3 mad.s24.
@@ -1266,6 +1362,16 @@ dst = ((((src0 & 0x0000ffff) << 16) * (src1 & 0xffff0000)) >> 16) + src2;
 # 24b multiply into 32b result (with sign extension) plus 32b int
 triop("imad24_ir3", tint32, _2src_commutative,
       "(((int32_t)src0 << 8) >> 8) * (((int32_t)src1 << 8) >> 8) + src2")
+
+def triop_shift_ir3(name, shift_op, bit_op):
+    opcode(name, 0, tuint, [0, 0, 0], [tuint, tuint32, tuint], False, "",
+           f"(src0 {shift_op} (src1 & (sizeof(src0) * 8 - 1))) {bit_op} src2")
+
+triop_shift_ir3("shrm_ir3", ">>", "&")
+triop_shift_ir3("shlm_ir3", "<<", "&")
+triop_shift_ir3("shrg_ir3", ">>", "|")
+triop_shift_ir3("shlg_ir3", "<<", "|")
+triop("andg_ir3", tuint, _2src_commutative, "(src0 & src1) | src2")
 
 # r600/gcn specific instruction that evaluates unnormalized cube texture coordinates
 # and face index
@@ -1307,6 +1413,33 @@ unop_horiz("cube_amd", 4, tfloat32, 3, tfloat32, """
 unop("fsin_amd", tfloat, "sinf(6.2831853 * src0)")
 unop("fcos_amd", tfloat, "cosf(6.2831853 * src0)")
 
+opcode("alignbyte_amd", 0, tuint32, [0, 0, 0], [tuint32, tuint32, tuint32], False, "", """
+   uint64_t src = src1 | ((uint64_t)src0 << 32);
+   dst = src >> ((src2 & 0x3) * 8);
+""")
+
+# AMD specific: Byte swizzle within 64-bits of source data
+# Operand order matches v_perm_b32, src0 contains the MSBs
+# and src1 the LSBs of the data.
+opcode("byte_perm_amd", 0, tuint32, [0, 0, 0], [tuint32, tuint32, tuint32], False, "", """
+   uint64_t src = src1 | ((uint64_t)src0 << 32);
+   dst = 0;
+   for (unsigned i = 0; i < 4; i++) {
+      uint8_t sel = (src2 >> (i * 8)) & 0xff;
+      unsigned res;
+      if (sel >= 13) {
+         res = 0xff;
+      } else if (sel == 12) {
+         res = 0;
+      } else if (sel >= 8) {
+         res = ((src >> (((sel - 8) * 2 + 1) * 8 + 7)) & 1) * 0xff;
+      } else {
+         res = (src >> (sel * 8)) & 0xff;
+      }
+      dst |= res << (i * 8);
+   }
+""")
+
 # Midgard specific sin and cos
 # These expect their inputs to be divided by pi.
 unop("fsin_mdg", tfloat, "sinf(3.141592653589793 * src0)")
@@ -1347,6 +1480,13 @@ opcode("imadshl_agx", 0, tint, [0, 0, 0, 0], [tint, tint, tint, tint], False,
 opcode("imsubshl_agx", 0, tint, [0, 0, 0, 0], [tint, tint, tint, tint], False,
        "", f"(src0 * src1) - (src2 << src3)")
 
+# Address arithmetic instructions: extend, shift, and add
+# Shift must be a small constant.
+opcode("ilea_agx", 0, tuint64, [0, 0, 0], [tuint64, tint32, tuint32], False,
+       "", f"src0 + (((int64_t)src1) << src2)")
+opcode("ulea_agx", 0, tuint64, [0, 0, 0], [tuint64, tuint32, tuint32], False,
+       "", f"src0 + (((uint64_t)src1) << src2)")
+
 # Bounds check instruction.
 #
 # Sources: <data, end offset, bounds>
@@ -1354,7 +1494,7 @@ opcode("bounds_agx", 0, tint, [0, 0, 0],
        [tint, tint, tint], False,
        "", "src1 <= src2 ? src0 : 0")
 
-binop_convert("interleave_agx", tuint32, tuint16, "", """
+binop_convert("interleave", tuint32, tuint16, "", """
       dst = 0;
       for (unsigned bit = 0; bit < 16; bit++) {
           dst |= (src0 & (1 << bit)) << bit;
@@ -1385,26 +1525,41 @@ opcode("prmt_nv", 0, tuint32, [0, 0, 0], [tuint32, tuint32, tuint32],
         dst |= ((uint32_t)x) << i * 8;
     }""")
 
+# Address arithmetic instructions: shift and add
+# Shift must be a constant.
+opcode("lea_nv", 0, tuint, [0, 0, 0], [tuint, tuint, tuint32], False,
+       "", "src0 + (src1 << (src2 % bit_size))")
+
 # 24b multiply into 32b result (with sign extension)
-binop("imul24", tint32, _2src_commutative + associative,
-      "(((int32_t)src0 << 8) >> 8) * (((int32_t)src1 << 8) >> 8)")
+binop("imul24", tint32, _2src_commutative,
+      "util_mask_sign_extend(src0, 24) * util_mask_sign_extend(src1, 24)")
 
 # unsigned 24b multiply into 32b result plus 32b int
 triop("umad24", tuint32, _2src_commutative,
       "(((uint32_t)src0 << 8) >> 8) * (((uint32_t)src1 << 8) >> 8) + src2")
 
 # unsigned 24b multiply into 32b result uint
-binop("umul24", tint32, _2src_commutative + associative,
+binop("umul24", tint32, _2src_commutative,
       "(((uint32_t)src0 << 8) >> 8) * (((uint32_t)src1 << 8) >> 8)")
 
 # relaxed versions of the above, which assume input is in the 24bit range (no clamping)
-binop("imul24_relaxed", tint32, _2src_commutative + associative, "src0 * src1")
+binop("imul24_relaxed", tint32, _2src_commutative, "src0 * src1")
 triop("umad24_relaxed", tuint32, _2src_commutative, "src0 * src1 + src2")
-binop("umul24_relaxed", tuint32, _2src_commutative + associative, "src0 * src1")
+binop("umul24_relaxed", tuint32, _2src_commutative, "src0 * src1")
 
 unop_convert("fisnormal", tbool1, tfloat, "isnormal(src0)")
 unop_convert("fisfinite", tbool1, tfloat, "isfinite(src0)")
 unop_convert("fisfinite32", tbool32, tfloat, "isfinite(src0)")
+
+# panfrost-specific opcodes
+
+# 16-bit ldexp with 16-bit exponent for bifrost
+opcode("ldexp16_pan", 0, tfloat16, [0, 0], [tfloat16, tint16], False, "", """
+dst = ldexpf(src0, src1);
+/* flush denormals to zero. */
+if (!isnormal(dst))
+   dst = copysignf(0.0f, src0);
+""")
 
 # vc4-specific opcodes
 
@@ -1412,7 +1567,7 @@ unop_convert("fisfinite32", tbool32, tfloat, "isfinite(src0)")
 binop("usadd_4x8_vc4", tint32, _2src_commutative + associative, """
 dst = 0;
 for (int i = 0; i < 32; i += 8) {
-   dst |= MIN2(((src0 >> i) & 0xff) + ((src1 >> i) & 0xff), 0xff) << i;
+   dst |= (uint32_t)MIN2(((src0 >> i) & 0xff) + ((src1 >> i) & 0xff), 0xff) << i;
 }
 """)
 
@@ -1423,7 +1578,7 @@ for (int i = 0; i < 32; i += 8) {
    int src0_chan = (src0 >> i) & 0xff;
    int src1_chan = (src1 >> i) & 0xff;
    if (src0_chan > src1_chan)
-      dst |= (src0_chan - src1_chan) << i;
+      dst |= (uint32_t)(src0_chan - src1_chan) << i;
 }
 """)
 
@@ -1494,9 +1649,11 @@ unop("pack_2x16_to_unorm_2x8_v3d", tuint32,
 unop("pack_2x16_to_snorm_2x8_v3d", tuint32,
      "_mesa_half_to_snorm(src0 & 0xffff, 8) | ((uint32_t)(_mesa_half_to_snorm(src0 >> 16, 8)) << 16)")
 
-# v3d-specific (v71) instructions to convert 32-bit floating point to 16 bit unorm/snorm
+# v3d-specific (v71) instructions to convert between 32-bit float and 16-bit unorm/snorm
 unop("f2unorm_16_v3d", tuint32, "_mesa_float_to_unorm16(src0)")
 unop("f2snorm_16_v3d", tuint32, "_mesa_float_to_snorm16(src0)")
+unop("unorm2f_16_v3d", tuint32, "_mesa_unorm_to_float(src0, 16)")
+unop("snorm2f_16_v3d", tuint32, "_mesa_snorm_to_float(src0, 16)")
 
 # v3d-specific (v71) instructions to convert 2x16 bit floating points to 2x10 bit unorm
 unop("pack_2x16_to_unorm_2x10_v3d", tuint32, "pack_2x16_to_unorm_2x10(src0)")
@@ -1600,7 +1757,7 @@ opcode("sdot_4x8_iadd_sat", 0, tint32, [0, 0, 0], [tuint32, tuint32, tint32],
 """)
 
 # Like udot_4x8_uadd, but the result is clampled to the range [0, 0xfffffffff].
-opcode("udot_4x8_uadd_sat", 0, tint32, [0, 0, 0], [tuint32, tuint32, tint32],
+opcode("udot_4x8_uadd_sat", 0, tint32, [0, 0, 0], [tuint32, tuint32, tuint32],
        False, _2src_commutative, """
    const uint64_t v0x = (uint8_t)(src0      );
    const uint64_t v0y = (uint8_t)(src0 >>  8);
@@ -1674,14 +1831,70 @@ opcode("sdot_2x16_iadd_sat", 0, tint32, [0, 0, 0], [tuint32, tuint32, tint32],
 """)
 
 # Like udot_2x16_uadd, but the result is clampled to the range [0, 0xfffffffff].
-opcode("udot_2x16_uadd_sat", 0, tint32, [0, 0, 0], [tuint32, tuint32, tint32],
+opcode("udot_2x16_uadd_sat", 0, tuint32, [0, 0, 0], [tuint32, tuint32, tuint32],
        False, _2src_commutative, """
-   const uint64_t v0x = (uint16_t)(src0      );
-   const uint64_t v0y = (uint16_t)(src0 >> 16);
-   const uint64_t v1x = (uint16_t)(src1      );
-   const uint64_t v1y = (uint16_t)(src1 >> 16);
+   const uint32_t v0x = (uint16_t)(src0      );
+   const uint32_t v0y = (uint16_t)(src0 >> 16);
+   const uint32_t v1x = (uint16_t)(src1      );
+   const uint32_t v1y = (uint16_t)(src1 >> 16);
 
-   const uint64_t tmp = (v0x * v1x) + (v0y * v1y) + src2;
+   /* SPIRV specifies that UDotAccSat is UB if the addition (or muliplication)
+    * overflows before the accumulation step.
+    */
+   uint32_t dp = (v0x * v1x) + (v0y * v1y);
+   if (dp < (v0x * v1x))
+      poison = true;
+
+   const uint64_t tmp = (uint64_t)dp + src2;
 
    dst = tmp >= UINT32_MAX ? UINT32_MAX : tmp;
 """)
+
+# Bfloat16 operations.
+
+unop_numeric_convert("bf2f", tfloat32, tuint16, "_mesa_bfloat16_bits_to_float(src0)")
+unop_numeric_convert("f2bf", tuint16, tfloat32, "_mesa_float_to_bfloat16_bits_rte(src0)")
+
+binop("bfmul", tuint16, _2src_commutative + inexact_associative, """
+   const float a = _mesa_bfloat16_bits_to_float(src0);
+   const float b = _mesa_bfloat16_bits_to_float(src1);
+   dst = _mesa_float_to_bfloat16_bits_rte(a * b);
+""")
+
+triop("bffma", tuint16, _2src_commutative, """
+    const float a = _mesa_bfloat16_bits_to_float(src0);
+    const float b = _mesa_bfloat16_bits_to_float(src1);
+    const float c = _mesa_bfloat16_bits_to_float(src2);
+    dst = _mesa_float_to_bfloat16_bits_rte(fmaf(a, b, c));
+""")
+
+binop_reduce("bfdot", 1, tuint16, tuint16,
+             "_mesa_bfloat16_bits_to_float({src0}) * _mesa_bfloat16_bits_to_float({src1})",
+             "_mesa_bfloat16_bits_to_float({src0}) + _mesa_bfloat16_bits_to_float({src1})",
+             "_mesa_float_to_bfloat16_bits_rte({src})")
+
+# Like bfdot2 but with accumulator
+opcode("bfdot2_bfadd", 1, tint16, [2, 2, 1], [tint16, tint16, tint16],
+       False, _2src_commutative, """
+   const float a0 = _mesa_bfloat16_bits_to_float(src0.x);
+   const float a1 = _mesa_bfloat16_bits_to_float(src0.y);
+   const float b0 = _mesa_bfloat16_bits_to_float(src1.x);
+   const float b1 = _mesa_bfloat16_bits_to_float(src1.y);
+
+   float acc = _mesa_bfloat16_bits_to_float(src2.x);
+   acc = fmaf(a0, b0, acc);
+   acc = fmaf(a1, b1, acc);
+
+   dst.x = _mesa_float_to_bfloat16_bits_rte(acc);
+""")
+
+
+unop_numeric_convert("e4m3fn2f", tfloat32, tuint8, "_mesa_e4m3fn_to_float(src0)")
+unop_numeric_convert("f2e4m3fn", tuint8, tfloat32, "_mesa_float_to_e4m3fn(src0)")
+unop_numeric_convert("f2e4m3fn_sat", tuint8, tfloat32, "_mesa_float_to_e4m3fn_sat(src0)")
+# AMD specific conversion that clamps finite values but not inf (GFX12 FP16_OVFL=1 behavior)
+unop_numeric_convert("f2e4m3fn_satfn", tuint8, tfloat32, "isinf(src0) ? 0x7f : _mesa_float_to_e4m3fn_sat(src0)")
+
+unop_numeric_convert("e5m22f", tfloat32, tuint8, "_mesa_e5m2_to_float(src0)")
+unop_numeric_convert("f2e5m2", tuint8, tfloat32, "_mesa_float_to_e5m2(src0)")
+unop_numeric_convert("f2e5m2_sat", tuint8, tfloat32, "_mesa_float_to_e5m2_sat(src0)")

@@ -21,6 +21,8 @@ radv_entrypoints_gen_command += [
   '--device-prefix', 'metro_exodus',
   '--device-prefix', 'rage2',
   '--device-prefix', 'quantic_dream',
+  '--device-prefix', 'no_mans_sky',
+  '--device-prefix', 'strange_brigade',
 
   # Command buffer annotation layer entrypoints
   '--device-prefix', 'annotate',
@@ -40,6 +42,8 @@ libradv_files = files(
   'layers/radv_metro_exodus.c',
   'layers/radv_rage2.c',
   'layers/radv_quantic_dream.c',
+  'layers/radv_no_mans_sky.c',
+  'layers/radv_strange_brigade.c',
   'layers/radv_rmv_layer.c',
   'layers/radv_rra_layer.c',
   'layers/radv_sqtt_layer.c',
@@ -51,6 +55,7 @@ libradv_files = files(
   'meta/radv_meta_buffer.c',
   'meta/radv_meta_bufimage.c',
   'meta/radv_meta_clear.c',
+  'meta/radv_meta_clear_hiz.c',
   'meta/radv_meta_copy.c',
   'meta/radv_meta_copy_vrs_htile.c',
   'meta/radv_meta_dcc_retile.c',
@@ -62,32 +67,36 @@ libradv_files = files(
   'meta/radv_meta_resolve.c',
   'meta/radv_meta_resolve_cs.c',
   'meta/radv_meta_resolve_fs.c',
+  'nir/radv_meta_nir.c',
+  'nir/radv_meta_nir.h',
   'nir/radv_nir.h',
   'nir/radv_nir_apply_pipeline_layout.c',
   'nir/radv_nir_export_multiview.c',
   'nir/radv_nir_lower_abi.c',
+  'nir/radv_nir_lower_call_abi.c',
   'nir/radv_nir_lower_cooperative_matrix.c',
   'nir/radv_nir_lower_fs_barycentric.c',
   'nir/radv_nir_lower_fs_intrinsics.c',
   'nir/radv_nir_lower_hit_attrib_derefs.c',
+  'nir/radv_nir_lower_immediate_samplers.c',
   'nir/radv_nir_lower_intrinsics_early.c',
   'nir/radv_nir_lower_io.c',
-  'nir/radv_nir_lower_poly_line_smooth.c',
   'nir/radv_nir_lower_primitive_shading_rate.c',
+  'nir/radv_nir_lower_printf.c',
   'nir/radv_nir_lower_ray_queries.c',
   'nir/radv_nir_lower_view_index.c',
   'nir/radv_nir_lower_viewport_to_zero.c',
   'nir/radv_nir_lower_vs_inputs.c',
+  'nir/radv_nir_opt_fs_builtins.c',
   'nir/radv_nir_opt_tid_function.c',
   'nir/radv_nir_remap_color_attachment.c',
   'nir/radv_nir_rt_common.c',
-  'nir/radv_nir_rt_shader.c',
-  'winsys/null/radv_null_bo.c',
-  'winsys/null/radv_null_bo.h',
-  'winsys/null/radv_null_cs.c',
-  'winsys/null/radv_null_cs.h',
-  'winsys/null/radv_null_winsys.c',
-  'winsys/null/radv_null_winsys_public.h',
+  'nir/radv_nir_rt_stage_common.c',
+  'nir/radv_nir_rt_stage_cps.c',
+  'nir/radv_nir_rt_stage_functions.c',
+  'nir/radv_nir_rt_stage_monolithic.c',
+  'nir/radv_nir_rt_traversal_shader.c',
+  'nir/radv_nir_trim_fs_color_exports.c',
   'radv_acceleration_structure.c',
   'radv_android.c',
   'radv_android.h',
@@ -103,20 +112,29 @@ libradv_files = files(
   'radv_cp_reg_shadowing.h',
   'radv_cs.c',
   'radv_cs.h',
+  'radv_debug_nir.c',
+  'radv_debug_nir.h',
   'radv_debug.c',
   'radv_debug.h',
   'radv_device.c',
   'radv_device.h',
   'radv_device_memory.c',
   'radv_device_memory.h',
+  'radv_descriptors.c',
+  'radv_descriptors.h',
+  'radv_descriptor_pool.c',
+  'radv_descriptor_pool.h',
   'radv_descriptor_set.c',
   'radv_descriptor_set.h',
+  'radv_descriptor_update_template.c',
+  'radv_descriptor_update_template.h',
   'radv_dgc.c',
   'radv_dgc.h',
   'radv_event.c',
   'radv_event.h',
   'radv_formats.c',
   'radv_formats.h',
+  'radv_host_image_copy.c',
   'radv_image.c',
   'radv_image.h',
   'radv_image_view.c',
@@ -134,15 +152,17 @@ libradv_files = files(
   'radv_pipeline_compute.c',
   'radv_pipeline_compute.h',
   'radv_pipeline_graphics.c',
+  'radv_pipeline_layout.c',
+  'radv_pipeline_layout.h',
   'radv_pipeline_rt.c',
   'radv_pipeline_rt.h',
-  'radv_printf.c',
-  'radv_printf.h',
   'radv_queue.c',
   'radv_queue.h',
   'radv_radeon_winsys.h',
   'radv_rmv.c',
   'radv_rmv.h',
+  'radv_rra_gfx10_3.c',
+  'radv_rra_gfx12.c',
   'radv_rra.c',
   'radv_rra.h',
   'radv_sampler.c',
@@ -191,15 +211,16 @@ if amd_with_llvm
   )
 endif
 
-subdir('radix_sort')
-libradv_files += radix_sort_files
-
 subdir('bvh')
 
 subdir('layers')
 
 radv_deps = []
 radv_flags = cc.get_supported_arguments(['-Wimplicit-fallthrough', '-Wshadow'])
+
+if with_amdgpu_virtio
+  radv_flags += '-DHAVE_AMDGPU_VIRTIO'
+endif
 
 if with_platform_x11
   radv_deps += dep_xcb_dri3
@@ -227,7 +248,8 @@ libvulkan_radeon = shared_library(
   [libradv_files, radv_entrypoints, sha1_h, radix_sort_spv, bvh_spv, radv_annotate_layer],
   vs_module_defs : vulkan_api_def,
   include_directories : [
-    inc_include, inc_src, inc_amd, inc_amd_common, inc_amd_common_llvm, inc_util,
+    inc_include, inc_src, inc_amd, inc_amd_common, inc_amd_common_llvm,
+    inc_util, inc_virtio_gpu
   ],
   link_with : [
     libamd_common, libamd_common_llvm, libamdgpu_addrlib,
@@ -263,17 +285,14 @@ if with_symbols_check
   )
 endif
 
-icd_lib_path = join_paths(get_option('prefix'), get_option('libdir'))
-icd_file_name = 'libvulkan_radeon.so'
-if with_platform_windows
-  icd_lib_path = import('fs').relative_to(get_option('bindir'), with_vulkan_icd_dir)
-  icd_file_name = 'vulkan_radeon.dll'
-endif
+icd_file_name = libname_prefix + 'vulkan_radeon.' + libname_suffix
 
 icd_command = [
   prog_python, '@INPUT0@',
-  '--api-version', '1.3', '--xml', '@INPUT1@',
-  '--lib-path', join_paths(icd_lib_path, icd_file_name),
+  '--api-version', '1.4', '--xml', '@INPUT1@',
+  '--sizeof-pointer', sizeof_pointer,
+  '--icd-lib-path', vulkan_icd_lib_path,
+  '--icd-filename', icd_file_name,
   '--out', '@OUTPUT@',
 ]
 if with_platform_windows
@@ -283,7 +302,7 @@ endif
 radeon_icd = custom_target(
   'radeon_icd',
   input : [vk_icd_gen, vk_api_xml],
-  output : 'radeon_icd.@0@.json'.format(host_machine.cpu()),
+  output : 'radeon_icd.' + vulkan_manifest_suffix,
   command : icd_command,
   build_by_default : true,
   install_dir : with_vulkan_icd_dir,
@@ -298,18 +317,18 @@ _dev_icd = custom_target(
   output : _dev_icdname,
   command : [
     prog_python, '@INPUT0@',
-    '--api-version', '1.3', '--xml', '@INPUT1@',
-    '--lib-path', meson.current_build_dir() / icd_file_name,
+    '--api-version', '1.4', '--xml', '@INPUT1@',
+    '--sizeof-pointer', sizeof_pointer,
+    '--icd-lib-path', meson.current_build_dir(),
+    '--icd-filename', icd_file_name,
     '--out', '@OUTPUT@',
   ],
   build_by_default : true,
 )
 
 devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
-# Deprecated: replaced by VK_DRIVER_FILES above
-devenv.append('VK_ICD_FILENAMES', _dev_icd.full_path())
 
-if with_tests
+if with_radv_tests
   test(
     'radv_tests',
     executable(
@@ -317,6 +336,10 @@ if with_tests
       files(
         'nir/radv_nir_lower_hit_attrib_derefs.c',
         'tests/radv_nir_lower_hit_attrib_derefs_tests.cpp',
+        'tests/helpers.cpp',
+        'tests/helpers.h',
+        'tests/drirc.cpp',
+        'tests/misc.cpp',
       ),
       cpp_args : [cpp_msvc_compat_args],
       gnu_symbol_visibility : 'hidden',
@@ -329,9 +352,14 @@ if with_tests
         inc_util,
         include_directories('.'),
       ],
-      dependencies : [dep_thread, idep_gtest, idep_nir, idep_mesautil],
+      link_with  : [ libvulkan_radeon ],
+      dependencies : [dep_llvm, dep_thread, idep_gtest, idep_nir, idep_mesautil, idep_vulkan_util_headers],
     ),
     suite : ['compiler', 'nir'],
     protocol : 'gtest',
+    env : [
+      'LD_PRELOAD=@0@'.format(libamdgpu_noop_drm_shim.full_path()),
+      'AMDGPU_GPU_ID=navi21',
+    ],
   )
 endif

@@ -435,8 +435,8 @@ void applyDescriptorSetAllocation(VkDescriptorPool pool, VkDescriptorSetLayout s
     }
 }
 
-void removeDescriptorSetAllocation(VkDescriptorPool pool,
-                                   const std::vector<VkDescriptorSetLayoutBinding>& bindings) {
+static void removeDescriptorSetAllocation(
+    VkDescriptorPool pool, const std::vector<VkDescriptorSetLayoutBinding>& bindings) {
     auto allocInfo = as_goldfish_VkDescriptorPool(pool)->allocInfo;
 
     if (0 == allocInfo->usedSets) {
@@ -490,7 +490,6 @@ VkResult validateAndApplyVirtualDescriptorSetAllocation(
             "IDs remaining. The count for maxSets was %u and used was %u\n",
             __func__, pAllocateInfo->descriptorSetCount, (uint32_t)allocInfo->freePoolIds.size(),
             allocInfo->maxSets, allocInfo->usedSets);
-        abort();
     }
 
     for (uint32_t i = 0; i < pAllocateInfo->descriptorSetCount; ++i) {

@@ -7,8 +7,16 @@
 #include "nir_builder.h"
 #include "nir_vla.h"
 
+/*
+ * This pass relies on nak_nir_mark_lcssa_invariants being run first, because it
+ * assumes that convergent values used in convergent control flow can be
+ * allocated to uniform registers. See the example in that file for more
+ * details.
+ */
+
 static void
-lower_ldcx_to_global(nir_builder *b, nir_intrinsic_instr *load)
+lower_ldcx_to_global(nir_builder *b, nir_intrinsic_instr *load,
+                     const struct nak_compiler *nak)
 {
    assert(load->intrinsic == nir_intrinsic_ldcx_nv);
 
@@ -19,17 +27,31 @@ lower_ldcx_to_global(nir_builder *b, nir_intrinsic_instr *load)
    nir_def *offset = load->src[1].ssa;
    assert(offset->bit_size == 32);
 
-   /* Base address shifted by 4 is the bottom 45 bits */
-   nir_def *addr_4_lo = nir_unpack_64_2x32_split_x(b, handle);
-   nir_def *addr_4_hi = nir_iand_imm(b, nir_unpack_64_2x32_split_y(b, handle),
+   nir_def *addr;
+   nir_def *size;
+   if (nak->sm >= 100) {
+      /* Base address shifted by 6 is the bottom 51 bits */
+      nir_def *addr_6_lo = nir_unpack_64_2x32_split_x(b, handle);
+      nir_def *addr_6_hi = nir_iand_imm(b, nir_unpack_64_2x32_split_y(b, handle),
+                                        BITFIELD_MASK(19));
+      nir_def *addr_6 = nir_pack_64_2x32_split(b, addr_6_lo, addr_6_hi);
+      addr = nir_ishl_imm(b, addr_6, 6);
+
+      /* Size shifted by 2 is the top 13 bits */
+      size = nir_unpack_64_2x32_split_y(b, handle);
+      size = nir_ishl_imm(b, nir_ushr_imm(b, size, 19), 4);
+   } else {
+      /* Base address shifted by 4 is the bottom 45 bits */
+      nir_def *addr_4_lo = nir_unpack_64_2x32_split_x(b, handle);
+      nir_def *addr_4_hi = nir_iand_imm(b, nir_unpack_64_2x32_split_y(b, handle),
                                         BITFIELD_MASK(13));
-   nir_def *addr_4 = nir_pack_64_2x32_split(b, addr_4_lo, addr_4_hi);
-   nir_def *addr =  nir_ishl_imm(b, addr_4, 4);
+      nir_def *addr_4 = nir_pack_64_2x32_split(b, addr_4_lo, addr_4_hi);
+      addr =  nir_ishl_imm(b, addr_4, 4);
 
-   /* Size shifted by 2 is the top 19 bits */
-   nir_def *size = nir_unpack_64_2x32_split_y(b, handle);
-   size = nir_ishl_imm(b, nir_ushr_imm(b, size, 13), 4);
-
+      /* Size shifted by 2 is the top 19 bits */
+      size = nir_unpack_64_2x32_split_y(b, handle);
+      size = nir_ishl_imm(b, nir_ushr_imm(b, size, 13), 4);
+   }
    /* At this point we can assume the offset is aligned so we only need a
     * simple less-than check here.
     */
@@ -38,7 +60,7 @@ lower_ldcx_to_global(nir_builder *b, nir_intrinsic_instr *load)
    nir_def *val;
    nir_push_if(b, nir_ilt(b, offset, size));
    {
-      val = nir_build_load_global_constant(b,
+      val = nir_load_global_constant(b,
          load->def.num_components, load->def.bit_size,
          nir_iadd(b, addr, nir_u2u64(b, offset)),
          .align_mul = nir_intrinsic_align_mul(load),
@@ -48,6 +70,17 @@ lower_ldcx_to_global(nir_builder *b, nir_intrinsic_instr *load)
    val = nir_if_phi(b, val, zero);
 
    nir_def_replace(&load->def, val);
+}
+
+static bool
+lower_all_ldcx_to_global_intrin(nir_builder *b, nir_intrinsic_instr *load,
+                                void *data)
+{
+   if (load->intrinsic != nir_intrinsic_ldcx_nv)
+      return false;
+
+   lower_ldcx_to_global(b, load, data);
+   return true;
 }
 
 struct non_uniform_section {
@@ -90,7 +123,7 @@ add_live_handle(nir_def *handle, struct non_uniform_section *nus)
 static bool
 def_needs_hoist(nir_def *def, nir_block *target)
 {
-   return def->parent_instr->block->index > target->index;
+   return nir_def_block(def)->index > target->index;
 }
 
 static bool
@@ -99,7 +132,7 @@ can_hoist_def(nir_def *def, nir_block *target)
    if (!def_needs_hoist(def, target))
       return true;
 
-   nir_instr *instr = def->parent_instr;
+   nir_instr *instr = nir_def_instr(def);
    switch (instr->type) {
    case nir_instr_type_alu: {
       nir_alu_instr *alu = nir_instr_as_alu(instr);
@@ -138,7 +171,7 @@ hoist_def(nir_def *def, nir_block *target)
    if (!def_needs_hoist(def, target))
       return false;
 
-   nir_instr *instr = def->parent_instr;
+   nir_instr *instr = nir_def_instr(def);
    switch (instr->type) {
    case nir_instr_type_alu: {
       nir_alu_instr *alu = nir_instr_as_alu(instr);
@@ -162,7 +195,7 @@ hoist_def(nir_def *def, nir_block *target)
       break;
 
    default:
-      unreachable("Cannot hoist instruction");
+      UNREACHABLE("Cannot hoist instruction");
    }
 
    nir_instr_remove(instr);
@@ -184,7 +217,7 @@ try_hoist_ldcx_handles_block(nir_block *block, struct non_uniform_section *nus)
           */
          nir_alu_instr *alu = nir_instr_as_alu(instr);
          for (uint8_t i = 0; i < nir_op_infos[alu->op].num_inputs; i++) {
-            nir_instr *src_instr = alu->src[i].src.ssa->parent_instr;
+            nir_instr *src_instr = nir_def_instr(alu->src[i].src.ssa);
             if (src_instr->type != nir_instr_type_intrinsic)
                continue;
 
@@ -298,7 +331,7 @@ static bool
 try_remat_ldcx_alu_use(nir_builder *b, nir_alu_instr *alu, uint8_t src_idx,
                        struct non_uniform_section *nus)
 {
-   nir_instr *src_instr = alu->src[src_idx].src.ssa->parent_instr;
+   nir_instr *src_instr = nir_def_instr(alu->src[src_idx].src.ssa);
    if (src_instr->type != nir_instr_type_intrinsic)
       return false;
 
@@ -336,7 +369,8 @@ try_remat_ldcx_alu_use(nir_builder *b, nir_alu_instr *alu, uint8_t src_idx,
 
 static bool
 lower_ldcx_block(nir_builder *b, nir_block *block,
-                 struct non_uniform_section *nus)
+                 struct non_uniform_section *nus,
+                 const struct nak_compiler *nak)
 {
    bool progress = false;
 
@@ -363,7 +397,7 @@ lower_ldcx_block(nir_builder *b, nir_block *block,
          if (nus == NULL) {
             /* Uniform control-flow */
             if (nir_intrinsic_access(load) & ACCESS_NON_UNIFORM) {
-               lower_ldcx_to_global(b, load);
+               lower_ldcx_to_global(b, load, nak);
                progress = true;
             } else if (handle->divergent) {
                b->cursor = nir_before_instr(&load->instr);
@@ -379,7 +413,7 @@ lower_ldcx_block(nir_builder *b, nir_block *block,
                assert(!ugpr->divergent);
                nir_src_rewrite(&load->src[0], ugpr);
             } else {
-               lower_ldcx_to_global(b, load);
+               lower_ldcx_to_global(b, load, nak);
             }
             progress = true;
          }
@@ -396,7 +430,8 @@ lower_ldcx_block(nir_builder *b, nir_block *block,
 
 static bool
 lower_non_uniform_cf_node(nir_builder *b, nir_cf_node *node,
-                          nir_block *pred, nir_block *succ)
+                          nir_block *pred, nir_block *succ,
+                          const struct nak_compiler *nak)
 {
    bool progress = false;
 
@@ -410,7 +445,7 @@ lower_non_uniform_cf_node(nir_builder *b, nir_cf_node *node,
    progress |= sort_and_mark_live_handles(b, &nus);
 
    nir_foreach_block_in_cf_node_safe(block, node)
-      progress |= lower_ldcx_block(b, block, &nus);
+      progress |= lower_ldcx_block(b, block, &nus, nak);
 
    non_uniform_section_finish(&nus);
 
@@ -418,7 +453,8 @@ lower_non_uniform_cf_node(nir_builder *b, nir_cf_node *node,
 }
 
 static bool
-lower_cf_list(nir_builder *b, struct exec_list *cf_list)
+lower_cf_list(nir_builder *b, struct exec_list *cf_list,
+              const struct nak_compiler *nak)
 {
    bool progress = false;
 
@@ -427,17 +463,17 @@ lower_cf_list(nir_builder *b, struct exec_list *cf_list)
       switch (node->type) {
       case nir_cf_node_block:
          block = nir_cf_node_as_block(node);
-         progress |= lower_ldcx_block(b, block, NULL);
+         progress |= lower_ldcx_block(b, block, NULL, nak);
          continue;
 
       case nir_cf_node_if: {
          nir_if *nif = nir_cf_node_as_if(node);
          if (nir_src_is_divergent(&nif->condition)) {
             nir_block *succ = nir_cf_node_as_block(nir_cf_node_next(node));
-            progress |= lower_non_uniform_cf_node(b, node, block, succ);
+            progress |= lower_non_uniform_cf_node(b, node, block, succ, nak);
          } else {
-            progress |= lower_cf_list(b, &nif->then_list);
-            progress |= lower_cf_list(b, &nif->else_list);
+            progress |= lower_cf_list(b, &nif->then_list, nak);
+            progress |= lower_cf_list(b, &nif->else_list, nak);
          }
          break;
       }
@@ -446,16 +482,16 @@ lower_cf_list(nir_builder *b, struct exec_list *cf_list)
          nir_loop *loop = nir_cf_node_as_loop(node);
          if (nir_loop_is_divergent(loop)) {
             nir_block *succ = nir_cf_node_as_block(nir_cf_node_next(node));
-            progress |= lower_non_uniform_cf_node(b, node, block, succ);
+            progress |= lower_non_uniform_cf_node(b, node, block, succ, nak);
          } else {
-            progress |= lower_cf_list(b, &loop->body);
-            progress |= lower_cf_list(b, &loop->continue_list);
+            progress |= lower_cf_list(b, &loop->body, nak);
+            progress |= lower_cf_list(b, &loop->continue_list, nak);
          }
          break;
       }
 
       default:
-         unreachable("Unknown CF node type");
+         UNREACHABLE("Unknown CF node type");
       }
    }
 
@@ -463,20 +499,22 @@ lower_cf_list(nir_builder *b, struct exec_list *cf_list)
 }
 
 bool
-nak_nir_lower_non_uniform_ldcx(nir_shader *nir)
+nak_nir_lower_non_uniform_ldcx(nir_shader *nir,
+                               const struct nak_compiler *nak)
 {
+   /* If we don't have UGPRs, lower all of them. */
+   if (nak_debug_no_ugpr()) {
+      return nir_shader_intrinsics_pass(nir, lower_all_ldcx_to_global_intrin,
+                                        nir_metadata_none, (void *)nak);
+   }
+
    /* Real functions are going to make hash of this */
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    nir_builder b = nir_builder_create(impl);
 
    /* We use block indices to determine when something is a predecessor */
-   nir_metadata_require(impl, nir_metadata_block_index);
+   nir_metadata_require(impl, nir_metadata_block_index | nir_metadata_divergence);
 
-   if (lower_cf_list(&b, &impl->body)) {
-      nir_metadata_preserve(impl, nir_metadata_none);
-      return true;
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-      return false;
-   }
+   bool progress = lower_cf_list(&b, &impl->body, nak);
+   return nir_progress(progress, impl, nir_metadata_none);
 }

@@ -14,7 +14,7 @@ struct tu_buffer_view
 {
    struct vk_buffer_view vk;
 
-   uint32_t descriptor[A6XX_TEX_CONST_DWORDS];
+   uint32_t descriptor[FDL6_TEX_CONST_DWORDS];
 
    struct tu_buffer *buffer;
 };

@@ -26,7 +26,6 @@
 
 #include "gallivm/lp_bld_limits.h"
 #include "gallivm/lp_bld_sample.h"
-#include "gallivm/lp_bld_struct.h"
 
 struct lp_sampler_dynamic_state;
 
@@ -101,7 +100,6 @@ struct lp_jit_sampler
    float max_lod;
    float lod_bias;
    float border_color[4];
-   float max_aniso;
 };
 
 enum {
@@ -109,7 +107,6 @@ enum {
    LP_JIT_SAMPLER_MAX_LOD,
    LP_JIT_SAMPLER_LOD_BIAS,
    LP_JIT_SAMPLER_BORDER_COLOR,
-   LP_JIT_SAMPLER_MAX_ANISO,
    LP_JIT_SAMPLER_NUM_FIELDS  /* number of fields above */
 };
 
@@ -147,7 +144,6 @@ struct lp_jit_resources {
    struct lp_jit_texture textures[PIPE_MAX_SHADER_SAMPLER_VIEWS];
    struct lp_jit_sampler samplers[PIPE_MAX_SAMPLERS];
    struct lp_jit_image images[PIPE_MAX_SHADER_IMAGES];
-   const float *aniso_filter_table;
 };
 
 enum {
@@ -156,7 +152,6 @@ enum {
    LP_JIT_RES_TEXTURES,
    LP_JIT_RES_SAMPLERS,
    LP_JIT_RES_IMAGES,
-   LP_JIT_RES_ANISO_FILTER_TABLE,
    LP_JIT_RES_COUNT,
 };
 
@@ -174,9 +169,6 @@ enum {
 
 #define lp_jit_resources_images(_gallivm, _type, _ptr)                   \
    lp_build_struct_get_ptr2(_gallivm, _type, _ptr, LP_JIT_RES_IMAGES, "images")
-
-#define lp_jit_resources_aniso_filter_table(_gallivm, _type, _ptr)       \
-   lp_build_struct_get2(_gallivm, _type, _ptr, LP_JIT_RES_ANISO_FILTER_TABLE, "aniso_filter_table")
 
 LLVMTypeRef
 lp_build_jit_resources_type(struct gallivm_state *gallivm);
@@ -210,7 +202,13 @@ LLVMTypeRef lp_build_size_function_type(struct gallivm_state *gallivm,
                                         const struct lp_sampler_size_query_params *params);
 
 LLVMTypeRef lp_build_image_function_type(struct gallivm_state *gallivm,
-                                         const struct lp_img_params *params, bool ms);
+                                         const struct lp_img_params *params, bool ms,
+                                         bool is64);
+
+struct lp_texture_handle_state {
+   struct lp_static_texture_state static_state;
+   struct lp_jit_texture dynamic_state;
+};
 
 struct lp_texture_functions {
    void ***sample_functions;
@@ -223,7 +221,7 @@ struct lp_texture_functions {
 
    void **image_functions;
 
-   struct lp_static_texture_state state;
+   struct lp_texture_handle_state state;
 
    bool sampled;
    bool storage;
@@ -236,10 +234,17 @@ struct lp_texture_handle {
    uint32_t sampler_index;
 };
 
+struct lp_jit_bindless_texture
+{
+   const void *base;
+   const void *residency;
+   uint32_t sampler_index;
+};
+
 struct lp_descriptor {
    union {
       struct {
-         struct lp_jit_texture texture;
+         struct lp_jit_bindless_texture texture;
          struct lp_jit_sampler sampler;
       };
       struct {

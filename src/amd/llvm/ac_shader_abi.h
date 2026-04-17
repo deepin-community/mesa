@@ -10,7 +10,7 @@
 #include "ac_shader_args.h"
 #include "ac_shader_util.h"
 #include "compiler/shader_enums.h"
-#include "nir.h"
+#include "nir_defines.h"
 #include <llvm-c/Core.h>
 
 #include <assert.h>
@@ -24,19 +24,6 @@ struct ac_shader_abi {
    /* Each entry is a pointer to a f32 or a f16 value (only possible for FS) */
    LLVMValueRef outputs[AC_LLVM_MAX_OUTPUTS * 4];
    bool is_16bit[AC_LLVM_MAX_OUTPUTS * 4];
-
-   /* These input registers sometimes need to be fixed up. */
-   LLVMValueRef vertex_id;
-   LLVMValueRef vs_rel_patch_id;
-   LLVMValueRef instance_id;
-
-   /* replaced registers when culling enabled */
-   LLVMValueRef vertex_id_replaced;
-   LLVMValueRef instance_id_replaced;
-   LLVMValueRef tes_u_replaced;
-   LLVMValueRef tes_v_replaced;
-   LLVMValueRef tes_rel_patch_id_replaced;
-   LLVMValueRef tes_patch_id_replaced;
 
    LLVMValueRef (*load_tess_varyings)(struct ac_shader_abi *abi, LLVMTypeRef type,
                                       unsigned driver_location, unsigned component,
@@ -62,8 +49,6 @@ struct ac_shader_abi {
     */
    LLVMValueRef (*load_sampler_desc)(struct ac_shader_abi *abi, LLVMValueRef index,
                                      enum ac_descriptor_type desc_type);
-
-   LLVMValueRef (*intrinsic_load)(struct ac_shader_abi *abi, nir_intrinsic_instr *intrin);
 
    /* Whether to clamp the shadow reference value to [0,1]on GFX8. Radeonsi currently
     * uses it due to promoting D16 to D32, but radv needs it off. */

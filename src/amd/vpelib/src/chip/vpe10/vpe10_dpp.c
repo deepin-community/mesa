@@ -28,7 +28,6 @@
 #include "vpe_priv.h"
 #include "vpe10_dpp.h"
 #include "color.h"
-#include "vpe10/inc/vpe10_cm_common.h"
 #include "hw_shared.h"
 #include "reg_helper.h"
 
@@ -176,7 +175,7 @@ void vpe10_dscl_calc_lb_num_partitions(const struct scaler_data *scl_data,
         *num_part_c = 12;
 }
 
-/* Not used as we don't enable prealpha dealpha currently
+/* Not used as we do not enable prealpha dealpha currently
  * Can skip for optimize performance and use default val
  */
 static void vpe10_dpp_program_prealpha_dealpha(struct dpp *dpp)
@@ -186,17 +185,13 @@ static void vpe10_dpp_program_prealpha_dealpha(struct dpp *dpp)
     uint32_t program_prealpha_dealpha = 0;
     PROGRAM_ENTRY();
 
-    if (program_prealpha_dealpha) {
-        dealpha_en = 1;
-        realpha_en = 1;
-    }
     REG_SET_2(
         VPCNVC_PRE_DEALPHA, 0, PRE_DEALPHA_EN, dealpha_en, PRE_DEALPHA_ABLND_EN, dealpha_ablnd_en);
     REG_SET_2(
         VPCNVC_PRE_REALPHA, 0, PRE_REALPHA_EN, realpha_en, PRE_REALPHA_ABLND_EN, realpha_ablnd_en);
 }
 
-/* Not used as we don't have special 2bit LUt currently
+/* Not used as we do not have special 2bit LUt currently
  * Can skip for optimize performance and use default val
  */
 static void vpe10_dpp_program_alpha_2bit_lut(
@@ -237,14 +232,18 @@ void vpe10_dpp_program_cnv(
     switch (format) {
     case VPE_SURFACE_PIXEL_FORMAT_GRPH_XRGB8888:
     case VPE_SURFACE_PIXEL_FORMAT_GRPH_XBGR8888:
+        pixel_format = 8;
         alpha_en = 0;
+        break;
     case VPE_SURFACE_PIXEL_FORMAT_GRPH_ARGB8888:
     case VPE_SURFACE_PIXEL_FORMAT_GRPH_ABGR8888:
         pixel_format = 8;
         break;
     case VPE_SURFACE_PIXEL_FORMAT_GRPH_RGBX8888:
     case VPE_SURFACE_PIXEL_FORMAT_GRPH_BGRX8888:
+        pixel_format = 9;
         alpha_en = 0;
+        break;
     case VPE_SURFACE_PIXEL_FORMAT_GRPH_RGBA8888:
     case VPE_SURFACE_PIXEL_FORMAT_GRPH_BGRA8888:
         pixel_format = 9;

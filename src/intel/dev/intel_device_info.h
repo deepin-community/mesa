@@ -55,9 +55,6 @@ extern "C" {
 #define intel_device_info_is_mtl(devinfo) \
    intel_platform_in_range((devinfo)->platform, MTL)
 
-#define intel_device_info_is_adln(devinfo) \
-   (devinfo->is_adl_n == true)
-
 #define intel_device_info_is_arl(devinfo) \
    intel_platform_in_range((devinfo)->platform, ARL)
 
@@ -85,6 +82,9 @@ extern "C" {
 #endif
 
 #define GFX_IP_VER(major, minor) ((major << 16) | minor)
+
+#define BMG_G31_IP_VER GFX_IP_VER(20, 2)
+#define intel_device_info_is_bmg_g31(devinfo) (devinfo->gfx_ip_ver == BMG_G31_IP_VER)
 
 static inline bool
 intel_device_info_slice_available(const struct intel_device_info *devinfo,
@@ -156,7 +156,7 @@ intel_device_info_dual_subslice_id_bound(const struct intel_device_info *devinfo
             return s * devinfo->max_subslices_per_slice + ss + 1;
       }
    }
-   unreachable("Invalid topology");
+   UNREACHABLE("Invalid topology");
    return 0;
 }
 
@@ -199,7 +199,6 @@ void intel_device_info_update_l3_banks(struct intel_device_info *devinfo);
 uint32_t intel_device_info_get_eu_count_first_subslice(const struct intel_device_info *devinfo);
 void intel_device_info_update_cs_workgroup_threads(struct intel_device_info *devinfo);
 bool intel_device_info_compute_system_memory(struct intel_device_info *devinfo, bool update);
-void intel_device_info_update_after_hwconfig(struct intel_device_info *devinfo);
 
 #ifdef GFX_VERx10
 #define intel_needs_workaround(devinfo, id)         \

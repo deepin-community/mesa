@@ -237,7 +237,7 @@ try_move_narrowing_dst(nir_builder *b, nir_phi_instr *phi)
    /* Push the conversion into the new phi sources: */
    nir_foreach_phi_src(src, phi) {
       /* insert new conversion instr in block of original phi src: */
-      b->cursor = nir_after_instr_and_phis(src->src.ssa->parent_instr);
+      b->cursor = nir_after_instr_and_phis(nir_def_instr(src->src.ssa));
       nir_def *old_src = src->src.ssa;
       nir_def *new_src = nir_build_alu(b, op, old_src, NULL, NULL, NULL);
 
@@ -289,7 +289,7 @@ can_convert_load_const(nir_load_const_instr *lc, nir_op op)
             return false;
          break;
       default:
-         unreachable("bad type");
+         UNREACHABLE("bad type");
          return false;
       }
    }
@@ -309,7 +309,7 @@ find_widening_op(nir_phi_instr *phi, unsigned *bit_size)
    *bit_size = 0;
 
    nir_foreach_phi_src(src, phi) {
-      nir_instr *instr = src->src.ssa->parent_instr;
+      nir_instr *instr = nir_def_instr(src->src.ssa);
       if (instr->type == nir_instr_type_load_const) {
          has_load_const = true;
          continue;
@@ -345,7 +345,7 @@ find_widening_op(nir_phi_instr *phi, unsigned *bit_size)
     * sequence to make the rest of the transformation possible:
     */
    nir_foreach_phi_src(src, phi) {
-      nir_instr *instr = src->src.ssa->parent_instr;
+      nir_instr *instr = nir_def_instr(src->src.ssa);
       if (instr->type != nir_instr_type_load_const)
          continue;
 
@@ -379,7 +379,7 @@ try_move_widening_src(nir_builder *b, nir_phi_instr *phi)
 
    /* Remove the widening conversions from the phi sources: */
    nir_foreach_phi_src(src, phi) {
-      nir_instr *instr = src->src.ssa->parent_instr;
+      nir_instr *instr = nir_def_instr(src->src.ssa);
       nir_def *new_src;
 
       b->cursor = nir_after_instr(instr);
@@ -427,7 +427,7 @@ try_move_widening_src(nir_builder *b, nir_phi_instr *phi)
 }
 
 static bool
-lower_phi(nir_builder *b, nir_phi_instr *phi)
+opt_phi_precision(nir_builder *b, nir_phi_instr *phi, void *unused)
 {
    bool progress = try_move_narrowing_dst(b, phi);
    if (!progress)
@@ -438,8 +438,6 @@ lower_phi(nir_builder *b, nir_phi_instr *phi)
 bool
 nir_opt_phi_precision(nir_shader *shader)
 {
-   bool progress = false;
-
    /* If 8b or 16b bit_sizes are not used, no point to run this pass: */
    unsigned bit_sizes_used = shader->info.bit_sizes_float |
                              shader->info.bit_sizes_int;
@@ -450,21 +448,6 @@ nir_opt_phi_precision(nir_shader *shader)
    if (bit_sizes_used && !(bit_sizes_used & (8 | 16)))
       return false;
 
-   nir_foreach_function_impl(impl, shader) {
-      nir_builder b = nir_builder_create(impl);
-
-      nir_foreach_block(block, impl) {
-         nir_foreach_phi_safe(phi, block)
-            progress |= lower_phi(&b, phi);
-      }
-
-      if (progress) {
-         nir_metadata_preserve(impl,
-                               nir_metadata_control_flow);
-      } else {
-         nir_metadata_preserve(impl, nir_metadata_all);
-      }
-   }
-
-   return progress;
+   return nir_shader_phi_pass(shader, opt_phi_precision,
+                              nir_metadata_control_flow, NULL);
 }

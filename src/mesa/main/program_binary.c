@@ -56,7 +56,7 @@ struct program_binary_header {
     * something besides a sha1, then a new internal_format value can be added.
     */
    uint32_t internal_format;
-   uint8_t sha1[20];
+   uint8_t sha1[SHA1_DIGEST_LENGTH];
    /* Fields following sha1 can be changed since the sha1 will guarantee that
     * the binary only works with the same Mesa version.
     */
@@ -173,7 +173,7 @@ static void
 write_program_payload(struct gl_context *ctx, struct blob *blob,
                       struct gl_shader_program *sh_prog)
 {
-   for (unsigned stage = 0; stage < MESA_SHADER_STAGES; stage++) {
+   for (unsigned stage = 0; stage < MESA_SHADER_MESH_STAGES; stage++) {
       struct gl_linked_shader *shader = sh_prog->_LinkedShaders[stage];
       if (shader)
          ctx->Driver.ProgramBinarySerializeDriverBlob(ctx, sh_prog,
@@ -184,7 +184,7 @@ write_program_payload(struct gl_context *ctx, struct blob *blob,
 
    serialize_glsl_program(blob, ctx, sh_prog);
 
-   for (unsigned stage = 0; stage < MESA_SHADER_STAGES; stage++) {
+   for (unsigned stage = 0; stage < MESA_SHADER_MESH_STAGES; stage++) {
       struct gl_linked_shader *shader = sh_prog->_LinkedShaders[stage];
       if (shader) {
          struct gl_program *prog = sh_prog->_LinkedShaders[stage]->Program;
@@ -236,7 +236,7 @@ _mesa_get_program_binary(struct gl_context *ctx,
                        GLenum *binary_format, GLvoid *binary)
 {
    struct blob blob;
-   uint8_t driver_sha1[20];
+   uint8_t driver_sha1[SHA1_DIGEST_LENGTH];
    unsigned header_size = get_program_binary_header_size();
 
    st_get_program_binary_driver_sha1(ctx, driver_sha1);
@@ -273,7 +273,7 @@ _mesa_program_binary(struct gl_context *ctx, struct gl_shader_program *sh_prog,
                      GLenum binary_format, const GLvoid *binary,
                      GLsizei length)
 {
-   uint8_t driver_sha1[20];
+   uint8_t driver_sha1[SHA1_DIGEST_LENGTH];
    unsigned header_size = get_program_binary_header_size();
 
    st_get_program_binary_driver_sha1(ctx, driver_sha1);
@@ -291,7 +291,7 @@ _mesa_program_binary(struct gl_context *ctx, struct gl_shader_program *sh_prog,
 
    unsigned programs_in_use = 0;
    if (ctx->_Shader)
-      for (unsigned stage = 0; stage < MESA_SHADER_STAGES; stage++) {
+      for (unsigned stage = 0; stage < MESA_SHADER_MESH_STAGES; stage++) {
          if (ctx->_Shader->CurrentProgram[stage] &&
              ctx->_Shader->CurrentProgram[stage]->Id == sh_prog->Name) {
             programs_in_use |= 1 << stage;

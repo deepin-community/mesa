@@ -27,8 +27,8 @@ transform_trig_input_vs_r500 = [
 # y = frac(x / 2PI)
 #
 transform_trig_input_fs_r500 = [
-        (('fsin', 'a(needs_fs_trig_input_fixup)'), ('fsin', ('ffract', ('fmul', 'a', 1 / (2 * pi))))),
-        (('fcos', 'a(needs_fs_trig_input_fixup)'), ('fcos', ('ffract', ('fmul', 'a', 1 / (2 * pi))))),
+        (('fsin', 'a'), ('fsin', ('ffract', ('fmul', 'a', 1 / (2 * pi))))),
+        (('fcos', 'a'), ('fcos', ('ffract', ('fmul', 'a', 1 / (2 * pi))))),
 ]
 
 # The is a pattern produced by wined3d for A0 register load.
@@ -53,8 +53,8 @@ r300_nir_prepare_presubtract = [
         (('fadd', -1.0, a), ('fneg', ('fadd', 1.0, ('fneg', a)))),
         # Bias presubtract 1 - 2 * x expects MAD -a 2.0 1.0 form.
         (('ffma', 2.0, ('fneg', a), 1.0), ('ffma', ('fneg', a), 2.0, 1.0)),
-        (('ffma', a, -2.0, 1.0), ('fneg', ('ffma', ('fneg', a), 2.0, 1.0))),
-        (('ffma', -2.0, a, 1.0), ('fneg', ('ffma', ('fneg', a), 2.0, 1.0))),
+        (('ffma', a, -2.0, 1.0), ('ffma', ('fneg', a), 2.0, 1.0)),
+        (('ffma', -2.0, a, 1.0), ('ffma', ('fneg', a), 2.0, 1.0)),
         (('ffma', 2.0, a, -1.0), ('fneg', ('ffma', ('fneg', a), 2.0, 1.0))),
         (('ffma', a, 2.0, -1.0), ('fneg', ('ffma', ('fneg', a), 2.0, 1.0))),
         # x * 2 can be usually folded into output modifier for the previous
@@ -76,6 +76,7 @@ r300_nir_opt_algebraic_late = [
         (('fabs', ('fneg', a)), ('fabs', a)),
         # Some cleanups after comparison lowering if one of the operands is 0.
         (('fadd', a, 0.0), a),
+        (('fadd', a, -0.0), a),
         (('fadd', a, ('fneg', 0.0)), a),
         # NIR terminate_if expects bools, but we can handle floats just fine
         # so get rid of the unneeded select.

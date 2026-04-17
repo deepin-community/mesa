@@ -12,7 +12,7 @@
 
 static const nir_shader_compiler_options *
 blorp_nir_options_elk(struct blorp_context *blorp,
-                      gl_shader_stage stage)
+                      mesa_shader_stage stage)
 {
    const struct elk_compiler *compiler = blorp->compiler->elk;
    return compiler->nir_options[stage];
@@ -22,6 +22,7 @@ static struct blorp_program
 blorp_compile_fs_elk(struct blorp_context *blorp, void *mem_ctx,
                      struct nir_shader *nir,
                      bool multisample_fbo,
+                     bool is_fast_clear,
                      bool use_repclear)
 {
    const struct elk_compiler *compiler = blorp->compiler->elk;
@@ -30,7 +31,9 @@ blorp_compile_fs_elk(struct blorp_context *blorp, void *mem_ctx,
    wm_prog_data->base.nr_params = 0;
    wm_prog_data->base.param = NULL;
 
-   struct elk_nir_compiler_opts opts = {};
+   struct elk_nir_compiler_opts opts = {
+      .softfp64 = blorp->get_fp64_nir ? blorp->get_fp64_nir(blorp) : NULL,
+   };
    elk_preprocess_nir(compiler, nir, &opts);
    nir_remove_dead_variables(nir, nir_var_shader_in, NULL);
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
@@ -76,7 +79,9 @@ blorp_compile_vs_elk(struct blorp_context *blorp, void *mem_ctx,
 {
    const struct elk_compiler *compiler = blorp->compiler->elk;
 
-   struct elk_nir_compiler_opts opts = {};
+   struct elk_nir_compiler_opts opts = {
+      .softfp64 = blorp->get_fp64_nir ? blorp->get_fp64_nir(blorp) : NULL,
+   };
    elk_preprocess_nir(compiler, nir, &opts);
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
@@ -86,7 +91,9 @@ blorp_compile_vs_elk(struct blorp_context *blorp, void *mem_ctx,
    elk_compute_vue_map(compiler->devinfo,
                        &vs_prog_data->base.vue_map,
                        nir->info.outputs_written,
-                       nir->info.separate_shader,
+                       nir->info.separate_shader ?
+                       INTEL_VUE_LAYOUT_SEPARATE :
+                       INTEL_VUE_LAYOUT_FIXED,
                        1);
 
    struct elk_vs_prog_key vs_key = { 0, };
@@ -129,11 +136,13 @@ blorp_compile_cs_elk(struct blorp_context *blorp, void *mem_ctx,
 {
    const struct elk_compiler *compiler = blorp->compiler->elk;
 
-   struct elk_nir_compiler_opts opts = {};
+   struct elk_nir_compiler_opts opts = {
+      .softfp64 = blorp->get_fp64_nir ? blorp->get_fp64_nir(blorp) : NULL,
+   };
    elk_preprocess_nir(compiler, nir, &opts);
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
-   NIR_PASS_V(nir, nir_lower_io, nir_var_uniform, elk_type_size_scalar_bytes,
+   NIR_PASS(_, nir, nir_lower_io, nir_var_uniform, elk_type_size_scalar_bytes,
               (nir_lower_io_options)0);
 
    STATIC_ASSERT(offsetof(struct blorp_wm_inputs, subgroup_id) + 4 ==
@@ -145,9 +154,9 @@ blorp_compile_cs_elk(struct blorp_context *blorp, void *mem_ctx,
    cs_prog_data->base.nr_params = nr_params;
    cs_prog_data->base.param = rzalloc_array(NULL, uint32_t, nr_params);
 
-   NIR_PASS_V(nir, elk_nir_lower_cs_intrinsics, compiler->devinfo,
+   NIR_PASS(_, nir, elk_nir_lower_cs_intrinsics, compiler->devinfo,
               cs_prog_data);
-   NIR_PASS_V(nir, nir_shader_intrinsics_pass, lower_base_workgroup_id,
+   NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_base_workgroup_id,
               nir_metadata_control_flow, NULL);
 
    struct elk_cs_prog_key cs_key;
@@ -223,8 +232,10 @@ blorp_ensure_sf_program_elk(struct blorp_batch *batch,
    const unsigned *program;
    unsigned program_size;
 
-   struct intel_vue_map vue_map;
-   elk_compute_vue_map(compiler->devinfo, &vue_map, slots_valid, false, 1);
+   /* Some fields that are not set can be read in debug paths, so initialization is required */
+   struct intel_vue_map vue_map = {0};
+   elk_compute_vue_map(compiler->devinfo, &vue_map, slots_valid,
+                       INTEL_VUE_LAYOUT_FIXED, 1);
 
    struct elk_sf_prog_data prog_data_tmp;
    program = elk_compile_sf(compiler, mem_ctx, &key.key,

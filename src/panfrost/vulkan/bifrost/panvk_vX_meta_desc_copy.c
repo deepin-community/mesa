@@ -1,6 +1,5 @@
 /*
  * Copyright © 2024 Collabora Ltd.
- *
  * SPDX-License-Identifier: MIT
  */
 
@@ -18,14 +17,15 @@
 #include "panvk_cmd_alloc.h"
 #include "panvk_cmd_buffer.h"
 #include "panvk_device.h"
+#include "panvk_meta.h"
 #include "panvk_shader.h"
 
 struct pan_nir_desc_copy_info {
-   mali_ptr sets[MAX_SETS];
-   mali_ptr tables[PANVK_BIFROST_DESC_TABLE_COUNT];
-   mali_ptr img_attrib_table;
+   uint64_t sets[MAX_SETS];
+   uint64_t tables[PANVK_BIFROST_DESC_TABLE_COUNT];
+   uint64_t img_attrib_table;
    struct {
-      mali_ptr table;
+      uint64_t table;
       uint32_t limits[PANVK_BIFROST_DESC_TABLE_COUNT];
       uint32_t attrib_buf_idx_offset;
    } desc_copy;
@@ -35,17 +35,46 @@ struct pan_nir_desc_copy_info {
 #define get_input_field(b, name)                                               \
    nir_load_push_constant(                                                     \
       b, 1, sizeof(((struct pan_nir_desc_copy_info *)0)->name) * 8,            \
-      nir_imm_int(b, 0),                                                       \
-      .base = offsetof(struct pan_nir_desc_copy_info, name),                   \
-      .range = sizeof(((struct pan_nir_desc_copy_info *)0)->name))
+      nir_imm_int(b, offsetof(struct pan_nir_desc_copy_info, name)))
+
+static nir_def *
+get_array_entry(nir_builder *b, unsigned array_offset, unsigned array_size,
+                unsigned array_stride, nir_def *idx)
+{
+   assert(array_size > 0);
+   assert(array_stride == 4 || array_stride == 8);
+
+   STACK_ARRAY(nir_def *, lut, array_size);
+
+   /* First we populate a lookup table covering the whole array. */
+   for (unsigned i = 0; i < array_size; i++) {
+      lut[i] = nir_load_push_constant(
+         b, 1, array_stride * 8,
+         nir_imm_int(b, (i * array_stride) + array_offset));
+   }
+
+   /* Then we test each bit in the index starting from the MSB of the biggest
+    * valid index in the array and select the entry accordingly. */
+   for (unsigned lut_stride = BITFIELD_BIT(util_last_bit(array_size - 1) - 1);
+        lut_stride > 0; lut_stride >>= 1) {
+      nir_def *bit_is_set = nir_i2b(b, nir_iand_imm(b, idx, lut_stride));
+
+      for (unsigned i = 0; i < lut_stride && i + lut_stride < array_size; i++)
+         lut[i] = nir_bcsel(b, bit_is_set, lut[i + lut_stride], lut[i]);
+   }
+
+   nir_def *result = lut[0];
+
+   STACK_ARRAY_FINISH(lut);
+
+   return result;
+}
 
 #define get_input_array_slot(b, name, index)                                   \
-   nir_load_push_constant(                                                     \
-      b, 1, sizeof(((struct pan_nir_desc_copy_info *)0)->name[0]) * 8,         \
-      nir_imul_imm(b, index,                                                   \
-                   sizeof(((struct pan_nir_desc_copy_info *)0)->name[0])),     \
-      .base = offsetof(struct pan_nir_desc_copy_info, name),                   \
-      .range = sizeof(((struct pan_nir_desc_copy_info *)0)->name))
+   get_array_entry(b, offsetof(struct pan_nir_desc_copy_info, name),           \
+                   ARRAY_SIZE(((struct pan_nir_desc_copy_info *)0)->name),     \
+                   sizeof(((struct pan_nir_desc_copy_info *)0)->name[0]),      \
+                   index)
 
 static void
 extract_desc_info_from_handle(nir_builder *b, nir_def *handle, nir_def **table,
@@ -70,10 +99,11 @@ set_to_table_copy(nir_builder *b, nir_def *set_ptr, nir_def *set_desc_count,
    {
       nir_def *src_offset =
          nir_u2u64(b, nir_imul_imm(b, src_desc_idx, PANVK_DESCRIPTOR_SIZE));
-      nir_def *desc = nir_load_global(b, nir_iadd(b, set_ptr, src_offset),
-                                      element_size, element_size / 4, 32);
-      nir_store_global(b, nir_iadd(b, table_ptr, dst_offset), element_size,
-                       desc, ~0);
+      nir_def *desc = nir_load_global(b, element_size / 4, 32,
+                                      nir_iadd(b, set_ptr, src_offset),
+                                      .align_mul = element_size);
+      nir_store_global(b, desc, nir_iadd(b, table_ptr, dst_offset),
+                       .align_mul = element_size);
    }
    nir_push_else(b, NULL);
    {
@@ -85,8 +115,8 @@ set_to_table_copy(nir_builder *b, nir_def *set_ptr, nir_def *set_desc_count,
       };
 
       nir_def *desc = nir_build_imm(b, element_size / 4, 32, v);
-      nir_store_global(b, nir_iadd(b, table_ptr, dst_offset), element_size,
-                       desc, ~0);
+      nir_store_global(b, desc, nir_iadd(b, table_ptr, dst_offset),
+                       .align_mul = element_size);
    }
    nir_pop_if(b, NULL);
 }
@@ -113,33 +143,81 @@ set_to_table_img_copy(nir_builder *b, nir_def *set_ptr, nir_def *set_desc_count,
          get_input_field(b, desc_copy.attrib_buf_idx_offset);
       nir_def *src_offset =
          nir_u2u64(b, nir_imul_imm(b, src_desc_idx, PANVK_DESCRIPTOR_SIZE));
-      nir_def *src_desc = nir_load_global(b, nir_iadd(b, set_ptr, src_offset),
-                                          element_size, element_size / 4, 32);
-      nir_def *fmt = nir_iand_imm(b, nir_channel(b, src_desc, 2), 0xfffffc00);
+      nir_def *src_desc = nir_load_global(b, element_size / 4, 32,
+                                          nir_iadd(b, set_ptr, src_offset),
+                                          .align_mul = element_size);
+      nir_def *attr_buf_type =
+         nir_iand_imm(b, nir_channel(b, src_desc, 0), BITFIELD_MASK(5));
 
-      /* Each image descriptor takes two attribute buffer slots, and we need
-       * to add the attribute buffer offset to have images working with vertex
-       * shader. */
-      nir_def *buf_idx =
-         nir_iadd(b, nir_imul_imm(b, dst_desc_idx, 2), attr_buf_idx_offset);
+      /* Texel buffer */
+      nir_push_if(b, nir_ieq_imm(b, attr_buf_type, MALI_ATTRIBUTE_TYPE_1D));
+      {
+         nir_def *fmt_offsetenable =
+            nir_iand_imm(b, nir_channel(b, src_desc, 4), ~BITFIELD_MASK(9));
+         nir_def *buf_idx =
+            nir_iadd(b, nir_imul_imm(b, dst_desc_idx, 2), attr_buf_idx_offset);
+         nir_def *attrib_w1 = nir_ior(b, fmt_offsetenable, buf_idx);
+         nir_def *attrib_desc =
+            nir_vec2(b, attrib_w1, nir_channel(b, src_desc, 5));
 
-      nir_def *attrib_w1 = nir_ior(b, buf_idx, fmt);
+         nir_store_global(b, attrib_desc,
+                          nir_iadd(b, attrib_table_ptr, attrib_offset),
+                          .align_mul = pan_size(ATTRIBUTE),
+                          .write_mask = nir_component_mask(attrib_comps));
 
-      nir_def *attrib_desc = nir_vec2(b, attrib_w1, nir_imm_int(b, 0));
+         nir_const_value v[] = {
+            nir_const_value_for_uint(0, 32),
+            nir_const_value_for_uint(0, 32),
+            nir_const_value_for_uint(0, 32),
+            nir_const_value_for_uint(0, 32),
+         };
 
-      nir_store_global(b, nir_iadd(b, attrib_table_ptr, attrib_offset),
-                       pan_size(ATTRIBUTE), attrib_desc,
-                       nir_component_mask(attrib_comps));
+         nir_def *null_desc = nir_build_imm(b, attrib_buf_comps / 2, 32, v);
 
-      nir_def *attrib_buf_desc = nir_vec8(
-         b, nir_channel(b, src_desc, 0), nir_channel(b, src_desc, 1),
-         nir_iand_imm(b, nir_channel(b, src_desc, 2), BITFIELD_MASK(10)),
-         nir_channel(b, src_desc, 3), nir_channel(b, src_desc, 4),
-         nir_channel(b, src_desc, 5), nir_channel(b, src_desc, 6),
-         nir_channel(b, src_desc, 7));
-      nir_store_global(b, nir_iadd(b, attrib_buf_table_ptr, attrib_buf_offset),
-                       element_size, attrib_buf_desc,
-                       nir_component_mask(attrib_buf_comps));
+         nir_def *attrib_buf_desc = nir_vec8(
+            b, nir_channel(b, src_desc, 0), nir_channel(b, src_desc, 1),
+            nir_iand_imm(b, nir_channel(b, src_desc, 2), BITFIELD_MASK(10)),
+            nir_channel(b, src_desc, 3), nir_channel(b, null_desc, 0),
+            nir_channel(b, null_desc, 1), nir_channel(b, null_desc, 2),
+            nir_channel(b, null_desc, 3));
+         nir_store_global(b, attrib_buf_desc,
+                          nir_iadd(b, attrib_buf_table_ptr, attrib_buf_offset),
+                          .align_mul = element_size,
+                          .write_mask = nir_component_mask(attrib_buf_comps));
+      }
+      /* Image */
+      nir_push_else(b, NULL);
+      {
+         nir_def *fmt =
+            nir_iand_imm(b, nir_channel(b, src_desc, 2), 0xfffffc00);
+
+         /* Each image descriptor takes two attribute buffer slots, and we need
+          * to add the attribute buffer offset to have images working with
+          * vertex shader. */
+         nir_def *buf_idx =
+            nir_iadd(b, nir_imul_imm(b, dst_desc_idx, 2), attr_buf_idx_offset);
+
+         nir_def *attrib_w1 = nir_ior(b, buf_idx, fmt);
+
+         nir_def *attrib_desc = nir_vec2(b, attrib_w1, nir_imm_int(b, 0));
+
+         nir_store_global(b, attrib_desc,
+                          nir_iadd(b, attrib_table_ptr, attrib_offset),
+                          .align_mul = pan_size(ATTRIBUTE),
+                          .write_mask = nir_component_mask(attrib_comps));
+
+         nir_def *attrib_buf_desc = nir_vec8(
+            b, nir_channel(b, src_desc, 0), nir_channel(b, src_desc, 1),
+            nir_iand_imm(b, nir_channel(b, src_desc, 2), BITFIELD_MASK(10)),
+            nir_channel(b, src_desc, 3), nir_channel(b, src_desc, 4),
+            nir_channel(b, src_desc, 5), nir_channel(b, src_desc, 6),
+            nir_channel(b, src_desc, 7));
+         nir_store_global(b, attrib_buf_desc,
+                          nir_iadd(b, attrib_buf_table_ptr, attrib_buf_offset),
+                          .align_mul = element_size,
+                          .write_mask = nir_component_mask(attrib_buf_comps));
+      }
+      nir_pop_if(b, NULL);
    }
    nir_push_else(b, NULL);
    {
@@ -153,11 +231,13 @@ set_to_table_img_copy(nir_builder *b, nir_def *set_ptr, nir_def *set_desc_count,
       nir_def *desc =
          nir_build_imm(b, MAX2(attrib_buf_comps, attrib_comps), 32, v);
 
-      nir_store_global(b, nir_iadd(b, attrib_buf_table_ptr, attrib_buf_offset),
-                       pan_size(ATTRIBUTE), desc,
-                       nir_component_mask(attrib_buf_comps));
-      nir_store_global(b, nir_iadd(b, attrib_table_ptr, attrib_offset),
-                       element_size, desc, nir_component_mask(attrib_comps));
+      nir_store_global(b, desc,
+                       nir_iadd(b, attrib_buf_table_ptr, attrib_buf_offset),
+                       .align_mul = pan_size(ATTRIBUTE),
+                       .write_mask = nir_component_mask(attrib_buf_comps));
+      nir_store_global(b, desc, nir_iadd(b, attrib_table_ptr, attrib_offset),
+                       .align_mul = element_size,
+                       .write_mask = nir_component_mask(attrib_comps));
    }
    nir_pop_if(b, NULL);
 }
@@ -168,7 +248,7 @@ single_desc_copy(nir_builder *b, nir_def *desc_copy_idx)
    nir_def *desc_copy_offset = nir_imul_imm(b, desc_copy_idx, sizeof(uint32_t));
    nir_def *desc_copy_ptr = nir_iadd(b, get_input_field(b, desc_copy.table),
                                      nir_u2u64(b, desc_copy_offset));
-   nir_def *src_copy_handle = nir_load_global(b, desc_copy_ptr, 4, 1, 32);
+   nir_def *src_copy_handle = nir_load_global(b, 1, 32, desc_copy_ptr);
 
    nir_def *set_idx, *src_desc_idx;
    extract_desc_info_from_handle(b, src_copy_handle, &set_idx, &src_desc_idx);
@@ -236,7 +316,7 @@ single_desc_copy(nir_builder *b, nir_def *desc_copy_idx)
    nir_pop_if(b, NULL);
 }
 
-static mali_ptr
+static uint64_t
 panvk_meta_desc_copy_rsd(struct panvk_device *dev)
 {
    struct panvk_physical_device *phys_dev =
@@ -250,8 +330,10 @@ panvk_meta_desc_copy_rsd(struct panvk_device *dev)
       goto out;
 
    nir_builder b = nir_builder_init_simple_shader(
-      MESA_SHADER_COMPUTE, GENX(pan_shader_get_compiler_options)(), "%s",
-      "desc_copy");
+      MESA_SHADER_COMPUTE,
+      pan_get_nir_shader_compiler_options(
+         pan_arch(phys_dev->kmod.dev->props.gpu_id)),
+      "%s", "desc_copy");
 
    /* We actually customize that at execution time to issue the
     * exact number of jobs. */
@@ -263,12 +345,13 @@ panvk_meta_desc_copy_rsd(struct panvk_device *dev)
       nir_channel(&b, nir_load_global_invocation_id(&b, 32), 0);
    single_desc_copy(&b, desc_copy_id);
 
-   struct panfrost_compile_inputs inputs = {
-      .gpu_id = phys_dev->kmod.props.gpu_prod_id,
-      .no_ubo_to_push = true,
+   struct pan_compile_inputs inputs = {
+      .gpu_id = phys_dev->kmod.dev->props.gpu_id,
+      .gpu_variant = phys_dev->kmod.dev->props.gpu_variant,
    };
 
-   pan_shader_preprocess(b.shader, inputs.gpu_id);
+   pan_preprocess_nir(b.shader, inputs.gpu_id);
+   pan_postprocess_nir(b.shader, inputs.gpu_id);
 
    VkResult result = panvk_per_arch(create_internal_shader)(
       dev, b.shader, &inputs, &shader);
@@ -282,12 +365,12 @@ panvk_meta_desc_copy_rsd(struct panvk_device *dev)
       DIV_ROUND_UP(sizeof(struct pan_nir_desc_copy_info), 4);
 
    shader->rsd = panvk_pool_alloc_desc(&dev->mempools.rw, RENDERER_STATE);
-   if (!panvk_priv_mem_host_addr(shader->rsd)) {
+   if (!panvk_priv_mem_check_alloc(shader->rsd)) {
       vk_shader_destroy(&dev->vk, &shader->vk, NULL);
       return 0;
    }
 
-   pan_pack(panvk_priv_mem_host_addr(shader->rsd), RENDERER_STATE, cfg) {
+   panvk_priv_mem_write_desc(shader->rsd, 0, RENDERER_STATE, cfg) {
       pan_shader_prepare_rsd(&shader->info,
                              panvk_priv_mem_dev_addr(shader->code_mem), &cfg);
    }
@@ -303,19 +386,19 @@ out:
 
 VkResult
 panvk_per_arch(meta_get_copy_desc_job)(
-   struct panvk_cmd_buffer *cmdbuf, const struct panvk_shader *shader,
+   struct panvk_cmd_buffer *cmdbuf, const struct panvk_shader_variant *shader,
    const struct panvk_descriptor_state *desc_state,
    const struct panvk_shader_desc_state *shader_desc_state,
-   uint32_t attrib_buf_idx_offset, struct panfrost_ptr *job_desc)
+   uint32_t attrib_buf_idx_offset, struct pan_ptr *job_desc)
 {
    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
 
-   *job_desc = (struct panfrost_ptr){0};
+   *job_desc = (struct pan_ptr){0};
 
    if (!shader)
       return VK_SUCCESS;
 
-   mali_ptr copy_table = panvk_priv_mem_dev_addr(shader->desc_info.others.map);
+   uint64_t copy_table = panvk_priv_mem_dev_addr(shader->desc_info.others.map);
    if (!copy_table)
       return VK_SUCCESS;
 
@@ -352,11 +435,11 @@ panvk_per_arch(meta_get_copy_desc_job)(
       copy_info.tables[i] = shader_desc_state->tables[i];
    }
 
-   mali_ptr desc_copy_rsd = panvk_meta_desc_copy_rsd(dev);
+   uint64_t desc_copy_rsd = panvk_meta_desc_copy_rsd(dev);
    if (!desc_copy_rsd)
       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 
-   struct panfrost_ptr push_uniforms =
+   struct pan_ptr push_uniforms =
       panvk_cmd_alloc_dev_mem(cmdbuf, desc, sizeof(copy_info), 16);
 
    if (!push_uniforms.gpu)
@@ -375,7 +458,7 @@ panvk_per_arch(meta_get_copy_desc_job)(
 
    assert(copy_count - 1 < BITFIELD_MASK(10));
 
-   panfrost_pack_work_groups_compute(
+   pan_pack_work_groups_compute(
       pan_section_ptr(job_desc->cpu, COMPUTE_JOB, INVOCATION), 1, 1, 1,
       copy_count, 1, 1, false, false);
 
@@ -386,7 +469,7 @@ panvk_per_arch(meta_get_copy_desc_job)(
    }
 
    struct pan_tls_info tlsinfo = {0};
-   struct panfrost_ptr tls = panvk_cmd_alloc_desc(cmdbuf, LOCAL_STORAGE);
+   struct pan_ptr tls = panvk_cmd_alloc_desc(cmdbuf, LOCAL_STORAGE);
    if (!tls.gpu)
       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 

@@ -249,6 +249,7 @@ i915_ioctl_get_param(int fd, unsigned long request, void *arg)
    case I915_PARAM_HAS_GEM:
    case I915_PARAM_HAS_RELAXED_DELTA:
    case I915_PARAM_HAS_RELAXED_FENCING:
+   case I915_PARAM_HAS_GEN7_SOL_RESET:
    case I915_PARAM_HAS_WAIT_TIMEOUT:
    case I915_PARAM_HAS_EXECBUF2:
    case I915_PARAM_HAS_EXEC_SOFTPIN:
@@ -259,6 +260,7 @@ i915_ioctl_get_param(int fd, unsigned long request, void *arg)
    case I915_PARAM_HAS_EXEC_ASYNC:
    case I915_PARAM_HAS_EXEC_NO_RELOC:
    case I915_PARAM_HAS_EXEC_BATCH_FIRST:
+   case I915_PARAM_PXP_STATUS:
       *gp->value = true;
       return 0;
    case I915_PARAM_HAS_EXEC_TIMELINE_FENCES:
@@ -555,20 +557,20 @@ void
 drm_shim_driver_init(void)
 {
    i915.device_id = 0;
-   const char *json_dev_str = getenv("INTEL_STUB_GPU_JSON");
+   const char *json_dev_str = os_get_option("INTEL_STUB_GPU_JSON");
    if (json_dev_str != NULL) {
       if (!intel_device_info_from_json(json_dev_str, &i915.devinfo))
          return;
       i915.device_id = i915.devinfo.pci_device_id;
       i915_device_from_json = true;
    } else {
-      const char *device_id_str = getenv("INTEL_STUB_GPU_DEVICE_ID");
+      const char *device_id_str = os_get_option("INTEL_STUB_GPU_DEVICE_ID");
       if (device_id_str != NULL) {
          /* Set as 0 if strtoul fails */
          i915.device_id = strtoul(device_id_str, NULL, 16);
       }
       if (i915.device_id == 0) {
-         const char *user_platform = getenv("INTEL_STUB_GPU_PLATFORM");
+         const char *user_platform = os_get_option("INTEL_STUB_GPU_PLATFORM");
          /* Use SKL if nothing is specified. */
          i915.device_id = intel_device_name_to_pci_device_id(user_platform ?: "skl");
       }

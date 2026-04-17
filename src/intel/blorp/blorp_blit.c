@@ -25,6 +25,7 @@
 #include "compiler/nir/nir_format_convert.h"
 
 #include "blorp_priv.h"
+#include "blorp_shaders.h"
 #include "dev/intel_debug.h"
 #include "dev/intel_device_info.h"
 
@@ -47,11 +48,10 @@ struct blorp_blit_vars {
 };
 
 static void
-blorp_blit_vars_init(nir_builder *b, struct blorp_blit_vars *v,
-                         const struct blorp_blit_prog_key *key)
+blorp_blit_vars_init(nir_builder *b, struct blorp_blit_vars *v)
 {
 #define LOAD_INPUT(name, type)\
-   v->v_##name = BLORP_CREATE_NIR_INPUT(b->shader, name, type);
+   v->v_##name = BLORP_CREATE_NIR_INPUT(b->shader, blit.name, type);
 
    LOAD_INPUT(bounds_rect, glsl_vec4_type())
    LOAD_INPUT(rect_grid, glsl_vec4_type())
@@ -94,7 +94,8 @@ blorp_blit_get_frag_coords(nir_builder *b,
 static nir_def *
 blorp_blit_get_cs_dst_coords(nir_builder *b,
                              const struct blorp_blit_prog_key *key,
-                             struct blorp_blit_vars *v)
+                             struct blorp_blit_vars *v,
+                             const struct intel_device_info *devinfo)
 {
    nir_def *coord = nir_load_global_invocation_id(b, 32);
 
@@ -109,8 +110,8 @@ blorp_blit_get_cs_dst_coords(nir_builder *b,
    if (key->need_dst_offset)
       coord = nir_isub(b, coord, nir_load_var(b, v->v_dst_offset));
 
-   assert(!key->persample_msaa_dispatch);
-   return nir_trim_vector(b, coord, 2);
+   assert(devinfo->ver >= 30 || !key->persample_msaa_dispatch);
+   return nir_trim_vector(b, coord, key->dst_samples > 1 ? 3 : 2);
 }
 
 /**
@@ -131,10 +132,19 @@ blorp_blit_apply_transform(nir_builder *b, nir_def *src_pos,
    return nir_fadd(b, nir_fmul(b, src_pos, mul), offset);
 }
 
+static bool
+tex_needs_16bits(nir_texop op, const struct intel_device_info *devinfo)
+{
+   return devinfo->verx10 >= 125 &&
+      (op == nir_texop_txf_ms ||
+       op == nir_texop_txf_ms_mcs_intel);
+}
+
 static nir_tex_instr *
 blorp_create_nir_tex_instr(nir_builder *b, struct blorp_blit_vars *v,
                            nir_texop op, nir_def *pos, unsigned num_srcs,
-                           nir_alu_type dst_type)
+                           nir_alu_type dst_type,
+                           const struct intel_device_info *devinfo)
 {
    nir_tex_instr *tex = nir_tex_instr_create(b->shader, num_srcs);
 
@@ -161,7 +171,9 @@ blorp_create_nir_tex_instr(nir_builder *b, struct blorp_blit_vars *v,
                         nir_load_var(b, v->v_src_z));
    }
 
-   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, pos);
+   tex->src[0] = nir_tex_src_for_ssa(
+      nir_tex_src_coord,
+      tex_needs_16bits(op, devinfo) ? nir_u2u16(b, pos) : pos);
    tex->coord_components = 3;
 
    nir_def_init(&tex->instr, &tex->def, 4, 32);
@@ -171,7 +183,8 @@ blorp_create_nir_tex_instr(nir_builder *b, struct blorp_blit_vars *v,
 
 static nir_def *
 blorp_nir_tex(nir_builder *b, struct blorp_blit_vars *v,
-              const struct blorp_blit_prog_key *key, nir_def *pos)
+              const struct blorp_blit_prog_key *key, nir_def *pos,
+              const struct intel_device_info *devinfo)
 {
    if (key->need_src_offset)
       pos = nir_fadd(b, pos, nir_i2f32(b, nir_load_var(b, v->v_src_offset)));
@@ -182,11 +195,13 @@ blorp_nir_tex(nir_builder *b, struct blorp_blit_vars *v,
 
    nir_tex_instr *tex =
       blorp_create_nir_tex_instr(b, v, nir_texop_txl, pos, 2,
-                                 key->texture_data_type);
+                                 key->texture_data_type, devinfo);
 
    assert(pos->num_components == 2);
    tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
-   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(b, 0));
+   tex->src[1] = nir_tex_src_for_ssa(
+      nir_tex_src_lod,
+      nir_imm_intN_t(b, 0, tex_needs_16bits(nir_texop_txl, devinfo) ? 16 : 32));
 
    nir_builder_instr_insert(b, &tex->instr);
 
@@ -195,10 +210,11 @@ blorp_nir_tex(nir_builder *b, struct blorp_blit_vars *v,
 
 static nir_def *
 blorp_nir_txf(nir_builder *b, struct blorp_blit_vars *v,
-              nir_def *pos, nir_alu_type dst_type)
+              nir_def *pos, nir_alu_type dst_type,
+              const struct intel_device_info *devinfo)
 {
    nir_tex_instr *tex =
-      blorp_create_nir_tex_instr(b, v, nir_texop_txf, pos, 2, dst_type);
+      blorp_create_nir_tex_instr(b, v, nir_texop_txf, pos, 2, dst_type, devinfo);
 
    tex->sampler_dim = GLSL_SAMPLER_DIM_3D;
    tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(b, 0));
@@ -210,25 +226,25 @@ blorp_nir_txf(nir_builder *b, struct blorp_blit_vars *v,
 
 static nir_def *
 blorp_nir_txf_ms(nir_builder *b, struct blorp_blit_vars *v,
-                 nir_def *pos, nir_def *mcs, nir_alu_type dst_type)
+                 nir_def *pos, nir_alu_type dst_type,
+                 const struct intel_device_info *devinfo)
 {
-   nir_tex_instr *tex =
-      blorp_create_nir_tex_instr(b, v, nir_texop_txf_ms, pos, 3, dst_type);
+   nir_tex_instr *tex = blorp_create_nir_tex_instr(
+      b, v, nir_texop_txf_ms, pos, 2, dst_type, devinfo);
 
    tex->sampler_dim = GLSL_SAMPLER_DIM_MS;
 
    tex->src[1].src_type = nir_tex_src_ms_index;
    if (pos->num_components == 2) {
-      tex->src[1].src = nir_src_for_ssa(nir_imm_int(b, 0));
+      tex->src[1].src = nir_src_for_ssa(
+         nir_imm_intN_t(b, 0, tex_needs_16bits(nir_texop_txf_ms, devinfo) ? 16 : 32));
    } else {
       assert(pos->num_components == 3);
-      tex->src[1].src = nir_src_for_ssa(nir_channel(b, pos, 2));
+      tex->src[1].src = nir_src_for_ssa(
+         tex_needs_16bits(nir_texop_txf_ms, devinfo) ?
+         nir_u2u16(b, nir_channel(b, pos, 2)) :
+         nir_channel(b, pos, 2));
    }
-
-   if (!mcs)
-      mcs = nir_imm_zero(b, 4, 32);
-
-   tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_ms_mcs_intel, mcs);
 
    nir_builder_instr_insert(b, &tex->instr);
 
@@ -237,11 +253,12 @@ blorp_nir_txf_ms(nir_builder *b, struct blorp_blit_vars *v,
 
 static nir_def *
 blorp_blit_txf_ms_mcs(nir_builder *b, struct blorp_blit_vars *v,
-                      nir_def *pos)
+                      nir_def *pos,
+                      const struct intel_device_info *devinfo)
 {
    nir_tex_instr *tex =
       blorp_create_nir_tex_instr(b, v, nir_texop_txf_ms_mcs_intel,
-                                 pos, 1, nir_type_int);
+                                 pos, 1, nir_type_int, devinfo);
 
    tex->sampler_dim = GLSL_SAMPLER_DIM_MS;
 
@@ -426,14 +443,14 @@ blorp_nir_encode_msaa(nir_builder *b, nir_def *pos,
          break;
 
       default:
-         unreachable("Invalid number of samples for IMS layout");
+         UNREACHABLE("Invalid number of samples for IMS layout");
       }
 
       return nir_vec2(b, x_out, y_out);
    }
 
    default:
-      unreachable("Invalid MSAA layout");
+      UNREACHABLE("Invalid MSAA layout");
    }
 }
 
@@ -526,14 +543,14 @@ blorp_nir_decode_msaa(nir_builder *b, nir_def *pos,
          break;
 
       default:
-         unreachable("Invalid number of samples for IMS layout");
+         UNREACHABLE("Invalid number of samples for IMS layout");
       }
 
       return nir_vec3(b, x_out, y_out, s_out);
    }
 
    default:
-      unreachable("Invalid MSAA layout");
+      UNREACHABLE("Invalid MSAA layout");
    }
 }
 
@@ -558,14 +575,15 @@ blorp_nir_combine_samples(nir_builder *b, struct blorp_blit_vars *v,
                           nir_def *pos, unsigned tex_samples,
                           enum isl_aux_usage tex_aux_usage,
                           nir_alu_type dst_type,
-                          enum blorp_filter filter)
+                          enum blorp_filter filter,
+                          const struct intel_device_info *devinfo)
 {
    nir_variable *color =
       nir_local_variable_create(b->impl, glsl_vec4_type(), "color");
 
    nir_def *mcs = NULL;
    if (isl_aux_usage_has_mcs(tex_aux_usage))
-      mcs = blorp_blit_txf_ms_mcs(b, v, pos);
+      mcs = blorp_blit_txf_ms_mcs(b, v, pos, devinfo);
 
    nir_op combine_op;
    switch (filter) {
@@ -579,7 +597,7 @@ blorp_nir_combine_samples(nir_builder *b, struct blorp_blit_vars *v,
       case nir_type_int:   combine_op = nir_op_imin;  break;
       case nir_type_uint:  combine_op = nir_op_umin;  break;
       case nir_type_float: combine_op = nir_op_fmin;  break;
-      default: unreachable("Invalid dst_type");
+      default: UNREACHABLE("Invalid dst_type");
       }
       break;
 
@@ -588,12 +606,12 @@ blorp_nir_combine_samples(nir_builder *b, struct blorp_blit_vars *v,
       case nir_type_int:   combine_op = nir_op_imax;  break;
       case nir_type_uint:  combine_op = nir_op_umax;  break;
       case nir_type_float: combine_op = nir_op_fmax;  break;
-      default: unreachable("Invalid dst_type");
+      default: UNREACHABLE("Invalid dst_type");
       }
       break;
 
    default:
-      unreachable("Invalid filter");
+      UNREACHABLE("Invalid filter");
    }
 
    /* If true, we inserted an if statement that we need to pop at at the end.
@@ -641,7 +659,7 @@ blorp_nir_combine_samples(nir_builder *b, struct blorp_blit_vars *v,
       nir_def *ms_pos = nir_vec3(b, nir_channel(b, pos, 0),
                                         nir_channel(b, pos, 1),
                                         nir_imm_int(b, i));
-      texture_data[stack_depth++] = blorp_nir_txf_ms(b, v, ms_pos, mcs, dst_type);
+      texture_data[stack_depth++] = blorp_nir_txf_ms(b, v, ms_pos, dst_type, devinfo);
 
       if (i == 0 && isl_aux_usage_has_mcs(tex_aux_usage)) {
          /* The Ivy Bridge PRM, Vol4 Part1 p27 (Multisample Control Surface)
@@ -711,7 +729,8 @@ static nir_def *
 blorp_nir_manual_blend_bilinear(nir_builder *b, nir_def *pos,
                                 unsigned tex_samples,
                                 const struct blorp_blit_prog_key *key,
-                                struct blorp_blit_vars *v)
+                                struct blorp_blit_vars *v,
+                                const struct intel_device_info *devinfo)
 {
    nir_def *pos_xy = nir_trim_vector(b, pos, 2);
    nir_def *rect_grid = nir_load_var(b, v->v_rect_grid);
@@ -746,15 +765,6 @@ blorp_nir_manual_blend_bilinear(nir_builder *b, nir_def *pos,
 
       nir_def *sample_coords = nir_fadd(b, pos_xy, sample_off);
       nir_def *sample_coords_int = nir_f2i32(b, sample_coords);
-
-      /* The MCS value we fetch has to match up with the pixel that we're
-       * sampling from. Since we sample from different pixels in each
-       * iteration of this "for" loop, the call to mcs_fetch() should be
-       * here inside the loop after computing the pixel coordinates.
-       */
-      nir_def *mcs = NULL;
-      if (isl_aux_usage_has_mcs(key->tex_aux_usage))
-         mcs = blorp_blit_txf_ms_mcs(b, v, sample_coords_int);
 
       /* Compute sample index and map the sample index to a sample number.
        * Sample index layout shows the numbering of slots in a rectangular
@@ -835,7 +845,7 @@ blorp_nir_manual_blend_bilinear(nir_builder *b, nir_def *pos,
       nir_def *pos_ms = nir_vec3(b, nir_channel(b, sample_coords_int, 0),
                                         nir_channel(b, sample_coords_int, 1),
                                         sample);
-      tex_data[i] = blorp_nir_txf_ms(b, v, pos_ms, mcs, key->texture_data_type);
+      tex_data[i] = blorp_nir_txf_ms(b, v, pos_ms, key->texture_data_type, devinfo);
    }
 
    nir_def *frac_x = nir_channel(b, frac_xy, 0);
@@ -909,7 +919,10 @@ bit_cast_color(struct nir_builder *b, nir_def *color,
                                     BITFIELD_MASK(chan_bits));
 
          if (dst_fmtl->channels_array[c].type == ISL_UNORM) {
-            chans[c] = nir_format_unorm_to_float(b, chans[c], &chan_bits);
+            chans[c] =
+               dst_fmtl->format == ISL_FORMAT_R24_UNORM_X8_TYPELESS ?
+               nir_format_unorm_to_float_precise(b, chans[c], &chan_bits) :
+               nir_format_unorm_to_float(b, chans[c], &chan_bits);
 
             /* Don't touch the alpha channel */
             if (c < 3 && dst_fmtl->colorspace == ISL_COLORSPACE_SRGB)
@@ -969,7 +982,7 @@ select_color_channel(struct nir_builder *b, nir_def *color,
       case nir_type_float:
          return nir_imm_float(b, 1);
       default:
-         unreachable("Invalid data type");
+         UNREACHABLE("Invalid data type");
       }
    } else {
       assert((unsigned)(chan - ISL_CHANNEL_SELECT_RED) < 4);
@@ -1013,7 +1026,7 @@ convert_color(struct nir_builder *b, nir_def *color,
    } else if (key->dst_format == ISL_FORMAT_R9G9B9E5_SHAREDEXP) {
       value = nir_format_pack_r9g9b9e5(b, color);
    } else {
-      unreachable("Unsupported format conversion");
+      UNREACHABLE("Unsupported format conversion");
    }
 
    nir_def *out_comps[4];
@@ -1167,10 +1180,15 @@ convert_color(struct nir_builder *b, nir_def *color,
  */
 static nir_shader *
 blorp_build_nir_shader(struct blorp_context *blorp,
-                           struct blorp_batch *batch, void *mem_ctx,
-                           const struct blorp_blit_prog_key *key)
+                       struct blorp_batch *batch, void *mem_ctx,
+                       const struct blorp_blit_prog_key *key)
 {
    const struct intel_device_info *devinfo = blorp->isl_dev->info;
+
+   /* Compute MSAA is only available on Gfx30+ */
+   if (key->base.shader_pipeline == BLORP_SHADER_PIPELINE_COMPUTE)
+      assert(key->dst_samples == 1 || devinfo->ver >= 30);
+
    nir_def *src_pos, *dst_pos, *color;
 
    /* Sanity checks */
@@ -1188,6 +1206,8 @@ blorp_build_nir_shader(struct blorp_context *blorp,
       /* It only makes sense to do persample dispatch if the render target is
        * configured as multisampled.
        */
+      assert(key->base.shader_pipeline == BLORP_SHADER_PIPELINE_RENDER ||
+             devinfo->ver >= 30);
       assert(key->rt_samples > 0);
    }
 
@@ -1204,15 +1224,15 @@ blorp_build_nir_shader(struct blorp_context *blorp,
    nir_builder b;
    const bool compute =
       key->base.shader_pipeline == BLORP_SHADER_PIPELINE_COMPUTE;
-   gl_shader_stage stage =
+   mesa_shader_stage stage =
       compute ? MESA_SHADER_COMPUTE : MESA_SHADER_FRAGMENT;
    blorp_nir_init_shader(&b, blorp, mem_ctx, stage, NULL);
 
    struct blorp_blit_vars v;
-   blorp_blit_vars_init(&b, &v, key);
+   blorp_blit_vars_init(&b, &v);
 
    dst_pos = compute ?
-      blorp_blit_get_cs_dst_coords(&b, key, &v) :
+      blorp_blit_get_cs_dst_coords(&b, key, &v, devinfo) :
       blorp_blit_get_frag_coords(&b, key, &v);
 
    /* Render target and texture hardware don't support W tiling until Gfx8. */
@@ -1268,8 +1288,9 @@ blorp_build_nir_shader(struct blorp_context *blorp,
    nir_if *bounds_if = NULL;
    if (key->use_kill) {
       nir_def *bounds_rect = nir_load_var(&b, v.v_bounds_rect);
-      nir_def *in_bounds = blorp_check_in_bounds(&b, bounds_rect,
-                                                     dst_pos);
+      nir_def *in_bounds =
+         blorp_check_in_bounds(&b, bounds_rect,
+                               nir_trim_vector(&b, dst_pos, 2));
       if (!compute)
          nir_discard_if(&b, nir_inot(&b, in_bounds));
       else
@@ -1344,13 +1365,9 @@ blorp_build_nir_shader(struct blorp_context *blorp,
        * memory location.  So we can fetch the texel now.
        */
       if (key->src_samples == 1) {
-         color = blorp_nir_txf(&b, &v, src_pos, key->texture_data_type);
+         color = blorp_nir_txf(&b, &v, src_pos, key->texture_data_type, devinfo);
       } else {
-         nir_def *mcs = NULL;
-         if (isl_aux_usage_has_mcs(key->tex_aux_usage))
-            mcs = blorp_blit_txf_ms_mcs(&b, &v, src_pos);
-
-         color = blorp_nir_txf_ms(&b, &v, src_pos, mcs, key->texture_data_type);
+         color = blorp_nir_txf_ms(&b, &v, src_pos, key->texture_data_type, devinfo);
       }
       break;
 
@@ -1360,11 +1377,11 @@ blorp_build_nir_shader(struct blorp_context *blorp,
       assert(key->tex_layout == key->src_layout);
 
       if (key->src_samples == 1) {
-         color = blorp_nir_tex(&b, &v, key, src_pos);
+         color = blorp_nir_tex(&b, &v, key, src_pos, devinfo);
       } else {
          assert(!key->use_kill);
          color = blorp_nir_manual_blend_bilinear(&b, src_pos, key->src_samples,
-                                                 key, &v);
+                                                 key, &v, devinfo);
       }
       break;
 
@@ -1393,18 +1410,19 @@ blorp_build_nir_shader(struct blorp_context *blorp,
          src_pos = nir_fadd_imm(&b,
                                 nir_i2f32(&b, src_pos),
                                 0.5f);
-         color = blorp_nir_tex(&b, &v, key, src_pos);
+         color = blorp_nir_tex(&b, &v, key, src_pos, devinfo);
       } else {
          /* Gfx7+ hardware doesn't automatically blend. */
          color = blorp_nir_combine_samples(&b, &v, src_pos, key->src_samples,
                                            key->tex_aux_usage,
                                            key->texture_data_type,
-                                           key->filter);
+                                           key->filter,
+                                           devinfo);
       }
       break;
 
    default:
-      unreachable("Invalid blorp filter");
+      UNREACHABLE("Invalid blorp filter");
    }
 
    if (!isl_swizzle_is_identity(key->src_swizzle)) {
@@ -1469,12 +1487,30 @@ blorp_build_nir_shader(struct blorp_context *blorp,
 
    if (compute) {
       nir_def *store_pos = nir_load_global_invocation_id(&b, 32);
+
+      /* Load sample index for MSAA image store */
+      nir_def *sample_idx = nir_imm_int(&b, 0);
+
+      if (key->dst_samples > 1) {
+         nir_def *num_layers_data =
+            nir_load_inline_data_intel(&b, 1, 32,
+               .base = BLORP_INLINE_PARAM_THREAD_GROUP_ID_Z_DIMENSION);
+
+         nir_def *z_pos = nir_umod(&b, nir_channel(&b, store_pos, 2),
+                                   num_layers_data);
+         sample_idx = nir_idiv(&b, nir_channel(&b, store_pos, 2),
+                               num_layers_data);
+
+         store_pos = nir_vector_insert_imm(&b, store_pos, z_pos, 2);
+      }
       nir_image_store(&b, nir_imm_int(&b, 0),
                       nir_pad_vector_imm_int(&b, store_pos, 0, 4),
-                      nir_imm_int(&b, 0),
+                      sample_idx,
                       nir_pad_vector_imm_int(&b, color, 0, 4),
                       nir_imm_int(&b, 0),
-                      .image_dim = GLSL_SAMPLER_DIM_2D,
+                      .image_dim = key->dst_samples > 1 ?
+                                   GLSL_SAMPLER_DIM_MS:
+                                   GLSL_SAMPLER_DIM_2D,
                       .image_array = true,
                       .access = ACCESS_NON_READABLE);
    } else if (key->dst_usage == ISL_SURF_USAGE_RENDER_TARGET_BIT) {
@@ -1496,7 +1532,7 @@ blorp_build_nir_shader(struct blorp_context *blorp,
       stencil_out->data.location = FRAG_RESULT_STENCIL;
       nir_store_var(&b, stencil_out, nir_channel(&b, color, 0), 0x1);
    } else {
-      unreachable("Invalid destination usage");
+      UNREACHABLE("Invalid destination usage");
    }
 
    if (bounds_if)
@@ -1519,13 +1555,15 @@ blorp_get_blit_kernel_fs(struct blorp_batch *batch,
    void *mem_ctx = ralloc_context(NULL);
 
    nir_shader *nir = blorp_build_nir_shader(blorp, batch, mem_ctx, key);
+   assert(blorp_op_type_is_blit(params->op));
+
    nir->info.name =
       ralloc_strdup(nir, blorp_shader_type_to_name(key->base.shader_type));
 
    const bool multisample_fbo = key->rt_samples > 1;
 
    const struct blorp_program p =
-      blorp_compile_fs(blorp, mem_ctx, nir, multisample_fbo, false);
+      blorp_compile_fs(blorp, mem_ctx, nir, multisample_fbo, false, false);
 
    bool result =
       blorp->upload_shader(batch, MESA_SHADER_FRAGMENT,
@@ -1553,10 +1591,12 @@ blorp_get_blit_kernel_cs(struct blorp_batch *batch,
 
    nir_shader *nir = blorp_build_nir_shader(blorp, batch, mem_ctx,
                                                 prog_key);
+   assert(blorp_op_type_is_blit(params->op));
+
    nir->info.name = ralloc_strdup(nir, "BLORP-gpgpu-blit");
    blorp_set_cs_dims(nir, prog_key->local_y);
 
-   assert(prog_key->rt_samples == 1);
+   assert(batch->blorp->isl_dev->info->ver >= 30 || prog_key->rt_samples == 1);
 
    const struct blorp_program p =
       blorp_compile_cs(blorp, mem_ctx, nir);
@@ -1627,7 +1667,7 @@ blorp_surf_convert_to_single_slice(const struct isl_device *isl_dev,
    bool ok UNUSED;
 
    /* It would be insane to try and do this on a compressed surface */
-   assert(info->aux_usage == ISL_AUX_USAGE_NONE);
+   assert(info->aux_surf.size_B == 0);
 
    /* Just bail if we have nothing to do. */
    if (info->surf.dim == ISL_SURF_DIM_2D &&
@@ -1722,9 +1762,9 @@ blorp_surf_retile_w_to_y(const struct isl_device *isl_dev,
    const unsigned x_align = 8, y_align = info->surf.samples != 0 ? 8 : 4;
    info->surf.tiling = ISL_TILING_Y0;
    info->surf.logical_level0_px.width =
-      ALIGN(info->surf.logical_level0_px.width, x_align) * 2;
+      align(info->surf.logical_level0_px.width, x_align) * 2;
    info->surf.logical_level0_px.height =
-      ALIGN(info->surf.logical_level0_px.height, y_align) / 2;
+      align(info->surf.logical_level0_px.height, y_align) / 2;
    info->tile_x_sa *= 2;
    info->tile_y_sa /= 2;
 }
@@ -1790,7 +1830,7 @@ get_red_format_for_rgb_format(enum isl_format format)
       case ISL_SINT:
          return ISL_FORMAT_R8_SINT;
       default:
-         unreachable("Invalid 8-bit RGB channel type");
+         UNREACHABLE("Invalid 8-bit RGB channel type");
       }
    case 16:
       switch (fmtl->channels.r.type) {
@@ -1805,7 +1845,7 @@ get_red_format_for_rgb_format(enum isl_format format)
       case ISL_SINT:
          return ISL_FORMAT_R16_SINT;
       default:
-         unreachable("Invalid 8-bit RGB channel type");
+         UNREACHABLE("Invalid 8-bit RGB channel type");
       }
    case 32:
       switch (fmtl->channels.r.type) {
@@ -1816,10 +1856,10 @@ get_red_format_for_rgb_format(enum isl_format format)
       case ISL_SINT:
          return ISL_FORMAT_R32_SINT;
       default:
-         unreachable("Invalid 8-bit RGB channel type");
+         UNREACHABLE("Invalid 8-bit RGB channel type");
       }
    default:
-      unreachable("Invalid number of red channel bits");
+      UNREACHABLE("Invalid number of red channel bits");
    }
 }
 
@@ -1889,7 +1929,8 @@ try_blorp_blit(struct blorp_batch *batch,
       } else {
          key->dst_usage = ISL_SURF_USAGE_RENDER_TARGET_BIT;
       }
-   } else if (params->dst.surf.usage & ISL_SURF_USAGE_STENCIL_BIT) {
+   } else if (params->dst.surf.usage & (ISL_SURF_USAGE_STENCIL_BIT |
+                                        ISL_SURF_USAGE_CPB_BIT)) {
       assert(params->dst.surf.format == ISL_FORMAT_R8_UINT);
       if (devinfo->ver >= 9 && !(batch->flags & BLORP_BATCH_USE_COMPUTE)) {
          key->dst_usage = ISL_SURF_USAGE_STENCIL_BIT;
@@ -1923,16 +1964,16 @@ try_blorp_blit(struct blorp_batch *batch,
    /* Round floating point values to nearest integer to avoid "off by one texel"
     * kind of errors when blitting.
     */
-   params->x0 = params->wm_inputs.bounds_rect.x0 = round(coords->x.dst0);
-   params->y0 = params->wm_inputs.bounds_rect.y0 = round(coords->y.dst0);
-   params->x1 = params->wm_inputs.bounds_rect.x1 = round(coords->x.dst1);
-   params->y1 = params->wm_inputs.bounds_rect.y1 = round(coords->y.dst1);
+   params->x0 = params->wm_inputs.blit.bounds_rect.x0 = round(coords->x.dst0);
+   params->y0 = params->wm_inputs.blit.bounds_rect.y0 = round(coords->y.dst0);
+   params->x1 = params->wm_inputs.blit.bounds_rect.x1 = round(coords->x.dst1);
+   params->y1 = params->wm_inputs.blit.bounds_rect.y1 = round(coords->y.dst1);
 
-   blorp_setup_coord_transform(&params->wm_inputs.coord_transform[0],
+   blorp_setup_coord_transform(&params->wm_inputs.blit.coord_transform[0],
                                    coords->x.src0, coords->x.src1,
                                    coords->x.dst0, coords->x.dst1,
                                    coords->x.mirror);
-   blorp_setup_coord_transform(&params->wm_inputs.coord_transform[1],
+   blorp_setup_coord_transform(&params->wm_inputs.blit.coord_transform[1],
                                    coords->y.src0, coords->y.src1,
                                    coords->y.dst0, coords->y.dst1,
                                    coords->y.mirror);
@@ -1974,8 +2015,8 @@ try_blorp_blit(struct blorp_batch *batch,
          isl_get_interleaved_msaa_px_size_sa(params->dst.surf.samples);
       params->x0 = ROUND_DOWN_TO(params->x0, 2) * px_size_sa.width;
       params->y0 = ROUND_DOWN_TO(params->y0, 2) * px_size_sa.height;
-      params->x1 = ALIGN(params->x1, 2) * px_size_sa.width;
-      params->y1 = ALIGN(params->y1, 2) * px_size_sa.height;
+      params->x1 = align(params->x1, 2) * px_size_sa.width;
+      params->y1 = align(params->y1, 2) * px_size_sa.height;
 
       blorp_surf_fake_interleaved_msaa(batch->blorp->isl_dev, &params->dst);
 
@@ -2035,8 +2076,8 @@ try_blorp_blit(struct blorp_batch *batch,
       const unsigned y_align = params->dst.surf.samples != 0 ? 8 : 4;
       params->x0 = ROUND_DOWN_TO(params->x0, x_align) * 2;
       params->y0 = ROUND_DOWN_TO(params->y0, y_align) / 2;
-      params->x1 = ALIGN(params->x1, x_align) * 2;
-      params->y1 = ALIGN(params->y1, y_align) / 2;
+      params->x1 = align(params->x1, x_align) * 2;
+      params->y1 = align(params->y1, y_align) / 2;
 
       /* Retile the surface to Y-tiled */
       blorp_surf_retile_w_to_y(batch->blorp->isl_dev, &params->dst);
@@ -2045,7 +2086,8 @@ try_blorp_blit(struct blorp_batch *batch,
       key->use_kill = true;
       key->need_dst_offset = true;
 
-      if (params->dst.surf.samples > 1) {
+      if (key->base.shader_pipeline == BLORP_SHADER_PIPELINE_RENDER &&
+          params->dst.surf.samples > 1) {
          /* If the destination surface is a W-tiled multisampled stencil
           * buffer that we're mapping as Y tiled, then we need to arrange for
           * the WM program to run once per sample rather than once per pixel,
@@ -2099,10 +2141,10 @@ try_blorp_blit(struct blorp_batch *batch,
        batch->blorp->isl_dev->info->ver <= 6) {
       /* Gfx4-5 don't support non-normalized texture coordinates */
       key->src_coords_normalized = true;
-      params->wm_inputs.src_inv_size[0] =
+      params->wm_inputs.blit.src_inv_size[0] =
          1.0f / u_minify(params->src.surf.logical_level0_px.width,
                          params->src.view.base_level);
-      params->wm_inputs.src_inv_size[1] =
+      params->wm_inputs.blit.src_inv_size[1] =
          1.0f / u_minify(params->src.surf.logical_level0_px.height,
                          params->src.view.base_level);
    }
@@ -2164,23 +2206,23 @@ try_blorp_blit(struct blorp_batch *batch,
    if (params->src.tile_x_sa || params->src.tile_y_sa) {
       assert(key->need_src_offset);
       surf_get_intratile_offset_px(&params->src,
-                                   &params->wm_inputs.src_offset.x,
-                                   &params->wm_inputs.src_offset.y);
+                                   &params->wm_inputs.blit.src_offset.x,
+                                   &params->wm_inputs.blit.src_offset.y);
    }
 
    if (params->dst.tile_x_sa || params->dst.tile_y_sa) {
       assert(key->need_dst_offset);
       surf_get_intratile_offset_px(&params->dst,
-                                   &params->wm_inputs.dst_offset.x,
-                                   &params->wm_inputs.dst_offset.y);
-      params->x0 += params->wm_inputs.dst_offset.x;
-      params->y0 += params->wm_inputs.dst_offset.y;
-      params->x1 += params->wm_inputs.dst_offset.x;
-      params->y1 += params->wm_inputs.dst_offset.y;
+                                   &params->wm_inputs.blit.dst_offset.x,
+                                   &params->wm_inputs.blit.dst_offset.y);
+      params->x0 += params->wm_inputs.blit.dst_offset.x;
+      params->y0 += params->wm_inputs.blit.dst_offset.y;
+      params->x1 += params->wm_inputs.blit.dst_offset.x;
+      params->y1 += params->wm_inputs.blit.dst_offset.y;
    }
 
    /* For some texture types, we need to pass the layer through the sampler. */
-   params->wm_inputs.src_z = params->src.z_offset;
+   params->wm_inputs.blit.src_z = params->src.z_offset;
 
    const bool compute =
       key->base.shader_pipeline == BLORP_SHADER_PIPELINE_COMPUTE;
@@ -2424,13 +2466,17 @@ blorp_blit_supports_compute(struct blorp_context *blorp,
                             const struct isl_surf *dst_surf,
                             enum isl_aux_usage dst_aux_usage)
 {
-   /* Our compiler doesn't currently support typed image writes with MSAA.
-    * Also, our BLORP compute shaders don't handle multisampling cases.
-    */
-   if (dst_surf->samples > 1 || src_surf->samples > 1)
+   /* Platforms < Xe3 doesn't support typed image writes with MSAA. */
+   if (blorp->isl_dev->info->ver < 30 && dst_surf->samples > 1)
       return false;
 
-   if (blorp->isl_dev->info->ver >= 12) {
+   if (blorp->isl_dev->info->ver >= 30) {
+      return dst_aux_usage == ISL_AUX_USAGE_FCV_CCS_E ||
+             dst_aux_usage == ISL_AUX_USAGE_MCS_CCS ||
+             dst_aux_usage == ISL_AUX_USAGE_CCS_E ||
+             dst_aux_usage == ISL_AUX_USAGE_MCS ||
+             dst_aux_usage == ISL_AUX_USAGE_NONE;
+   } else if (blorp->isl_dev->info->ver >= 12) {
       return dst_aux_usage == ISL_AUX_USAGE_FCV_CCS_E ||
              dst_aux_usage == ISL_AUX_USAGE_CCS_E ||
              dst_aux_usage == ISL_AUX_USAGE_NONE;
@@ -2470,6 +2516,12 @@ blorp_copy_supports_blitter(struct blorp_context *blorp,
    if (devinfo->ver < 12)
       return false;
 
+   if (devinfo->verx10 == 120 &&
+       (src_surf->tiling != ISL_TILING_LINEAR ||
+        dst_surf->tiling != ISL_TILING_LINEAR)) {
+      return false;
+   }
+
    if (dst_surf->samples > 1 || src_surf->samples > 1)
       return false;
 
@@ -2486,8 +2538,10 @@ blorp_copy_supports_blitter(struct blorp_context *blorp,
       /* XY_BLOCK_COPY_BLT mentions it doesn't support clear colors for 96bpp
        * formats, but none of them support CCS anyway, so it's a moot point.
        */
-      assert(src_aux_usage == ISL_AUX_USAGE_NONE);
-      assert(dst_aux_usage == ISL_AUX_USAGE_NONE);
+      if (devinfo->verx10 < 20) {
+         assert(src_aux_usage == ISL_AUX_USAGE_NONE);
+         assert(dst_aux_usage == ISL_AUX_USAGE_NONE);
+      }
 
       /* We can only support linear mode for 96bpp. */
       if (src_surf->tiling != ISL_TILING_LINEAR ||
@@ -2539,9 +2593,9 @@ blorp_blit(struct blorp_batch *batch,
    }
 
    blorp_surface_info_init(batch, &params.src, src_surf, src_level,
-                               src_layer, src_format, false);
+                           src_layer, src_format, false);
    blorp_surface_info_init(batch, &params.dst, dst_surf, dst_level,
-                               dst_layer, dst_format, true);
+                           dst_layer, dst_format, true);
 
    params.src.view.swizzle = src_swizzle;
    params.dst.view.swizzle = dst_swizzle;
@@ -2574,10 +2628,10 @@ blorp_blit(struct blorp_batch *batch,
       key.x_scale = 2.0f;
    key.y_scale = params.src.surf.samples / key.x_scale;
 
-   params.wm_inputs.rect_grid.x1 =
+   params.wm_inputs.blit.rect_grid.x1 =
       u_minify(params.src.surf.logical_level0_px.width, src_level) *
       key.x_scale - 1.0f;
-   params.wm_inputs.rect_grid.y1 =
+   params.wm_inputs.blit.rect_grid.y1 =
       u_minify(params.src.surf.logical_level0_px.height, src_level) *
       key.y_scale - 1.0f;
 
@@ -2628,7 +2682,7 @@ get_copy_format_for_bpb(const struct isl_device *isl_dev, unsigned bpb)
       case 96: return ISL_FORMAT_R32G32B32_UINT;
       case 128:return ISL_FORMAT_R32G32B32A32_UINT;
       default:
-         unreachable("Unknown format bpb");
+         UNREACHABLE("Unknown format bpb");
       }
    } else {
       switch (bpb) {
@@ -2641,7 +2695,7 @@ get_copy_format_for_bpb(const struct isl_device *isl_dev, unsigned bpb)
       case 96: return ISL_FORMAT_R32G32B32_UINT;
       case 128:return ISL_FORMAT_R32G32B32A32_UINT;
       default:
-         unreachable("Unknown format bpb");
+         UNREACHABLE("Unknown format bpb");
       }
    }
 }
@@ -2752,7 +2806,7 @@ get_ccs_compatible_uint_format(const struct isl_format_layout *fmtl)
       return ISL_FORMAT_R8_UINT;
 
    default:
-      unreachable("Not a compressible format");
+      UNREACHABLE("Not a compressible format");
    }
 }
 
@@ -2775,11 +2829,11 @@ blorp_copy_get_color_format(const struct isl_device *isl_dev,
        * to properly interpret the clear color of imported dmabuf surfaces.
        */
       return surf_format;
-   } else if (ISL_GFX_VER(isl_dev) <= 12 &&
+   } else if (ISL_GFX_VERX10(isl_dev) <= 120 &&
               isl_format_supports_ccs_e(isl_dev->info, surf_format)) {
-      /* On gfx9-12, choose a copy format that maintains compatibility with
+      /* On gfx9-12.0, choose a copy format that maintains compatibility with
        * CCS_E. Although format reinterpretation doesn't affect compression
-       * support while rendering on gfx12, the sampler does have reduced
+       * support while rendering on gfx12.0, the sampler does have reduced
        * support for compression when the bits-per-channel changes.
        */
       return get_ccs_compatible_uint_format(fmtl);
@@ -2880,7 +2934,6 @@ blorp_copy_get_formats(const struct isl_device *isl_dev,
    if (ISL_GFX_VER(isl_dev) >= 8 &&
        isl_surf_usage_is_depth(src_surf->usage)) {
       /* In order to use HiZ, we have to use the real format for the source.
-       * Depth <-> Color copies are not allowed.
        */
       *src_view_format = src_surf->format;
       *dst_view_format = src_surf->format;
@@ -2891,6 +2944,21 @@ blorp_copy_get_formats(const struct isl_device *isl_dev,
        */
       *src_view_format = dst_surf->format;
       *dst_view_format = dst_surf->format;
+
+      /* Some generations like Gfx9/11 have a CCS_E dependent on the
+       * bits-per-channel of the format. If we reinterpret a R32 source image
+       * as D24_UNORM we'll read invalid data from the sampler.
+       *
+       * Instead keep the source as R32_UINT (so it stays bits-per-channel
+       * compatible according to the VK_KHR_maintenance8 copy operations
+       * compatibility format list) and have the shader do a conversion
+       * to a floating point value out of 24bits of data to write into the
+       * depth output.
+       */
+      if (dst_surf->format == ISL_FORMAT_R24_UNORM_X8_TYPELESS &&
+          src_surf->format != ISL_FORMAT_R24_UNORM_X8_TYPELESS) {
+         *src_view_format = ISL_FORMAT_R32_UINT;
+      }
    } else if (isl_surf_usage_is_depth_or_stencil(src_surf->usage) ||
               isl_surf_usage_is_depth_or_stencil(dst_surf->usage)) {
       assert(src_fmtl->bpb == dst_fmtl->bpb);
@@ -2939,9 +3007,9 @@ blorp_copy(struct blorp_batch *batch,
    }
 
    blorp_surface_info_init(batch, &params.src, src_surf, src_level,
-                               src_layer, ISL_FORMAT_UNSUPPORTED, false);
+                           src_layer, ISL_FORMAT_UNSUPPORTED, false);
    blorp_surface_info_init(batch, &params.dst, dst_surf, dst_level,
-                               dst_layer, ISL_FORMAT_UNSUPPORTED, true);
+                           dst_layer, ISL_FORMAT_UNSUPPORTED, true);
 
    struct blorp_blit_prog_key key = {
       .base = BLORP_BASE_KEY_INIT(BLORP_SHADER_TYPE_COPY),
@@ -2980,8 +3048,9 @@ blorp_copy(struct blorp_batch *batch,
        */
       ASSERTED enum isl_format src_view_fmt = params.src.view.format;
       ASSERTED enum isl_format src_surf_fmt = params.src.surf.format;
-      assert(isl_get_sampler_clear_field_offset(devinfo, src_view_fmt) ==
-             isl_get_sampler_clear_field_offset(devinfo, src_surf_fmt));
+      ASSERTED bool hiz = params.src.aux_usage == ISL_AUX_USAGE_HIZ_CCS_WT;
+      assert(isl_get_sampler_clear_field_offset(devinfo, src_view_fmt, hiz) ==
+             isl_get_sampler_clear_field_offset(devinfo, src_surf_fmt, hiz));
    }
 
    if (params.src.view.format != params.dst.view.format) {
@@ -3034,10 +3103,10 @@ blorp_copy(struct blorp_batch *batch,
       params.x1 = dst_x + dst_width;
       params.y0 = dst_y;
       params.y1 = dst_y + dst_height;
-      params.wm_inputs.coord_transform[0].offset = dst_x - (float)src_x;
-      params.wm_inputs.coord_transform[1].offset = dst_y - (float)src_y;
-      params.wm_inputs.coord_transform[0].multiplier = 1.0f;
-      params.wm_inputs.coord_transform[1].multiplier = 1.0f;
+      params.wm_inputs.blit.coord_transform[0].offset = dst_x - (float)src_x;
+      params.wm_inputs.blit.coord_transform[1].offset = dst_y - (float)src_y;
+      params.wm_inputs.blit.coord_transform[0].multiplier = 1.0f;
+      params.wm_inputs.blit.coord_transform[1].multiplier = 1.0f;
 
       batch->blorp->exec(batch, &params);
       return;
@@ -3063,122 +3132,38 @@ blorp_copy(struct blorp_batch *batch,
    do_blorp_blit(batch, &params, &key, &coords);
 }
 
-static enum isl_format
-isl_format_for_size(unsigned size_B)
-{
-   switch (size_B) {
-   case 1:  return ISL_FORMAT_R8_UINT;
-   case 2:  return ISL_FORMAT_R8G8_UINT;
-   case 4:  return ISL_FORMAT_R8G8B8A8_UINT;
-   case 8:  return ISL_FORMAT_R16G16B16A16_UINT;
-   case 16: return ISL_FORMAT_R32G32B32A32_UINT;
-   default:
-      unreachable("Not a power-of-two format size");
-   }
-}
-
-/**
- * Returns the greatest common divisor of a and b that is a power of two.
- */
-static uint64_t
-gcd_pow2_u64(uint64_t a, uint64_t b)
-{
-   assert(a > 0 || b > 0);
-
-   unsigned a_log2 = ffsll(a) - 1;
-   unsigned b_log2 = ffsll(b) - 1;
-
-   /* If either a or b is 0, then a_log2 or b_log2 till be UINT_MAX in which
-    * case, the MIN2() will take the other one.  If both are 0 then we will
-    * hit the assert above.
-    */
-   return 1 << MIN2(a_log2, b_log2);
-}
-
-static void
-do_buffer_copy(struct blorp_batch *batch,
-               struct blorp_address *src,
-               struct blorp_address *dst,
-               int width, int height, int block_size)
-{
-   /* The actual format we pick doesn't matter as blorp will throw it away.
-    * The only thing that actually matters is the size.
-    */
-   enum isl_format format = isl_format_for_size(block_size);
-
-   UNUSED bool ok;
-   struct isl_surf surf;
-   ok = isl_surf_init(batch->blorp->isl_dev, &surf,
-                      .dim = ISL_SURF_DIM_2D,
-                      .format = format,
-                      .width = width,
-                      .height = height,
-                      .depth = 1,
-                      .levels = 1,
-                      .array_len = 1,
-                      .samples = 1,
-                      .row_pitch_B = width * block_size,
-                      .usage = ISL_SURF_USAGE_TEXTURE_BIT |
-                               ISL_SURF_USAGE_RENDER_TARGET_BIT,
-                      .tiling_flags = ISL_TILING_LINEAR_BIT);
-   assert(ok);
-
-   struct blorp_surf src_blorp_surf = {
-      .surf = &surf,
-      .addr = *src,
-   };
-
-   struct blorp_surf dst_blorp_surf = {
-      .surf = &surf,
-      .addr = *dst,
-   };
-
-   blorp_copy(batch, &src_blorp_surf, 0, 0, &dst_blorp_surf, 0, 0,
-              0, 0, 0, 0, width, height);
-}
-
 void
 blorp_buffer_copy(struct blorp_batch *batch,
                   struct blorp_address src,
                   struct blorp_address dst,
                   uint64_t size)
 {
-   const struct intel_device_info *devinfo = batch->blorp->isl_dev->info;
-   uint64_t copy_size = size;
+   struct isl_surf surf;
+   struct blorp_surf src_blorp_surf = {
+      .surf = &surf,
+      .addr = src,
+   };
 
-   /* This is maximum possible width/height our HW can handle */
-   uint64_t max_surface_dim = 1 << (devinfo->ver >= 7 ? 14 : 13);
+   struct blorp_surf dst_blorp_surf = {
+      .surf = &surf,
+      .addr = dst,
+   };
 
-   /* First, we compute the biggest format that can be used with the
-    * given offsets and size.
-    */
-   int bs = 16;
-   bs = gcd_pow2_u64(bs, src.offset);
-   bs = gcd_pow2_u64(bs, dst.offset);
-   bs = gcd_pow2_u64(bs, size);
+   while (size != 0) {
+      isl_surf_from_mem(batch->blorp->isl_dev, &surf,
+                        src_blorp_surf.addr.offset |
+                        dst_blorp_surf.addr.offset, size, ISL_TILING_LINEAR);
 
-   /* First, we make a bunch of max-sized copies */
-   uint64_t max_copy_size = max_surface_dim * max_surface_dim * bs;
-   while (copy_size >= max_copy_size) {
-      do_buffer_copy(batch, &src, &dst, max_surface_dim, max_surface_dim, bs);
-      copy_size -= max_copy_size;
-      src.offset += max_copy_size;
-      dst.offset += max_copy_size;
-   }
+      for (int i = 0; i < surf.logical_level0_px.a; i++) {
+         blorp_copy(batch,
+                    &src_blorp_surf, 0, i,
+                    &dst_blorp_surf, 0, i, 0, 0, 0, 0,
+                    surf.logical_level0_px.w,
+                    surf.logical_level0_px.h);
+      }
 
-   /* Now make a max-width copy */
-   uint64_t height = copy_size / (max_surface_dim * bs);
-   assert(height < max_surface_dim);
-   if (height != 0) {
-      uint64_t rect_copy_size = height * max_surface_dim * bs;
-      do_buffer_copy(batch, &src, &dst, max_surface_dim, height, bs);
-      copy_size -= rect_copy_size;
-      src.offset += rect_copy_size;
-      dst.offset += rect_copy_size;
-   }
-
-   /* Finally, make a small copy to finish it off */
-   if (copy_size != 0) {
-      do_buffer_copy(batch, &src, &dst, copy_size / bs, 1, bs);
+      size -= surf.size_B;
+      src_blorp_surf.addr.offset += surf.size_B;
+      dst_blorp_surf.addr.offset += surf.size_B;
    }
 }

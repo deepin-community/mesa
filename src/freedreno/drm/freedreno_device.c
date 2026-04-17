@@ -42,6 +42,12 @@ fd_device_new(int fd)
       return NULL;
    }
 
+#ifdef HAVE_FREEDRENO_VIRTIO
+   if (debug_get_bool_option("FD_FORCE_VTEST", false)) {
+      DEBUG_MSG("virtio_gpu vtest device");
+      dev = virtio_device_new(-1, version);
+   } else
+#endif
    if (!strcmp(version->name, "msm")) {
       DEBUG_MSG("msm DRM device");
       if (version->version_major != 1) {
@@ -220,6 +226,12 @@ enum fd_version
 fd_device_version(struct fd_device *dev)
 {
    return dev->version;
+}
+
+void
+fd_device_disable_explicit_sync_heuristic(struct fd_device *dev)
+{
+   dev->disable_explicit_sync_heuristic = true;
 }
 
 DEBUG_GET_ONCE_BOOL_OPTION(libgl, "LIBGL_DEBUG", false)

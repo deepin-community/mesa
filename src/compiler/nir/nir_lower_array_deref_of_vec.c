@@ -119,26 +119,18 @@ nir_lower_array_deref_of_vec_impl(nir_function_impl *impl,
             nir_def *index = deref->arr.index.ssa;
             nir_def *scalar =
                nir_vector_extract(&b, &intrin->def, index);
-            if (scalar->parent_instr->type == nir_instr_type_undef) {
+            if (nir_def_is_undef(scalar)) {
                nir_def_replace(&intrin->def, scalar);
             } else {
-               nir_def_rewrite_uses_after(&intrin->def,
-                                          scalar,
-                                          scalar->parent_instr);
+               nir_def_rewrite_uses_after(&intrin->def, scalar);
             }
             progress = true;
          }
       }
    }
 
-   if (progress) {
-      /* indirect store lower will change control flow */
-      nir_metadata_preserve(impl, has_indirect_store ? nir_metadata_none : nir_metadata_control_flow);
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-   }
-
-   return progress;
+   return nir_progress(progress, impl,
+                       has_indirect_store ? nir_metadata_none : nir_metadata_control_flow);
 }
 
 /* Lowers away array dereferences on vectors

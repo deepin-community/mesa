@@ -40,6 +40,7 @@
 #include "main/framebuffer.h"
 #include "main/macros.h"
 #include "main/glformats.h"
+#include "main/renderbuffer.h"
 #include "program/prog_instruction.h"
 #include "st_context.h"
 #include "st_atom.h"
@@ -106,14 +107,14 @@ st_destroy_clear(struct st_context *st)
  * Helper function to set the clear color fragment shader.
  */
 static void
-set_clearcolor_fs(struct st_context *st, union pipe_color_union *color)
+set_clearcolor_fs(struct st_context *st, union pipe_color_union *color,
+                  struct pipe_resource **releasebuf)
 {
    struct pipe_constant_buffer cb = {
       .user_buffer = color->f,
       .buffer_size = 4 * sizeof(float),
    };
-   st->pipe->set_constant_buffer(st->pipe, PIPE_SHADER_FRAGMENT, 0,
-                                false, &cb);
+   pipe_upload_constant_buffer0(st->pipe, MESA_SHADER_FRAGMENT, &cb, releasebuf);
 
    if (!st->clear.fs) {
       st->clear.fs = st_nir_make_clearcolor_shader(st);
@@ -135,9 +136,8 @@ make_nir_clear_vertex_shader(struct st_context *st, bool layered)
       VARYING_SLOT_LAYER
    };
 
-   return st_nir_make_passthrough_shader(st, shader_name, MESA_SHADER_VERTEX,
-                                         layered ? 2 : 1, inputs, outputs,
-                                         NULL, (1 << 1));
+   return st_nir_make_passthrough_vs(st, shader_name, layered ? 2 : 1, inputs,
+                                     outputs, (1 << 1));
 }
 
 
@@ -163,7 +163,7 @@ set_vertex_shader_layered(struct st_context *st)
 {
    struct pipe_context *pipe = st->pipe;
 
-   if (!st->screen->get_param(st->screen, PIPE_CAP_VS_INSTANCEID)) {
+   if (!st->screen->caps.vs_instanceid) {
       assert(!"Got layered clear, but VS instancing is unsupported");
       set_vertex_shader(st);
       return;
@@ -171,7 +171,7 @@ set_vertex_shader_layered(struct st_context *st)
 
    if (!st->clear.vs_layered) {
       bool vs_layer =
-         st->screen->get_param(st->screen, PIPE_CAP_VS_LAYER_VIEWPORT);
+         st->screen->caps.vs_layer_viewport;
       if (vs_layer) {
          st->clear.vs_layered = make_nir_clear_vertex_shader(st, true);
       } else {
@@ -226,7 +226,8 @@ clear_with_quad(struct gl_context *ctx, unsigned clear_buffers)
                         CSO_BIT_STREAM_OUTPUTS |
                         CSO_BIT_VERTEX_ELEMENTS |
                         (st->active_queries ? CSO_BIT_PAUSE_QUERIES : 0) |
-                        CSO_BITS_ALL_SHADERS));
+                        CSO_BIT_MESH_SHADER |
+                        CSO_BITS_VERTEX_PIPE_SHADERS));
 
    /* blend state: RGBA masking */
    {
@@ -283,7 +284,7 @@ clear_with_quad(struct gl_context *ctx, unsigned clear_buffers)
    st->util_velems.count = 1;
    cso_set_vertex_elements(cso, &st->util_velems);
 
-   cso_set_stream_outputs(cso, 0, NULL, NULL);
+   cso_set_stream_outputs(cso, 0, NULL, NULL, 0);
    cso_set_sample_mask(cso, ~0);
    cso_set_min_samples(cso, 1);
    st->clear.raster.multisample = st->state.fb_num_samples > 1;
@@ -294,9 +295,11 @@ clear_with_quad(struct gl_context *ctx, unsigned clear_buffers)
                          _mesa_fb_orientation(fb) == Y_0_TOP);
 
    /* Set constant buffer */
-   set_clearcolor_fs(st, (union pipe_color_union*)&ctx->Color.ClearColor);
+   struct pipe_resource *releasebuf = NULL;
+   set_clearcolor_fs(st, (union pipe_color_union*)&ctx->Color.ClearColor, &releasebuf);
    cso_set_tessctrl_shader_handle(cso, NULL);
    cso_set_tesseval_shader_handle(cso, NULL);
+   cso_set_mesh_shader_handle(cso, NULL);
 
    if (num_layers > 1)
       set_vertex_shader_layered(st);
@@ -319,11 +322,12 @@ clear_with_quad(struct gl_context *ctx, unsigned clear_buffers)
       _mesa_error(ctx, GL_OUT_OF_MEMORY, "glClear");
    }
 
+   pipe_resource_release(cso->pipe, releasebuf);
+
    /* Restore pipe state */
    cso_restore_state(cso, 0);
    ctx->Array.NewVertexElements = true;
-   ctx->NewDriverState |= ST_NEW_VERTEX_ARRAYS |
-                          ST_NEW_FS_CONSTANTS;
+   ST_SET_STATE2(ctx->NewDriverState, ST_NEW_VERTEX_ARRAYS, ST_NEW_FS_CONSTANTS);
 }
 
 
@@ -397,7 +401,8 @@ st_Clear(struct gl_context *ctx, GLbitfield mask)
    st_invalidate_readpix_cache(st);
 
    /* This makes sure the pipe has the latest scissor, etc values */
-   st_validate_state(st, ST_PIPELINE_CLEAR_STATE_MASK);
+   ST_PIPELINE_CLEAR_STATE_MASK(pipeline_mask);
+   st_validate_state(st, pipeline_mask);
 
    if (mask & BUFFER_BITS_COLOR) {
       for (i = 0; i < ctx->DrawBuffer->_NumColorDrawBuffers; i++) {
@@ -408,9 +413,10 @@ st_Clear(struct gl_context *ctx, GLbitfield mask)
                = ctx->DrawBuffer->Attachment[b].Renderbuffer;
             int colormask_index = ctx->Extensions.EXT_draw_buffers2 ? i : 0;
 
-            if (!rb || !rb->surface)
+            if (!rb || !rb->texture)
                continue;
 
+            enum pipe_format format = _mesa_renderbuffer_get_format(ctx, rb);
             unsigned colormask =
                GET_COLORMASK(ctx->Color.ColorMask, colormask_index);
 
@@ -418,7 +424,7 @@ st_Clear(struct gl_context *ctx, GLbitfield mask)
                continue;
 
             unsigned surf_colormask =
-               util_format_colormask(util_format_description(rb->surface->format));
+               util_format_colormask(util_format_description(format));
 
             bool scissor = is_scissor_enabled(ctx, rb);
             if ((scissor && !st->can_scissor_clear) ||
@@ -433,7 +439,7 @@ st_Clear(struct gl_context *ctx, GLbitfield mask)
    }
 
    if (mask & BUFFER_BIT_DEPTH) {
-      if (depthRb->surface && ctx->Depth.Mask) {
+      if (depthRb->texture && ctx->Depth.Mask) {
          bool scissor = is_scissor_enabled(ctx, depthRb);
          if ((scissor && !st->can_scissor_clear) ||
              is_window_rectangle_enabled(ctx))
@@ -444,7 +450,7 @@ st_Clear(struct gl_context *ctx, GLbitfield mask)
       }
    }
    if (mask & BUFFER_BIT_STENCIL) {
-      if (stencilRb->surface && !is_stencil_disabled(ctx, stencilRb)) {
+      if (stencilRb->texture && !is_stencil_disabled(ctx, stencilRb)) {
          bool scissor = is_scissor_enabled(ctx, stencilRb);
          if ((scissor && !st->can_scissor_clear) ||
              is_window_rectangle_enabled(ctx) ||
@@ -512,4 +518,3 @@ st_Clear(struct gl_context *ctx, GLbitfield mask)
    if (mask & BUFFER_BIT_ACCUM)
       _mesa_clear_accum_buffer(ctx);
 }
-

@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "util/lut.h"
 #include "agx_builder.h"
 #include "agx_compiler.h"
 #include "agx_opcodes.h"
@@ -31,9 +32,7 @@ cmpsel_for_break_if(agx_builder *b, agx_instr *I)
    agx_index f = r0l;
 
    if (I->invert_cond) {
-      agx_index temp = t;
-      t = f;
-      f = temp;
+      SWAP(t, f);
    }
 
    if (I->op == AGX_OPCODE_BREAK_IF_FCMP)
@@ -78,10 +77,14 @@ lower(agx_builder *b, agx_instr *I)
 
    /* Various instructions are implemented as bitwise truth tables */
    case AGX_OPCODE_MOV:
-      return agx_bitop_to(b, I->dest[0], I->src[0], agx_zero(), AGX_BITOP_MOV);
+      return agx_bitop_to(b, I->dest[0], I->src[0], agx_zero(), UTIL_LUT2(a));
 
    case AGX_OPCODE_NOT:
-      return agx_bitop_to(b, I->dest[0], I->src[0], agx_zero(), AGX_BITOP_NOT);
+      return agx_bitop_to(b, I->dest[0], I->src[0], agx_zero(), UTIL_LUT2(~a));
+
+   /* We can sign-extend with an add */
+   case AGX_OPCODE_SIGNEXT:
+      return agx_iadd_to(b, I->dest[0], I->src[0], agx_zero(), 0);
 
    /* Unfused comparisons are fused with a 0/1 select */
    case AGX_OPCODE_ICMP:
@@ -120,12 +123,6 @@ lower(agx_builder *b, agx_instr *I)
 
    case AGX_OPCODE_SWAP:
       swap(b, I->src[0], I->src[1]);
-      return (void *)true;
-
-   case AGX_OPCODE_EXPORT:
-      /* We already lowered exports during RA, we just need to remove them late
-       * after inserting waits.
-       */
       return (void *)true;
 
    default:

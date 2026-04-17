@@ -29,8 +29,7 @@
   *   Keith Whitwell <keithw@vmware.com>
   */
 
-#ifndef ELK_CLIP_H
-#define ELK_CLIP_H
+#pragma once
 
 #include "elk_compiler.h"
 #include "elk_eu.h"
@@ -95,6 +94,7 @@ struct elk_clip_compile {
    GLuint last_tmp;
 
    bool need_direction;
+   bool has_negative_rhw_bug;
 
    struct intel_vue_map vue_map;
 };
@@ -159,5 +159,3 @@ void elk_clip_project_position(struct elk_clip_compile *c,
              struct elk_reg pos );
 void elk_clip_ff_sync(struct elk_clip_compile *c);
 void elk_clip_init_ff_sync(struct elk_clip_compile *c);
-
-#endif

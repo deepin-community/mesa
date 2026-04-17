@@ -104,7 +104,7 @@ anv_device_init_blorp(struct anv_device *device)
       device->blorp.exec = gfx8_blorp_exec;
       break;
    default:
-      unreachable("Unknown hardware generation");
+      UNREACHABLE("Unknown hardware generation");
    }
 }
 
@@ -437,7 +437,7 @@ isl_format_for_size(unsigned size_B)
    case 12: return ISL_FORMAT_R32G32B32_UINT;
    case 16: return ISL_FORMAT_R32G32B32A32_UINT;
    default:
-      unreachable("Unknown format size");
+      UNREACHABLE("Unknown format size");
    }
 }
 
@@ -647,7 +647,7 @@ blit_image(struct anv_cmd_buffer *cmd_buffer,
       blorp_filter = BLORP_FILTER_BILINEAR;
       break;
    default:
-      unreachable("Invalid filter");
+      UNREACHABLE("Invalid filter");
    }
 
    assert(anv_image_aspects_compatible(src_res->aspectMask,
@@ -760,24 +760,6 @@ void anv_CmdBlitImage2(
    }
 
    anv_blorp_batch_finish(&batch);
-}
-
-/**
- * Returns the greatest common divisor of a and b that is a power of two.
- */
-static uint64_t
-gcd_pow2_u64(uint64_t a, uint64_t b)
-{
-   assert(a > 0 || b > 0);
-
-   unsigned a_log2 = ffsll(a) - 1;
-   unsigned b_log2 = ffsll(b) - 1;
-
-   /* If either a or b is 0, then a_log2 or b_log2 till be UINT_MAX in which
-    * case, the MIN2() will take the other one.  If both are 0 then we will
-    * hit the assert above.
-    */
-   return 1 << MIN2(a_log2, b_log2);
 }
 
 /* This is maximum possible width/height our HW can handle */
@@ -898,8 +880,6 @@ void anv_CmdFillBuffer(
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
    ANV_FROM_HANDLE(anv_buffer, dst_buffer, dstBuffer);
-   struct blorp_surf surf;
-   struct isl_surf isl_surf;
 
    struct blorp_batch batch;
    anv_blorp_batch_init(cmd_buffer, &batch, 0);
@@ -916,62 +896,34 @@ void anv_CmdFillBuffer(
     */
    fillSize &= ~3ull;
 
-   /* First, we compute the biggest format that can be used with the
-    * given offsets and size.
-    */
-   int bs = 16;
-   bs = gcd_pow2_u64(bs, dstOffset);
-   bs = gcd_pow2_u64(bs, fillSize);
-   enum isl_format isl_format = isl_format_for_size(bs);
-
    union isl_color_value color = {
       .u32 = { data, data, data, data },
    };
 
-   const uint64_t max_fill_size = MAX_SURFACE_DIM * MAX_SURFACE_DIM * bs;
-   while (fillSize >= max_fill_size) {
-      get_blorp_surf_for_anv_buffer(cmd_buffer->device,
-                                    dst_buffer, dstOffset,
-                                    MAX_SURFACE_DIM, MAX_SURFACE_DIM,
-                                    MAX_SURFACE_DIM * bs, isl_format, true,
-                                    &surf, &isl_surf);
+   struct isl_surf isl_surf;
+   struct blorp_surf surf = {
+      .addr = {
+         .buffer = dst_buffer->address.bo,
+         .offset = dst_buffer->address.offset + dstOffset,
+         .mocs = anv_mocs(cmd_buffer->device, dst_buffer->address.bo,
+                          ISL_SURF_USAGE_RENDER_TARGET_BIT),
+      },
+      .surf = &isl_surf,
+   };
 
-      blorp_clear(&batch, &surf, isl_format, ISL_SWIZZLE_IDENTITY,
-                  0, 0, 1, 0, 0, MAX_SURFACE_DIM, MAX_SURFACE_DIM,
+   do {
+      isl_surf_from_mem(&cmd_buffer->device->isl_dev, &isl_surf,
+                        surf.addr.offset, fillSize, ISL_TILING_LINEAR);
+
+      blorp_clear(&batch, &surf, isl_surf.format, ISL_SWIZZLE_IDENTITY, 0, 0,
+                  isl_surf.logical_level0_px.a, 0, 0,
+                  isl_surf.logical_level0_px.w,
+                  isl_surf.logical_level0_px.h,
                   color, 0 /* color_write_disable */);
-      fillSize -= max_fill_size;
-      dstOffset += max_fill_size;
-   }
 
-   uint64_t height = fillSize / (MAX_SURFACE_DIM * bs);
-   assert(height < MAX_SURFACE_DIM);
-   if (height != 0) {
-      const uint64_t rect_fill_size = height * MAX_SURFACE_DIM * bs;
-      get_blorp_surf_for_anv_buffer(cmd_buffer->device,
-                                    dst_buffer, dstOffset,
-                                    MAX_SURFACE_DIM, height,
-                                    MAX_SURFACE_DIM * bs, isl_format, true,
-                                    &surf, &isl_surf);
-
-      blorp_clear(&batch, &surf, isl_format, ISL_SWIZZLE_IDENTITY,
-                  0, 0, 1, 0, 0, MAX_SURFACE_DIM, height,
-                  color, 0 /* color_write_disable */);
-      fillSize -= rect_fill_size;
-      dstOffset += rect_fill_size;
-   }
-
-   if (fillSize != 0) {
-      const uint32_t width = fillSize / bs;
-      get_blorp_surf_for_anv_buffer(cmd_buffer->device,
-                                    dst_buffer, dstOffset,
-                                    width, 1,
-                                    width * bs, isl_format, true,
-                                    &surf, &isl_surf);
-
-      blorp_clear(&batch, &surf, isl_format, ISL_SWIZZLE_IDENTITY,
-                  0, 0, 1, 0, 0, width, 1,
-                  color, 0 /* color_write_disable */);
-   }
+      fillSize -= isl_surf.size_B;
+      surf.addr.offset += isl_surf.size_B;
+   } while (fillSize != 0);
 
    anv_blorp_batch_finish(&batch);
 
@@ -1362,7 +1314,9 @@ anv_image_msaa_resolve(struct anv_cmd_buffer *cmd_buffer,
 
    assert(src_image->vk.image_type == VK_IMAGE_TYPE_2D);
    assert(src_image->vk.samples > 1);
-   assert(dst_image->vk.image_type == VK_IMAGE_TYPE_2D);
+   assert((dst_image->vk.image_type == VK_IMAGE_TYPE_2D) ||
+          (dst_image->vk.image_type == VK_IMAGE_TYPE_3D &&
+           dst_base_layer == 0 && layer_count == 1));
    assert(dst_image->vk.samples == 1);
 
    struct blorp_surf src_surf, dst_surf;
@@ -1932,7 +1886,7 @@ anv_image_mcs_op(struct anv_cmd_buffer *cmd_buffer,
    case ISL_AUX_OP_FULL_RESOLVE:
    case ISL_AUX_OP_AMBIGUATE:
    default:
-      unreachable("Unsupported MCS operation");
+      UNREACHABLE("Unsupported MCS operation");
    }
 
    anv_add_pending_pipe_bits(cmd_buffer,
@@ -2030,7 +1984,7 @@ anv_image_ccs_op(struct anv_cmd_buffer *cmd_buffer,
       }
       break;
    default:
-      unreachable("Unsupported CCS operation");
+      UNREACHABLE("Unsupported CCS operation");
    }
 
    anv_add_pending_pipe_bits(cmd_buffer,

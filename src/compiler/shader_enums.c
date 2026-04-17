@@ -34,7 +34,7 @@
 #define NAME(val) ((((val) < ARRAY_SIZE(names)) && names[(val)]) ? names[(val)] : "UNKNOWN")
 
 const char *
-gl_shader_stage_name(gl_shader_stage stage)
+mesa_shader_stage_name(mesa_shader_stage stage)
 {
    static const char *names[] = {
       ENUM(MESA_SHADER_VERTEX),
@@ -58,7 +58,7 @@ gl_shader_stage_name(gl_shader_stage stage)
 }
 
 /**
- * Translate a gl_shader_stage to a short shader stage name for debug
+ * Translate a mesa_shader_stage to a short shader stage name for debug
  * printouts and error messages.
  */
 const char *
@@ -82,11 +82,11 @@ _mesa_shader_stage_to_string(unsigned stage)
    case MESA_SHADER_CALLABLE:     return "callable";
    }
 
-   unreachable("Unknown shader stage.");
+   UNREACHABLE("Unknown shader stage.");
 }
 
 /**
- * Translate a gl_shader_stage to a shader stage abbreviation (VS, GS, FS)
+ * Translate a mesa_shader_stage to a shader stage abbreviation (VS, GS, FS)
  * for debug printouts and error messages.
  */
 const char *
@@ -110,7 +110,34 @@ _mesa_shader_stage_to_abbrev(unsigned stage)
    case MESA_SHADER_CALLABLE:     return "RCALL";
    }
 
-   unreachable("Unknown shader stage.");
+   UNREACHABLE("Unknown shader stage.");
+}
+
+/**
+ * Translate a gl_shader_stage to a shader stage file extension
+ * that's easily consumed by glslang.
+ */
+const char *
+_mesa_shader_stage_to_file_ext(unsigned stage)
+{
+   switch (stage) {
+   case MESA_SHADER_VERTEX:       return "vert";
+   case MESA_SHADER_FRAGMENT:     return "frag";
+   case MESA_SHADER_GEOMETRY:     return "geom";
+   case MESA_SHADER_COMPUTE:      return "comp";
+   case MESA_SHADER_TESS_CTRL:    return "tesc";
+   case MESA_SHADER_TESS_EVAL:    return "tese";
+   case MESA_SHADER_TASK:         return "task";
+   case MESA_SHADER_MESH:         return "mesh";
+   case MESA_SHADER_RAYGEN:       return "rgen";
+   case MESA_SHADER_ANY_HIT:      return "rahit";
+   case MESA_SHADER_CLOSEST_HIT:  return "rchit";
+   case MESA_SHADER_MISS:         return "rmiss";
+   case MESA_SHADER_INTERSECTION: return "rint";
+   case MESA_SHADER_CALLABLE:     return "rcall";
+   }
+
+   UNREACHABLE("Unknown shader stage.");
 }
 
 const char *
@@ -155,7 +182,7 @@ gl_vert_attrib_name(gl_vert_attrib attrib)
 }
 
 const char *
-gl_varying_slot_name_for_stage(gl_varying_slot slot, gl_shader_stage stage)
+gl_varying_slot_name_for_stage(gl_varying_slot slot, mesa_shader_stage stage)
 {
    if (stage != MESA_SHADER_FRAGMENT && slot == VARYING_SLOT_PRIMITIVE_SHADING_RATE)
       return "VARYING_SLOT_PRIMITIVE_SHADING_RATE";
@@ -328,16 +355,17 @@ gl_system_value_name(gl_system_value sysval)
      ENUM(SYSTEM_VALUE_INVOCATION_ID),
      ENUM(SYSTEM_VALUE_FRAG_COORD),
      ENUM(SYSTEM_VALUE_PIXEL_COORD),
+     ENUM(SYSTEM_VALUE_FRAG_COORD_Z),
+     ENUM(SYSTEM_VALUE_FRAG_COORD_W),
      ENUM(SYSTEM_VALUE_POINT_COORD),
      ENUM(SYSTEM_VALUE_LINE_COORD),
      ENUM(SYSTEM_VALUE_FRONT_FACE),
+     ENUM(SYSTEM_VALUE_FRONT_FACE_FSIGN),
      ENUM(SYSTEM_VALUE_SAMPLE_ID),
      ENUM(SYSTEM_VALUE_SAMPLE_POS),
      ENUM(SYSTEM_VALUE_SAMPLE_MASK_IN),
      ENUM(SYSTEM_VALUE_LAYER_ID),
      ENUM(SYSTEM_VALUE_HELPER_INVOCATION),
-     ENUM(SYSTEM_VALUE_COLOR0),
-     ENUM(SYSTEM_VALUE_COLOR1),
      ENUM(SYSTEM_VALUE_TESS_COORD),
      ENUM(SYSTEM_VALUE_VERTICES_IN),
      ENUM(SYSTEM_VALUE_PRIMITIVE_ID),
@@ -398,6 +426,11 @@ gl_system_value_name(gl_system_value sysval)
      ENUM(SYSTEM_VALUE_SM_COUNT_NV),
      ENUM(SYSTEM_VALUE_WARP_ID_NV),
      ENUM(SYSTEM_VALUE_SM_ID_NV),
+     ENUM(SYSTEM_VALUE_CORE_ID),
+     ENUM(SYSTEM_VALUE_CORE_COUNT_ARM),
+     ENUM(SYSTEM_VALUE_CORE_MAX_ID_ARM),
+     ENUM(SYSTEM_VALUE_WARP_ID_ARM),
+     ENUM(SYSTEM_VALUE_WARP_MAX_ID_ARM),
    };
    STATIC_ASSERT(ARRAY_SIZE(names) == SYSTEM_VALUE_MAX);
    return NAME(sysval);
@@ -433,6 +466,7 @@ gl_frag_result_name(gl_frag_result result)
       ENUM(FRAG_RESULT_DATA5),
       ENUM(FRAG_RESULT_DATA6),
       ENUM(FRAG_RESULT_DATA7),
+      ENUM(FRAG_RESULT_DUAL_SRC_BLEND),
    };
    STATIC_ASSERT(ARRAY_SIZE(names) == FRAG_RESULT_MAX);
    return NAME(result);
@@ -451,4 +485,20 @@ mesa_scope_name(mesa_scope scope)
       ENUM(SCOPE_DEVICE),
    };
    return NAME(scope);
+}
+
+int
+mesa_frag_result_get_color_index(gl_frag_result result)
+{
+   switch (result) {
+   case FRAG_RESULT_COLOR:
+      return 0;
+   case FRAG_RESULT_DUAL_SRC_BLEND:
+      return 1;
+   default:
+      if (result >= FRAG_RESULT_DATA0 && result <= FRAG_RESULT_DATA7)
+         return result - FRAG_RESULT_DATA0;
+
+      return -1;
+   }
 }

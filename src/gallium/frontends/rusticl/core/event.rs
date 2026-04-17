@@ -1,3 +1,6 @@
+// Copyright 2020 Red Hat.
+// SPDX-License-Identifier: MIT
+
 use crate::api::icd::*;
 use crate::api::types::*;
 use crate::core::context::*;
@@ -15,6 +18,7 @@ use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
+use std::sync::Weak;
 use std::time::Duration;
 
 // we assert that those are a continous range of numbers so we won't have to use HashMaps
@@ -23,7 +27,8 @@ static_assert!(CL_RUNNING == 1);
 static_assert!(CL_SUBMITTED == 2);
 static_assert!(CL_QUEUED == 3);
 
-pub type EventSig = Box<dyn FnOnce(&Arc<Queue>, &QueueContext) -> CLResult<()> + Send + Sync>;
+pub type EventSig =
+    Box<dyn FnOnce(&Context, &mut QueueContextWithState) -> CLResult<()> + Send + Sync>;
 
 pub enum EventTimes {
     Queued = CL_PROFILING_COMMAND_QUEUED as isize,
@@ -46,7 +51,7 @@ struct EventMutState {
 pub struct Event {
     pub base: CLObjectBase<CL_INVALID_EVENT>,
     pub context: Arc<Context>,
-    pub queue: Option<Arc<Queue>>,
+    pub queue: Option<Weak<Queue>>,
     pub cmd_type: cl_command_type,
     pub deps: Vec<Arc<Event>>,
     state: Mutex<EventMutState>,
@@ -64,8 +69,8 @@ impl Event {
     ) -> Arc<Event> {
         Arc::new(Self {
             base: CLObjectBase::new(RusticlTypes::Event),
-            context: queue.context.clone(),
-            queue: Some(queue.clone()),
+            context: Arc::clone(&queue.context),
+            queue: Some(Arc::downgrade(queue)),
             cmd_type: cmd_type,
             deps: deps,
             state: Mutex::new(EventMutState {
@@ -92,7 +97,7 @@ impl Event {
         })
     }
 
-    fn state(&self) -> MutexGuard<EventMutState> {
+    fn state(&self) -> MutexGuard<'_, EventMutState> {
         self.state.lock().unwrap()
     }
 
@@ -219,15 +224,14 @@ impl Event {
     // We always assume that work here simply submits stuff to the hardware even if it's just doing
     // sw emulation or nothing at all.
     // If anything requets waiting, we will update the status through fencing later.
-    pub fn call(&self, ctx: &QueueContext) -> cl_int {
+    pub fn call(&self, ctx: &mut QueueContextWithState) -> cl_int {
         let mut lock = self.state();
         let mut status = lock.status;
-        let queue = self.queue.as_ref().unwrap();
-        let profiling_enabled = queue.is_profiling_enabled();
+        let profiling_enabled = lock.time_queued != 0;
         if status == CL_QUEUED as cl_int {
             if profiling_enabled {
                 // We already have the lock so can't call set_time on the event
-                lock.time_submit = queue.device.screen().get_timestamp();
+                lock.time_submit = ctx.dev.screen().get_timestamp();
             }
             let mut query_start = None;
             let mut query_end = None;
@@ -237,17 +241,17 @@ impl Event {
                 |w| {
                     if profiling_enabled {
                         query_start =
-                            PipeQueryGen::<{ pipe_query_type::PIPE_QUERY_TIMESTAMP }>::new(ctx);
+                            PipeQueryGen::<{ pipe_query_type::PIPE_QUERY_TIMESTAMP }>::new(ctx.ctx);
                     }
 
-                    let res = w(queue, ctx).err().map_or(
+                    let res = w(&self.context, ctx).err().map_or(
                         // return the error if there is one
                         CL_SUBMITTED as cl_int,
                         |e| e,
                     );
                     if profiling_enabled {
                         query_end =
-                            PipeQueryGen::<{ pipe_query_type::PIPE_QUERY_TIMESTAMP }>::new(ctx);
+                            PipeQueryGen::<{ pipe_query_type::PIPE_QUERY_TIMESTAMP }>::new(ctx.ctx);
                     }
                     res
                 },
@@ -291,7 +295,9 @@ impl Event {
     pub fn deep_unflushed_queues(events: &[Arc<Event>]) -> HashSet<Arc<Queue>> {
         Event::deep_unflushed_deps(events)
             .iter()
-            .filter_map(|e| e.queue.clone())
+            .filter_map(|e| e.queue.as_ref())
+            // We don't have to do anything for destroyed queues as they already flush on drop.
+            .filter_map(Weak::upgrade)
             .collect()
     }
 }

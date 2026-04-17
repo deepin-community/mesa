@@ -59,7 +59,7 @@
 #include "util/u_math.h"
 
 #include <xf86drm.h>
-#include "asahi/lib/unstable_asahi_drm.h"
+#include "drm-uapi/asahi_drm.h"
 #include "drm-uapi/amdgpu_drm.h"
 #include "drm-uapi/i915_drm.h"
 #include "drm-uapi/v3d_drm.h"
@@ -76,6 +76,7 @@ static struct v3d_simulator_state {
 
         struct v3d_hw *v3d;
         int ver;
+        int rev;
 
         /* Size of the heap. */
         uint64_t mem_size;
@@ -122,6 +123,9 @@ struct v3d_simulator_file {
 
         /** For specific gpus, use their create ioctl. Otherwise use dumb bo. */
         enum gem_type gem_type;
+
+        /** The stride alignment required for raster textures. */
+        uint32_t raster_stride_align;
 };
 
 /** Wrapper for drm_v3d_bo tracking the simulator-specific state. */
@@ -331,8 +335,7 @@ v3d_simulator_get_spill(uint32_t spill_size)
         struct v3d_simulator_bo *sim_bo =
                 v3d_create_simulator_bo(bin_fd, spill_size);
 
-        util_dynarray_append(&sim_state.bin_oom, struct v3d_simulator_bo *,
-                             sim_bo);
+        util_dynarray_append(&sim_state.bin_oom, sim_bo);
 
         return sim_bo->block->ofs;
 }
@@ -568,6 +571,9 @@ v3d_simulator_create_bo_ioctl(int fd, struct drm_v3d_create_bo *args)
         {
                 union drm_amdgpu_gem_create create = { 0 };
                 create.in.bo_size = args->size;
+                create.in.domains = AMDGPU_GEM_DOMAIN_GTT;
+                create.in.domain_flags =
+                        AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED;
 
                 ret = drmIoctl(fd, DRM_IOCTL_AMDGPU_GEM_CREATE, &create);
 
@@ -731,8 +737,17 @@ v3d_rewrite_csd_job_wg_counts_from_indirect(int fd,
 	submit->cfg[0] = wg_counts[0] << V3D_CSD_CFG012_WG_COUNT_SHIFT;
 	submit->cfg[1] = wg_counts[1] << V3D_CSD_CFG012_WG_COUNT_SHIFT;
 	submit->cfg[2] = wg_counts[2] << V3D_CSD_CFG012_WG_COUNT_SHIFT;
-	submit->cfg[4] = DIV_ROUND_UP(indirect_csd->wg_size, 16) *
-			(wg_counts[0] * wg_counts[1] * wg_counts[2]) - 1;
+
+	uint32_t num_batches = DIV_ROUND_UP(indirect_csd->wg_size, 16) *
+	                       (wg_counts[0] * wg_counts[1] * wg_counts[2]);
+
+	/* V3D 7.1.6 and later don't subtract 1 from the number of batches */
+	if (sim_state.ver < 71 || (sim_state.ver == 71 && sim_state.rev < 6)) {
+		submit->cfg[4] = num_batches - 1;
+	} else {
+		submit->cfg[4] = num_batches;
+	}
+	assert(submit->cfg[4] != ~0);
 
 	for (int i = 0; i < 3; i++) {
 		/* 0xffffffff indicates that the uniform rewrite is not needed */
@@ -1149,6 +1164,13 @@ v3d_simulator_get_mem_free(void)
    return total_free;
 }
 
+uint32_t
+v3d_simulator_get_raster_stride_align(int fd)
+{
+        struct v3d_simulator_file *file = v3d_get_simulator_file_for_fd(fd);
+        return file->raster_stride_align;
+}
+
 static void
 v3d_simulator_init_global()
 {
@@ -1175,6 +1197,7 @@ v3d_simulator_init_global()
         v3d_hw_set_mem(sim_state.v3d, b->ofs, 0xd0, 4096);
 
         sim_state.ver = v3d_hw_get_version(sim_state.v3d);
+        sim_state.rev = v3d_hw_get_revision(sim_state.v3d);
 
         simple_mtx_unlock(&sim_state.mutex);
 
@@ -1183,7 +1206,7 @@ v3d_simulator_init_global()
                                         _mesa_hash_pointer,
                                         _mesa_key_pointer_equal);
 
-        util_dynarray_init(&sim_state.bin_oom, NULL);
+        sim_state.bin_oom = UTIL_DYNARRAY_INIT;
 
         v3d_X_simulator(init_regs)(sim_state.v3d);
         v3d_X_simulator(get_perfcnt_total)(&sim_state.perfcnt_total);
@@ -1205,6 +1228,12 @@ v3d_simulator_init(int fd)
                 sim_file->gem_type = GEM_ASAHI;
         else
                 sim_file->gem_type = GEM_DUMB;
+
+        if (sim_file->gem_type == GEM_AMDGPU)
+                sim_file->raster_stride_align = 256;
+        else
+                sim_file->raster_stride_align = 1;
+
         drmFreeVersion(version);
 
         sim_file->bo_map =

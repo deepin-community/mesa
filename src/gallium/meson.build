@@ -16,6 +16,12 @@ foreach d : [[with_gallium_r300 or with_gallium_radeonsi or with_gallium_r600, '
   endif
 endforeach
 
+if with_gallium_va
+  sym_config.set('va_driver_init', '__vaDriverInit_*_*;')
+else
+  sym_config.set('va_driver_init', '')
+endif
+
 inc_gallium_drivers = include_directories('drivers')
 inc_gallium_winsys = include_directories('winsys')
 inc_gallium_winsys_sw = include_directories('winsys/sw')
@@ -178,6 +184,18 @@ if with_gallium_lima
 else
   driver_lima = declare_dependency()
 endif
+if with_gallium_rocket
+  subdir('winsys/rocket/drm')
+  subdir('drivers/rocket')
+else
+  driver_rocket = declare_dependency()
+endif
+if with_gallium_ethosu
+  subdir('winsys/ethosu/drm')
+  subdir('drivers/ethosu')
+else
+  driver_ethosu = declare_dependency()
+endif
 if with_gallium_zink
   subdir('drivers/zink')
 else
@@ -187,15 +205,6 @@ if with_gallium_d3d12
   subdir('drivers/d3d12')
 else
   driver_d3d12 = declare_dependency()
-endif
-if with_gallium_clover or with_tests
-  # At the moment, clover and gallium/tests are the only two consumers
-  # for pipe-loader
-  subdir('targets/pipe-loader')
-endif
-if with_gallium_clover
-  subdir('frontends/clover')
-  subdir('targets/opencl')
 endif
 if with_gallium_rusticl
   subdir('frontends/rusticl')
@@ -212,30 +221,16 @@ if with_gallium_va
     subdir('targets/va')
   endif
 endif
-if with_gallium_vdpau
-  subdir('frontends/vdpau')
-  if not with_dri
-    subdir('targets/vdpau')
-  endif
+if with_gallium_mediafoundation
+  subdir('frontends/mediafoundation')
+  subdir('targets/mediafoundation')
 endif
 if with_dri
   subdir('frontends/dri')
   subdir('targets/dri')
 endif
-if with_osmesa
-  subdir('frontends/osmesa')
-  subdir('targets/osmesa')
-endif
-if with_gallium_xa
-  subdir('frontends/xa')
-  subdir('targets/xa')
-endif
 if with_platform_haiku
   subdir('frontends/hgl')
-endif
-if with_gallium_st_nine
-  subdir('frontends/nine')
-  subdir('targets/d3dadapter9')
 endif
 if with_gallium_st_d3d10umd
   subdir('frontends/d3d10umd')
@@ -252,9 +247,6 @@ if with_platform_windows
     subdir('targets/wgl')
     subdir('targets/libgl-gdi')
   endif
-endif
-if with_tests
-  subdir('tests')
 endif
 if with_swrast_vk
   subdir('frontends/lavapipe')

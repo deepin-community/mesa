@@ -25,7 +25,7 @@
 static inline unsigned
 src_get_fotid_mask(nir_src src)
 {
-   return src.ssa->parent_instr->pass_flags;
+   return nir_def_instr(src.ssa)->pass_flags;
 }
 
 static inline unsigned
@@ -68,11 +68,17 @@ update_fotid_intrinsic(nir_builder *b, nir_intrinsic_instr *instr, const radv_ni
    case nir_intrinsic_load_local_invocation_id: {
       if (b->shader->info.workgroup_size_variable)
          break;
-      /* This assumes linear subgroup dispatch. */
+
+      /* subgroup_invocation_id <-> local_id mapping is not strictly defined by
+       * the spec.  We assume linear dispatch, and with DERIVATIVE_GROUP_QUADS
+       * linear dispatch of quads.
+       */
       unsigned partial_size = 1;
       for (unsigned i = 0; i < 3; i++) {
          partial_size *= b->shader->info.workgroup_size[i];
-         if (partial_size == options->hw_subgroup_size)
+
+         const bool quad_x = i == 0 && b->shader->info.derivative_group == DERIVATIVE_GROUP_QUADS;
+         if (partial_size * (quad_x ? 2 : 1) == options->hw_subgroup_size)
             instr->instr.pass_flags = (uint8_t)BITFIELD_MASK(i + 1);
       }
       if (partial_size <= options->hw_subgroup_size)
@@ -80,6 +86,7 @@ update_fotid_intrinsic(nir_builder *b, nir_intrinsic_instr *instr, const radv_ni
       break;
    }
    case nir_intrinsic_load_local_invocation_index: {
+      assert(b->shader->info.derivative_group != DERIVATIVE_GROUP_QUADS);
       if (b->shader->info.workgroup_size_variable)
          break;
       unsigned workgroup_size =
@@ -138,7 +145,7 @@ constant_fold_scalar(nir_scalar s, unsigned invocation_id, nir_shader *shader, n
    memset(dest, 0, sizeof(*dest));
 
    if (nir_scalar_is_alu(s)) {
-      nir_alu_instr *alu = nir_instr_as_alu(s.def->parent_instr);
+      nir_alu_instr *alu = nir_def_as_alu(s.def);
       nir_const_value sources[NIR_ALU_MAX_INPUTS][NIR_MAX_VEC_COMPONENTS];
       const nir_op_info *op_info = &nir_op_infos[alu->op];
 
@@ -174,10 +181,10 @@ constant_fold_scalar(nir_scalar s, unsigned invocation_id, nir_shader *shader, n
          srcs[i] = sources[i];
       nir_const_value dests[NIR_MAX_VEC_COMPONENTS];
       if (op_info->output_size == 0) {
-         nir_eval_const_opcode(alu->op, dests, 1, bit_size, srcs, exec_mode);
+         nir_eval_const_opcode(alu->op, dests, NULL, 1, bit_size, srcs, exec_mode);
          *dest = dests[0];
       } else {
-         nir_eval_const_opcode(alu->op, dests, s.def->num_components, bit_size, srcs, exec_mode);
+         nir_eval_const_opcode(alu->op, dests, NULL, s.def->num_components, bit_size, srcs, exec_mode);
          *dest = dests[s.comp];
       }
       return true;
@@ -189,16 +196,32 @@ constant_fold_scalar(nir_scalar s, unsigned invocation_id, nir_shader *shader, n
          return true;
       }
       case nir_intrinsic_load_local_invocation_id: {
+         const unsigned size_x = shader->info.workgroup_size[0];
+         const unsigned size_y = shader->info.workgroup_size[1];
          unsigned local_ids[3];
-         local_ids[2] = invocation_id / (shader->info.workgroup_size[0] * shader->info.workgroup_size[1]);
-         unsigned xy = invocation_id % (shader->info.workgroup_size[0] * shader->info.workgroup_size[1]);
-         local_ids[1] = xy / shader->info.workgroup_size[0];
-         local_ids[0] = xy % shader->info.workgroup_size[0];
+
+         if (shader->info.derivative_group == DERIVATIVE_GROUP_QUADS) {
+            /* x = (invocation_id / 4 * 2 + invocation_id % 2) % block_width */
+            const unsigned quad_x = invocation_id / 4 * 2;
+            const unsigned quad_sub_x = invocation_id % 2;
+            local_ids[0] = (quad_x + quad_sub_x) % size_x;
+
+            /* y = (invocation_id / block_width / 2 * 2 + (invocation_id / 2) % 2) % block_height */
+            const unsigned quad_y = invocation_id / size_x / 2 * 2;
+            const unsigned quad_sub_y = (invocation_id / 2) % 2;
+            local_ids[1] = (quad_y + quad_sub_y) % size_y;
+         } else {
+            const unsigned xy = invocation_id % (size_x * size_y);
+            local_ids[0] = xy % size_x;
+            local_ids[1] = xy / size_x;
+         }
+
+         local_ids[2] = invocation_id / (size_x * size_y);
          *dest = nir_const_value_for_uint(local_ids[s.comp], s.def->bit_size);
          return true;
       }
       case nir_intrinsic_inverse_ballot: {
-         nir_def *src = nir_instr_as_intrinsic(s.def->parent_instr)->src[0].ssa;
+         nir_def *src = nir_def_as_intrinsic(s.def)->src[0].ssa;
          unsigned comp = invocation_id / src->bit_size;
          unsigned bit = invocation_id % src->bit_size;
          if (!constant_fold_scalar(nir_get_scalar(src, comp), invocation_id, shader, dest, depth + 1))
@@ -215,7 +238,7 @@ constant_fold_scalar(nir_scalar s, unsigned invocation_id, nir_shader *shader, n
       return true;
    }
 
-   unreachable("unhandled scalar type");
+   UNREACHABLE("unhandled scalar type");
    return false;
 }
 
@@ -414,7 +437,7 @@ opt_fotid_shuffle(nir_builder *b, nir_intrinsic_instr *instr, const radv_nir_opt
 {
    if (instr->intrinsic != nir_intrinsic_shuffle)
       return false;
-   if (!instr->src[1].ssa->parent_instr->pass_flags)
+   if (!nir_def_instr(instr->src[1].ssa)->pass_flags)
       return false;
 
    unsigned src_idx = 0;
@@ -506,8 +529,8 @@ opt_fotid_bool(nir_builder *b, nir_alu_instr *instr, const radv_nir_opt_tid_func
    }
 
    nir_def *ballot = nir_vec(b, ballot_comp, options->hw_ballot_num_comp);
-   nir_def *res = nir_inverse_ballot(b, 1, ballot);
-   res->parent_instr->pass_flags = 1;
+   nir_def *res = nir_inverse_ballot(b, ballot);
+   nir_def_instr(res)->pass_flags = 1;
 
    nir_def_replace(&instr->def, res);
    return true;
@@ -527,7 +550,7 @@ visit_instr(nir_builder *b, nir_instr *instr, void *params)
          /* revist shuffles that we skipped previously */
          bool progress = false;
          for (unsigned i = 1; i < 3; i++) {
-            nir_instr *src_instr = alu->src[i].src.ssa->parent_instr;
+            nir_instr *src_instr = nir_def_instr(alu->src[i].src.ssa);
             if (src_instr->type == nir_instr_type_intrinsic) {
                nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(src_instr);
                progress |= opt_fotid_shuffle(b, intrin, options, true);

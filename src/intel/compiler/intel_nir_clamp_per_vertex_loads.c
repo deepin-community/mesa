@@ -30,6 +30,7 @@
  */
 
 #include "intel_nir.h"
+#include "intel_shader_enums.h"
 #include "compiler/nir/nir_builder.h"
 #include "compiler/nir/nir_deref.h"
 
@@ -40,7 +41,7 @@ clamp_per_vertex_loads_instr(nir_builder *b, nir_intrinsic_instr *intrin,
    if (intrin->intrinsic != nir_intrinsic_load_deref)
       return false;
 
-   nir_deref_instr *deref = nir_instr_as_deref(intrin->src[0].ssa->parent_instr);
+   nir_deref_instr *deref = nir_def_as_deref(intrin->src[0].ssa);
    nir_variable *var = nir_deref_instr_get_variable(deref);
    if (var == NULL || (var->data.mode & nir_var_shader_in) == 0)
       return false;
@@ -81,26 +82,62 @@ intel_nir_clamp_per_vertex_loads(nir_shader *shader)
    return ret;
 }
 
+struct lower_patch_vertices_state {
+   unsigned input_vertices;
+};
+
 static bool
-lower_patch_vertices_instr(nir_builder *b, nir_intrinsic_instr *intrin,
-                           void *cb_data)
+lower_patch_vertices_in_instr(nir_builder *b, nir_intrinsic_instr *intrin,
+                              void *cb_data)
 {
    if (intrin->intrinsic != nir_intrinsic_load_patch_vertices_in)
       return false;
 
-   unsigned *input_vertices = cb_data;
+   struct lower_patch_vertices_state *state = cb_data;
 
    b->cursor = nir_before_instr(&intrin->instr);
 
-   nir_def_rewrite_uses(&intrin->def, nir_imm_int(b, *input_vertices));
+   nir_def *val =
+      state->input_vertices ?
+      nir_imm_int(b, state->input_vertices) :
+      nir_iadd_imm(b, intel_nir_tess_field(b, INPUT_VERTICES), 1);
+
+   nir_def_replace(&intrin->def, val);
 
    return true;
 }
 
 bool
-intel_nir_lower_patch_vertices_in(nir_shader *shader, unsigned input_vertices)
+intel_nir_lower_patch_vertices_in(nir_shader *shader,
+                                  unsigned input_vertices)
 {
-   return nir_shader_intrinsics_pass(shader, lower_patch_vertices_instr,
-                                       nir_metadata_control_flow,
-                                       &input_vertices);
+   assert(shader->info.stage == MESA_SHADER_TESS_CTRL);
+   struct lower_patch_vertices_state state = {
+      .input_vertices = input_vertices,
+   };
+   return nir_shader_intrinsics_pass(shader, lower_patch_vertices_in_instr,
+                                     nir_metadata_none, &state);
+}
+
+static bool
+lower_patch_vertices_tes_instr(nir_builder *b, nir_intrinsic_instr *intrin,
+                               void *cb_data)
+{
+   if (intrin->intrinsic != nir_intrinsic_load_patch_vertices_in)
+      return false;
+
+   b->cursor = nir_before_instr(&intrin->instr);
+
+   nir_def *field = intel_nir_tess_field(b, OUTPUT_VERTICES);
+
+   nir_def_replace(&intrin->def, nir_iadd_imm(b, field, 1));
+   return true;
+}
+
+bool
+intel_nir_lower_patch_vertices_tes(nir_shader *shader)
+{
+   assert(shader->info.stage == MESA_SHADER_TESS_EVAL);
+   return nir_shader_intrinsics_pass(shader, lower_patch_vertices_tes_instr,
+                                     nir_metadata_none, NULL);
 }

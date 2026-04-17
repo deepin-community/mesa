@@ -25,20 +25,29 @@
         *zink_files_list
       when: manual
 
-.zink-lvp-rules:
+.zink-lavapipe-rules:
   stage: layered-backends
   rules:
     - !reference [.test, rules]
     - !reference [.lavapipe-rules, rules]
     - !reference [.zink-common-rules, rules]
 
-.zink-venus-lvp-rules:
+.zink-venus-lavapipe-rules:
   stage: layered-backends
   rules:
     - !reference [.test, rules]
     - !reference [.lavapipe-rules, rules]
     - !reference [.venus-rules, rules]
     - !reference [.zink-common-rules, rules]
+
+.zink-venus-lavapipe-manual-rules:
+  stage: layered-backends-nightly
+  extends: .no-auto-retry
+  rules:
+    - !reference [.test, rules]
+    - !reference [.lavapipe-manual-rules, rules]
+    - !reference [.venus-manual-rules, rules]
+    - !reference [.zink-common-manual-rules, rules]
 
 .zink-anv-rules:
   stage: layered-backends
@@ -48,7 +57,7 @@
     - !reference [.zink-common-rules, rules]
 
 .zink-anv-manual-rules:
-  stage: layered-backends-postmerge
+  stage: layered-backends-nightly
   extends: .no-auto-retry
   rules:
     - !reference [.test, rules]
@@ -71,7 +80,7 @@
     - !reference [.zink-common-rules, rules]
 
 .zink-nvk-manual-rules:
-  stage: layered-backends-postmerge
+  stage: layered-backends-nightly
   extends: .no-auto-retry
   rules:
     - !reference [.test, rules]
@@ -88,38 +97,57 @@
     ZINK_DEBUG: optimal_keys
 
 .zink-turnip-collabora-manual-rules:
-  stage: layered-backends-postmerge
+  stage: layered-backends-nightly
   extends: .no-auto-retry
   rules:
     - !reference [.test, rules]
     - !reference [.collabora-turnip-manual-rules, rules]
     - !reference [.zink-common-manual-rules, rules]
 
+.zink-turnip-valve-rules:
+  stage: layered-backends
+  rules:
+    - !reference [.test, rules]
+    - !reference [.valve-turnip-rules, rules]
+    - !reference [.zink-common-rules, rules]
+
 .zink-turnip-valve-manual-rules:
-  stage: layered-backends-postmerge
+  stage: layered-backends-nightly
   extends: .no-auto-retry
   rules:
     - !reference [.test, rules]
-    - !reference [.valve-freedreno-turnip-manual-rules, rules]
+    - !reference [.valve-turnip-manual-rules, rules]
     - !reference [.zink-common-manual-rules, rules]
 
-.zink-radv-rules:
+.zink-radv-collabora-rules:
+  stage: layered-backends
+  rules:
+    - !reference [.test, rules]
+    - !reference [.radv-collabora-rules, rules]
+    - !reference [.zink-common-rules, rules]
+
+.zink-radv-collabora-manual-rules:
+  stage: layered-backends-nightly
+  extends: .no-auto-retry
+  rules:
+    - !reference [.test, rules]
+    - !reference [.radv-collabora-manual-rules, rules]
+    - !reference [.zink-common-manual-rules, rules]
+
+.zink-radv-valve-rules:
   stage: layered-backends
   rules:
     - !reference [.test, rules]
     - !reference [.radv-valve-rules, rules]
     - !reference [.zink-common-rules, rules]
 
-.zink-radv-manual-rules:
-  stage: layered-backends-postmerge
+.zink-radv-valve-manual-rules:
+  stage: layered-backends-nightly
   extends: .no-auto-retry
   rules:
     - !reference [.test, rules]
     - !reference [.radv-valve-manual-rules, rules]
     - !reference [.zink-common-manual-rules, rules]
-    - changes:
-        - .gitlab-ci/container/build-piglit.sh
-      when: manual
 
 .zink-test:
   timeout: 30m
@@ -132,34 +160,29 @@
   extends:
     - .zink-test
   variables:
-    # The libX11 in the debian we use doesn't XInitThreads() by default (need
-    # 1.8.1 for that), and eglretrace's waffle GLX path doesn't call it either,
-    # which ends up causing trouble with kopper's X usage.  Use gbm for our
-    # trace replay, instead.
-    # https://gitlab.freedesktop.org/mesa/mesa/-/issues/6753
-    HWCI_START_XORG: ""
-    WAFFLE_PLATFORM: gbm
-    PIGLIT_PLATFORM: gbm
+    HWCI_TEST_SCRIPT: "/install/piglit/piglit-traces.sh"
 
-.zink-lvp-test:
+.zink-lavapipe-test:
   extends:
-    - .zink-lvp-rules
+    - .zink-lavapipe-rules
     - .zink-test
+  tags:
+    - $FDO_RUNNER_JOB_PRIORITY_TAG_X86_64
   variables:
     LIBGL_ALWAYS_SOFTWARE: "true"
     LVP_POISON_MEMORY: "1"
-    GPU_VERSION: zink-lvp
+    GPU_VERSION: zink-lavapipe
     # Fix non-conformant llvmpipe filter defaults
     GALLIVM_PERF: "no_quad_lod"
 
-.zink-venus-lvp-test:
+.zink-venus-lavapipe-test:
   extends:
-    - .zink-venus-lvp-rules
+    - .zink-venus-lavapipe-rules
     - .zink-test
   variables:
     LIBGL_ALWAYS_SOFTWARE: "true"
     LVP_POISON_MEMORY: "1"
-    GPU_VERSION: zink-venus-lvp
+    GPU_VERSION: zink-venus-lavapipe
     # Fix non-conformant llvmpipe filter defaults
     GALLIVM_PERF: "no_quad_lod"
     VK_DRIVER: virtio
@@ -167,31 +190,54 @@
     CROSVM_GALLIUM_DRIVER: "llvmpipe"
     CROSVM_VK_DRIVER: "lvp"
     CROSVM_GPU_ARGS: "vulkan=true,gles=false,backend=virglrenderer,egl=true,surfaceless=true,fixed-blob-mapping=false"
+  tags:
+    - $FDO_RUNNER_JOB_PRIORITY_TAG_X86_64_KVM
 
 .zink-anv-adl-test:
   extends:
-    - .lava-acer-cbv514-1h-34uz-brya:x86_64
+    - .lava-x86_64-test-gl
     - .anv-test
+    - .lava-acer-cbv514-1h-34uz-brya:x86_64
     - .zink-anv-rules
     - .zink-test
   variables:
-    VK_DRIVER: intel
+    GPU_VERSION: zink-anv-adl
+
+.zink-anv-adl-trace-test:
+  extends:
+    - .lava-x86_64-piglit-traces
+    - .anv-test
+    - .lava-acer-n20q11-r856ltn-p1s2-nissa:x86_64
+    - .zink-anv-rules
+    - .zink-trace-test
+  variables:
     GPU_VERSION: zink-anv-adl
 
 .zink-anv-tgl-test:
   extends:
-    - .lava-acer-cp514-2h-1160g7-volteer:x86_64
+    - .lava-x86_64-test-gl
     - .anv-test
+    - .lava-acer-cp514-2h-1160g7-volteer:x86_64
     - .zink-anv-rules
     - .zink-test
   variables:
-    VK_DRIVER: intel
+    GPU_VERSION: zink-anv-tgl
+
+.zink-anv-tgl-trace-test:
+  extends:
+    - .lava-x86_64-piglit-traces
+    - .anv-test
+    - .lava-acer-cp514-2h-1130g7-volteer:x86_64
+    - .zink-anv-rules
+    - .zink-trace-test
+  variables:
     GPU_VERSION: zink-anv-tgl
 
 .zink-nvk-test-valve:
   extends:
-    - .b2c-x86_64-test-gl
+    - .ci-tron-x86_64-test-gl-manual
     - .nvk-vkcts
+    - .test-piglit
     - .zink-test
   variables:
     DEQP_SUITE: zink-nvk
@@ -200,26 +246,24 @@
 
 .tu-zink-test-valve:
   extends:
+    - .ci-tron-arm64-test-gl
     - .zink-test
-    - .b2c-arm64-test-gl
   variables:
     VK_DRIVER: freedreno
-    HWCI_TEST_SCRIPT: ./install/deqp-runner.sh
     # Disable reporting, since DUTs don't have internet access
     FLAKES_CHANNEL: ""
 
 .radv-zink-test-valve:
   timeout: 30m
   extends:
+    - .ci-tron-test-amdgpu
+    - .ci-tron-x86_64-test-gl
     - .zink-test
-    - .test-radv
-    - .b2c-x86_64-test-gl
+    - .test-piglit
+    - .ci-tron-test-radv
   variables:
+    DRIVER_NAME: zink-radv
     DEQP_SUITE: zink-radv
-    HWCI_TEST_SCRIPT: ./install/deqp-runner.sh
-    B2C_KERNEL_URL: https://fs.mupuf.org/linux-6.6-b2c-radv-ci # 6.6
-    B2C_TIMEOUT_OVERALL_MINUTES: 20
-
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 20
     # Disable reporting, since DUTs don't have internet access
     FLAKES_CHANNEL: ""
-

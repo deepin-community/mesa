@@ -24,6 +24,7 @@
 
 struct panvk_priv_bo;
 struct panvk_sysvals;
+struct panvk_descriptor_pool;
 struct panvk_descriptor_set_layout;
 
 struct panvk_opaque_desc {
@@ -40,10 +41,14 @@ struct panvk_ssbo_addr {
 
 struct panvk_descriptor_set {
    struct vk_object_base base;
+   struct panvk_descriptor_pool *pool;
    const struct panvk_descriptor_set_layout *layout;
    struct {
       uint64_t dev;
       void *host;
+
+      /* Dirty range, or SIZE_MAX, 0 for clean */
+      size_t dirty_min, dirty_max;
    } descs;
 
    struct {
@@ -61,6 +66,8 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_descriptor_set, base, VkDescriptorSet,
 struct panvk_descriptor_pool {
    struct vk_object_base base;
    struct panvk_priv_bo *desc_bo;
+   /* Set if the pool was created with VK_DESCRIPTOR_POOL_CREATE_HOST_ONLY_BIT_EXT. */
+   uintptr_t host_only_mem;
    struct util_vma_heap desc_heap;
 
    /* Initialize to ones */
@@ -81,5 +88,7 @@ void panvk_per_arch(descriptor_set_write_template)(
    struct panvk_descriptor_set *set,
    const struct vk_descriptor_update_template *template, const void *data,
    bool write_immutable_samplers);
+
+void panvk_per_arch(descriptor_set_flush)(struct panvk_descriptor_set *set);
 
 #endif /* PANVK_VX_DESCRIPTOR_SET_H */

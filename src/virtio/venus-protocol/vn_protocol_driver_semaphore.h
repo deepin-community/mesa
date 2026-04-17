@@ -84,13 +84,13 @@ vn_sizeof_VkSemaphoreCreateInfo_pnext(const void *val)
         case VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO:
             size += vn_sizeof_simple_pointer(pnext);
             size += vn_sizeof_VkStructureType(&pnext->sType);
-            size += vn_sizeof_VkSemaphoreCreateInfo_pnext(pnext->pNext);
+            size += vn_sizeof_VkSemaphoreCreateInfo_pnext(((const VkExportSemaphoreCreateInfo *)pnext)->pNext);
             size += vn_sizeof_VkExportSemaphoreCreateInfo_self((const VkExportSemaphoreCreateInfo *)pnext);
             return size;
         case VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO:
             size += vn_sizeof_simple_pointer(pnext);
             size += vn_sizeof_VkStructureType(&pnext->sType);
-            size += vn_sizeof_VkSemaphoreCreateInfo_pnext(pnext->pNext);
+            size += vn_sizeof_VkSemaphoreCreateInfo_pnext(((const VkSemaphoreTypeCreateInfo *)pnext)->pNext);
             size += vn_sizeof_VkSemaphoreTypeCreateInfo_self((const VkSemaphoreTypeCreateInfo *)pnext);
             return size;
         default:
@@ -134,13 +134,13 @@ vn_encode_VkSemaphoreCreateInfo_pnext(struct vn_cs_encoder *enc, const void *val
         case VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO:
             vn_encode_simple_pointer(enc, pnext);
             vn_encode_VkStructureType(enc, &pnext->sType);
-            vn_encode_VkSemaphoreCreateInfo_pnext(enc, pnext->pNext);
+            vn_encode_VkSemaphoreCreateInfo_pnext(enc, ((const VkExportSemaphoreCreateInfo *)pnext)->pNext);
             vn_encode_VkExportSemaphoreCreateInfo_self(enc, (const VkExportSemaphoreCreateInfo *)pnext);
             return;
         case VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO:
             vn_encode_simple_pointer(enc, pnext);
             vn_encode_VkStructureType(enc, &pnext->sType);
-            vn_encode_VkSemaphoreCreateInfo_pnext(enc, pnext->pNext);
+            vn_encode_VkSemaphoreCreateInfo_pnext(enc, ((const VkSemaphoreTypeCreateInfo *)pnext)->pNext);
             vn_encode_VkSemaphoreTypeCreateInfo_self(enc, (const VkSemaphoreTypeCreateInfo *)pnext);
             return;
         default:
@@ -914,19 +914,6 @@ static inline void vn_async_vkCreateSemaphore(struct vn_ring *vn_ring, VkDevice 
     vn_submit_vkCreateSemaphore(vn_ring, 0, device, pCreateInfo, pAllocator, pSemaphore, &submit);
 }
 
-static inline void vn_call_vkDestroySemaphore(struct vn_ring *vn_ring, VkDevice device, VkSemaphore semaphore, const VkAllocationCallbacks* pAllocator)
-{
-    VN_TRACE_FUNC();
-
-    struct vn_ring_submit_command submit;
-    vn_submit_vkDestroySemaphore(vn_ring, VK_COMMAND_GENERATE_REPLY_BIT_EXT, device, semaphore, pAllocator, &submit);
-    struct vn_cs_decoder *dec = vn_ring_get_command_reply(vn_ring, &submit);
-    if (dec) {
-        vn_decode_vkDestroySemaphore_reply(dec, device, semaphore, pAllocator);
-        vn_ring_free_command_reply(vn_ring, &submit);
-    }
-}
-
 static inline void vn_async_vkDestroySemaphore(struct vn_ring *vn_ring, VkDevice device, VkSemaphore semaphore, const VkAllocationCallbacks* pAllocator)
 {
     struct vn_ring_submit_command submit;
@@ -999,36 +986,10 @@ static inline void vn_async_vkSignalSemaphore(struct vn_ring *vn_ring, VkDevice 
     vn_submit_vkSignalSemaphore(vn_ring, 0, device, pSignalInfo, &submit);
 }
 
-static inline void vn_call_vkWaitSemaphoreResourceMESA(struct vn_ring *vn_ring, VkDevice device, VkSemaphore semaphore)
-{
-    VN_TRACE_FUNC();
-
-    struct vn_ring_submit_command submit;
-    vn_submit_vkWaitSemaphoreResourceMESA(vn_ring, VK_COMMAND_GENERATE_REPLY_BIT_EXT, device, semaphore, &submit);
-    struct vn_cs_decoder *dec = vn_ring_get_command_reply(vn_ring, &submit);
-    if (dec) {
-        vn_decode_vkWaitSemaphoreResourceMESA_reply(dec, device, semaphore);
-        vn_ring_free_command_reply(vn_ring, &submit);
-    }
-}
-
 static inline void vn_async_vkWaitSemaphoreResourceMESA(struct vn_ring *vn_ring, VkDevice device, VkSemaphore semaphore)
 {
     struct vn_ring_submit_command submit;
     vn_submit_vkWaitSemaphoreResourceMESA(vn_ring, 0, device, semaphore, &submit);
-}
-
-static inline void vn_call_vkImportSemaphoreResourceMESA(struct vn_ring *vn_ring, VkDevice device, const VkImportSemaphoreResourceInfoMESA* pImportSemaphoreResourceInfo)
-{
-    VN_TRACE_FUNC();
-
-    struct vn_ring_submit_command submit;
-    vn_submit_vkImportSemaphoreResourceMESA(vn_ring, VK_COMMAND_GENERATE_REPLY_BIT_EXT, device, pImportSemaphoreResourceInfo, &submit);
-    struct vn_cs_decoder *dec = vn_ring_get_command_reply(vn_ring, &submit);
-    if (dec) {
-        vn_decode_vkImportSemaphoreResourceMESA_reply(dec, device, pImportSemaphoreResourceInfo);
-        vn_ring_free_command_reply(vn_ring, &submit);
-    }
 }
 
 static inline void vn_async_vkImportSemaphoreResourceMESA(struct vn_ring *vn_ring, VkDevice device, const VkImportSemaphoreResourceInfoMESA* pImportSemaphoreResourceInfo)

@@ -369,8 +369,8 @@ struct pvr_winsys_ops {
 
    VkResult (*buffer_get_fd)(struct pvr_winsys_bo *bo, int *const fd_out);
 
-   VkResult (*buffer_map)(struct pvr_winsys_bo *bo);
-   void (*buffer_unmap)(struct pvr_winsys_bo *bo);
+   VkResult (*buffer_map)(struct pvr_winsys_bo *bo, void *addr);
+   VkResult (*buffer_unmap)(struct pvr_winsys_bo *bo, bool reserve);
 
    VkResult (*heap_alloc)(struct pvr_winsys_heap *heap,
                           uint64_t size,
@@ -407,6 +407,7 @@ struct pvr_winsys_ops {
    VkResult (*render_ctx_create)(
       struct pvr_winsys *ws,
       struct pvr_winsys_render_ctx_create_info *create_info,
+      const struct pvr_device_info *dev_info,
       struct pvr_winsys_render_ctx **const ctx_out);
    void (*render_ctx_destroy)(struct pvr_winsys_render_ctx *ctx);
    VkResult (*render_submit)(
@@ -419,6 +420,7 @@ struct pvr_winsys_ops {
    VkResult (*compute_ctx_create)(
       struct pvr_winsys *ws,
       const struct pvr_winsys_compute_ctx_create_info *create_info,
+      const struct pvr_device_info *dev_info,
       struct pvr_winsys_compute_ctx **const ctx_out);
    void (*compute_ctx_destroy)(struct pvr_winsys_compute_ctx *ctx);
    VkResult (*compute_submit)(

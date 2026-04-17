@@ -25,6 +25,7 @@
 #include "v3d_compiler.h"
 #include "compiler/nir/nir_schedule.h"
 #include "compiler/nir/nir_builder.h"
+#include "compiler/nir/nir_format_convert.h"
 #include "util/perf/cpu_trace.h"
 
 int
@@ -304,7 +305,7 @@ vir_channels_written(struct qinst *inst)
                         return 0xc;
                 }
         }
-        unreachable("Bad pack field");
+        UNREACHABLE("Bad pack field");
 }
 #endif
 
@@ -601,9 +602,8 @@ lower_tex_packing_cb(const nir_tex_instr *tex, const void *data)
    int sampler_index = nir_tex_instr_need_sampler(tex) ?
       tex->sampler_index : tex->backend_flags;
 
-   assert(sampler_index < c->key->num_samplers_used);
-   return c->key->sampler[sampler_index].return_size == 16 ?
-      nir_lower_tex_packing_16 : nir_lower_tex_packing_none;
+   return (c->key->sampler_is_32b & (1 << sampler_index)) ?
+      nir_lower_tex_packing_none : nir_lower_tex_packing_16;
 }
 
 static bool
@@ -631,10 +631,10 @@ v3d_nir_lower_null_pointers_cb(nir_builder *b,
                 return false;
 
         /* Otherwise, see if it comes from a bcsel including a null pointer */
-        if (src->ssa->parent_instr->type != nir_instr_type_alu)
+        if (!nir_def_is_alu(src->ssa))
                 return false;
 
-        nir_alu_instr *alu = nir_instr_as_alu(src->ssa->parent_instr);
+        nir_alu_instr *alu = nir_def_as_alu(src->ssa);
         if (alu->op != nir_op_bcsel)
                 return false;
 
@@ -740,19 +740,8 @@ v3d_lower_nir(struct v3d_compile *c)
 
                 .lower_rect = false, /* XXX: Use this on V3D 3.x */
                 .lower_txp = ~0,
-                /* Apply swizzles to all samplers. */
-                .swizzle_result = ~0,
                 .lower_invalid_implicit_lod = true,
         };
-
-        /* Lower the format swizzle and (for 32-bit returns)
-         * ARB_texture_swizzle-style swizzle.
-         */
-        assert(c->key->num_tex_used <= ARRAY_SIZE(c->key->tex));
-        for (int i = 0; i < c->key->num_tex_used; i++) {
-                for (int j = 0; j < 4; j++)
-                        tex_options.swizzles[i][j] = c->key->tex[i].swizzle[j];
-        }
 
         tex_options.lower_tex_packing_cb = lower_tex_packing_cb;
         tex_options.lower_tex_packing_data = c;
@@ -838,7 +827,7 @@ v3d_vs_set_prog_data(struct v3d_compile *c,
                 prog_data->vpm_input_size++;
 
         prog_data->writes_psiz =
-            c->s->info.outputs_written & (1 << VARYING_SLOT_PSIZ);
+            c->s->info.outputs_written & VARYING_BIT_PSIZ;
 
         /* Input/output segment size are in sectors (8 rows of 32 bits per
          * channel).
@@ -917,7 +906,7 @@ v3d_gs_set_prog_data(struct v3d_compile *c,
         prog_data->num_invocations = c->s->info.gs.invocations;
 
         prog_data->writes_psiz =
-            c->s->info.outputs_written & (1 << VARYING_SLOT_PSIZ);
+            c->s->info.outputs_written & VARYING_BIT_PSIZ;
 }
 
 static void
@@ -969,7 +958,7 @@ v3d_cs_set_prog_data(struct v3d_compile *c,
         prog_data->local_size[1] = c->s->info.workgroup_size[1];
         prog_data->local_size[2] = c->s->info.workgroup_size[2];
 
-        prog_data->has_subgroups = c->has_subgroups;
+        prog_data->can_use_supergroups = c->can_use_supergroups;
 }
 
 static void
@@ -1004,7 +993,7 @@ v3d_set_prog_data(struct v3d_compile *c,
                 v3d_cs_set_prog_data(c, (struct v3d_compute_prog_data *)prog_data);
                 break;
         default:
-                unreachable("unsupported shader stage");
+                UNREACHABLE("unsupported shader stage");
         }
 }
 
@@ -1030,7 +1019,7 @@ v3d_nir_lower_vs_early(struct v3d_compile *c)
         /* Split our I/O vars and dead code eliminate the unused
          * components.
          */
-        NIR_PASS(_, c->s, nir_lower_io_to_scalar_early,
+        NIR_PASS(_, c->s, nir_lower_io_vars_to_scalar,
                  nir_var_shader_in | nir_var_shader_out);
         uint64_t used_outputs[4] = {0};
         for (int i = 0; i < c->vs_key->num_used_outputs; i++) {
@@ -1046,11 +1035,20 @@ v3d_nir_lower_vs_early(struct v3d_compile *c)
 
         /* This must go before nir_lower_io */
         if (c->vs_key->per_vertex_point_size)
-                NIR_PASS(_, c->s, nir_lower_point_size, 1.0f, 0.0f);
+                NIR_PASS(_, c->s, nir_lower_point_size, 1.0f, 0.0f, nir_type_invalid);
 
         NIR_PASS(_, c->s, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
                  type_size_vec4,
                  (nir_lower_io_options)0);
+        c->s->info.disable_output_offset_src_constant_folding = true;
+
+        /* For geometry stages using the same segment for inputs and outputs
+         * we need to read all inputs before writing any output. If we switch
+         * to separate segments in the future this may not longer be strictly
+         * required.
+         */
+        NIR_PASS(_, c->s, nir_move_output_stores_to_end);
+
         /* clean up nir_lower_io's deref_var remains and do a constant folding pass
          * on the code it generated.
          */
@@ -1064,7 +1062,7 @@ v3d_nir_lower_gs_early(struct v3d_compile *c)
         /* Split our I/O vars and dead code eliminate the unused
          * components.
          */
-        NIR_PASS(_, c->s, nir_lower_io_to_scalar_early,
+        NIR_PASS(_, c->s, nir_lower_io_vars_to_scalar,
                  nir_var_shader_in | nir_var_shader_out);
         uint64_t used_outputs[4] = {0};
         for (int i = 0; i < c->gs_key->num_used_outputs; i++) {
@@ -1080,11 +1078,13 @@ v3d_nir_lower_gs_early(struct v3d_compile *c)
 
         /* This must go before nir_lower_io */
         if (c->gs_key->per_vertex_point_size)
-                NIR_PASS(_, c->s, nir_lower_point_size, 1.0f, 0.0f);
+                NIR_PASS(_, c->s, nir_lower_point_size, 1.0f, 0.0f, nir_type_invalid);
 
         NIR_PASS(_, c->s, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
                  type_size_vec4,
                  (nir_lower_io_options)0);
+        c->s->info.disable_output_offset_src_constant_folding = true;
+
         /* clean up nir_lower_io's deref_var remains and do a constant folding pass
          * on the code it generated.
          */
@@ -1092,92 +1092,173 @@ v3d_nir_lower_gs_early(struct v3d_compile *c)
         NIR_PASS(_, c->s, nir_opt_constant_folding);
 }
 
-static void
-v3d_fixup_fs_output_types(struct v3d_compile *c)
+static const unsigned bits_16[] = {16, 16, 16, 16};
+
+static nir_def *
+v3d_nir_float_to_snorm_16(nir_builder *b, nir_def *a, bool sw)
 {
-        nir_foreach_shader_out_variable(var, c->s) {
-                uint32_t mask = 0;
+        if (sw)
+               return nir_format_float_to_snorm(b, a, bits_16);
 
-                switch (var->data.location) {
-                case FRAG_RESULT_COLOR:
-                        mask = ~0;
-                        break;
-                case FRAG_RESULT_DATA0:
-                case FRAG_RESULT_DATA1:
-                case FRAG_RESULT_DATA2:
-                case FRAG_RESULT_DATA3:
-                        mask = 1 << (var->data.location - FRAG_RESULT_DATA0);
-                        break;
-                }
+        nir_def *out[4];
+        for (unsigned i = 0; i < a->num_components; i++)
+                out[i] = nir_f2snorm_16_v3d(b, nir_channel(b, a, i));
 
-                if (c->fs_key->int_color_rb & mask) {
-                        var->type =
-                                glsl_vector_type(GLSL_TYPE_INT,
-                                                 glsl_get_components(var->type));
-                } else if (c->fs_key->uint_color_rb & mask) {
-                        var->type =
-                                glsl_vector_type(GLSL_TYPE_UINT,
-                                                 glsl_get_components(var->type));
-                }
+        return nir_vec(b, out, a->num_components);
+}
+
+static nir_def *
+v3d_nir_float_to_unorm_16(nir_builder *b, nir_def *a, bool sw)
+{
+        if (sw)
+               return nir_format_float_to_unorm(b, a, bits_16);
+
+        nir_def *out[4];
+        for (unsigned i = 0; i < a->num_components; i++)
+                out[i] = nir_f2unorm_16_v3d(b, nir_channel(b, a, i));
+
+        return nir_vec(b, out, a->num_components);
+}
+
+static nir_def *
+v3d_nir_unorm_to_float_16(nir_builder *b, nir_def *a, bool sw)
+{
+        if (sw)
+                return nir_format_unorm_to_float(b, a, bits_16);
+
+        nir_def *out[4];
+        for (unsigned i = 0; i < a->num_components; i++)
+                out[i] = nir_unorm2f_16_v3d(b, nir_channel(b, a, i));
+
+        return nir_vec(b, out, a->num_components);
+}
+
+static nir_def *
+v3d_nir_snorm_to_float_16(nir_builder *b, nir_def *a, bool sw)
+{
+        if (sw)
+                return nir_format_snorm_to_float(b, a, bits_16);
+
+        nir_def *out[4];
+        for (unsigned i = 0; i < a->num_components; i++)
+                out[i] = nir_snorm2f_16_v3d(b, nir_channel(b, a, i));
+
+        return nir_vec(b, out, a->num_components);
+}
+
+static bool
+lower_16bit_norm(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+        if (intr->intrinsic != nir_intrinsic_load_output &&
+            intr->intrinsic != nir_intrinsic_store_output)
+                return false;
+
+        nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+        if (sem.location < FRAG_RESULT_DATA0)
+                return false;
+
+        struct v3d_compile *c = data;
+
+        unsigned rt = sem.location - FRAG_RESULT_DATA0;
+        bool norm = c->fs_key->norm_16 & (1 << rt);
+
+        if (!norm)
+                return false;
+
+        /* We do not have specific instructions for snorm packing on older
+         * hardware.
+         */
+        bool needs_sw = c->devinfo->ver < 71;
+        bool norm_signed = c->fs_key->snorm & (1 << rt);
+
+        bool is_store = intr->intrinsic == nir_intrinsic_store_output;
+
+        nir_def *dst;
+        if (is_store) {
+                b->cursor = nir_before_instr(&intr->instr);
+                nir_def *src = intr->src[0].ssa;
+                if (norm_signed)
+                        dst = v3d_nir_float_to_snorm_16(b, src, needs_sw);
+                else
+                        dst = v3d_nir_float_to_unorm_16(b, src, needs_sw);
+
+                nir_src_rewrite(&intr->src[0], dst);
+        } else {
+                b->cursor = nir_after_instr(&intr->instr);
+                if (norm_signed)
+                        dst = v3d_nir_snorm_to_float_16(b, &intr->def, needs_sw);
+                else
+                        dst = v3d_nir_unorm_to_float_16(b, &intr->def, needs_sw);
+
+                nir_def_rewrite_uses_after(&intr->def, dst);
         }
+
+        return true;
+}
+
+static bool
+v3d_nir_lower_16bit_norm(nir_shader *s, struct v3d_compile *c)
+{
+        return nir_shader_intrinsics_pass(s, lower_16bit_norm, nir_metadata_control_flow, c);
 }
 
 static void
 v3d_nir_lower_fs_early(struct v3d_compile *c)
 {
-        if (c->fs_key->int_color_rb || c->fs_key->uint_color_rb)
-                v3d_fixup_fs_output_types(c);
-
-        NIR_PASS(_, c->s, v3d_nir_lower_logic_ops, c);
-
         if (c->fs_key->line_smoothing) {
                 NIR_PASS(_, c->s, v3d_nir_lower_line_smooth);
                 NIR_PASS(_, c->s, nir_lower_global_vars_to_local);
                 /* The lowering pass can introduce new sysval reads */
                 nir_shader_gather_info(c->s, nir_shader_get_entrypoint(c->s));
         }
+
+        if (c->fs_key->software_blend) {
+                if (c->fs_key->sample_alpha_to_coverage) {
+                        assert(c->fs_key->msaa);
+
+                        NIR_PASS(_, c->s, nir_lower_alpha_to_coverage,
+                                 V3D_MAX_SAMPLES, true, NULL);
+                }
+
+                if (c->fs_key->sample_alpha_to_one)
+                        NIR_PASS(_, c->s, nir_lower_alpha_to_one);
+
+                NIR_PASS(_, c->s, v3d_nir_lower_blend, c);
+        }
+
+        NIR_PASS(_, c->s, v3d_nir_lower_logic_ops, c);
+        NIR_PASS(_, c->s, v3d_nir_lower_16bit_norm, c);
+        NIR_PASS(_, c->s, v3d_nir_lower_load_output, c);
 }
 
 static void
 v3d_nir_lower_gs_late(struct v3d_compile *c)
 {
-        if (c->key->ucp_enables) {
-                NIR_PASS(_, c->s, nir_lower_clip_gs, c->key->ucp_enables,
-                         true, NULL);
-        }
-
-        /* Note: GS output scalarizing must happen after nir_lower_clip_gs. */
-        NIR_PASS_V(c->s, nir_lower_io_to_scalar, nir_var_shader_out, NULL, NULL);
+        NIR_PASS(_, c->s, nir_lower_io_to_scalar, nir_var_shader_out, NULL, NULL);
 }
 
 static void
 v3d_nir_lower_vs_late(struct v3d_compile *c)
 {
-        if (c->key->ucp_enables) {
-                NIR_PASS(_, c->s, nir_lower_clip_vs, c->key->ucp_enables,
-                         false, true, NULL);
-                NIR_PASS_V(c->s, nir_lower_io_to_scalar,
-                           nir_var_shader_out, NULL, NULL);
-        }
-
-        /* Note: VS output scalarizing must happen after nir_lower_clip_vs. */
-        NIR_PASS_V(c->s, nir_lower_io_to_scalar, nir_var_shader_out, NULL, NULL);
+        NIR_PASS(_, c->s, nir_lower_io_to_scalar, nir_var_shader_out, NULL, NULL);
 }
 
 static void
 v3d_nir_lower_fs_late(struct v3d_compile *c)
 {
-        /* In OpenGL the fragment shader can't read gl_ClipDistance[], but
-         * Vulkan allows it, in which case the SPIR-V compiler will declare
-         * VARING_SLOT_CLIP_DIST0 as compact array variable. Pass true as
-         * the last parameter to always operate with a compact array in both
-         * OpenGL and Vulkan so we do't have to care about the API we
-         * are using.
+        /* If there are clip distance writes (either GL/Vulkan
+         * gl_ClipDistance[], or lowered user clip planes for desktop GL),
+         * then we need to emit the discards for them at the top of the fragment
+         * shader.
+         *
+         * The SPIR-V compiler will declare VARING_SLOT_CLIP_DIST0 as compact
+         * array variable, so we have GL's clip lowering follow suit
+         * (compact_arrays option at nir_shader_compiler_options)
          */
-        if (c->key->ucp_enables)
-                NIR_PASS(_, c->s, nir_lower_clip_fs, c->key->ucp_enables, true);
+        if (c->fs_key->ucp_enables)
+                NIR_PASS(_, c->s, nir_lower_clip_fs, c->fs_key->ucp_enables, true, false);
 
-        NIR_PASS_V(c->s, nir_lower_io_to_scalar, nir_var_shader_in, NULL, NULL);
+        NIR_PASS(_, c->s, nir_lower_io_to_scalar, nir_var_shader_in, NULL, NULL);
 }
 
 static uint32_t
@@ -1269,8 +1350,8 @@ v3d_instr_delay_cb(nir_instr *instr, void *data)
    case nir_instr_type_alu:
    case nir_instr_type_deref:
    case nir_instr_type_jump:
-   case nir_instr_type_parallel_copy:
    case nir_instr_type_call:
+   case nir_instr_type_cmat_call:
    case nir_instr_type_phi:
       return 1;
 
@@ -1316,27 +1397,9 @@ v3d_instr_delay_cb(nir_instr *instr, void *data)
 
    case nir_instr_type_tex:
       return 5;
-
-   case nir_instr_type_debug_info:
-      return 0;
    }
 
    return 0;
-}
-
-static bool
-should_split_wrmask(const nir_instr *instr, const void *data)
-{
-        nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-        switch (intr->intrinsic) {
-        case nir_intrinsic_store_ssbo:
-        case nir_intrinsic_store_shared:
-        case nir_intrinsic_store_global:
-        case nir_intrinsic_store_scratch:
-                return true;
-        default:
-                return false;
-        }
 }
 
 static nir_intrinsic_instr *
@@ -1504,7 +1567,7 @@ v3d_nir_sort_constant_ubo_load(nir_block *block, nir_intrinsic_instr *ref)
                                  */
                                 break;
                         }
-                        if (intr->src[1].ssa->parent_instr == tmp) {
+                        if (nir_def_instr(intr->src[1].ssa) == tmp) {
                                 offset_inst = tmp;
                                 break;
                         }
@@ -1531,6 +1594,10 @@ v3d_nir_sort_constant_ubo_load(nir_block *block, nir_intrinsic_instr *ref)
                         exec_node_insert_after(&pos->node, &inst->node);
 
                 progress = true;
+
+                /* If this was the last instruction in the block we are done */
+                if (!next_inst)
+                        break;
         }
 
         return progress;
@@ -1571,8 +1638,7 @@ v3d_nir_sort_constant_ubo_loads(nir_shader *s, struct v3d_compile *c)
                         c->sorted_any_ubo_loads |=
                                 v3d_nir_sort_constant_ubo_loads_block(c, block);
                 }
-                nir_metadata_preserve(impl,
-                                      nir_metadata_control_flow);
+                nir_progress(true, impl, nir_metadata_control_flow);
         }
         return c->sorted_any_ubo_loads;
 }
@@ -1601,7 +1667,7 @@ lower_subgroup_intrinsics(struct v3d_compile *c,
         bool progress = false;
         nir_foreach_instr_safe(inst, block) {
                 if (inst->type != nir_instr_type_intrinsic)
-                        continue;;
+                        continue;
 
                 nir_intrinsic_instr *intr =
                         nir_instr_as_intrinsic(inst);
@@ -1612,9 +1678,7 @@ lower_subgroup_intrinsics(struct v3d_compile *c,
                 case nir_intrinsic_load_num_subgroups:
                         lower_load_num_subgroups(c, b, intr);
                         progress = true;
-                        FALLTHROUGH;
-                case nir_intrinsic_load_subgroup_id:
-                case nir_intrinsic_load_subgroup_size:
+                        break;
                 case nir_intrinsic_load_subgroup_invocation:
                 case nir_intrinsic_elect:
                 case nir_intrinsic_ballot:
@@ -1647,7 +1711,7 @@ lower_subgroup_intrinsics(struct v3d_compile *c,
                 case nir_intrinsic_quad_swap_horizontal:
                 case nir_intrinsic_quad_swap_vertical:
                 case nir_intrinsic_quad_swap_diagonal:
-                        c->has_subgroups = true;
+                        c->can_use_supergroups = false;
                         break;
                 default:
                         break;
@@ -1661,16 +1725,60 @@ static bool
 v3d_nir_lower_subgroup_intrinsics(nir_shader *s, struct v3d_compile *c)
 {
         bool progress = false;
+        c->can_use_supergroups = true;
         nir_foreach_function_impl(impl, s) {
                 nir_builder b = nir_builder_create(impl);
 
                 nir_foreach_block(block, impl)
                         progress |= lower_subgroup_intrinsics(c, block, &b);
 
-                nir_metadata_preserve(impl,
-                                      nir_metadata_control_flow);
+                nir_progress(true, impl, nir_metadata_control_flow);
         }
         return progress;
+}
+
+static bool
+should_lower_robustness(const nir_intrinsic_instr *intr, const void *data)
+{
+        const struct v3d_key *key = data;
+
+        switch (intr->intrinsic) {
+        case nir_intrinsic_load_ubo:
+                return key->robust_uniform_access;
+
+        case nir_intrinsic_load_ssbo:
+        case nir_intrinsic_store_ssbo:
+        case nir_intrinsic_ssbo_atomic:
+        case nir_intrinsic_ssbo_atomic_swap:
+                return key->robust_storage_access;
+
+        case nir_intrinsic_image_load:
+        case nir_intrinsic_image_store:
+        case nir_intrinsic_image_atomic:
+        case nir_intrinsic_image_atomic_swap:
+                return key->robust_image_access;
+
+        default:
+                return false;
+        }
+}
+
+static bool
+intrinsic_try_skip_helpers(nir_intrinsic_instr *intr, UNUSED void *data)
+{
+        switch(intr->intrinsic) {
+                case nir_intrinsic_image_load:
+                case nir_intrinsic_load_uniform:
+                case nir_intrinsic_load_ubo:
+                case nir_intrinsic_load_ssbo:
+                case nir_intrinsic_load_scratch:
+                case nir_intrinsic_load_shared:
+                case nir_intrinsic_load_global:
+                case nir_intrinsic_load_global_constant:
+                        return true;
+                default:
+                        return false;
+        }
 }
 
 static void
@@ -1689,7 +1797,7 @@ v3d_attempt_compile(struct v3d_compile *c)
         case MESA_SHADER_COMPUTE:
                 break;
         default:
-                unreachable("unsupported shader stage");
+                UNREACHABLE("unsupported shader stage");
         }
 
         switch (c->s->info.stage) {
@@ -1741,26 +1849,19 @@ v3d_attempt_compile(struct v3d_compile *c)
                  * this. We also want to run the lowering before v3d_optimize to
                  * clean-up redundant get_buffer_size calls produced in the pass.
                  */
-                NIR_PASS(_, c->s, nir_copy_prop);
+                NIR_PASS(_, c->s, nir_opt_copy_prop);
                 NIR_PASS(_, c->s, nir_opt_constant_folding);
 
-                nir_lower_robust_access_options opts = {
-                   .lower_image = c->key->robust_image_access,
-                   .lower_ssbo = c->key->robust_storage_access,
-                   .lower_ubo = c->key->robust_uniform_access,
-                };
-
-                NIR_PASS(_, c->s, nir_lower_robust_access, &opts);
+                NIR_PASS(_, c->s, nir_lower_robust_access,
+                         should_lower_robustness, c->key);
         }
 
         NIR_PASS(_, c->s, nir_lower_vars_to_scratch,
-                 nir_var_function_temp,
                  0,
                  glsl_get_natural_size_align_bytes,
                  glsl_get_natural_size_align_bytes);
 
         NIR_PASS(_, c->s, v3d_nir_lower_global_2x32);
-        NIR_PASS(_, c->s, nir_lower_wrmasks, should_split_wrmask, c->s);
         NIR_PASS(_, c->s, v3d_nir_lower_load_store_bitsize);
         NIR_PASS(_, c->s, v3d_nir_lower_scratch);
 
@@ -1778,10 +1879,19 @@ v3d_attempt_compile(struct v3d_compile *c)
                 .lower_subgroup_masks = true,
                 .lower_relative_shuffle = true,
                 .lower_quad = true,
+                .lower_reduce = true,
         };
         NIR_PASS(_, c->s, nir_lower_subgroups, &subgroup_opts);
 
         v3d_optimize_nir(c, c->s);
+
+        const unsigned lower_flrp =
+                (c->s->options->lower_flrp16 ? 16 : 0) |
+                (c->s->options->lower_flrp32 ? 32 : 0) |
+                (c->s->options->lower_flrp64 ? 64 : 0);
+
+        NIR_PASS(_, c->s, nir_lower_flrp, lower_flrp,
+                 false /* always_precise */);
 
         /* Do late algebraic optimization to turn add(a, neg(b)) back into
          * subs, then the mandatory cleanup after algebraic.  Note that it may
@@ -1793,15 +1903,25 @@ v3d_attempt_compile(struct v3d_compile *c)
                 more_late_algebraic = false;
                 NIR_PASS(more_late_algebraic, c->s, nir_opt_algebraic_late);
                 NIR_PASS(_, c->s, nir_opt_constant_folding);
-                NIR_PASS(_, c->s, nir_copy_prop);
+                NIR_PASS(_, c->s, nir_opt_copy_prop);
                 NIR_PASS(_, c->s, nir_opt_dce);
                 NIR_PASS(_, c->s, nir_opt_cse);
         }
 
         NIR_PASS(_, c->s, nir_lower_bool_to_int32);
         NIR_PASS(_, c->s, nir_convert_to_lcssa, true, true);
-        NIR_PASS_V(c->s, nir_divergence_analysis);
-        NIR_PASS(_, c->s, nir_convert_from_ssa, true);
+        nir_divergence_analysis(c->s);
+
+        if (c->s->info.stage == MESA_SHADER_FRAGMENT) {
+                nir_opt_load_skip_helpers_options skip_helper_options = {
+                        .no_add_divergence = true,
+                        .intrinsic_cb = intrinsic_try_skip_helpers,
+                };
+                NIR_PASS(_, c->s, nir_opt_load_skip_helpers,
+                         &skip_helper_options);
+        }
+
+        NIR_PASS(_, c->s, nir_convert_from_ssa, true, true);
 
         struct nir_schedule_options schedule_options = {
                 /* Schedule for about half our register space, to enable more
@@ -1825,7 +1945,7 @@ v3d_attempt_compile(struct v3d_compile *c)
                 .instr_delay_cb = v3d_instr_delay_cb,
                 .instr_delay_cb_data = c,
         };
-        NIR_PASS_V(c->s, nir_schedule, &schedule_options);
+        NIR_PASS(_, c->s, nir_schedule, &schedule_options);
 
         if (!c->disable_constant_ubo_load_sorting)
                 NIR_PASS(_, c->s, v3d_nir_sort_constant_ubo_loads, c);
@@ -1836,13 +1956,13 @@ v3d_attempt_compile(struct v3d_compile *c)
                                         nir_move_const_undef |
                                         buffer_opts);
 
-        NIR_PASS_V(c->s, nir_trivialize_registers);
+        NIR_PASS(_, c->s, nir_trivialize_registers);
 
         v3d_nir_to_vir(c);
 }
 
 uint32_t
-v3d_prog_data_size(gl_shader_stage stage)
+v3d_prog_data_size(mesa_shader_stage stage)
 {
         static const int prog_data_size[] = {
                 [MESA_SHADER_VERTEX] = sizeof(struct v3d_vs_prog_data),
@@ -2172,10 +2292,7 @@ vir_compile_destroy(struct v3d_compile *c)
         c->cursor.link = NULL;
 
         vir_for_each_block(block, c) {
-                while (!list_is_empty(&block->instructions)) {
-                        struct qinst *qinst =
-                                list_first_entry(&block->instructions,
-                                                 struct qinst, link);
+                list_for_each_entry_safe(struct qinst, qinst, &block->instructions, link) {
                         vir_remove_instruction(c, qinst);
                 }
         }
@@ -2350,7 +2467,7 @@ vir_get_stage_name(struct v3d_compile *c)
         else if (c->gs_key && c->gs_key->is_coord)
                 return "MESA_SHADER_GEOMETRY_BIN";
         else
-                return gl_shader_stage_name(c->s->info.stage);
+                return mesa_shader_stage_name(c->s->info.stage);
 }
 
 static inline uint32_t
@@ -2522,4 +2639,24 @@ v3d_compute_vpm_config(struct v3d_device_info *devinfo,
    }
 
    return true;
+}
+
+static inline uint32_t
+compute_prog_score(struct v3d_prog_data *p, uint32_t qpu_size)
+{
+        const uint32_t inst_count = qpu_size / sizeof(uint64_t);
+        const uint32_t tmu_count = p->tmu_count + p->tmu_spills + p->tmu_fills;
+        return inst_count + 4 * tmu_count;
+}
+
+void
+v3d_update_double_buffer_score(uint32_t vertex_count,
+                               uint32_t vs_qpu_size,
+                               uint32_t fs_qpu_size,
+                               struct v3d_prog_data *vs,
+                               struct v3d_prog_data *fs,
+                               struct v3d_double_buffer_score *score)
+{
+        score->geom += vertex_count * compute_prog_score(vs, vs_qpu_size);
+        score->render += compute_prog_score(fs, fs_qpu_size);
 }

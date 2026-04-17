@@ -20,6 +20,8 @@
 #include <stack>
 #include <vector>
 
+#define R600_GS_VERTEX_INDIRECT_TOTAL 6
+
 struct nir_shader;
 struct nir_cf_node;
 struct nir_if;
@@ -263,6 +265,9 @@ protected:
       es_tess_coord,
       es_primitive_id,
       es_helper_invocation,
+      es_base_instance,
+      es_base_vertex,
+      es_draw_id,
       es_last
    };
 
@@ -311,6 +316,7 @@ private:
    bool emit_local_store(nir_intrinsic_instr *intr);
    bool emit_local_load(nir_intrinsic_instr *instr);
    bool emit_load_tcs_param_base(nir_intrinsic_instr *instr, int offset);
+   bool emit_get_lds_info_uint(nir_intrinsic_instr *instr, int offset);
    bool emit_group_barrier(nir_intrinsic_instr *intr);
    bool emit_shader_clock(nir_intrinsic_instr *instr);
    bool emit_wait_ack();
@@ -374,7 +380,6 @@ private:
       void visit(FetchInstr *instr) override { (void)instr; }
       void visit(Block *instr) override { (void)instr; }
       void visit(ControlFlowInstr *instr) override { (void)instr; }
-      void visit(IfInstr *instr) override { (void)instr; }
       void visit(StreamOutInstr *instr) override { (void)instr; }
       void visit(MemRingOutInstr *instr) override { (void)instr; }
       void visit(EmitVertexInstr *instr) override { (void)instr; }
@@ -382,6 +387,7 @@ private:
       void visit(LDSAtomicInstr *instr) override { (void)instr; }
       void visit(LDSReadInstr *instr) override { (void)instr; }
 
+      void visit(IfInstr *instr) override;
       void visit(AluInstr *instr) override;
       void visit(ScratchIOInstr *instr) override;
       void visit(GDSInstr *instr) override;

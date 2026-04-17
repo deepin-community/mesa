@@ -26,30 +26,21 @@
  */
 
 #include "v3dv_private.h"
+#include "v3dv_limits.h"
 
 /* Our Vulkan resource indices represent indices in descriptor maps which
  * include all shader stages, so we need to size the arrays below
  * accordingly. For now we only support a maximum of 3 stages: VS, GS, FS.
  */
-#define MAX_STAGES 3
-
-#define MAX_TOTAL_TEXTURE_SAMPLERS (V3D_MAX_TEXTURE_SAMPLERS * MAX_STAGES)
 struct texture_bo_list {
    struct v3dv_bo *tex[MAX_TOTAL_TEXTURE_SAMPLERS];
 };
 
-/* This tracks state BOs for both textures and samplers, so we
- * multiply by 2.
- */
-#define MAX_TOTAL_STATES (2 * V3D_MAX_TEXTURE_SAMPLERS * MAX_STAGES)
 struct state_bo_list {
    uint32_t count;
    struct v3dv_bo *states[MAX_TOTAL_STATES];
 };
 
-#define MAX_TOTAL_UNIFORM_BUFFERS ((MAX_UNIFORM_BUFFERS + \
-                                    MAX_INLINE_UNIFORM_BUFFERS) * MAX_STAGES)
-#define MAX_TOTAL_STORAGE_BUFFERS (MAX_STORAGE_BUFFERS * MAX_STAGES)
 struct buffer_bo_list {
    struct v3dv_bo *ubo[MAX_TOTAL_UNIFORM_BUFFERS];
    struct v3dv_bo *ssbo[MAX_TOTAL_STORAGE_BUFFERS];
@@ -97,7 +88,7 @@ check_push_constants_ubo(struct v3dv_cmd_buffer *cmd_buffer,
                       cmd_buffer->push_constants_resource.bo);
 
       if (!cmd_buffer->push_constants_resource.bo) {
-         fprintf(stderr, "Failed to allocate memory for push constants\n");
+         mesa_loge("Failed to allocate memory for push constants\n");
          abort();
       }
 
@@ -105,7 +96,7 @@ check_push_constants_ubo(struct v3dv_cmd_buffer *cmd_buffer,
                             cmd_buffer->push_constants_resource.bo,
                             cmd_buffer->push_constants_resource.bo->size);
       if (!ok) {
-         fprintf(stderr, "failed to map push constants buffer\n");
+         mesa_loge("failed to map push constants buffer\n");
          abort();
       }
    } else {
@@ -399,7 +390,7 @@ get_texture_size_from_image_view(struct v3dv_image_view *image_view,
       assert(image_view->vk.image);
       return image_view->vk.image->samples;
    default:
-      unreachable("Bad texture size field");
+      UNREACHABLE("Bad texture size field");
    }
 }
 
@@ -415,7 +406,7 @@ get_texture_size_from_buffer_view(struct v3dv_buffer_view *buffer_view,
       return buffer_view->num_elements;
    /* Only size can be queried for texel buffers  */
    default:
-      unreachable("Bad texture size field for texel buffers");
+      UNREACHABLE("Bad texture size field for texel buffers");
    }
 }
 
@@ -451,7 +442,7 @@ get_texture_size(struct v3dv_cmd_buffer *cmd_buffer,
       return get_texture_size_from_buffer_view(descriptor->buffer_view,
                                                contents, data);
    default:
-      unreachable("Wrong descriptor for getting texture size");
+      UNREACHABLE("Wrong descriptor for getting texture size");
    }
 }
 
@@ -616,10 +607,8 @@ v3dv_write_uniforms_wg_offsets(struct v3dv_cmd_buffer *cmd_buffer,
          } else {
             assert(cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY);
             num_layers = 2048;
-#if MESA_DEBUG
-            fprintf(stderr, "Skipping gl_LayerID shader sanity check for "
-                            "secondary command buffer\n");
-#endif
+            mesa_logd("Skipping gl_LayerID shader sanity check for "
+                      "secondary command buffer\n");
          }
          cl_aligned_u32(&uniforms, num_layers);
          break;
@@ -672,8 +661,21 @@ v3dv_write_uniforms_wg_offsets(struct v3dv_cmd_buffer *cmd_buffer,
                         v3dv_get_aa_line_width(pipeline, job->cmd_buffer));
          break;
 
+      case QUNIFORM_BLEND_CONSTANT_R:
+         cl_aligned_f(&uniforms, job->cmd_buffer->vk.dynamic_graphics_state.cb.blend_constants[0]);
+         break;
+      case QUNIFORM_BLEND_CONSTANT_G:
+         cl_aligned_f(&uniforms, job->cmd_buffer->vk.dynamic_graphics_state.cb.blend_constants[1]);
+         break;
+      case QUNIFORM_BLEND_CONSTANT_B:
+         cl_aligned_f(&uniforms, job->cmd_buffer->vk.dynamic_graphics_state.cb.blend_constants[2]);
+         break;
+      case QUNIFORM_BLEND_CONSTANT_A:
+         cl_aligned_f(&uniforms, job->cmd_buffer->vk.dynamic_graphics_state.cb.blend_constants[3]);
+         break;
+
       default:
-         unreachable("unsupported quniform_contents uniform type\n");
+         UNREACHABLE("unsupported quniform_contents uniform type\n");
       }
    }
 

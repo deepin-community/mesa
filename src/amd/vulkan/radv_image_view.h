@@ -36,6 +36,7 @@ struct radv_image_view {
    bool support_fast_clear;
 
    bool disable_dcc_mrt;
+   bool disable_tc_compat_cmask_mrt;
 
    union radv_descriptor descriptor;
 
@@ -46,6 +47,16 @@ struct radv_image_view {
 
    /* Block-compressed image views on GFX10+. */
    struct ac_surf_nbc_view nbc_view;
+
+   union {
+      struct radv_color_buffer_info color_desc;
+
+      struct {
+         struct radv_ds_buffer_info depth_stencil_desc;
+         struct radv_ds_buffer_info depth_only_desc;
+         struct radv_ds_buffer_info stencil_only_desc;
+      };
+   };
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(radv_image_view, vk.base, VkImageView, VK_OBJECT_TYPE_IMAGE_VIEW);
@@ -54,6 +65,7 @@ struct radv_image_view_extra_create_info {
    bool disable_compression;
    bool enable_compression;
    bool disable_dcc_mrt;
+   bool disable_tc_compat_cmask_mrt;
    bool from_client; /**< Set only if this came from vkCreateImage */
 };
 
@@ -62,11 +74,14 @@ void radv_image_view_init(struct radv_image_view *view, struct radv_device *devi
                           const struct radv_image_view_extra_create_info *extra_create_info);
 void radv_image_view_finish(struct radv_image_view *iview);
 
+void radv_hiz_image_view_init(struct radv_image_view *iview, struct radv_device *device,
+                              const VkImageViewCreateInfo *pCreateInfo);
+
 void radv_set_mutable_tex_desc_fields(struct radv_device *device, struct radv_image *image,
                                       const struct legacy_surf_level *base_level_info, unsigned plane_id,
                                       unsigned base_level, unsigned first_level, unsigned block_width, bool is_stencil,
                                       bool is_storage_image, bool disable_compression, bool enable_write_compression,
-                                      uint32_t *state, const struct ac_surf_nbc_view *nbc_view);
+                                      uint32_t *state, const struct ac_surf_nbc_view *nbc_view, uint64_t offset);
 
 void radv_make_texture_descriptor(struct radv_device *device, struct radv_image *image, bool is_storage_image,
                                   VkImageViewType view_type, VkFormat vk_format, const VkComponentMapping *mapping,

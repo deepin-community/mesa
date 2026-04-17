@@ -81,7 +81,7 @@ extern void _mesa_glsl_error(YYLTYPE *locp, _mesa_glsl_parse_state *state,
 
 
 struct _mesa_glsl_parse_state {
-   _mesa_glsl_parse_state(struct gl_context *_ctx, gl_shader_stage stage,
+   _mesa_glsl_parse_state(struct gl_context *_ctx, mesa_shader_stage stage,
                           void *mem_ctx);
 
    DECLARE_RZALLOC_CXX_OPERATORS(_mesa_glsl_parse_state);
@@ -383,9 +383,10 @@ struct _mesa_glsl_parse_state {
    struct gl_context *const ctx; /* only to be used for debug callback. */
    const struct gl_extensions *exts;
    const struct gl_constants *consts;
+   const struct pipe_caps *caps;
    gl_api api;
    void *scanner;
-   exec_list translation_unit;
+   ir_exec_list translation_unit;
    glsl_symbol_table *symbols;
 
    linear_ctx *linalloc;
@@ -404,7 +405,7 @@ struct _mesa_glsl_parse_state {
    /* Bitfield of ir_variable_mode to zero init */
    uint32_t zero_init;
    unsigned gl_version;
-   gl_shader_stage stage;
+   mesa_shader_stage stage;
 
    /**
     * Default uniform layout qualifiers tracked during parsing.
@@ -449,19 +450,19 @@ struct _mesa_glsl_parse_state {
    struct ast_type_qualifier *in_qualifier;
 
    /**
-    * True if a compute shader input local size was specified using a layout
-    * directive.
+    * True if a compute, task or mesh shader input local size was specified
+    * using a layout directive.
     *
     * Note: this value is computed at ast_to_hir time rather than at parse
     * time.
     */
-   bool cs_input_local_size_specified;
+   bool cs_ms_input_local_size_specified;
 
    /**
-    * If cs_input_local_size_specified is true, the local size that was
+    * If cs_ms_input_local_size_specified is true, the local size that was
     * specified.  Otherwise ignored.
     */
-   unsigned cs_input_local_size[3];
+   unsigned cs_ms_input_local_size[3];
 
    /**
     * True if a compute shader input local variable size was specified using
@@ -484,6 +485,20 @@ struct _mesa_glsl_parse_state {
    bool bindless_image_specified;
    bool bound_sampler_specified;
    bool bound_image_specified;
+
+   /**
+    * True if mesh shader max_vertices or max_primitives was specified
+    * using a layout directive.
+    */
+   bool ms_output_max_vertices_specified;
+   bool ms_output_max_primitives_specified;
+
+   /**
+    * True if a shader declares input/output pixel local storage interfaces;
+    * at most one input and one output may be declared.
+    */
+   bool pixel_local_input_specified;
+   bool pixel_local_output_specified;
 
    /**
     * Output layout qualifiers from GLSL 1.50 (geometry shader controls),
@@ -618,7 +633,7 @@ struct _mesa_glsl_parse_state {
     * During AST to IR conversion, pointer to the toplevel IR
     * instruction list being generated.
     */
-   exec_list *toplevel_ir;
+   ir_exec_list *toplevel_ir;
 
    /** Have we found a return statement in this function? */
    bool found_return;
@@ -858,6 +873,8 @@ struct _mesa_glsl_parse_state {
    bool EXT_blend_func_extended_warn;
    bool EXT_clip_cull_distance_enable;
    bool EXT_clip_cull_distance_warn;
+   bool EXT_conservative_depth_enable;
+   bool EXT_conservative_depth_warn;
    bool EXT_demote_to_helper_invocation_enable;
    bool EXT_demote_to_helper_invocation_warn;
    bool EXT_draw_buffers_enable;
@@ -874,10 +891,14 @@ struct _mesa_glsl_parse_state {
    bool EXT_gpu_shader4_warn;
    bool EXT_gpu_shader5_enable;
    bool EXT_gpu_shader5_warn;
+   bool EXT_mesh_shader_enable;
+   bool EXT_mesh_shader_warn;
    bool EXT_primitive_bounding_box_enable;
    bool EXT_primitive_bounding_box_warn;
    bool EXT_separate_shader_objects_enable;
    bool EXT_separate_shader_objects_warn;
+   bool EXT_shader_clock_enable;
+   bool EXT_shader_clock_warn;
    bool EXT_shader_framebuffer_fetch_enable;
    bool EXT_shader_framebuffer_fetch_warn;
    bool EXT_shader_framebuffer_fetch_non_coherent_enable;
@@ -894,6 +915,10 @@ struct _mesa_glsl_parse_state {
    bool EXT_shader_integer_mix_warn;
    bool EXT_shader_io_blocks_enable;
    bool EXT_shader_io_blocks_warn;
+   bool EXT_shader_pixel_local_storage_enable;
+   bool EXT_shader_pixel_local_storage_warn;
+   bool EXT_shader_realtime_clock_enable;
+   bool EXT_shader_realtime_clock_warn;
    bool EXT_shader_samples_identical_enable;
    bool EXT_shader_samples_identical_warn;
    bool EXT_shadow_samplers_enable;
@@ -977,6 +1002,16 @@ struct _mesa_glsl_parse_state {
     */
    unsigned tcs_output_size;
 
+   /**
+    * For mesh shaders, size of the most recently seen per-vertex/primitive output
+    * declaration that was a sized array, or 0 if no sized output array
+    * declarations have been seen.
+    *
+    * Unused for other shader types.
+    */
+   unsigned ms_per_vertex_output_size;
+   unsigned ms_per_primitive_output_size;
+
    /** Atomic counter offsets by binding */
    unsigned atomic_counter_offsets[MAX_COMBINED_ATOMIC_BUFFERS];
 
@@ -988,6 +1023,7 @@ struct _mesa_glsl_parse_state {
    char *alias_shader_extension;
    bool allow_vertex_texture_bias;
    bool allow_glsl_120_subset_in_110;
+   bool allow_glsl_embedded_structure_declarations;
    bool allow_builtin_variable_redeclaration;
    bool ignore_write_to_readonly_var;
 
@@ -1015,6 +1051,13 @@ struct _mesa_glsl_parse_state {
     * so we can check totals aren't too large.
     */
    unsigned clip_dist_size, cull_dist_size;
+
+   /* for EXT_shader_pixel_local_storage */
+   bool fs_writes_output;
+   bool fs_writes_pixel_local_storage;
+
+   /* for OVR_multiview */
+   uint32_t view_mask;
 };
 
 # define YYLLOC_DEFAULT(Current, Rhs, N)                        \
@@ -1084,6 +1127,14 @@ extern "C" {
 struct glcpp_parser;
 struct _mesa_glsl_parse_state;
 
+struct gl_context;
+struct gl_shader;
+
+extern void
+_mesa_glsl_compile_shader(struct gl_context *ctx, struct gl_shader *shader,
+                          FILE *dump_ir_file, bool dump_ast, bool dump_hir,
+                          bool force_recompile);
+
 typedef void (*glcpp_extension_iterator)(
               struct _mesa_glsl_parse_state *state,
               void (*add_builtin_define)(struct glcpp_parser *, const char *, int),
@@ -1095,11 +1146,6 @@ extern int glcpp_preprocess(void *ctx, const char **shader, char **info_log,
                             glcpp_extension_iterator extensions,
                             struct _mesa_glsl_parse_state *state,
                             struct gl_context *gl_ctx);
-
-extern void
-_mesa_glsl_copy_symbols_from_table(struct exec_list *shader_ir,
-                                   struct glsl_symbol_table *src,
-                                   struct glsl_symbol_table *dest);
 
 #ifdef __cplusplus
 }

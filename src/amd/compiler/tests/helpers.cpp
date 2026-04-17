@@ -5,13 +5,16 @@
  */
 #include "helpers.h"
 
-#include "common/amd_family.h"
-#include "vk_format.h"
+#include "aco_ir.h"
 
+#include "common/amd_family.h"
+#include "common/nir/ac_nir.h"
+
+#include "drm-shim/amdgpu_noop_drm_shim.h"
 #include <llvm-c/Target.h>
 
+#include "ac_gpu_info.h"
 #include <mutex>
-#include <sstream>
 #include <stdio.h>
 
 using namespace aco;
@@ -31,8 +34,8 @@ static nir_shader_compiler_options nir_options;
 static nir_builder _nb;
 nir_builder *nb;
 
-static VkInstance instance_cache[CHIP_LAST] = {VK_NULL_HANDLE};
-static VkDevice device_cache[CHIP_LAST] = {VK_NULL_HANDLE};
+static VkInstance vk_instance = VK_NULL_HANDLE;
+static VkDevice vk_device = VK_NULL_HANDLE;
 static std::mutex create_device_mutex;
 
 #define FUNCTION_LIST                                                                              \
@@ -60,15 +63,46 @@ static std::mutex create_device_mutex;
 FUNCTION_LIST
 #undef ITEM
 
+enum radeon_family
+get_family(enum amd_gfx_level gfx_level, enum radeon_family family)
+{
+   if (family == CHIP_UNKNOWN) {
+      switch (gfx_level) {
+      case GFX6: return CHIP_TAHITI;
+      case GFX7: return CHIP_BONAIRE;
+      case GFX8: return CHIP_POLARIS10;
+      case GFX9: return CHIP_VEGA10;
+      case GFX10: return CHIP_NAVI10;
+      case GFX10_3: return CHIP_NAVI21;
+      case GFX11: return CHIP_NAVI31;
+      case GFX11_5: return CHIP_STRIX_HALO;
+      case GFX12: return CHIP_GFX1201;
+      default: return CHIP_UNKNOWN;
+      }
+   }
+
+   return family;
+}
+
 void
 create_program(enum amd_gfx_level gfx_level, Stage stage, unsigned wave_size,
                enum radeon_family family)
 {
+   family = get_family(gfx_level, family);
+   assert(family != CHIP_UNKNOWN);
+
    memset(&config, 0, sizeof(config));
    info.wave_size = wave_size;
-
    program.reset(new Program);
-   aco::init_program(program.get(), stage, &info, gfx_level, family, false, &config);
+   rad_info.gfx_level = gfx_level;
+   rad_info.family = family;
+   ac_fill_cu_info(&rad_info, NULL);
+   struct aco_compiler_options options = {
+      .cu_info = &rad_info.cu_info,
+      .family = family,
+      .gfx_level = gfx_level,
+   };
+   aco::init_program(program.get(), stage, &info, &options, &config);
    program->workgroup_size = UINT_MAX;
    calc_min_waves(program.get());
 
@@ -111,11 +145,15 @@ setup_cs(const char* input_spec, enum amd_gfx_level gfx_level, enum radeon_famil
             input_spec++;
       }
 
+      PhysReg sgpr_reg{0};
+      PhysReg vgpr_reg{256};
       aco_ptr<Instruction> startpgm{
          create_instruction(aco_opcode::p_startpgm, Format::PSEUDO, 0, input_classes.size())};
       for (unsigned i = 0; i < input_classes.size(); i++) {
          inputs[i] = bld.tmp(input_classes[i]);
-         startpgm->definitions[i] = Definition(inputs[i]);
+         PhysReg& reg = input_classes[i].type() == RegType::sgpr ? sgpr_reg : vgpr_reg;
+         startpgm->definitions[i] = Definition(inputs[i], reg);
+         reg = reg.advance(input_classes[i].size() * 4);
       }
       bld.insert(std::move(startpgm));
    }
@@ -124,30 +162,21 @@ setup_cs(const char* input_spec, enum amd_gfx_level gfx_level, enum radeon_famil
 }
 
 bool
-setup_nir_cs(enum amd_gfx_level gfx_level, gl_shader_stage stage, enum radeon_family family, const char* subvariant)
+setup_nir_cs(enum amd_gfx_level gfx_level, mesa_shader_stage stage, enum radeon_family family, const char* subvariant)
 {
    if (!set_variant(gfx_level, subvariant))
       return false;
 
-   if (family == CHIP_UNKNOWN) {
-      switch (gfx_level) {
-      case GFX6: family = CHIP_TAHITI; break;
-      case GFX7: family = CHIP_BONAIRE; break;
-      case GFX8: family = CHIP_POLARIS10; break;
-      case GFX9: family = CHIP_VEGA10; break;
-      case GFX10: family = CHIP_NAVI10; break;
-      case GFX10_3: family = CHIP_NAVI21; break;
-      case GFX11: family = CHIP_NAVI31; break;
-      default: family = CHIP_UNKNOWN; break;
-      }
-   }
+   family = get_family(gfx_level, family);
+   assert(family != CHIP_UNKNOWN);
 
    memset(&rad_info, 0, sizeof(rad_info));
    rad_info.gfx_level = gfx_level;
    rad_info.family = family;
+   ac_fill_cu_info(&rad_info, NULL);
 
    memset(&nir_options, 0, sizeof(nir_options));
-   ac_set_nir_options(&rad_info, false, &nir_options);
+   ac_nir_set_options(&rad_info, false, &nir_options);
 
    glsl_type_singleton_init_or_ref();
 
@@ -301,6 +330,26 @@ finish_to_hw_instr_test()
 }
 
 void
+finish_lower_branches_test()
+{
+   finish_program(program.get(), true, true);
+
+   if (!aco::validate_ir(program.get())) {
+      fail_test("Validation before lower_branches failed");
+      return;
+   }
+
+   aco::lower_branches(program.get());
+
+   if (!aco::validate_ir(program.get())) {
+      fail_test("Validation after lower_branches failed");
+      return;
+   }
+
+   aco_print_program(program.get(), output);
+}
+
+void
 finish_schedule_vopd_test()
 {
    finish_program(program.get());
@@ -342,7 +391,7 @@ finish_assembler_test()
    /* we could use CLRX for disassembly but that would require it to be
     * installed */
    if (program->gfx_level >= GFX8) {
-      print_asm(program.get(), binary, exec_size / 4u, output);
+      print_asm(program.get(), rad_info.family, binary, exec_size / 4u, output);
    } else {
       // TODO: maybe we should use CLRX and skip this test if it's not available?
       for (uint32_t dword : binary)
@@ -361,7 +410,6 @@ void
 finish_isel_test(enum ac_hw_stage hw_stage, unsigned wave_size)
 {
    nir_validate_shader(nb->shader, "in finish_isel_test");
-   nir_validate_ssa_dominance(nb->shader, "in finish_isel_test");
 
    program.reset(new Program);
    program->debug.func = nullptr;
@@ -372,6 +420,7 @@ finish_isel_test(enum ac_hw_stage hw_stage, unsigned wave_size)
    aco_compiler_options options = {};
    options.family = rad_info.family;
    options.gfx_level = rad_info.gfx_level;
+   options.cu_info = &rad_info.cu_info;
 
    memset(&info, 0, sizeof(info));
    info.hw_stage = hw_stage;
@@ -382,6 +431,8 @@ finish_isel_test(enum ac_hw_stage hw_stage, unsigned wave_size)
 
    select_program(program.get(), 1, &nb->shader, &config, &options, &info, &args);
    dominator_tree(program.get());
+   if (program->should_repair_ssa)
+      repair_ssa(program.get());
    lower_phis(program.get());
 
    ralloc_free(nb->shader);
@@ -602,32 +653,30 @@ emit_divergent_if_else(Program* prog, aco::Builder& b, Operand cond, std::functi
    b.reset(if_block);
    Temp saved_exec = b.sop1(Builder::s_and_saveexec, b.def(b.lm, saved_exec_reg),
                             Definition(scc, s1), Definition(exec, b.lm), cond, Operand(exec, b.lm));
-   b.branch(aco_opcode::p_cbranch_nz, Definition(vcc, bld.lm), then_logical->index,
-            then_linear->index);
+   b.branch(aco_opcode::p_cbranch_nz, then_logical->index, then_linear->index);
 
    b.reset(then_logical);
    b.pseudo(aco_opcode::p_logical_start);
    then();
    b.pseudo(aco_opcode::p_logical_end);
-   b.branch(aco_opcode::p_branch, Definition(vcc, bld.lm), invert->index);
+   b.branch(aco_opcode::p_branch, invert->index);
 
    b.reset(then_linear);
-   b.branch(aco_opcode::p_branch, Definition(vcc, bld.lm), invert->index);
+   b.branch(aco_opcode::p_branch, invert->index);
 
    b.reset(invert);
    b.sop2(Builder::s_andn2, Definition(exec, bld.lm), Definition(scc, s1),
           Operand(saved_exec, saved_exec_reg), Operand(exec, bld.lm));
-   b.branch(aco_opcode::p_cbranch_nz, Definition(vcc, bld.lm), else_logical->index,
-            else_linear->index);
+   b.branch(aco_opcode::p_cbranch_nz, else_logical->index, else_linear->index);
 
    b.reset(else_logical);
    b.pseudo(aco_opcode::p_logical_start);
    els();
    b.pseudo(aco_opcode::p_logical_end);
-   b.branch(aco_opcode::p_branch, Definition(vcc, bld.lm), endif_block->index);
+   b.branch(aco_opcode::p_branch, endif_block->index);
 
    b.reset(else_linear);
-   b.branch(aco_opcode::p_branch, Definition(vcc, bld.lm), endif_block->index);
+   b.branch(aco_opcode::p_branch, endif_block->index);
 
    b.reset(endif_block);
    b.pseudo(aco_opcode::p_parallelcopy, Definition(exec, bld.lm),
@@ -646,7 +695,7 @@ get_vk_device(enum amd_gfx_level gfx_level)
    case GFX10: family = CHIP_NAVI10; break;
    case GFX10_3: family = CHIP_NAVI21; break;
    case GFX11: family = CHIP_NAVI31; break;
-   case GFX12: family = CHIP_GFX1200; break;
+   case GFX12: family = CHIP_GFX1201; break;
    default: family = CHIP_UNKNOWN; break;
    }
    return get_vk_device(family);
@@ -659,10 +708,15 @@ get_vk_device(enum radeon_family family)
 
    std::lock_guard<std::mutex> guard(create_device_mutex);
 
-   if (device_cache[family])
-      return device_cache[family];
+   /* Destroy previous device/instance because the winsys in RADV is
+    * refcounted.
+    */
+   if (vk_device)
+      DestroyDevice(vk_device, NULL);
+   if (vk_instance)
+      DestroyInstance(vk_instance, NULL);
 
-   setenv("RADV_FORCE_FAMILY", ac_get_family_name(family), 1);
+   drm_shim_amdgpu_select_device(ac_get_family_name(family));
 
    VkApplicationInfo app_info = {};
    app_info.pApplicationName = "aco_tests";
@@ -671,16 +725,16 @@ get_vk_device(enum radeon_family family)
    instance_create_info.pApplicationInfo = &app_info;
    instance_create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
    ASSERTED VkResult result = ((PFN_vkCreateInstance)vk_icdGetInstanceProcAddr(
-      NULL, "vkCreateInstance"))(&instance_create_info, NULL, &instance_cache[family]);
+      NULL, "vkCreateInstance"))(&instance_create_info, NULL, &vk_instance);
    assert(result == VK_SUCCESS);
 
-#define ITEM(n) n = (PFN_vk##n)vk_icdGetInstanceProcAddr(instance_cache[family], "vk" #n);
+#define ITEM(n) n = (PFN_vk##n)vk_icdGetInstanceProcAddr(vk_instance, "vk" #n);
    FUNCTION_LIST
 #undef ITEM
 
    uint32_t device_count = 1;
    VkPhysicalDevice device = VK_NULL_HANDLE;
-   result = EnumeratePhysicalDevices(instance_cache[family], &device_count, &device);
+   result = EnumeratePhysicalDevices(vk_instance, &device_count, &device);
    assert(result == VK_SUCCESS);
    assert(device != VK_NULL_HANDLE);
 
@@ -689,20 +743,18 @@ get_vk_device(enum radeon_family family)
    static const char* extensions[] = {"VK_KHR_pipeline_executable_properties"};
    device_create_info.enabledExtensionCount = sizeof(extensions) / sizeof(extensions[0]);
    device_create_info.ppEnabledExtensionNames = extensions;
-   result = CreateDevice(device, &device_create_info, NULL, &device_cache[family]);
+   result = CreateDevice(device, &device_create_info, NULL, &vk_device);
 
-   return device_cache[family];
+   return vk_device;
 }
 
 static struct DestroyDevices {
    ~DestroyDevices()
    {
-      for (unsigned i = 0; i < CHIP_LAST; i++) {
-         if (!device_cache[i])
-            continue;
-         DestroyDevice(device_cache[i], NULL);
-         DestroyInstance(instance_cache[i], NULL);
-      }
+      if (vk_device)
+         DestroyDevice(vk_device, NULL);
+      if (vk_instance)
+         DestroyInstance(vk_instance, NULL);
    }
 } destroy_devices;
 

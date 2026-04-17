@@ -33,9 +33,9 @@ struct Params {
 };
 
 static const Params test_data[] = {
-   {"Mesa Rocks! 273", "7fb99737373d65a73f049cdabc01e73aa6bc60f3"},
-   {"Mesa Rocks! 300", "b2180263e37d3bed6a4be0afe41b1a82ebbcf4c3"},
-   {"Mesa Rocks! 583", "7fb9734108a62503e8a149c1051facd7fb112d05"},
+   {"Mesa Rocks! 273", "dee075fc6fc8b4e55570d8038c629db8f29d6ec68cf962d2938e972c80342f0d"},
+   {"Mesa Rocks! 300", "82661e51d2a48fbb9b5758bc3d64e7fd5da14a48cc5fdb44fdc903ddfbcc1f3c"},
+   {"Mesa Rocks! 583", "42f5982e2ef3c5e388c50ee1070e7fd07e93bd44fa0dc3ea62e0892337c89ad8"},
 };
 
 class MesaSHA1TestFixture : public testing::TestWithParam<Params> {};
@@ -49,10 +49,10 @@ TEST_P(MesaSHA1TestFixture, Match)
 {
    Params p = GetParam();
 
-   unsigned char sha1[20];
+   unsigned char sha1[SHA1_DIGEST_LENGTH];
    _mesa_sha1_compute(p.string, strlen(p.string), sha1);
 
-   char buf[41];
+   char buf[SHA1_DIGEST_STRING_LENGTH];
    _mesa_sha1_format(buf, sha1);
 
    ASSERT_TRUE(memcmp(buf, p.expected_sha1, SHA1_LENGTH) == 0)

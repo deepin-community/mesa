@@ -15,7 +15,9 @@
 #include "pan_shader.h"
 
 #include "panvk_blend.h"
+#include "panvk_cmd_buffer.h"
 #include "panvk_device.h"
+#include "panvk_meta.h"
 #include "panvk_shader.h"
 
 struct panvk_blend_shader_key {
@@ -36,12 +38,9 @@ lower_load_blend_const(nir_builder *b, nir_instr *instr, UNUSED void *data)
 
    b->cursor = nir_before_instr(instr);
 
-   unsigned offset = offsetof(struct panvk_graphics_sysvals, blend.constants);
+   /* Blend constants are always passed through FAU words 0:3. */
    nir_def *blend_consts = nir_load_push_constant(
-      b, intr->def.num_components, intr->def.bit_size, nir_imm_int(b, 0),
-      /* Push constants are placed first, and then come the sysvals. */
-      .base = offset + 256,
-      .range = intr->def.num_components * intr->def.bit_size / 8);
+      b, intr->def.num_components, intr->def.bit_size, nir_imm_int(b, 0));
 
    nir_def_rewrite_uses(&intr->def, blend_consts);
    return true;
@@ -51,7 +50,7 @@ static VkResult
 get_blend_shader(struct panvk_device *dev,
                  const struct pan_blend_state *state,
                  nir_alu_type src0_type, nir_alu_type src1_type,
-                 unsigned rt, mali_ptr *shader_addr)
+                 unsigned rt, uint64_t *shader_addr)
 {
    struct panvk_physical_device *pdev =
       to_panvk_physical_device(dev->vk.physical);
@@ -62,8 +61,6 @@ get_blend_shader(struct panvk_device *dev,
          .src0_type = src0_type,
          .src1_type = src1_type,
          .rt = rt,
-         .has_constants =
-            pan_blend_constant_mask(state->rts[rt].equation) != 0,
          .logicop_enable = state->logicop_enable,
          .logicop_func = state->logicop_func,
          .nr_samples = state->rts[rt].nr_samples,
@@ -85,27 +82,18 @@ get_blend_shader(struct panvk_device *dev,
    nir_shader *nir =
       GENX(pan_blend_create_shader)(state, src0_type, src1_type, rt);
 
-   NIR_PASS_V(nir, nir_shader_instructions_pass, lower_load_blend_const,
-              nir_metadata_control_flow, NULL);
+   NIR_PASS(_, nir, nir_shader_instructions_pass, lower_load_blend_const,
+            nir_metadata_control_flow, NULL);
 
    /* Compile the NIR shader */
-   struct panfrost_compile_inputs inputs = {
-      .gpu_id = pdev->kmod.props.gpu_prod_id,
-      .no_ubo_to_push = true,
+   struct pan_compile_inputs inputs = {
+      .gpu_id = pdev->kmod.dev->props.gpu_id,
+      .gpu_variant = pdev->kmod.dev->props.gpu_variant,
       .is_blend = true,
-      .blend = {
-         .nr_samples = key.info.nr_samples,
-         .bifrost_blend_desc =
-            GENX(pan_blend_get_internal_desc)(key.info.format, key.info.rt, 0,
-                                              false),
-      },
    };
 
-   pan_shader_preprocess(nir, inputs.gpu_id);
-
-   enum pipe_format rt_formats[8] = {0};
-   rt_formats[rt] = key.info.format;
-   NIR_PASS_V(nir, GENX(pan_inline_rt_conversion), rt_formats);
+   pan_preprocess_nir(nir, inputs.gpu_id);
+   pan_postprocess_nir(nir, inputs.gpu_id);
 
    VkResult result =
       panvk_per_arch(create_internal_shader)(dev, nir, &inputs, &shader);
@@ -126,15 +114,15 @@ out:
 }
 
 static void
-emit_blend_desc(const struct pan_shader_info *fs_info, mali_ptr fs_code,
-                const struct pan_blend_state *state, unsigned rt_idx,
-                mali_ptr blend_shader, uint16_t constant,
+emit_blend_desc(const struct pan_blend_state *state, uint8_t rt_idx,
+                const struct pan_shader_info *fs_info, uint8_t loc,
+                uint64_t fs_code, uint64_t blend_shader, uint16_t constant,
                 struct mali_blend_packed *bd)
 {
    const struct pan_blend_rt_state *rt = &state->rts[rt_idx];
 
    pan_pack(bd, BLEND, cfg) {
-      if (!state->rt_count || !rt->equation.color_mask) {
+      if (loc == MESA_VK_ATTACHMENT_UNUSED || !rt->equation.color_mask) {
          cfg.enable = false;
          cfg.internal.mode = MALI_BLEND_MODE_OFF;
          continue;
@@ -143,7 +131,7 @@ emit_blend_desc(const struct pan_shader_info *fs_info, mali_ptr fs_code,
       cfg.srgb = util_format_is_srgb(rt->format);
       cfg.load_destination = pan_blend_reads_dest(rt->equation);
       cfg.round_to_fb_precision = true;
-      cfg.constant = constant;
+      cfg.blend_constant = constant;
 
       if (blend_shader) {
          /* Blend and fragment shaders must be in the same 4G region. */
@@ -156,8 +144,8 @@ emit_blend_desc(const struct pan_shader_info *fs_info, mali_ptr fs_code,
          cfg.internal.mode = MALI_BLEND_MODE_SHADER;
          cfg.internal.shader.pc = (uint32_t)blend_shader;
 
-#if PAN_ARCH <= 7
-         uint32_t ret_offset = fs_info->bifrost.blend[rt_idx].return_offset;
+#if PAN_ARCH < 9
+         uint32_t ret_offset = fs_info->bifrost.blend[loc].return_offset;
 
          /* If ret_offset is zero, we assume the BLEND is a terminal
           * instruction and set return_value to zero, to let the
@@ -180,7 +168,7 @@ emit_blend_desc(const struct pan_shader_info *fs_info, mali_ptr fs_code,
           */
          cfg.internal.fixed_function.num_comps = 4;
          cfg.internal.fixed_function.conversion.memory_format =
-            GENX(panfrost_dithered_format_from_pipe_format)(rt->format, false);
+            GENX(pan_dithered_format_from_pipe_format)(rt->format, false);
 
 #if PAN_ARCH >= 7
          if (cfg.internal.mode == MALI_BLEND_MODE_FIXED_FUNCTION &&
@@ -196,15 +184,14 @@ emit_blend_desc(const struct pan_shader_info *fs_info, mali_ptr fs_code,
 
          cfg.internal.fixed_function.rt = rt_idx;
 
-#if PAN_ARCH <= 7
+#if PAN_ARCH < 9
+         nir_alu_type type = fs_info->bifrost.blend[loc].type;
          if (fs_info->fs.untyped_color_outputs) {
-            nir_alu_type type = fs_info->bifrost.blend[rt_idx].type;
-
             cfg.internal.fixed_function.conversion.register_format =
                GENX(pan_fixup_blend_type)(type, rt->format);
          } else {
             cfg.internal.fixed_function.conversion.register_format =
-               fs_info->bifrost.blend[rt_idx].format;
+               pan_blend_type_from_nir(type);
          }
 
          if (!opaque) {
@@ -218,37 +205,15 @@ emit_blend_desc(const struct pan_shader_info *fs_info, mali_ptr fs_code,
    }
 }
 
-static uint16_t
-get_ff_blend_constant(const struct pan_blend_state *state, unsigned rt_idx,
-                      unsigned const_idx)
-{
-   const struct pan_blend_rt_state *rt = &state->rts[rt_idx];
-
-   /* On Bifrost, the blend constant is expressed with a UNORM of the
-    * size of the target format. The value is then shifted such that
-    * used bits are in the MSB.
-    */
-   const struct util_format_description *format_desc =
-      util_format_description(rt->format);
-   unsigned chan_size = 0;
-   for (unsigned c = 0; c < format_desc->nr_channels; c++)
-      chan_size = MAX2(format_desc->channel[c].size, chan_size);
-   float factor = ((1 << chan_size) - 1) << (16 - chan_size);
-
-   return (uint16_t)(state->constants[const_idx] * factor);
-}
-
 static bool
 blend_needs_shader(const struct pan_blend_state *state, unsigned rt_idx,
                    unsigned *ff_blend_constant)
 {
    const struct pan_blend_rt_state *rt = &state->rts[rt_idx];
 
-   /* LogicOp requires a blend shader, unless it's a NOOP, in which case we just
-    * disable blending.
-    */
+   /* LogicOp requires a blend shader */
    if (state->logicop_enable)
-      return state->logicop_func != PIPE_LOGICOP_NOOP;
+      return true;
 
    /* alpha-to-one always requires a blend shader */
    if (state->alpha_to_one)
@@ -261,7 +226,11 @@ blend_needs_shader(const struct pan_blend_state *state, unsigned rt_idx,
       return false;
 
    /* Not all formats can be blended by fixed-function hardware */
-   if (!GENX(panfrost_blendable_format_from_pipe_format)(rt->format)->internal)
+   if (!GENX(pan_blendable_format_from_pipe_format)(rt->format)->internal)
+      return true;
+
+   bool supports_2src = pan_blend_supports_2src(PAN_ARCH);
+   if (!pan_blend_can_fixed_function(rt->equation, supports_2src))
       return true;
 
    unsigned constant_mask = pan_blend_constant_mask(rt->equation);
@@ -279,16 +248,13 @@ blend_needs_shader(const struct pan_blend_state *state, unsigned rt_idx,
     */
    unsigned blend_const = ~0;
    if (constant_mask) {
-      blend_const =
-         get_ff_blend_constant(state, rt_idx, ffs(constant_mask) - 1);
+      const float blend_const_f =
+         pan_blend_get_constant(constant_mask, state->constants);
+      blend_const = pan_pack_blend_constant(rt->format, blend_const_f);
 
       if (*ff_blend_constant != ~0 && blend_const != *ff_blend_constant)
          return true;
    }
-
-   bool supports_2src = pan_blend_supports_2src(PAN_ARCH);
-   if (!pan_blend_can_fixed_function(rt->equation, supports_2src))
-      return true;
 
    /* Update the fixed function blend constant, if we use it. */
    if (blend_const != ~0)
@@ -298,18 +264,27 @@ blend_needs_shader(const struct pan_blend_state *state, unsigned rt_idx,
 }
 
 VkResult
-panvk_per_arch(blend_emit_descs)(
-   struct panvk_device *dev, const struct vk_dynamic_graphics_state *dyns,
-   const VkFormat *color_attachment_formats, uint8_t *color_attachment_samples,
-   const struct pan_shader_info *fs_info, mali_ptr fs_code,
-   struct mali_blend_packed *bds, struct panvk_blend_info *blend_info)
+panvk_per_arch(blend_emit_descs)(struct panvk_cmd_buffer *cmdbuf,
+                                 struct mali_blend_packed *bds)
 {
+   struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
+   const struct vk_dynamic_graphics_state *dyns =
+      &cmdbuf->vk.dynamic_graphics_state;
    const struct vk_color_blend_state *cb = &dyns->cb;
+   const struct vk_color_attachment_location_state *cal = &dyns->cal;
+   const struct panvk_shader_variant *fs =
+      panvk_shader_only_variant(cmdbuf->state.gfx.fs.shader);
+   const struct pan_shader_info *fs_info = &fs->info;
+   uint64_t fs_code = panvk_shader_variant_get_dev_addr(fs);
+   const struct panvk_rendering_state *render = &cmdbuf->state.gfx.render;
+   const VkFormat *color_attachment_formats = render->color_attachments.fmts;
+   const uint8_t *color_attachment_samples = render->color_attachments.samples;
+   struct panvk_blend_info *blend_info = &cmdbuf->state.gfx.cb.info;
    struct pan_blend_state bs = {
       .alpha_to_one = dyns->ms.alpha_to_one_enable,
       .logicop_enable = cb->logic_op_enable,
       .logicop_func = vk_logic_op_to_pipe(cb->logic_op),
-      .rt_count = cb->attachment_count,
+      .rt_count = cmdbuf->state.gfx.render.fb.info.rt_count,
       .constants =
          {
             cb->blend_constants[0],
@@ -318,39 +293,53 @@ panvk_per_arch(blend_emit_descs)(
             cb->blend_constants[3],
          },
    };
-   mali_ptr blend_shaders[8] = {};
+   uint64_t blend_shaders[8] = {};
    /* All bits set to one encodes unused fixed-function blend constant. */
    unsigned ff_blend_constant = ~0;
+   uint32_t blend_count = MAX2(cmdbuf->state.gfx.render.fb.info.rt_count, 1);
+
+   uint8_t loc_rt[MAX_RTS], rt_loc[MAX_RTS];
+   memset(loc_rt, MESA_VK_ATTACHMENT_UNUSED, sizeof(loc_rt));
+   memset(rt_loc, MESA_VK_ATTACHMENT_UNUSED, sizeof(rt_loc));
 
    memset(blend_info, 0, sizeof(*blend_info));
-   for (uint8_t i = 0; i < cb->attachment_count; i++) {
+   for (uint8_t i = 0; i < bs.rt_count; i++) {
       struct pan_blend_rt_state *rt = &bs.rts[i];
 
-      if (!(cb->color_write_enables & BITFIELD_BIT(i))) {
-         rt->equation.color_mask = 0;
+      uint8_t loc = cal->color_map[i];
+      if (loc == MESA_VK_ATTACHMENT_UNUSED)
          continue;
-      }
 
-      if (bs.logicop_enable && bs.logicop_func == PIPE_LOGICOP_NOOP) {
-         rt->equation.color_mask = 0;
+      if (!(fs_info->outputs_written & BITFIELD_BIT(FRAG_RESULT_DATA0 + loc)))
          continue;
-      }
 
-      if (color_attachment_formats[i] == VK_FORMAT_UNDEFINED) {
-         rt->equation.color_mask = 0;
-         continue;
-      }
+      /* At this point, we know it's mapped to a shader location. */
+      assert(loc < MAX_RTS && loc_rt[loc] == MESA_VK_ATTACHMENT_UNUSED);
+      rt_loc[i] = loc;
+      loc_rt[loc] = i;
 
-      if (!cb->attachments[i].write_mask) {
-         rt->equation.color_mask = 0;
+      if (!(cb->color_write_enables & BITFIELD_BIT(i)))
          continue;
-      }
+
+      if (color_attachment_formats[i] == VK_FORMAT_UNDEFINED)
+         continue;
+
+      if (!cb->attachments[i].write_mask)
+         continue;
 
       rt->format = vk_format_to_pipe_format(color_attachment_formats[i]);
 
+      /* Disable blending for LOGICOP_NOOP unless the format is float/srgb */
+      bool is_float = util_format_is_float(rt->format);
+      if (bs.logicop_enable && bs.logicop_func == PIPE_LOGICOP_NOOP &&
+          !(is_float || util_format_is_srgb(rt->format)))
+         continue;
+
       rt->nr_samples = color_attachment_samples[i];
       rt->equation.blend_enable = cb->attachments[i].blend_enable;
+      rt->equation.is_float = is_float;
       rt->equation.color_mask = cb->attachments[i].write_mask;
+
       rt->equation.rgb_func =
          vk_blend_op_to_pipe(cb->attachments[i].color_blend_op);
       rt->equation.rgb_src_factor =
@@ -364,27 +353,19 @@ panvk_per_arch(blend_emit_descs)(
       rt->equation.alpha_dst_factor =
          vk_blend_factor_to_pipe(cb->attachments[i].dst_alpha_blend_factor);
 
-      bool dest_has_alpha = util_format_has_alpha(rt->format);
-      if (!dest_has_alpha) {
-         rt->equation.rgb_src_factor =
-            util_blend_dst_alpha_to_one(rt->equation.rgb_src_factor);
-         rt->equation.rgb_dst_factor =
-            util_blend_dst_alpha_to_one(rt->equation.rgb_dst_factor);
-
-         rt->equation.alpha_src_factor =
-            util_blend_dst_alpha_to_one(rt->equation.alpha_src_factor);
-         rt->equation.alpha_dst_factor =
-            util_blend_dst_alpha_to_one(rt->equation.alpha_dst_factor);
-      }
+      /* We have the format and the constants so we can optimize the blend
+       * equation before we decide if we actually need a blend shader.
+       */
+      pan_blend_optimize_equation(&rt->equation, rt->format, bs.constants);
 
       blend_info->any_dest_read |= pan_blend_reads_dest(rt->equation);
 
       if (blend_needs_shader(&bs, i, &ff_blend_constant)) {
-         nir_alu_type src0_type = fs_info->bifrost.blend[i].type;
+         nir_alu_type src0_type = fs_info->bifrost.blend[loc].type;
          nir_alu_type src1_type = fs_info->bifrost.blend_src1_type;
 
-         VkResult result = get_blend_shader(dev, &bs, src0_type, src1_type, i,
-                                            &blend_shaders[i]);
+         VkResult result = get_blend_shader(dev, &bs, src0_type, src1_type,
+                                            i, &blend_shaders[i]);
          if (result != VK_SUCCESS)
             return result;
 
@@ -398,11 +379,66 @@ panvk_per_arch(blend_emit_descs)(
    if (ff_blend_constant == ~0)
       ff_blend_constant = 0;
 
-   /* Now that we've collected all the information, we can emit. */
-   for (uint8_t i = 0; i < MAX2(cb->attachment_count, 1); i++) {
-      emit_blend_desc(fs_info, fs_code, &bs, i, blend_shaders[i],
-                      ff_blend_constant, &bds[i]);
+   struct mali_blend_packed packed[MAX_RTS];
+   for (uint8_t rt = 0; rt < blend_count; rt++) {
+      emit_blend_desc(&bs, rt, fs_info, rt_loc[rt], fs_code,
+                      blend_shaders[rt], ff_blend_constant, &packed[rt]);
    }
+
+   /* Copy into the GPU descriptor array */
+   typed_memcpy(bds, packed, blend_count);
+
+   /* Re-order blend descriptors for the shader
+    *
+    * Blending on Bifrost+ is really annoying.  In theory, we can order the
+    * blend descriptors any way we want and, in theory, they all have an RT
+    * index.  However, that's not really the way blending works.  If every
+    * blend descriptor is either disabled or has the RT index that's the same
+    * as the blend descriptor index, everything is fine.  If not, we're in for
+    * a bit of trouble.
+    *
+    * The RT index is only really consumed by the BLEND instruction to tell it
+    * what RT to target.  The FF blend hardware, however, assumes that blend
+    * RTs map 1:1 to framebuffer RTs.  If the BLEND instruction kicks off a
+    * blend shader, everything is good because the blend shader has the
+    * correct RT index baked into it.  But if the BLEND fires off a message to
+    * the blend unit, it then looks up the blend descriptor by RT index,
+    * ignoring which blend descriptor FAU we read from the shader.  Say, for
+    * instance bds[3].rt == 5.  If we BLEND using blend_descriptor_3, the
+    * BLEND instruction will see an RT of 5 and kick off a blend message.  The
+    * blend unit will then fetch bds[5] and use that to do the actual blend.
+    *
+    * We could try to do something crazy where we divide blend descriptors
+    * into a shader half and a HW half and only re-arrange the shader half so
+    * that the hardware's little daisy-chain game works.  However, there are a
+    * few fields that are used by both, notably the conversion, so this is
+    * dead in the water.
+    *
+    * The solution, then, is to push our own blend descriptors.  Or at least
+    * the shader half (everything in .internal).  This lets us leave the HW
+    * blend descriptors with a 1:1 mapping to framebuffer RTs and re-order
+    * things from the shader PoV.  The BLEND instructions in the shader will
+    * use the ones we pushed manually and then, when a blend message gets sent
+    * to the hardware, it'll pick up an idential blend descriptor in the RT
+    * index location in the bds[] array.
+    */
+   for (uint8_t loc = 0; loc < MAX_RTS; loc++) {
+      uint8_t rt = loc_rt[loc];
+      if (rt == MESA_VK_ATTACHMENT_UNUSED) {
+         struct mali_blend_packed disabled;
+         pan_pack(&disabled, BLEND, cfg) {
+            cfg.enable = false;
+            cfg.internal.mode = MALI_BLEND_MODE_OFF;
+         }
+         cmdbuf->state.gfx.fs.blend_descs[loc] =
+            disabled.opaque[2] | (uint64_t)disabled.opaque[3] << 32;
+      } else {
+         cmdbuf->state.gfx.fs.blend_descs[loc] =
+            packed[rt].opaque[2] | (uint64_t)packed[rt].opaque[3] << 32;
+      }
+   }
+
+   gfx_state_set_dirty(cmdbuf, FS_PUSH_UNIFORMS);
 
    return VK_SUCCESS;
 }

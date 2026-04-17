@@ -38,7 +38,7 @@ struct tu_inline_ubo
  */
 struct tu_push_constant_range
 {
-   uint32_t lo;
+   uint32_t lo_dwords;
    uint32_t dwords;
    enum ir3_push_consts_type type;
 };
@@ -69,6 +69,7 @@ struct tu_shader
    struct tu_draw_state state;
    struct tu_draw_state safe_const_state;
    struct tu_draw_state binning_state;
+   struct tu_draw_state safe_const_binning_state;
 
    struct tu_const_state const_state;
    uint32_t view_mask;
@@ -81,6 +82,11 @@ struct tu_shader
     */
    int dynamic_descriptor_sizes[MAX_SETS];
 
+   /* For all shader types other than FS, store whether the viewport was
+    * rewritten to equal the layer.
+    */
+   bool per_layer_viewport;
+
    union {
       struct {
          unsigned patch_type;
@@ -89,7 +95,11 @@ struct tu_shader
       } tes;
 
       struct {
-         bool per_samp;
+         /* Set if the FS should be run at sample rate instead of pixel rate (by
+          * sample-rate variable usage, or
+          * VkPipelineMultisampleStateCreateInfo->sampleShadingEnable.
+          */
+         bool sample_shading;
          bool has_fdm;
 
          uint16_t dynamic_input_attachments_used;
@@ -98,6 +108,10 @@ struct tu_shader
             uint32_t status;
             bool force_late_z;
          } lrz;
+
+         /* If per_layer_viewport is true, the maximum number of layers written to.
+          */
+         uint8_t max_fdm_layers;
       } fs;
    };
 };
@@ -105,19 +119,29 @@ struct tu_shader
 struct tu_shader_key {
    unsigned multiview_mask;
    uint16_t read_only_input_attachments;
-   bool force_sample_interp;
+   uint8_t max_fdm_layers;
+   bool force_sample_interp; /* Set when VkPipelineMultisampleStateCreateInfo->sampleShadingEnable */
    bool fragment_density_map;
+   bool fdm_per_layer;
    bool dynamic_renderpass;
    uint8_t unscaled_input_fragcoord;
    bool robust_storage_access2;
    bool robust_uniform_access2;
    bool lower_view_index_to_device_index;
+   bool custom_resolve;
    enum ir3_wavesize_option api_wavesize, real_wavesize;
 };
 
 extern const struct vk_pipeline_cache_object_ops tu_shader_ops;
+
+void
+tu_destroy_softfloat(struct tu_device *device);
+
 bool
 tu_nir_lower_multiview(nir_shader *nir, uint32_t mask, struct tu_device *dev);
+
+bool
+tu_nir_lower_ray_queries(nir_shader *nir);
 
 nir_shader *
 tu_spirv_to_nir(struct tu_device *dev,
@@ -125,14 +149,22 @@ tu_spirv_to_nir(struct tu_device *dev,
                 VkPipelineCreateFlags2KHR pipeline_flags,
                 const VkPipelineShaderStageCreateInfo *stage_info,
                 const struct tu_shader_key *key,
-                gl_shader_stage stage);
+                mesa_shader_stage stage);
 
+template <chip CHIP>
 void
-tu6_emit_xs(struct tu_cs *cs,
-            gl_shader_stage stage,
+tu6_emit_xs(struct tu_crb &crb,
+            struct tu_device *device,
+            mesa_shader_stage stage,
             const struct ir3_shader_variant *xs,
             const struct tu_pvtmem_config *pvtmem,
             uint64_t binary_iova);
+
+void
+tu6_emit_xs_constants(struct tu_cs *cs,
+                      mesa_shader_stage stage,
+                      const struct ir3_shader_variant *xs,
+                      uint64_t binary_iova);
 
 template <chip CHIP>
 void

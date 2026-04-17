@@ -54,9 +54,7 @@ build_instance_id(struct lower_multiview_state *state)
 
    if (state->instance_id == NULL) {
       nir_builder *b = &state->builder;
-
-      b->cursor =
-         nir_after_instr(state->instance_id_with_views->parent_instr);
+      b->cursor = nir_after_def(state->instance_id_with_views);
 
       /* We use instancing for implementing multiview.  The actual instance id
        * is given by dividing instance_id by the number of views in this
@@ -77,9 +75,7 @@ build_view_index(struct lower_multiview_state *state)
 
    if (state->view_index == NULL) {
       nir_builder *b = &state->builder;
-
-      b->cursor =
-         nir_after_instr(state->instance_id_with_views->parent_instr);
+      b->cursor = nir_after_def(state->instance_id_with_views);
 
       assert(state->view_mask != 0);
       if (util_bitcount(state->view_mask) == 1) {
@@ -204,7 +200,11 @@ anv_nir_lower_multiview(nir_shader *shader, uint32_t view_mask,
     * implement multiview.
     */
    if (use_primitive_replication) {
-      bool progress = nir_lower_multiview(shader, view_mask);
+      nir_lower_multiview_options options = {
+         .view_mask = view_mask,
+         .allowed_per_view_outputs = VARYING_BIT_POS
+      };
+      bool progress = nir_lower_multiview(shader, options);
 
       if (progress) {
          nir_builder b = nir_builder_at(nir_before_impl(entrypoint));
@@ -240,8 +240,8 @@ anv_nir_lower_multiview(nir_shader *shader, uint32_t view_mask,
     */
    nir_def *view_index = build_view_index(&state);
 
-   assert(view_index->parent_instr->block == nir_start_block(entrypoint));
-   b->cursor = nir_after_instr(view_index->parent_instr);
+   assert(nir_def_block(view_index) == nir_start_block(entrypoint));
+   b->cursor = nir_after_def(view_index);
 
    /* Unless there is only one possible view index (that would be set
     * directly), pass it to the next stage.
@@ -297,9 +297,7 @@ anv_nir_lower_multiview(nir_shader *shader, uint32_t view_mask,
       }
    }
 
-   nir_metadata_preserve(entrypoint, nir_metadata_control_flow);
-
-   return true;
+   return nir_progress(true, entrypoint, nir_metadata_control_flow);
 }
 
 bool
@@ -327,17 +325,21 @@ anv_check_for_primitive_replication(struct anv_device *device,
    /* TODO: We should be able to support replication at 'geometry' stages
     * later than Vertex.  In that case only the last stage can refer to
     * gl_ViewIndex.
+    *
+    * If we have only vertex or only fragment (pipeline libraries), we also do
+    * not support primitive replication, because that would make use compute
+    * inconsistent VUE layout in each stage.
     */
-   if (stages & ~(VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT))
-      return false;
-
-   /* It's possible we have no vertex shader yet (with pipeline libraries) */
-   if (!(stages & VK_SHADER_STAGE_VERTEX_BIT))
+   if (stages != (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT))
       return false;
 
    int view_count = util_bitcount(view_mask);
    if (view_count == 1 || view_count > primitive_replication_max_views)
       return false;
 
-   return nir_can_lower_multiview(shaders[MESA_SHADER_VERTEX]);
+   nir_lower_multiview_options options = {
+      .view_mask = view_mask,
+      .allowed_per_view_outputs = VARYING_BIT_POS
+   };
+   return nir_can_lower_multiview(shaders[MESA_SHADER_VERTEX], options);
 }

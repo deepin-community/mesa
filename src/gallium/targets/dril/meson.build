@@ -43,7 +43,7 @@ dril_dri = shared_library(
   'dril_dri',
   files('dril_target.c'),
   include_directories : [
-    inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux, inc_util, inc_gallium_drivers,
+    inc_include, inc_src, inc_mesa, inc_gallium, inc_gallium_aux, inc_util, inc_gallium_drivers,
     inc_gallium_winsys,
   ],
   gnu_symbol_visibility : 'hidden',
@@ -51,18 +51,19 @@ dril_dri = shared_library(
   link_depends : dril_link_depends,
   link_with : [
     libgallium,
-    libgbm,
   ],
   dependencies : [
     idep_mesautil,
+    dep_gbm,
   ],
   # Will be deleted during installation, see install_megadrivers.py
   install : true,
   install_dir : dri_drivers_path,
-  name_suffix : 'so',
+  name_suffix : libname_suffix,
 )
 
 foreach d : [[with_gallium_kmsro, [
+               'apple_dri.so',
                'armada-drm_dri.so',
                'exynos_dri.so',
                'gm12u320_dri.so',
@@ -117,7 +118,8 @@ foreach d : [[with_gallium_kmsro, [
              [with_gallium_r600, 'r600_dri.so'],
              [with_gallium_svga, 'vmwgfx_dri.so'],
              [with_gallium_virgl or
-               (with_gallium_freedreno and freedreno_kmds.contains('virtio')),
+               (with_gallium_freedreno and freedreno_kmds.contains('virtio')) or
+               (with_gallium_radeonsi and with_amdgpu_virtio),
                'virtio_gpu_dri.so'],
              [with_gallium_lima, 'lima_dri.so'],
              [with_gallium_d3d12, 'd3d12_dri.so'],
@@ -143,7 +145,7 @@ endif
 
 if dril_drivers.length() > 0
   meson.add_install_script(
-    install_megadrivers_py.full_path(),
+    install_megadrivers,
     dril_dri.full_path(),
     dri_drivers_path,
     dril_drivers,

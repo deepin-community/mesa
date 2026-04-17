@@ -25,6 +25,7 @@
 
 #include "vk_format.h"
 #include "vk_ycbcr_conversion.h"
+#include "nir_builder.h"
 
 #include <math.h>
 
@@ -46,7 +47,7 @@ y_range(nir_builder *b,
                           1.0f / (219.0f * pow(2, bpc - 8)));
 
    default:
-      unreachable("missing Ycbcr range");
+      UNREACHABLE("missing Ycbcr range");
       return NULL;
    }
 }
@@ -69,7 +70,7 @@ chroma_range(nir_builder *b,
                                        -128.0f * pow(2, bpc - 8)),
                           1.0f / (224.0f * pow(2, bpc - 8)));
    default:
-      unreachable("missing Ycbcr range");
+      UNREACHABLE("missing Ycbcr range");
       return NULL;
    }
 }
@@ -110,7 +111,7 @@ ycbcr_model_to_rgb_matrix(VkSamplerYcbcrModelConversion model)
       return &bt2020;
    }
    default:
-      unreachable("missing Ycbcr model");
+      UNREACHABLE("missing Ycbcr model");
       return NULL;
    }
 }
@@ -159,26 +160,10 @@ struct ycbcr_state {
 static nir_def *
 get_texture_size(struct ycbcr_state *state, nir_deref_instr *texture)
 {
-   if (state->image_size)
-      return state->image_size;
-
-   nir_builder *b = state->builder;
-   const struct glsl_type *type = texture->type;
-   nir_tex_instr *tex = nir_tex_instr_create(b->shader, 1);
-
-   tex->op = nir_texop_txs;
-   tex->sampler_dim = glsl_get_sampler_dim(type);
-   tex->is_array = glsl_sampler_type_is_array(type);
-   tex->is_shadow = glsl_sampler_type_is_shadow(type);
-   tex->dest_type = nir_type_int32;
-
-   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_texture_deref,
-                                     &texture->def);
-
-   nir_def_init(&tex->instr, &tex->def, nir_tex_instr_dest_size(tex), 32);
-   nir_builder_instr_insert(b, &tex->instr);
-
-   state->image_size = nir_i2f32(b, &tex->def);
+   if (!state->image_size) {
+      nir_builder *b = state->builder;
+      state->image_size = nir_i2f32(b, nir_txs(b, .texture_deref = texture));
+   }
 
    return state->image_size;
 }
@@ -189,12 +174,8 @@ implicit_downsampled_coord(nir_builder *b,
                            nir_def *max_value,
                            int div_scale)
 {
-   return nir_fadd(b,
-                   value,
-                   nir_frcp(b,
-                            nir_fmul(b,
-                                     nir_imm_float(b, div_scale),
-                                     max_value)));
+   nir_def *scaled_max_value = nir_fmul_imm(b, max_value, div_scale);
+   return nir_fadd(b, value, nir_frcp(b, scaled_max_value));
 }
 
 static nir_def *
@@ -290,7 +271,7 @@ swizzle_to_component(VkComponentSwizzle swizzle)
    case VK_COMPONENT_SWIZZLE_A:
       return 3;
    default:
-      unreachable("invalid channel");
+      UNREACHABLE("invalid channel");
       return 0;
    }
 }

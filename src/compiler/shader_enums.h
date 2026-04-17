@@ -31,8 +31,7 @@
 #include "util/macros.h"
 #include "util/u_debug.h"
 #else
-#define ENUM_PACKED
-#define BITFIELD_BIT(b) (1u << (b))
+#include "libcl/libcl.h"
 #define debug_printf(x, ...)
 #endif
 
@@ -46,34 +45,23 @@ extern "C" {
 /**
  * Shader stages.
  *
+ * For vertex/tessallation/geometry/fragment shaders:
  * The order must match how shaders are ordered in the pipeline.
  * The GLSL linker assumes that if i<j, then the j-th shader is
  * executed later than the i-th shader.
  */
-typedef enum pipe_shader_type
-{
+typedef enum mesa_shader_stage {
    MESA_SHADER_NONE = -1,
    MESA_SHADER_VERTEX = 0,
-   PIPE_SHADER_VERTEX = MESA_SHADER_VERTEX,
    MESA_SHADER_TESS_CTRL = 1,
-   PIPE_SHADER_TESS_CTRL = MESA_SHADER_TESS_CTRL,
    MESA_SHADER_TESS_EVAL = 2,
-   PIPE_SHADER_TESS_EVAL = MESA_SHADER_TESS_EVAL,
    MESA_SHADER_GEOMETRY = 3,
-   PIPE_SHADER_GEOMETRY = MESA_SHADER_GEOMETRY,
    MESA_SHADER_FRAGMENT = 4,
-   PIPE_SHADER_FRAGMENT = MESA_SHADER_FRAGMENT,
    MESA_SHADER_COMPUTE = 5,
-   PIPE_SHADER_COMPUTE = MESA_SHADER_COMPUTE,
+   MESA_SHADER_TASK = 6,
+   MESA_SHADER_MESH = 7,
 
-   PIPE_SHADER_TYPES = (PIPE_SHADER_COMPUTE + 1),
    /* Vulkan-only stages. */
-   MESA_SHADER_TASK         = 6,
-   PIPE_SHADER_TASK = MESA_SHADER_TASK,
-   MESA_SHADER_MESH         = 7,
-   PIPE_SHADER_MESH = MESA_SHADER_MESH,
-   PIPE_SHADER_MESH_TYPES = (PIPE_SHADER_MESH + 1),
-
    MESA_SHADER_RAYGEN       = 8,
    MESA_SHADER_ANY_HIT      = 9,
    MESA_SHADER_CLOSEST_HIT  = 10,
@@ -83,23 +71,40 @@ typedef enum pipe_shader_type
 
    /* must be last so it doesn't affect the GL pipeline */
    MESA_SHADER_KERNEL = 14,
-} gl_shader_stage;
+} mesa_shader_stage;
 
 static inline bool
-gl_shader_stage_is_compute(gl_shader_stage stage)
+mesa_shader_stage_is_graphics(mesa_shader_stage stage)
+{
+   switch (stage) {
+   case MESA_SHADER_VERTEX:
+   case MESA_SHADER_TESS_CTRL:
+   case MESA_SHADER_TESS_EVAL:
+   case MESA_SHADER_GEOMETRY:
+   case MESA_SHADER_FRAGMENT:
+   case MESA_SHADER_TASK:
+   case MESA_SHADER_MESH:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static inline bool
+mesa_shader_stage_is_compute(mesa_shader_stage stage)
 {
    return stage == MESA_SHADER_COMPUTE || stage == MESA_SHADER_KERNEL;
 }
 
 static inline bool
-gl_shader_stage_is_mesh(gl_shader_stage stage)
+mesa_shader_stage_is_mesh(mesa_shader_stage stage)
 {
    return stage == MESA_SHADER_TASK ||
           stage == MESA_SHADER_MESH;
 }
 
 static inline bool
-gl_shader_stage_uses_workgroup(gl_shader_stage stage)
+mesa_shader_stage_uses_workgroup(mesa_shader_stage stage)
 {
    return stage == MESA_SHADER_COMPUTE ||
           stage == MESA_SHADER_KERNEL ||
@@ -108,7 +113,7 @@ gl_shader_stage_uses_workgroup(gl_shader_stage stage)
 }
 
 static inline bool
-gl_shader_stage_is_callable(gl_shader_stage stage)
+mesa_shader_stage_is_callable(mesa_shader_stage stage)
 {
    return stage == MESA_SHADER_ANY_HIT ||
           stage == MESA_SHADER_CLOSEST_HIT ||
@@ -118,13 +123,13 @@ gl_shader_stage_is_callable(gl_shader_stage stage)
 }
 
 static inline bool
-gl_shader_stage_is_rt(gl_shader_stage stage)
+mesa_shader_stage_is_rt(mesa_shader_stage stage)
 {
-   return stage == MESA_SHADER_RAYGEN || gl_shader_stage_is_callable(stage);
+   return stage == MESA_SHADER_RAYGEN || mesa_shader_stage_is_callable(stage);
 }
 
 static inline bool
-gl_shader_stage_can_set_fragment_shading_rate(gl_shader_stage stage)
+mesa_shader_stage_can_set_fragment_shading_rate(mesa_shader_stage stage)
 {
    /* According to EXT_fragment_shading_rate :
     *
@@ -144,24 +149,36 @@ gl_shader_stage_can_set_fragment_shading_rate(gl_shader_stage stage)
 
 typedef short gl_state_index16; /* see enum gl_state_index */
 
-const char *gl_shader_stage_name(gl_shader_stage stage);
+const char *mesa_shader_stage_name(mesa_shader_stage stage);
 
 /**
- * Translate a gl_shader_stage to a short shader stage name for debug
+ * Translate a mesa_shader_stage to a short shader stage name for debug
  * printouts and error messages.
  */
 const char *_mesa_shader_stage_to_string(unsigned stage);
 
 /**
- * Translate a gl_shader_stage to a shader stage abbreviation (VS, GS, FS)
+ * Translate a mesa_shader_stage to a shader stage abbreviation (VS, GS, FS)
  * for debug printouts and error messages.
  */
 const char *_mesa_shader_stage_to_abbrev(unsigned stage);
+
+
+/**
+ * Translate a gl_shader_stage to a shader stage file extension
+ * that's easily consumed by glslang.
+ */
+const char *_mesa_shader_stage_to_file_ext(unsigned stage);
 
 /**
  * GL related stages (not including CL)
  */
 #define MESA_SHADER_STAGES (MESA_SHADER_COMPUTE + 1)
+
+/**
+ * GL related stages with mesh shader (not including CL)
+ */
+#define MESA_SHADER_MESH_STAGES (MESA_SHADER_MESH + 1)
 
 /**
  * Vulkan stages (not including CL)
@@ -464,7 +481,7 @@ typedef enum
 #define MAX_VARYINGS_INCL_PATCH (VARYING_SLOT_TESS_MAX - VARYING_SLOT_VAR0)
 
 const char *gl_varying_slot_name_for_stage(gl_varying_slot slot,
-                                           gl_shader_stage stage);
+                                           mesa_shader_stage stage);
 
 /**
  * Determine if the given gl_varying_slot appears in the fragment shader.
@@ -523,6 +540,7 @@ _mesa_varying_slot_in_fs(gl_varying_slot slot)
 #define VARYING_BIT_CULL_DIST0 BITFIELD64_BIT(VARYING_SLOT_CULL_DIST0)
 #define VARYING_BIT_CULL_DIST1 BITFIELD64_BIT(VARYING_SLOT_CULL_DIST1)
 #define VARYING_BIT_PRIMITIVE_ID BITFIELD64_BIT(VARYING_SLOT_PRIMITIVE_ID)
+#define VARYING_BIT_PRIMITIVE_COUNT BITFIELD64_BIT(VARYING_SLOT_PRIMITIVE_COUNT)
 #define VARYING_BIT_LAYER BITFIELD64_BIT(VARYING_SLOT_LAYER)
 #define VARYING_BIT_VIEWPORT BITFIELD64_BIT(VARYING_SLOT_VIEWPORT)
 #define VARYING_BIT_FACE BITFIELD64_BIT(VARYING_SLOT_FACE)
@@ -530,9 +548,11 @@ _mesa_varying_slot_in_fs(gl_varying_slot slot)
 #define VARYING_BIT_PNTC BITFIELD64_BIT(VARYING_SLOT_PNTC)
 #define VARYING_BIT_TESS_LEVEL_OUTER BITFIELD64_BIT(VARYING_SLOT_TESS_LEVEL_OUTER)
 #define VARYING_BIT_TESS_LEVEL_INNER BITFIELD64_BIT(VARYING_SLOT_TESS_LEVEL_INNER)
+#define VARYING_BIT_PRIMITIVE_INDICES BITFIELD64_BIT(VARYING_SLOT_PRIMITIVE_INDICES)
 #define VARYING_BIT_BOUNDING_BOX0 BITFIELD64_BIT(VARYING_SLOT_BOUNDING_BOX0)
 #define VARYING_BIT_BOUNDING_BOX1 BITFIELD64_BIT(VARYING_SLOT_BOUNDING_BOX1)
 #define VARYING_BIT_VIEWPORT_MASK BITFIELD64_BIT(VARYING_SLOT_VIEWPORT_MASK)
+#define VARYING_BIT_CULL_PRIMITIVE BITFIELD64_BIT(VARYING_SLOT_CULL_PRIMITIVE)
 #define VARYING_BIT_VAR(V) BITFIELD64_BIT(VARYING_SLOT_VAR0 + (V))
 /*@}*/
 
@@ -558,9 +578,8 @@ _mesa_varying_slot_in_fs(gl_varying_slot slot)
 /*@}*/
 
 /**
- * If the gl_register_file is PROGRAM_SYSTEM_VALUE, the register index will be
- * one of these values.  If a NIR variable's mode is nir_var_system_value, it
- * will be one of these values.
+ * If a NIR variable's mode is nir_var_system_value, it will be one of these
+ * values.
  */
 typedef enum
 {
@@ -782,17 +801,18 @@ typedef enum
    /*@{*/
    SYSTEM_VALUE_FRAG_COORD,
    SYSTEM_VALUE_PIXEL_COORD,
+   SYSTEM_VALUE_FRAG_COORD_Z,
+   SYSTEM_VALUE_FRAG_COORD_W,
    SYSTEM_VALUE_POINT_COORD,
    SYSTEM_VALUE_LINE_COORD, /**< Coord along axis perpendicular to line */
    SYSTEM_VALUE_FRONT_FACE,
+   SYSTEM_VALUE_FRONT_FACE_FSIGN,
    SYSTEM_VALUE_SAMPLE_ID,
    SYSTEM_VALUE_SAMPLE_POS,
    SYSTEM_VALUE_SAMPLE_POS_OR_CENTER,
    SYSTEM_VALUE_SAMPLE_MASK_IN,
    SYSTEM_VALUE_LAYER_ID,
    SYSTEM_VALUE_HELPER_INVOCATION,
-   SYSTEM_VALUE_COLOR0,
-   SYSTEM_VALUE_COLOR1,
    /*@}*/
 
    /**
@@ -832,6 +852,11 @@ typedef enum
 
    /** Required for VK_KHX_multiview */
    SYSTEM_VALUE_VIEW_INDEX,
+
+   /** Metal's amplification_id. Required to emulate view index on the vertex
+    * shaders. This value is present in both vertex and fragment shaders
+    */
+   SYSTEM_VALUE_AMPLIFICATION_ID_KK,
 
    /**
     * Driver internal vertex-count, used (for example) for drivers to
@@ -934,6 +959,13 @@ typedef enum
    SYSTEM_VALUE_WARP_ID_NV,
    SYSTEM_VALUE_SM_ID_NV,
 
+   /* SPV_ARM_core_builtins */
+   SYSTEM_VALUE_CORE_ID,
+   SYSTEM_VALUE_CORE_COUNT_ARM,
+   SYSTEM_VALUE_CORE_MAX_ID_ARM,
+   SYSTEM_VALUE_WARP_ID_ARM,
+   SYSTEM_VALUE_WARP_MAX_ID_ARM,
+
    SYSTEM_VALUE_MAX             /**< Number of values */
 } gl_system_value;
 
@@ -992,11 +1024,18 @@ typedef enum
    FRAG_RESULT_DATA5,
    FRAG_RESULT_DATA6,
    FRAG_RESULT_DATA7,
+
+   /* The color output that sets the values for the SRC1 blend factors, also
+    * known as dual source blending. This is typically the second color output,
+    * and DATA1-DATA7 can't be written when this one is written. Enabled by
+    * nir_io_use_frag_result_dual_src_blend.
+    */
+   FRAG_RESULT_DUAL_SRC_BLEND,
+   FRAG_RESULT_MAX,
 } gl_frag_result;
 
 const char *gl_frag_result_name(gl_frag_result result);
-
-#define FRAG_RESULT_MAX		(FRAG_RESULT_DATA0 + MAX_DRAW_BUFFERS)
+int mesa_frag_result_get_color_index(gl_frag_result result);
 
 /**
  * \brief Layout qualifiers for gl_FragDepth.
@@ -1036,6 +1075,9 @@ enum gl_access_qualifier
     * This means that the memory scope is the current device. It indicates
     * that reads and writes are coherent with reads and writes from other
     * shader invocations and other workgroups.
+    *
+    * This is not necessary for shared access. It is always workgroup
+    * coherent.
     */
    ACCESS_COHERENT      = (1 << 0),
 
@@ -1142,10 +1184,8 @@ enum gl_access_qualifier
     */
    ACCESS_CP_GE_COHERENT_AMD = (1 << 13),
 
-   /* Guarantee that an image_load is in bounds so we can skip robustness code
-    * on AGX, used for some internal shaders.
-    */
-   ACCESS_IN_BOUNDS_AGX = (1 << 14),
+   /* Guarantee that an image_load is in bounds so we can skip robustness code. */
+   ACCESS_IN_BOUNDS = (1 << 14),
 
    /**
     * Disallow vectorization.
@@ -1159,6 +1199,58 @@ enum gl_access_qualifier
     * shader where the API wants to copy all bytes that are resident.
     */
    ACCESS_KEEP_SCALAR = (1 << 15),
+
+   /**
+    * Indicates that this load will use SMEM.
+    */
+   ACCESS_SMEM_AMD = (1 << 16),
+
+   /**
+    * Indicates that this load must be skipped by helper invocations.
+    */
+   ACCESS_SKIP_HELPERS = (1 << 17),
+
+   /**
+    * Indicates that this is an atomic load/store. Atomic RMW, swap, and other
+    * intrinsics which are always atomic such as atomic_counter_read_deref do
+    * not need this flag.
+    *
+    * If this is a vector load/store, then each component is considered its
+    * own atomic access.
+    *
+    * For non-shared load/store, instructions with this flag should also have
+    * ACCESS_COHERENT.
+    *
+    * The differences between atomic and non-atomic accesses can be summarized
+    * as follows:
+    * - Bounds checking of a 64-bit atomic access must be done per-component,
+    *   and not for each 32-bit part.
+    * - Atomics accesses are always coherent. Non-shared atomic load/store
+    *   should have the ACCESS_COHERENT flag.
+    * - Data races do not happen with two atomic accesses, with each access
+    *   instead reading/writing a valid value. Two non-atomic accesses or an
+    *   atomic access and a non-atomic access can data race, which is either
+    *   undefined behaviour or undefined value, depending on
+    *   shader_info::assume_no_data_races.
+    * - Because of data races, atomics are necessary for sychronization
+    *   without barriers. In the Vulkan memory model, synchronizes-with
+    *   relations only form between two memory barriers if control barriers or
+    *   atomic accesses are involved.
+    *
+    * Some hardware can "tear" loads with a subgroup uniform address, which
+    * means that a store from a different subgroup interrupts the load,
+    * causing the result to not be subgroup uniform and instead be a mix of
+    * the old and new values, despite the address being subgroup uniform. If
+    * a load is not atomic and assume_no_data_races=true, we can assume that
+    * the load never tears.
+    */
+   ACCESS_ATOMIC = (1 << 18),
+
+   /**
+    * Indicates that access should be serialized with regard to the Intel EU
+    * fusion feature.
+    */
+   ACCESS_FUSED_EU_DISABLE_INTEL = (1 << 19),
 };
 
 /**
@@ -1384,6 +1476,18 @@ u_reduced_prim(enum mesa_prim prim)
    }
 }
 
+static inline bool
+mesa_prim_has_adjacency(enum mesa_prim prim)
+{
+   static_assert(MESA_PRIM_LINE_STRIP_ADJACENCY == MESA_PRIM_LINES_ADJACENCY + 1, "");
+   static_assert(MESA_PRIM_TRIANGLES_ADJACENCY == MESA_PRIM_LINES_ADJACENCY + 2, "");
+   static_assert(MESA_PRIM_TRIANGLE_STRIP_ADJACENCY == MESA_PRIM_LINES_ADJACENCY + 3, "");
+
+   /* Adjacency primitives are together so we can do a simple comparison */
+   return prim >= MESA_PRIM_LINES_ADJACENCY &&
+          prim <= MESA_PRIM_TRIANGLE_STRIP_ADJACENCY;
+}
+
 /**
  * A compare function enum for use in compiler lowering passes.  This is in
  * the same order as GL's compare functions (shifted down by GL_NEVER), and is
@@ -1444,62 +1548,28 @@ enum gl_derivative_group {
 
 enum float_controls
 {
-   /* The order of these matters. For float_controls2, only the first 9 bits
-    * are used and stored per-instruction in nir_alu_instr::fp_fast_math.
-    * Any changes in this enum need to be synchronized with that.
-    */
    FLOAT_CONTROLS_DEFAULT_FLOAT_CONTROL_MODE = 0,
-   FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP16  = BITFIELD_BIT(0),
-   FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP32  = BITFIELD_BIT(1),
-   FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP64  = BITFIELD_BIT(2),
-   FLOAT_CONTROLS_INF_PRESERVE_FP16          = BITFIELD_BIT(3),
-   FLOAT_CONTROLS_INF_PRESERVE_FP32          = BITFIELD_BIT(4),
-   FLOAT_CONTROLS_INF_PRESERVE_FP64          = BITFIELD_BIT(5),
-   FLOAT_CONTROLS_NAN_PRESERVE_FP16          = BITFIELD_BIT(6),
-   FLOAT_CONTROLS_NAN_PRESERVE_FP32          = BITFIELD_BIT(7),
-   FLOAT_CONTROLS_NAN_PRESERVE_FP64          = BITFIELD_BIT(8),
-   FLOAT_CONTROLS_DENORM_PRESERVE_FP16       = BITFIELD_BIT(9),
-   FLOAT_CONTROLS_DENORM_PRESERVE_FP32       = BITFIELD_BIT(10),
-   FLOAT_CONTROLS_DENORM_PRESERVE_FP64       = BITFIELD_BIT(11),
-   FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP16  = BITFIELD_BIT(12),
-   FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32  = BITFIELD_BIT(13),
-   FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP64  = BITFIELD_BIT(14),
-   FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP16     = BITFIELD_BIT(15),
-   FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP32     = BITFIELD_BIT(16),
-   FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP64     = BITFIELD_BIT(17),
-   FLOAT_CONTROLS_ROUNDING_MODE_RTZ_FP16     = BITFIELD_BIT(18),
-   FLOAT_CONTROLS_ROUNDING_MODE_RTZ_FP32     = BITFIELD_BIT(19),
-   FLOAT_CONTROLS_ROUNDING_MODE_RTZ_FP64     = BITFIELD_BIT(20),
 
-   FLOAT_CONTROLS_SIGNED_ZERO_INF_NAN_PRESERVE_FP16 =
-      FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP16 |
-      FLOAT_CONTROLS_INF_PRESERVE_FP16 |
-      FLOAT_CONTROLS_NAN_PRESERVE_FP16,
+   /* Both input and output denorms must be preserved. */
+   FLOAT_CONTROLS_DENORM_PRESERVE_FP16       = BITFIELD_BIT(0),
+   FLOAT_CONTROLS_DENORM_PRESERVE_FP32       = BITFIELD_BIT(1),
+   FLOAT_CONTROLS_DENORM_PRESERVE_FP64       = BITFIELD_BIT(2),
 
-   FLOAT_CONTROLS_SIGNED_ZERO_INF_NAN_PRESERVE_FP32 =
-      FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP32 |
-      FLOAT_CONTROLS_INF_PRESERVE_FP32 |
-      FLOAT_CONTROLS_NAN_PRESERVE_FP32,
+   /* Both input and output denorms must be flushed.
+    * Note that this is different from SPIR-V, which only requires
+    * output flushing.
+    */
+   FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP16  = BITFIELD_BIT(3),
+   FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32  = BITFIELD_BIT(4),
+   FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP64  = BITFIELD_BIT(5),
 
-   FLOAT_CONTROLS_SIGNED_ZERO_INF_NAN_PRESERVE_FP64 =
-      FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP64 |
-      FLOAT_CONTROLS_INF_PRESERVE_FP64 |
-      FLOAT_CONTROLS_NAN_PRESERVE_FP64,
-   
-   FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE =
-      FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP16 |
-      FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP32 |
-      FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP64,
+   FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP16     = BITFIELD_BIT(6),
+   FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP32     = BITFIELD_BIT(7),
+   FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP64     = BITFIELD_BIT(8),
 
-   FLOAT_CONTROLS_INF_PRESERVE =
-      FLOAT_CONTROLS_INF_PRESERVE_FP16 |
-      FLOAT_CONTROLS_INF_PRESERVE_FP32 |
-      FLOAT_CONTROLS_INF_PRESERVE_FP64,
-
-   FLOAT_CONTROLS_NAN_PRESERVE =
-      FLOAT_CONTROLS_NAN_PRESERVE_FP16 |
-      FLOAT_CONTROLS_NAN_PRESERVE_FP32 |
-      FLOAT_CONTROLS_NAN_PRESERVE_FP64,
+   FLOAT_CONTROLS_ROUNDING_MODE_RTZ_FP16     = BITFIELD_BIT(9),
+   FLOAT_CONTROLS_ROUNDING_MODE_RTZ_FP32     = BITFIELD_BIT(10),
+   FLOAT_CONTROLS_ROUNDING_MODE_RTZ_FP64     = BITFIELD_BIT(11),
 };
 
 /**
@@ -1557,44 +1627,6 @@ enum cl_sampler_filter_mode {
 #define MAT_BIT_FRONT_INDEXES         (1<<MAT_ATTRIB_FRONT_INDEXES)
 #define MAT_BIT_BACK_INDEXES          (1<<MAT_ATTRIB_BACK_INDEXES)
 
-/** An enum representing what kind of input gl_SubgroupSize is. */
-enum ENUM_PACKED gl_subgroup_size
-{
-   /** Actual subgroup size, whatever that happens to be */
-   SUBGROUP_SIZE_VARYING = 0,
-
-   /** Subgroup size must appear to be draw or dispatch-uniform
-    *
-    * This is the OpenGL behavior
-    */
-   SUBGROUP_SIZE_UNIFORM,
-
-   /** Subgroup size must appear to be the API advertised constant
-    *
-    * This is the default Vulkan 1.1 behavior
-    */
-   SUBGROUP_SIZE_API_CONSTANT,
-
-   /** Subgroup size must actually be the API advertised constant
-    *
-    * Not only must the subgroup size match the API advertised constant as
-    * with SUBGROUP_SIZE_API_CONSTANT but it must also be dispatched such that
-    * all the subgroups are full if there are enough invocations.
-    */
-   SUBGROUP_SIZE_FULL_SUBGROUPS,
-
-   /* These enums are specifically chosen so that the value of the enum is
-    * also the subgroup size.  If any new values are added, they must respect
-    * this invariant.
-    */
-   SUBGROUP_SIZE_REQUIRE_4   = 4,   /**< VK_EXT_subgroup_size_control */
-   SUBGROUP_SIZE_REQUIRE_8   = 8,   /**< VK_EXT_subgroup_size_control */
-   SUBGROUP_SIZE_REQUIRE_16  = 16,  /**< VK_EXT_subgroup_size_control */
-   SUBGROUP_SIZE_REQUIRE_32  = 32,  /**< VK_EXT_subgroup_size_control */
-   SUBGROUP_SIZE_REQUIRE_64  = 64,  /**< VK_EXT_subgroup_size_control */
-   SUBGROUP_SIZE_REQUIRE_128 = 128, /**< VK_EXT_subgroup_size_control */
-};
-
 /* Ordered from narrower to wider scope. */
 typedef enum {
    SCOPE_NONE,
@@ -1607,6 +1639,20 @@ typedef enum {
 } mesa_scope;
 
 const char *mesa_scope_name(mesa_scope scope);
+
+/* This is defined here to be available to OpenCL */
+enum glsl_sampler_dim {
+   GLSL_SAMPLER_DIM_1D = 0,
+   GLSL_SAMPLER_DIM_2D,
+   GLSL_SAMPLER_DIM_3D,
+   GLSL_SAMPLER_DIM_CUBE,
+   GLSL_SAMPLER_DIM_RECT,
+   GLSL_SAMPLER_DIM_BUF,
+   GLSL_SAMPLER_DIM_EXTERNAL,
+   GLSL_SAMPLER_DIM_MS,
+   GLSL_SAMPLER_DIM_SUBPASS, /* for vulkan input attachments */
+   GLSL_SAMPLER_DIM_SUBPASS_MS, /* for multisampled vulkan input attachments */
+};
 
 #ifdef __cplusplus
 } /* extern "C" */

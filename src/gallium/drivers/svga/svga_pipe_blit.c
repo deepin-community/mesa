@@ -14,7 +14,6 @@
 #include "svga_surface.h"
 #include "svga_resource_buffer_upload.h"
 
-//#include "util/u_blit_sw.h"
 #include "util/format/u_format.h"
 #include "util/u_surface.h"
 
@@ -131,7 +130,7 @@ copy_region_vgpu10(struct svga_context *svga, struct pipe_resource *src_tex,
  * Fallback to the copy region utility which uses map/memcpy for the copy
  */
 static void
-copy_region_fallback(struct svga_context *svga, 
+copy_region_fallback(struct svga_context *svga,
                      struct pipe_resource *dst_tex, unsigned dst_level,
                      unsigned dstx, unsigned dsty, unsigned dstz,
                      struct pipe_resource *src_tex, unsigned src_level,
@@ -214,8 +213,8 @@ is_blending_enabled(struct svga_context *svga,
    if (svga->curr.blend) {
       if (svga->curr.blend->independent_blend_enable) {
          for (i = 0; i < PIPE_MAX_COLOR_BUFS; i++) {
-            struct pipe_surface *cbuf = svga->curr.framebuffer.cbufs[i];
-            if (cbuf && (cbuf->texture == blit->dst.resource)) {
+            struct svga_surface *cbuf = svga->curr.framebuffer.cbufs[i];
+            if (cbuf && (cbuf->base.texture == blit->dst.resource)) {
                if (svga->curr.blend->rt[i].blend_enable) {
                   blend_enable = true;
                }
@@ -367,6 +366,9 @@ can_blit_via_copy_region_vgpu10(struct svga_context *svga,
                                 const struct pipe_blit_info *blit_info)
 {
    struct svga_texture *dtex, *stex;
+
+   if (blit_info->swizzle_enable)
+      return false;
 
    /* can't copy between different resource types */
    if (svga_resource_type(blit_info->src.resource->target) !=
@@ -610,7 +612,7 @@ try_blit(struct svga_context *svga, const struct pipe_blit_info *blit_info)
    util_blitter_save_tessctrl_shader(svga->blitter, svga->curr.tcs);
    util_blitter_save_tesseval_shader(svga->blitter, svga->curr.tes);
    util_blitter_save_so_targets(svga->blitter, svga->num_so_targets,
-                     (struct pipe_stream_output_target**)svga->so_targets);
+                     (struct pipe_stream_output_target**)svga->so_targets, MESA_PRIM_UNKNOWN);
    util_blitter_save_rasterizer(svga->blitter, (void*)svga->curr.rast);
    util_blitter_save_viewport(svga->blitter, &svga->curr.viewport[0]);
    util_blitter_save_scissor(svga->blitter, &svga->curr.scissor[0]);
@@ -620,13 +622,13 @@ try_blit(struct svga_context *svga, const struct pipe_blit_info *blit_info)
                                          (void*)svga->curr.depth);
    util_blitter_save_stencil_ref(svga->blitter, &svga->curr.stencil_ref);
    util_blitter_save_sample_mask(svga->blitter, svga->curr.sample_mask, 0);
-   util_blitter_save_framebuffer(svga->blitter, &svga->curr.framebuffer);
+   util_blitter_save_framebuffer(svga->blitter, &svga->curr.framebuffer.base);
    util_blitter_save_fragment_sampler_states(svga->blitter,
-                     svga->curr.num_samplers[PIPE_SHADER_FRAGMENT],
-                     (void**)svga->curr.sampler[PIPE_SHADER_FRAGMENT]);
+                     svga->curr.num_samplers[MESA_SHADER_FRAGMENT],
+                     (void**)svga->curr.sampler[MESA_SHADER_FRAGMENT]);
    util_blitter_save_fragment_sampler_views(svga->blitter,
-                     svga->curr.num_sampler_views[PIPE_SHADER_FRAGMENT],
-                     svga->curr.sampler_views[PIPE_SHADER_FRAGMENT]);
+                     svga->curr.num_sampler_views[MESA_SHADER_FRAGMENT],
+                     svga->curr.sampler_views[MESA_SHADER_FRAGMENT]);
 
    if (!can_create_src_view) {
       struct pipe_resource template;
@@ -816,7 +818,7 @@ is_texture_valid_to_copy(struct svga_context *svga,
       }
 
       return (bufsurf &&
-	      bufsurf->surface_state >= SVGA_SURFACE_STATE_UPDATED);
+              bufsurf->surface_state >= SVGA_SURFACE_STATE_UPDATED);
    } else {
       struct svga_texture *tex = svga_texture(resource);
       return ((tex->surface_state >= SVGA_SURFACE_STATE_UPDATED) ||
@@ -868,7 +870,7 @@ svga_blit(struct pipe_context *pipe,
 
    if (!try_cpu_copy_region(svga, blit))
       debug_printf("svga: Blit failed.\n");
-   
+
 done:
    SVGA_STATS_TIME_POP(sws);  /* SVGA_STATS_TIME_BLIT */
    (void) sws;

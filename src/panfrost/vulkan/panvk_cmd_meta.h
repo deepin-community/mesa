@@ -25,26 +25,18 @@ struct panvk_cmd_meta_compute_save_ctx {
    const struct panvk_descriptor_set *set0;
    struct {
       struct panvk_opaque_desc desc_storage[MAX_PUSH_DESCS];
-      mali_ptr descs_dev_addr;
+      uint64_t descs_dev_addr;
       uint32_t desc_count;
    } push_set0;
    struct panvk_push_constant_state push_constants;
 };
-
-void panvk_per_arch(cmd_meta_compute_start)(
-   struct panvk_cmd_buffer *cmdbuf,
-   struct panvk_cmd_meta_compute_save_ctx *save_ctx);
-
-void panvk_per_arch(cmd_meta_compute_end)(
-   struct panvk_cmd_buffer *cmdbuf,
-   const struct panvk_cmd_meta_compute_save_ctx *save_ctx);
 
 struct panvk_cmd_meta_graphics_save_ctx {
    const struct panvk_graphics_pipeline *pipeline;
    const struct panvk_descriptor_set *set0;
    struct {
       struct panvk_opaque_desc desc_storage[MAX_PUSH_DESCS];
-      mali_ptr descs_dev_addr;
+      uint64_t descs_dev_addr;
       uint32_t desc_count;
    } push_set0;
    struct panvk_push_constant_state push_constants;
@@ -65,14 +57,11 @@ struct panvk_cmd_meta_graphics_save_ctx {
       const struct panvk_shader *shader;
       struct panvk_shader_desc_state desc;
    } vs;
+
+   struct panvk_occlusion_query_state occlusion_query;
 };
 
-void panvk_per_arch(cmd_meta_gfx_start)(
-   struct panvk_cmd_buffer *cmdbuf,
-   struct panvk_cmd_meta_graphics_save_ctx *save_ctx);
-
-void panvk_per_arch(cmd_meta_gfx_end)(
-   struct panvk_cmd_buffer *cmdbuf,
-   const struct panvk_cmd_meta_graphics_save_ctx *save_ctx);
+void panvk_per_arch(cmd_meta_resolve_attachments)(
+   struct panvk_cmd_buffer *cmdbuf);
 
 #endif

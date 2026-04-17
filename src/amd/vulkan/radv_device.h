@@ -15,22 +15,26 @@
 #include "ac_spm.h"
 #include "ac_sqtt.h"
 
+#include "util/bitset.h"
 #include "util/mesa-blake3.h"
 
+#include "radv_debug_nir.h"
 #include "radv_pipeline.h"
-#include "radv_printf.h"
 #include "radv_queue.h"
 #include "radv_radeon_winsys.h"
 #include "radv_rra.h"
 #include "radv_shader.h"
 
+#include "vk_acceleration_structure.h"
 #include "vk_device.h"
+#include "vk_meta.h"
 #include "vk_texcompress_astc.h"
 #include "vk_texcompress_etc2.h"
 
 #define RADV_NUM_HW_CTX (RADEON_CTX_PRIORITY_REALTIME + 1)
 
 struct radv_image_view;
+struct radv_cmd_stream;
 
 enum radv_dispatch_table {
    RADV_DEVICE_DISPATCH_TABLE,
@@ -53,10 +57,11 @@ struct radv_layer_dispatch_tables {
 };
 
 struct radv_device_cache_key {
-   uint32_t disable_trunc_coord : 1;
    uint32_t image_2d_view_of_3d : 1;
    uint32_t mesh_shader_queries : 1;
    uint32_t primitives_generated_query : 1;
+
+   uint32_t reserved : 29;
 };
 
 enum radv_force_vrs {
@@ -85,259 +90,17 @@ struct radv_meta_state {
     */
    mtx_t mtx;
 
-   /**
-    * Use array element `i` for images with `2^i` samples.
-    */
    struct {
-      VkPipeline color_pipelines[NUM_META_FS_KEYS];
-   } color_clear[MAX_SAMPLES_LOG2][MAX_RTS];
-
-   struct {
-      VkPipeline depth_only_pipeline[NUM_DEPTH_CLEAR_PIPELINES];
-      VkPipeline stencil_only_pipeline[NUM_DEPTH_CLEAR_PIPELINES];
-      VkPipeline depthstencil_pipeline[NUM_DEPTH_CLEAR_PIPELINES];
-
-      VkPipeline depth_only_unrestricted_pipeline[NUM_DEPTH_CLEAR_PIPELINES];
-      VkPipeline stencil_only_unrestricted_pipeline[NUM_DEPTH_CLEAR_PIPELINES];
-      VkPipeline depthstencil_unrestricted_pipeline[NUM_DEPTH_CLEAR_PIPELINES];
-   } ds_clear[MAX_SAMPLES_LOG2];
-
-   VkPipelineLayout clear_color_p_layout;
-   VkPipelineLayout clear_depth_p_layout;
-   VkPipelineLayout clear_depth_unrestricted_p_layout;
-
-   /* Optimized compute fast HTILE clear for stencil or depth only. */
-   VkPipeline clear_htile_mask_pipeline;
-   VkPipelineLayout clear_htile_mask_p_layout;
-   VkDescriptorSetLayout clear_htile_mask_ds_layout;
-
-   /* Copy VRS into HTILE. */
-   VkPipeline copy_vrs_htile_pipeline;
-   VkPipelineLayout copy_vrs_htile_p_layout;
-   VkDescriptorSetLayout copy_vrs_htile_ds_layout;
-
-   /* Clear DCC with comp-to-single. */
-   VkPipeline clear_dcc_comp_to_single_pipeline[2]; /* 0: 1x, 1: 2x/4x/8x */
-   VkPipelineLayout clear_dcc_comp_to_single_p_layout;
-   VkDescriptorSetLayout clear_dcc_comp_to_single_ds_layout;
-
-   struct {
-      /** Pipeline that blits from a 1D image. */
-      VkPipeline pipeline_1d_src[NUM_META_FS_KEYS];
-
-      /** Pipeline that blits from a 2D image. */
-      VkPipeline pipeline_2d_src[NUM_META_FS_KEYS];
-
-      /** Pipeline that blits from a 3D image. */
-      VkPipeline pipeline_3d_src[NUM_META_FS_KEYS];
-
-      VkPipeline depth_only_1d_pipeline;
-      VkPipeline depth_only_2d_pipeline;
-      VkPipeline depth_only_3d_pipeline;
-
-      VkPipeline stencil_only_1d_pipeline;
-      VkPipeline stencil_only_2d_pipeline;
-      VkPipeline stencil_only_3d_pipeline;
-      VkPipelineLayout pipeline_layout;
-      VkDescriptorSetLayout ds_layout;
-   } blit;
-
-   struct {
-      VkPipelineLayout p_layouts[5];
-      VkDescriptorSetLayout ds_layouts[5];
-      VkPipeline pipelines[5][NUM_META_FS_KEYS];
-
-      VkPipeline depth_only_pipeline[5];
-
-      VkPipeline stencil_only_pipeline[5];
-   } blit2d[MAX_SAMPLES_LOG2];
-
-   struct {
-      VkPipelineLayout img_p_layout;
-      VkDescriptorSetLayout img_ds_layout;
-      VkPipeline pipeline;
-      VkPipeline pipeline_3d;
-   } itob;
-   struct {
-      VkPipelineLayout img_p_layout;
-      VkDescriptorSetLayout img_ds_layout;
-      VkPipeline pipeline;
-      VkPipeline pipeline_3d;
-   } btoi;
-   struct {
-      VkPipelineLayout img_p_layout;
-      VkDescriptorSetLayout img_ds_layout;
-      VkPipeline pipeline;
-   } btoi_r32g32b32;
-   struct {
-      VkPipelineLayout img_p_layout;
-      VkDescriptorSetLayout img_ds_layout;
-      VkPipeline pipeline[MAX_SAMPLES_LOG2];
-      VkPipeline pipeline_2d_3d;
-      VkPipeline pipeline_3d_2d;
-      VkPipeline pipeline_3d_3d;
-   } itoi;
-   struct {
-      VkPipelineLayout img_p_layout;
-      VkDescriptorSetLayout img_ds_layout;
-      VkPipeline pipeline;
-   } itoi_r32g32b32;
-   struct {
-      VkPipelineLayout img_p_layout;
-      VkDescriptorSetLayout img_ds_layout;
-      VkPipeline pipeline[MAX_SAMPLES_LOG2];
-      VkPipeline pipeline_3d;
-   } cleari;
-   struct {
-      VkPipelineLayout img_p_layout;
-      VkDescriptorSetLayout img_ds_layout;
-      VkPipeline pipeline;
-   } cleari_r32g32b32;
-   struct {
-      VkPipelineLayout p_layout;
-      VkDescriptorSetLayout ds_layout;
-      VkPipeline pipeline[MAX_SAMPLES_LOG2];
-   } fmask_copy;
-
-   struct {
-      VkPipelineLayout p_layout;
-      VkPipeline pipeline[NUM_META_FS_KEYS];
-   } resolve;
-
-   struct {
-      VkDescriptorSetLayout ds_layout;
-      VkPipelineLayout p_layout;
-      struct {
-         VkPipeline pipeline;
-         VkPipeline i_pipeline;
-         VkPipeline srgb_pipeline;
-      } rc[MAX_SAMPLES_LOG2];
-
-      VkPipeline depth_zero_pipeline;
-      struct {
-         VkPipeline average_pipeline;
-         VkPipeline max_pipeline;
-         VkPipeline min_pipeline;
-      } depth[MAX_SAMPLES_LOG2];
-
-      VkPipeline stencil_zero_pipeline;
-      struct {
-         VkPipeline max_pipeline;
-         VkPipeline min_pipeline;
-      } stencil[MAX_SAMPLES_LOG2];
-   } resolve_compute;
-
-   struct {
-      VkDescriptorSetLayout ds_layout;
-      VkPipelineLayout p_layout;
-
-      struct {
-         VkPipeline pipeline[NUM_META_FS_KEYS];
-      } rc[MAX_SAMPLES_LOG2];
-
-      VkPipeline depth_zero_pipeline;
-      struct {
-         VkPipeline average_pipeline;
-         VkPipeline max_pipeline;
-         VkPipeline min_pipeline;
-      } depth[MAX_SAMPLES_LOG2];
-
-      VkPipeline stencil_zero_pipeline;
-      struct {
-         VkPipeline max_pipeline;
-         VkPipeline min_pipeline;
-      } stencil[MAX_SAMPLES_LOG2];
-   } resolve_fragment;
-
-   struct {
-      VkPipelineLayout p_layout;
-      VkPipeline decompress_pipeline[MAX_SAMPLES_LOG2];
-   } depth_decomp;
-
-   VkDescriptorSetLayout expand_depth_stencil_compute_ds_layout;
-   VkPipelineLayout expand_depth_stencil_compute_p_layout;
-   VkPipeline expand_depth_stencil_compute_pipeline;
-
-   struct {
-      VkPipelineLayout p_layout;
-      VkPipeline cmask_eliminate_pipeline;
-      VkPipeline fmask_decompress_pipeline;
-      VkPipeline dcc_decompress_pipeline;
-
-      VkDescriptorSetLayout dcc_decompress_compute_ds_layout;
-      VkPipelineLayout dcc_decompress_compute_p_layout;
-      VkPipeline dcc_decompress_compute_pipeline;
-   } fast_clear_flush;
-
-   struct {
-      VkPipelineLayout fill_p_layout;
-      VkPipelineLayout copy_p_layout;
-      VkPipeline fill_pipeline;
-      VkPipeline copy_pipeline;
-   } buffer;
-
-   struct {
-      VkDescriptorSetLayout ds_layout;
-      VkPipelineLayout p_layout;
-      VkPipeline occlusion_query_pipeline;
-      VkPipeline pipeline_statistics_query_pipeline;
-      VkPipeline tfb_query_pipeline;
-      VkPipeline timestamp_query_pipeline;
-      VkPipeline pg_query_pipeline;
-      VkPipeline ms_prim_gen_query_pipeline;
-   } query;
-
-   struct {
-      VkDescriptorSetLayout ds_layout;
-      VkPipelineLayout p_layout;
-      VkPipeline pipeline[MAX_SAMPLES_LOG2];
-   } fmask_expand;
-
-   struct {
-      VkDescriptorSetLayout ds_layout;
-      VkPipelineLayout p_layout;
-      VkPipeline pipeline[32];
-   } dcc_retile;
-
-   struct {
-      VkPipelineLayout leaf_p_layout;
-      VkPipeline leaf_pipeline;
-      VkPipeline leaf_updateable_pipeline;
-      VkPipelineLayout morton_p_layout;
-      VkPipeline morton_pipeline;
-      VkPipelineLayout lbvh_main_p_layout;
-      VkPipeline lbvh_main_pipeline;
-      VkPipelineLayout lbvh_generate_ir_p_layout;
-      VkPipeline lbvh_generate_ir_pipeline;
-      VkPipelineLayout ploc_p_layout;
-      VkPipeline ploc_pipeline;
-      VkPipelineLayout encode_p_layout;
-      VkPipeline encode_pipeline;
-      VkPipeline encode_compact_pipeline;
-      VkPipelineLayout header_p_layout;
-      VkPipeline header_pipeline;
-      VkPipelineLayout update_p_layout;
-      VkPipeline update_pipeline;
-      VkPipelineLayout copy_p_layout;
-      VkPipeline copy_pipeline;
-
       struct radix_sort_vk *radix_sort;
-
-      struct {
-         VkBuffer buffer;
-         VkDeviceMemory memory;
-         VkAccelerationStructureKHR accel_struct;
-      } null;
+      struct vk_acceleration_structure_build_ops build_ops;
+      struct vk_acceleration_structure_build_args build_args;
    } accel_struct_build;
 
    struct vk_texcompress_etc2_state etc_decode;
 
    struct vk_texcompress_astc_state *astc_decode;
 
-   struct {
-      VkDescriptorSetLayout ds_layout;
-      VkPipelineLayout p_layout;
-   } dgc_prepare;
+   struct vk_meta_device device;
 };
 
 struct radv_memory_trace_data {
@@ -383,6 +146,8 @@ struct radv_device {
    struct radv_layer_dispatch_tables layer_dispatch;
 
    struct radeon_winsys_ctx *hw_ctx[RADV_NUM_HW_CTX];
+   struct radeon_winsys_ctx *hw_vcn_enc_ctx;
+
    struct radv_meta_state meta_state;
 
    struct radv_queue *queues[RADV_MAX_QUEUE_FAMILIES];
@@ -404,22 +169,21 @@ struct radv_device {
    /* GFX7 and later */
    uint32_t gfx_init_size_dw;
    struct radeon_winsys_bo *gfx_init;
+   struct radeon_winsys_bo *zero_bo;
 
    struct radeon_winsys_bo *trace_bo;
    struct radv_trace_data *trace_data;
+
+   VkDeviceMemory va_validation_memory;
+   VkBuffer va_validation_buffer;
+   BITSET_WORD *valid_vas;
+   uint64_t valid_vas_addr;
 
    /* Whether to keep shader debug info, for debugging. */
    bool keep_shader_info;
 
    /* Backup in-memory cache to be used if the app doesn't provide one */
    struct vk_pipeline_cache *mem_cache;
-
-   /*
-    * use different counters so MSAA MRTs get consecutive surface indices,
-    * even if MASK is allocated in between.
-    */
-   uint32_t image_mrt_offset_counter;
-   uint32_t fmask_mrt_offset_counter;
 
    struct list_head shader_arenas;
    struct hash_table_u64 *capture_replay_arena_vas;
@@ -460,6 +224,16 @@ struct radv_device {
    bool sqtt_enabled;
    bool sqtt_triggered;
 
+   VkCommandBuffer sqtt_start_cmdbuf[2];
+   VkCommandBuffer sqtt_stop_cmdbuf[2];
+
+   uint64_t sqtt_size;
+   VkBuffer sqtt_buffer;
+   VkDeviceMemory sqtt_memory;
+
+   VkBuffer sqtt_staging_buffer;
+   VkDeviceMemory sqtt_staging_memory;
+
    /* SQTT timestamps for queue events. */
    simple_mtx_t sqtt_timestamp_mtx;
    struct radv_sqtt_timestamp sqtt_timestamp;
@@ -468,11 +242,20 @@ struct radv_device {
    simple_mtx_t sqtt_command_pool_mtx;
    struct vk_command_pool *sqtt_command_pool[2];
 
+   /* Whether to use a staging buffer for SQTT/SPM buffers. */
+   bool rgp_use_staging_buffer;
+
    /* Memory trace. */
    struct radv_memory_trace_data memory_trace;
 
    /* SPM. */
    struct ac_spm spm;
+
+   uint64_t spm_buffer_va;
+   VkBuffer spm_buffer;
+   VkDeviceMemory spm_memory;
+   VkBuffer spm_staging_buffer;
+   VkDeviceMemory spm_staging_memory;
 
    /* Radeon Raytracing Analyzer trace. */
    struct radv_rra_trace_data rra_trace;
@@ -526,7 +309,7 @@ struct radv_device {
    struct radeon_winsys_bo *perf_counter_bo;
 
    /* Interleaved lock/unlock commandbuffers for perfcounter passes. */
-   struct radeon_cmdbuf **perf_counter_lock_cs;
+   struct radv_cmd_stream **perf_counter_lock_cs;
 
    bool uses_shadow_regs;
 
@@ -544,6 +327,10 @@ struct radv_device {
    /* PSO cache stats */
    simple_mtx_t pso_cache_stats_mtx;
    struct radv_pso_cache_stats pso_cache_stats[RADV_PIPELINE_TYPE_COUNT];
+
+   simple_mtx_t blit_queue_mtx;
+
+   struct radv_address_binding_tracker *addr_binding_tracker;
 };
 
 VK_DEFINE_HANDLE_CASTS(radv_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)
@@ -575,10 +362,8 @@ VkResult radv_device_init_vrs_state(struct radv_device *device);
 
 unsigned radv_get_default_max_sample_dist(int log_samples);
 
-void radv_emit_default_sample_locations(const struct radv_physical_device *pdev, struct radeon_cmdbuf *cs,
+void radv_emit_default_sample_locations(const struct radv_physical_device *pdev, struct radv_cmd_stream *cs,
                                         int nr_samples);
-
-unsigned radv_get_dcc_max_uncompressed_block_size(const struct radv_device *device, const struct radv_image *image);
 
 struct radv_color_buffer_info {
    struct ac_cb_surface ac;
@@ -597,7 +382,6 @@ void radv_initialise_color_surface(struct radv_device *device, struct radv_color
 void radv_initialise_vrs_surface(struct radv_image *image, struct radv_buffer *htile_buffer,
                                  struct radv_ds_buffer_info *ds);
 
-
 void radv_initialise_ds_surface(const struct radv_device *device, struct radv_ds_buffer_info *ds,
                                 struct radv_image_view *iview, VkImageAspectFlags ds_aspects);
 
@@ -609,5 +393,7 @@ bool radv_device_set_pstate(struct radv_device *device, bool enable);
 bool radv_device_acquire_performance_counters(struct radv_device *device);
 
 void radv_device_release_performance_counters(struct radv_device *device);
+
+bool radv_device_should_clear_vram(const struct radv_device *device);
 
 #endif /* RADV_DEVICE_H */

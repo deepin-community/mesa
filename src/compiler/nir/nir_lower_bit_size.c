@@ -37,7 +37,7 @@ convert_to_bit_size(nir_builder *bld, nir_def *src,
    assert(src->bit_size < bit_size);
 
    /* create b2i32(a) instead of i2i32(b2i8(a))/i2i32(b2i16(a)) */
-   nir_alu_instr *alu = nir_src_as_alu_instr(nir_src_for_ssa(src));
+   nir_alu_instr *alu = nir_def_as_alu_or_null(src);
    if ((type & (nir_type_uint | nir_type_int)) && bit_size == 32 &&
        alu && (alu->op == nir_op_b2i8 || alu->op == nir_op_b2i16)) {
       nir_alu_instr *instr = nir_alu_instr_create(bld->shader, nir_op_b2i32);
@@ -46,6 +46,39 @@ convert_to_bit_size(nir_builder *bld, nir_def *src,
    }
 
    return nir_convert_to_bit_size(bld, src, type, bit_size);
+}
+
+static nir_def *
+before_conversion(nir_builder *bld, nir_alu_type type, unsigned bit_size, nir_def *def, nir_op op)
+{
+   /* Filtering in opcode of instruction where the LSB of the output are not affected by the MSB of the inputs */
+   switch (op) {
+   case nir_op_iadd:
+   case nir_op_iadd3:
+   case nir_op_iand:
+   case nir_op_imad:
+   case nir_op_imul:
+   case nir_op_ior:
+   case nir_op_ishl:
+   case nir_op_isub:
+   case nir_op_ixor:
+   case nir_op_mov:
+      break;
+   default:
+      return NULL;
+   }
+   if (!nir_def_is_alu(def)) {
+      return NULL;
+   }
+   nir_alu_instr *alu_instr = nir_def_as_alu(def);
+   if (alu_instr->op != nir_type_conversion_op((nir_alu_type)(type | bit_size),
+                                               (nir_alu_type)(type | def->bit_size),
+                                               nir_rounding_mode_undef) ||
+       alu_instr->src[0].src.ssa->bit_size != bit_size) {
+      return NULL;
+   }
+   /* Handle potential swizzling with 'nir_ssa_for_alu_src' which will be adding a move if needed */
+   return nir_ssa_for_alu_src(bld, alu_instr, 0);
 }
 
 static void
@@ -62,15 +95,22 @@ lower_alu_instr(nir_builder *bld, nir_alu_instr *alu, unsigned bit_size)
       nir_def *src = nir_ssa_for_alu_src(bld, alu, i);
 
       nir_alu_type type = nir_op_infos[op].input_types[i];
-      if (nir_alu_type_get_type_size(type) == 0)
-         src = convert_to_bit_size(bld, src, type, bit_size);
+      if (nir_alu_type_get_type_size(type) == 0) {
+         nir_def *src_before_conversion = before_conversion(bld, type, bit_size, src, op);
+         if (src_before_conversion) {
+            src = src_before_conversion;
+         } else {
+            src = convert_to_bit_size(bld, src, type, bit_size);
+         }
+      }
 
       if (i == 1 && (op == nir_op_ishl || op == nir_op_ishr || op == nir_op_ushr ||
                      op == nir_op_bitz || op == nir_op_bitz8 || op == nir_op_bitz16 ||
                      op == nir_op_bitz32 || op == nir_op_bitnz || op == nir_op_bitnz8 ||
                      op == nir_op_bitnz16 || op == nir_op_bitnz32)) {
-         assert(util_is_power_of_two_nonzero(dst_bit_size));
-         src = nir_iand(bld, src, nir_imm_int(bld, dst_bit_size - 1));
+         unsigned src0_bit_size = alu->src[0].src.ssa->bit_size;
+         assert(util_is_power_of_two_nonzero(src0_bit_size));
+         src = nir_iand(bld, src, nir_imm_int(bld, src0_bit_size - 1));
       }
 
       srcs[i] = src;
@@ -111,6 +151,14 @@ lower_alu_instr(nir_builder *bld, nir_alu_instr *alu, unsigned bit_size)
          assert(op == nir_op_uadd_carry);
          lowered_dst = nir_ushr_imm(bld, lowered_dst, dst_bit_size);
       }
+   } else if (op == nir_op_bitfield_reverse) {
+      lowered_dst = nir_bitfield_reverse(bld, srcs[0]);
+
+      /* We need to shift down to the original bit size, else we would just
+       * always return 0.
+       */
+      assert(bit_size > dst_bit_size);
+      lowered_dst = nir_ushr_imm(bld, lowered_dst, bit_size - dst_bit_size);
    } else {
       lowered_dst = nir_build_alu_src_arr(bld, op, srcs);
    }
@@ -131,6 +179,20 @@ lower_intrinsic_instr(nir_builder *b, nir_intrinsic_instr *intrin,
                       unsigned bit_size)
 {
    switch (intrin->intrinsic) {
+   case nir_intrinsic_ballot:
+   case nir_intrinsic_ballot_relaxed: {
+      b->cursor = nir_before_instr(&intrin->instr);
+
+      nir_alu_type type = nir_type_uint;
+      if (intrin->src[0].ssa->bit_size == 1)
+         type = nir_type_bool;
+
+      nir_def *new_src = nir_convert_to_bit_size(b, intrin->src[0].ssa,
+                                                 type, bit_size);
+      nir_src_rewrite(&intrin->src[0], new_src);
+      break;
+   }
+
    case nir_intrinsic_read_invocation:
    case nir_intrinsic_read_first_invocation:
    case nir_intrinsic_shuffle:
@@ -218,7 +280,7 @@ lower_intrinsic_instr(nir_builder *b, nir_intrinsic_instr *intrin,
    }
 
    default:
-      unreachable("Unsupported instruction");
+      UNREACHABLE("Unsupported instruction");
    }
 }
 
@@ -241,8 +303,7 @@ lower_phi_instr(nir_builder *b, nir_phi_instr *phi, unsigned bit_size,
    b->cursor = nir_after_instr(&last_phi->instr);
 
    nir_def *new_dest = nir_u2uN(b, &phi->def, old_bit_size);
-   nir_def_rewrite_uses_after(&phi->def, new_dest,
-                              new_dest->parent_instr);
+   nir_def_rewrite_uses_after(&phi->def, new_dest);
 }
 
 static bool
@@ -278,19 +339,13 @@ lower_impl(nir_function_impl *impl,
             break;
 
          default:
-            unreachable("Unsupported instruction type");
+            UNREACHABLE("Unsupported instruction type");
          }
          progress = true;
       }
    }
 
-   if (progress) {
-      nir_metadata_preserve(impl, nir_metadata_control_flow);
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-   }
-
-   return progress;
+   return nir_progress(progress, impl, nir_metadata_control_flow);
 }
 
 bool

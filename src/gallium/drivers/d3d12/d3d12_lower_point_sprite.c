@@ -27,7 +27,7 @@
 #include "d3d12_compiler.h"
 #include "d3d12_nir_passes.h"
 #include "dxil_nir.h"
-#include "program/prog_statevars.h"
+#include "mesa/program/prog_statevars.h"
 
 struct output_writes {
    nir_def *val;
@@ -149,7 +149,7 @@ lower_store(nir_intrinsic_instr *instr, nir_builder *b, struct lower_state *stat
                .deref = nir_src_as_deref(instr->src[0]),
                .write_mask = nir_intrinsic_write_mask(instr),
             };
-            util_dynarray_append(&state->output_writes, struct output_writes, data);
+            util_dynarray_append(&state->output_writes, data);
             break;
          }
       }
@@ -166,11 +166,11 @@ lower_emit_vertex(nir_intrinsic_instr *instr, nir_builder *b, struct lower_state
 {
    unsigned stream_id = nir_intrinsic_stream_id(instr);
 
-   nir_def *point_width, *point_height;
-   get_scaled_point_size(b, state, &point_width, &point_height);
-
-   nir_instr_remove(&instr->instr);
+   b->cursor = nir_instr_remove(&instr->instr);
    if (stream_id == 0) {
+      nir_def *point_width, *point_height;
+      get_scaled_point_size(b, state, &point_width, &point_height);
+
       for (unsigned i = 0; i < 4; i++) {
          /* All outputs need to be emitted for each vertex */
          util_dynarray_foreach(&state->output_writes, struct output_writes, data) {
@@ -197,7 +197,7 @@ lower_emit_vertex(nir_intrinsic_instr *instr, nir_builder *b, struct lower_state
          for (unsigned j = 0; j < state->num_point_coords; ++j) {
             unsigned num_channels = glsl_get_components(state->point_coord_out[j]->type);
             unsigned mask = (1 << num_channels) - 1;
-            nir_store_var(b, state->point_coord_out[j], nir_channels(b, point_coord, mask), mask);
+            nir_store_var(b, state->point_coord_out[j], nir_channels(b, point_coord, (nir_component_mask_t)mask), (nir_component_mask_t)mask);
          }
 
          /* EmitVertex */
@@ -297,13 +297,13 @@ d3d12_lower_point_sprite(nir_shader *shader,
          }
       }
 
-      nir_metadata_preserve(impl, nir_metadata_control_flow);
+      nir_progress(true, impl, nir_metadata_control_flow);
    }
 
    util_dynarray_fini(&state.output_writes);
    shader->info.gs.output_primitive = MESA_PRIM_TRIANGLE_STRIP;
-   shader->info.gs.vertices_out = shader->info.gs.vertices_out * 4 /
-      util_bitcount(shader->info.gs.active_stream_mask);
+   shader->info.gs.vertices_out = (uint16_t) (shader->info.gs.vertices_out * 4 /
+      util_bitcount(shader->info.gs.active_stream_mask));
    shader->info.gs.active_stream_mask = 1;
 
    return progress;

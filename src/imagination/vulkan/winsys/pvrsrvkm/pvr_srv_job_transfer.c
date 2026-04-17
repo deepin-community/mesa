@@ -32,7 +32,6 @@
 #include "fw-api/pvr_rogue_fwif.h"
 #include "fw-api/pvr_rogue_fwif_rf.h"
 #include "pvr_device_info.h"
-#include "pvr_private.h"
 #include "pvr_srv.h"
 #include "pvr_srv_bridge.h"
 #include "pvr_srv_job_common.h"
@@ -40,6 +39,7 @@
 #include "pvr_srv_sync.h"
 #include "pvr_winsys.h"
 #include "util/macros.h"
+#include "util/os_file.h"
 #include "vk_alloc.h"
 #include "vk_log.h"
 #include "vk_util.h"
@@ -132,89 +132,14 @@ void pvr_srv_winsys_transfer_ctx_destroy(struct pvr_winsys_transfer_ctx *ctx)
    vk_free(srv_ws->base.alloc, srv_ctx);
 }
 
-static void
-pvr_srv_transfer_cmd_stream_load(struct rogue_fwif_cmd_transfer *const cmd,
-                                 const uint8_t *const stream,
-                                 const uint32_t stream_len,
-                                 const struct pvr_device_info *const dev_info)
-{
-   const uint32_t *stream_ptr = (const uint32_t *)stream;
-   struct rogue_fwif_transfer_regs *const regs = &cmd->regs;
-   uint32_t main_stream_len =
-      pvr_csb_unpack((uint64_t *)stream_ptr, KMD_STREAM_HDR).length;
+#define PER_ARCH_FUNCS(arch)                       \
+   void pvr_##arch##_srv_transfer_cmd_stream_load( \
+      struct rogue_fwif_cmd_transfer *const cmd,   \
+      const uint8_t *const stream,                 \
+      const uint32_t stream_len,                   \
+      const struct pvr_device_info *const dev_info)
 
-   stream_ptr += pvr_cmd_length(KMD_STREAM_HDR);
-
-   regs->pds_bgnd0_base = *(uint64_t *)stream_ptr;
-   stream_ptr += pvr_cmd_length(CR_PDS_BGRND0_BASE);
-
-   regs->pds_bgnd1_base = *(uint64_t *)stream_ptr;
-   stream_ptr += pvr_cmd_length(CR_PDS_BGRND1_BASE);
-
-   regs->pds_bgnd3_sizeinfo = *(uint64_t *)stream_ptr;
-   stream_ptr += pvr_cmd_length(CR_PDS_BGRND3_SIZEINFO);
-
-   regs->isp_mtile_base = *(uint64_t *)stream_ptr;
-   stream_ptr += pvr_cmd_length(CR_ISP_MTILE_BASE);
-
-   STATIC_ASSERT(ARRAY_SIZE(regs->pbe_wordx_mrty) == 9U);
-   STATIC_ASSERT(sizeof(regs->pbe_wordx_mrty[0]) == sizeof(uint64_t));
-   memcpy(regs->pbe_wordx_mrty, stream_ptr, sizeof(regs->pbe_wordx_mrty));
-   stream_ptr += 9U * 2U;
-
-   regs->isp_bgobjvals = *stream_ptr;
-   stream_ptr += pvr_cmd_length(CR_ISP_BGOBJVALS);
-
-   regs->usc_pixel_output_ctrl = *stream_ptr;
-   stream_ptr += pvr_cmd_length(CR_USC_PIXEL_OUTPUT_CTRL);
-
-   regs->usc_clear_register0 = *stream_ptr;
-   stream_ptr += pvr_cmd_length(CR_USC_CLEAR_REGISTER);
-
-   regs->usc_clear_register1 = *stream_ptr;
-   stream_ptr += pvr_cmd_length(CR_USC_CLEAR_REGISTER);
-
-   regs->usc_clear_register2 = *stream_ptr;
-   stream_ptr += pvr_cmd_length(CR_USC_CLEAR_REGISTER);
-
-   regs->usc_clear_register3 = *stream_ptr;
-   stream_ptr += pvr_cmd_length(CR_USC_CLEAR_REGISTER);
-
-   regs->isp_mtile_size = *stream_ptr;
-   stream_ptr += pvr_cmd_length(CR_ISP_MTILE_SIZE);
-
-   regs->isp_render_origin = *stream_ptr;
-   stream_ptr += pvr_cmd_length(CR_ISP_RENDER_ORIGIN);
-
-   regs->isp_ctl = *stream_ptr;
-   stream_ptr += pvr_cmd_length(CR_ISP_CTL);
-
-   regs->isp_aa = *stream_ptr;
-   stream_ptr += pvr_cmd_length(CR_ISP_AA);
-
-   regs->event_pixel_pds_info = *stream_ptr;
-   stream_ptr += pvr_cmd_length(CR_EVENT_PIXEL_PDS_INFO);
-
-   regs->event_pixel_pds_code = *stream_ptr;
-   stream_ptr += pvr_cmd_length(CR_EVENT_PIXEL_PDS_CODE);
-
-   regs->event_pixel_pds_data = *stream_ptr;
-   stream_ptr += pvr_cmd_length(CR_EVENT_PIXEL_PDS_DATA);
-
-   regs->isp_render = *stream_ptr;
-   stream_ptr += pvr_cmd_length(CR_ISP_RENDER);
-
-   regs->isp_rgn = *stream_ptr;
-   stream_ptr++;
-
-   if (PVR_HAS_FEATURE(dev_info, gpu_multicore_support)) {
-      regs->frag_screen = *stream_ptr;
-      stream_ptr++;
-   }
-
-   assert((const uint8_t *)stream_ptr - stream == stream_len);
-   assert((const uint8_t *)stream_ptr - stream == main_stream_len);
-}
+PER_ARCH_FUNCS(rogue);
 
 static void pvr_srv_transfer_cmds_init(
    const struct pvr_winsys_transfer_submit_info *submit_info,
@@ -224,16 +149,19 @@ static void pvr_srv_transfer_cmds_init(
 {
    memset(cmds, 0, sizeof(*cmds) * submit_info->cmd_count);
 
+   enum pvr_device_arch arch = dev_info->ident.arch;
    for (uint32_t i = 0; i < cmd_count; i++) {
       const struct pvr_winsys_transfer_cmd *submit_cmd = &submit_info->cmds[i];
       struct rogue_fwif_cmd_transfer *cmd = &cmds[i];
 
       cmd->cmn.frame_num = submit_info->frame_num;
 
-      pvr_srv_transfer_cmd_stream_load(cmd,
-                                       submit_cmd->fw_stream,
-                                       submit_cmd->fw_stream_len,
-                                       dev_info);
+      PVR_ARCH_DISPATCH(srv_transfer_cmd_stream_load,
+                        arch,
+                        cmd,
+                        submit_cmd->fw_stream,
+                        submit_cmd->fw_stream_len,
+                        dev_info);
 
       if (submit_info->cmds[i].flags.use_single_core)
          cmd->flags |= ROGUE_FWIF_CMDTRANSFER_SINGLE_CORE;
@@ -285,7 +213,7 @@ VkResult pvr_srv_winsys_transfer_submit(
       struct pvr_srv_sync *srv_wait_sync = to_srv_sync(submit_info->wait);
 
       if (srv_wait_sync->fd >= 0) {
-         in_fd = dup(srv_wait_sync->fd);
+         in_fd = os_dupfd_cloexec(srv_wait_sync->fd);
          if (in_fd == -1) {
             return vk_errorf(NULL,
                              VK_ERROR_OUT_OF_HOST_MEMORY,

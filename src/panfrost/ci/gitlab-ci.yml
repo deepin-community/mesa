@@ -1,254 +1,12 @@
-.panfrost-midgard-rules:
-  stage: arm
-  rules:
-    - !reference [.test, rules]
-    - !reference [.collabora-farm-rules, rules]
-    - !reference [.gl-rules, rules]
-    - changes: &panfrost_gallium_file_list
-        - src/gallium/drivers/panfrost/**/*
-        - src/gallium/winsys/panfrost/**/*
-      when: on_success
-    - changes: &panfrost_common_file_list
-        - src/panfrost/ci/gitlab-ci.yml
-        - src/panfrost/ci/deqp-$DEQP_SUITE.toml
-        - src/panfrost/ci/$GPU_VERSION-fails.txt
-        - src/panfrost/ci/$GPU_VERSION-flakes.txt
-        - src/panfrost/ci/$GPU_VERSION-skips.txt
-        - src/panfrost/ci/$PIGLIT_TRACES_FILE
-        - src/panfrost/include/*
-        - src/panfrost/lib/*
-        - src/panfrost/lib/genxml/*
-        - src/panfrost/lib/kmod/*
-        - src/panfrost/shared/*
-        - src/panfrost/util/*
-      when: on_success
-    - changes:
-        - src/panfrost/midgard/**/*
-      when: on_success
+include:
+  - local: src/panfrost/ci/gitlab-ci-inc.yml
 
-.panfrost-midgard-manual-rules:
-  stage: arm-postmerge
-  extends: .no-auto-retry
-  rules:
-    - !reference [.test, rules]
-    - !reference [.collabora-farm-manual-rules, rules]
-    - !reference [.gl-manual-rules, rules]
-    - changes: *panfrost_gallium_file_list
-      when: manual
-    - changes: *panfrost_common_file_list
-      when: manual
-    - changes:
-        - src/panfrost/midgard/**/*
-      when: manual
-
-.panfrost-bifrost-gl-rules:
-  stage: arm
-  rules:
-    - !reference [.test, rules]
-    - !reference [.collabora-farm-rules, rules]
-    - !reference [.gl-rules, rules]
-    - changes:
-        *panfrost_common_file_list
-      when: on_success
-    - changes:
-        *panfrost_gallium_file_list
-      when: on_success
-    - changes: &panfrost_bifrost_file_list
-        - src/panfrost/compiler/**/*
-      when: on_success
-
-.panfrost-bifrost-gl-manual-rules:
-  stage: arm-postmerge
-  extends: .no-auto-retry
-  rules:
-    - !reference [.test, rules]
-    - !reference [.collabora-farm-manual-rules, rules]
-    - !reference [.gl-manual-rules, rules]
-    - changes:
-        *panfrost_common_file_list
-      when: manual
-    - changes:
-        *panfrost_gallium_file_list
-      when: manual
-    - changes:
-        *panfrost_bifrost_file_list
-      when: manual
-
-.panfrost-bifrost-vk-rules:
-  stage: arm
-  rules:
-    - !reference [.test, rules]
-    - !reference [.collabora-farm-rules, rules]
-    - !reference [.vulkan-rules, rules]
-    - changes:
-        *panfrost_common_file_list
-      when: on_success
-    - changes: &panfrost_vulkan_file_list
-        - src/panfrost/vulkan/**/*
-      when: on_success
-    - changes: &panfrost_bifrost_file_list
-        - src/panfrost/compiler/**/*
-      when: on_success
-
-.panfrost-bifrost-vk-manual-rules:
-  stage: arm-postmerge
-  extends: .no-auto-retry
-  rules:
-    - !reference [.test, rules]
-    - !reference [.collabora-farm-manual-rules, rules]
-    - !reference [.vulkan-manual-rules, rules]
-    - changes:
-        *panfrost_common_file_list
-      when: manual
-    - changes:
-        *panfrost_vulkan_file_list
-      when: manual
-    - changes:
-        *panfrost_bifrost_file_list
-      when: manual
-
-.panfrost-valhall-gl-rules:
-  stage: arm
-  rules:
-    - !reference [.test, rules]
-    - !reference [.collabora-farm-rules, rules]
-    - !reference [.gl-rules, rules]
-    - changes:
-        *panfrost_common_file_list
-      when: on_success
-    - changes:
-        *panfrost_gallium_file_list
-      when: on_success
-    - changes: &panfrost_valhall_file_list
-        - src/panfrost/compiler/**/*
-      when: on_success
-
-.panfrost-valhall-gl-manual-rules:
-  stage: arm-postmerge
-  extends: .no-auto-retry
-  rules:
-    - !reference [.test, rules]
-    - !reference [.collabora-farm-manual-rules, rules]
-    - !reference [.gl-manual-rules, rules]
-    - changes:
-        *panfrost_common_file_list
-      when: manual
-    - changes:
-        *panfrost_gallium_file_list
-      when: manual
-    - changes:
-        *panfrost_valhall_file_list
-      when: manual
-
-.panfrost-test:
-  variables:
-    FLAKES_CHANNEL: "#panfrost-ci"
-    PAN_MESA_DEBUG: sync
-    HWCI_FREQ_MAX: "true"
-
-.panfrost-traces:
-  variables:
-    PAN_MESA_DEBUG: "deqp,sync"
-    MESA_GLES_VERSION_OVERRIDE: "3.1"
-    MESA_GL_VERSION_OVERRIDE: "3.3"
-    MESA_GLSL_VERSION_OVERRIDE: 330
-    EGL_PLATFORM: surfaceless
-    PIGLIT_TRACES_FILE: traces-panfrost.yml
-
-# https://lava.collabora.dev/scheduler/device_type/meson-g12b-a311d-khadas-vim3
-.lava-meson-g12b-a311d-khadas-vim3:arm64:
-  variables:
-    DEVICE_TYPE: meson-g12b-a311d-khadas-vim3
-    DTB: $DEVICE_TYPE
-    FARM: collabora
-    GPU_VERSION: panfrost-g52
-#   FDO_CI_CONCURRENT: ?
-    RUNNER_TAG: mesa-ci-x86-64-lava-meson-g12b-a311d-khadas-vim3
-    VK_DRIVER: panfrost
-
-# Status: https://lava.collabora.dev/scheduler/device_type/mt8183-kukui-jacuzzi-juniper-sku16
-.lava-mt8183-kukui-jacuzzi-juniper-sku16:arm64:
-  variables:
-    DEVICE_TYPE: mt8183-kukui-jacuzzi-juniper-sku16
-    DTB: $DEVICE_TYPE
-    BOOT_METHOD: depthcharge
-    KERNEL_IMAGE_TYPE: ""
-    FARM: collabora
-    GPU_VERSION: panfrost-g72
-#   FDO_CI_CONCURRENT: ?
-    RUNNER_TAG: mesa-ci-x86-64-lava-mt8183-kukui-jacuzzi-juniper-sku16
-
-# Status: https://lava.collabora.dev/scheduler/device_type/mt8192-asurada-spherion-r0
-.lava-mt8192-asurada-spherion-r0:arm64:
-  variables:
-    BOOT_METHOD: depthcharge
-    DEVICE_TYPE: mt8192-asurada-spherion-r0
-    DTB: $DEVICE_TYPE
-#   FDO_CI_CONCURRENT: ?
-    FARM: collabora
-    GPU_VERSION: panfrost-g57
-    KERNEL_IMAGE_TYPE: ""
-    RUNNER_TAG: mesa-ci-x86-64-lava-mt8192-asurada-spherion-r0
-
-.lava-rk3288-veyron-jaq:arm32:
-  variables:
-    BOOT_METHOD: depthcharge
-    DEVICE_TYPE: rk3288-veyron-jaq
-    DEQP_SUITE: panfrost-t760
-    DRIVER_NAME: panfrost
-    DTB: rk3288-veyron-jaq
-    FDO_CI_CONCURRENT: 6
-    FARM: collabora
-    GPU_VERSION: panfrost-t760
-    KERNEL_IMAGE_TYPE: ""
-    RUNNER_TAG: mesa-ci-x86-64-lava-rk3288-veyron-jaq
-
-# Status: https://lava.collabora.dev/scheduler/device_type/rk3399-gru-kevin
-.lava-rk3399-gru-kevin:arm64:
-  variables:
-    DEVICE_TYPE: rk3399-gru-kevin
-    DTB: $DEVICE_TYPE
-    FARM: collabora
-    GPU_VERSION: panfrost-t860
-    DRIVER_NAME: panfrost
-#   FDO_CI_CONCURRENT: ?
-    BOOT_METHOD: depthcharge
-    KERNEL_IMAGE_TYPE: ""
-    RUNNER_TAG: mesa-ci-x86-64-lava-rk3399-gru-kevin
-
-# Status: https://lava.collabora.dev/scheduler/device_type/rk3588-rock-5b
-.lava-rk3588-rock-5b:arm64:
-  variables:
-    DEVICE_TYPE: rk3588-rock-5b
-    DTB: $DEVICE_TYPE
-    FARM: collabora
-    GPU_VERSION: panfrost-g610
-    DRIVER_NAME: panfrost
-    FDO_CI_CONCURRENT: 6
-    HWCI_KERNEL_MODULES: panthor
-    BOOT_METHOD: u-boot
-    KERNEL_IMAGE_NAME: Image
-    KERNEL_IMAGE_TYPE: "image"
-    EXTERNAL_KERNEL_TAG: "v6.11-rc7-mesa-f9e9"
-    RUNNER_TAG: mesa-ci-x86-64-lava-rk3588-rock-5b
-
-# Status: https://lava.collabora.dev/scheduler/device_type/sun50i-h6-pine-h64
-.lava-sun50i-h6-pine-h64:arm64:
-  variables:
-    DEVICE_TYPE: sun50i-h6-pine-h64
-    DTB: sun50i-h6-pine-h64
-    FARM: collabora
-    GPU_VERSION: panfrost-t720
-    DEQP_SUITE: panfrost-t720
-    FDO_CI_CONCURRENT: 6
-    HWCI_FREQ_MAX: "true"
-    RUNNER_TAG: mesa-ci-x86-64-lava-sun50i-h6-pine-h64
-
-
+# We only have two machines and these boards are EOL.
+# Put it in nightly until we can move to different boards.
 panfrost-t720-gles2:arm64:
   extends:
-    - .lava-test-deqp:arm64
-    - .panfrost-midgard-rules
+    - .lava-arm64-test-gl
+    - .panfrost-midgard-manual-rules
     - .panfrost-test
     - .lava-sun50i-h6-pine-h64:arm64
 
@@ -256,16 +14,15 @@ panfrost-t720-gles2:arm64:
 # Keep the second t760 job manual.
 panfrost-t760-gles:arm32:
   extends:
-    - .lava-test-deqp:arm32
+    - .lava-arm32-test-gl
     - .panfrost-midgard-manual-rules
     - .panfrost-test
     - .lava-rk3288-veyron-jaq:arm32
-  variables:
-    JOB_TIMEOUT: 60
+  timeout: 1h 30m
 
 panfrost-t760-traces:arm32:
   extends:
-    - .lava-piglit-traces:arm32
+    - .lava-arm32-piglit-traces
     - .panfrost-midgard-manual-rules
     - .panfrost-test
     - .lava-rk3288-veyron-jaq:arm32
@@ -273,9 +30,10 @@ panfrost-t760-traces:arm32:
 
 panfrost-t860-cl:arm64:
   extends:
-    - .lava-test-deqp:arm64
+    - .lava-arm64-test-gl
     - .panfrost-midgard-manual-rules
     - .panfrost-test
+    - .test-piglit
     - .lava-rk3399-gru-kevin:arm64
   rules:
     - !reference [.panfrost-midgard-manual-rules, rules]
@@ -287,7 +45,7 @@ panfrost-t860-cl:arm64:
 panfrost-t860-gl:arm64:
   parallel: 3
   extends:
-    - .lava-test-deqp:arm64
+    - .lava-arm64-test-gl
     - .panfrost-midgard-rules
     - .panfrost-test
     - .lava-rk3399-gru-kevin:arm64
@@ -297,7 +55,7 @@ panfrost-t860-gl:arm64:
 
 panfrost-t860-egl:arm64:
   extends:
-    - .lava-test-deqp:arm64
+    - .lava-arm64-test-gl
     - .panfrost-midgard-rules
     - .panfrost-test
     - .lava-rk3399-gru-kevin:arm64
@@ -307,59 +65,55 @@ panfrost-t860-egl:arm64:
 
 panfrost-t860-traces:arm64:
   extends:
-    - .lava-piglit-traces:arm64
+    - .lava-arm64-piglit-traces
     - .panfrost-midgard-manual-rules
     - .panfrost-test
     - .lava-rk3399-gru-kevin:arm64
     - .panfrost-traces
-  variables:
-    # force fixed kernel until 6.11 is switched officially
-    EXTERNAL_KERNEL_TAG: "v6.11-rc7-mesa-3fb8"
-
 
 panfrost-g52-gl:arm64:
   parallel: 4
   extends:
-    - .lava-test-deqp:arm64
+    - .lava-arm64-test-gl
     - .panfrost-bifrost-gl-rules
     - .panfrost-test
     - .lava-meson-g12b-a311d-khadas-vim3:arm64
   variables:
     FDO_CI_CONCURRENT: 6
     DEQP_SUITE: panfrost-g52
-    PAN_MESA_DEBUG: "deqp,sync,indirect"
 
 panfrost-g52-vk:arm64:
-  parallel: 2
+  parallel: 8
   extends:
-    - .lava-test-deqp:arm64
+    - .lava-arm64-test-vk
     - .panfrost-test
-    - .lava-meson-g12b-a311d-khadas-vim3:arm64
-    - .panfrost-bifrost-vk-rules
+    - .lava-mt8186-corsola-steelix-sku131072:arm64
+    - .panfrost-vk-rules
   variables:
-    # Using more than 4 cores cause instabilities
-    FDO_CI_CONCURRENT: 4
+    DRIVER_NAME: panvk
+    FDO_CI_CONCURRENT: 6  # We get OOMkills if we go too wide since VKCTS 1.4.4.0
     MESA_VK_IGNORE_CONFORMANCE_WARNING: 1
     PAN_I_WANT_A_BROKEN_VULKAN_DRIVER: 1
-    PANVK_DEBUG: "no_known_warn,sync"
+    PANVK_DEBUG: "sync,coherent_before_cached"
     DEQP_SUITE: panfrost-g52-vk
     HWCI_START_WESTON: 1
 
-panfrost-g52-piglit-gles2:arm64:
+panfrost-g52-piglit:arm64:
+  parallel: 2
   extends:
-    - .lava-piglit:arm64
-    - .panfrost-bifrost-gl-rules
+    - .lava-arm64-test-gl
+    - .panfrost-bifrost-gl-manual-rules
     - .panfrost-test
+    - .test-piglit
     - .lava-meson-g12b-a311d-khadas-vim3:arm64
   variables:
     HWCI_START_WESTON: 1
-    DEQP_VER: gles2
-    PIGLIT_PROFILES: quick_gl
+    DEQP_SUITE: panfrost-g52-piglit
 
 panfrost-g72-gl:arm64:
   parallel: 3
   extends:
-    - .lava-test-deqp:arm64
+    - .lava-arm64-test-gl
     - .panfrost-bifrost-gl-rules
     - .panfrost-test
     - .lava-mt8183-kukui-jacuzzi-juniper-sku16:arm64
@@ -368,28 +122,108 @@ panfrost-g72-gl:arm64:
 
 panfrost-g57-gl:arm64:
   extends:
-    - .lava-test-deqp:arm64
+    - .lava-arm64-test-gl
     - .panfrost-bifrost-gl-rules
     - .panfrost-test
-    - .lava-mt8192-asurada-spherion-r0:arm64
-  parallel: 6
+    - .lava-mt8195-cherry-tomato-r2:arm64
+  parallel: 3
   variables:
     DEQP_SUITE: panfrost-g57
+    # Oversubscribing by one thread helps deqp, but hurts piglit
+    FDO_CI_CONCURRENT: 9
+
+panfrost-g57-piglit:arm64:
+  extends:
+    - .lava-arm64-test-gl
+    - .panfrost-bifrost-gl-rules
+    - .panfrost-test
+    - .test-piglit
+    - .lava-mt8195-cherry-tomato-r2:arm64
+  variables:
+    HWCI_START_WESTON: 1
+    DEQP_SUITE: panfrost-g57-piglit
+    # Undersubscribing by one thread prevents test timeouts and speeds up
+    # the piglit job overall
+    FDO_CI_CONCURRENT: 7
 
 panfrost-g610-gl:arm64:
   parallel: 2
   extends:
-    - .lava-test-deqp:arm64
+    - .lava-arm64-test-gl
     - .panfrost-valhall-gl-rules
     - .panfrost-test
     - .lava-rk3588-rock-5b:arm64
   variables:
     DEQP_SUITE: panfrost-g610
-    PAN_MESA_DEBUG: "deqp,sync,indirect"
+    LAVA_TAGS: 4gb
 
-panfrost-g610-gl-full:arm64:
+panfrost-g610-piglit:arm64:
   extends:
-    - panfrost-g610-gl:arm64
-    - .panfrost-valhall-gl-manual-rules
+    - .lava-arm64-test-gl
+    - .panfrost-valhall-gl-rules
+    - .panfrost-test
+    - .test-piglit
+    - .lava-rk3588-rock-5b:arm64
   variables:
-    DEQP_FRACTION: 1
+    DEQP_SUITE: panfrost-g610-piglit
+    HWCI_START_WESTON: 1
+    LAVA_TAGS: 4gb
+
+panfrost-g610-vk:arm64:
+  parallel: 4
+  extends:
+    - .lava-arm64-test-vk
+    - .panfrost-test
+    - .lava-rk3588-rock-5b:arm64
+    - .panfrost-vk-rules
+  variables:
+    DRIVER_NAME: panvk
+    MESA_VK_IGNORE_CONFORMANCE_WARNING: 1
+    PANVK_DEBUG: "sync,cs,coherent_before_cached"
+    DEQP_SUITE: panfrost-g610-vk
+    DEQP_FRACTION: 3
+    HWCI_START_WESTON: 1
+    LAVA_TAGS: at-least-8gb
+
+panfrost-g610-vk-asan:arm64:
+  parallel: 5
+  extends:
+    - .lava-arm64-test-asan-vk
+    - .panfrost-test
+    - .lava-rk3588-rock-5b:arm64
+    - .panfrost-vk-manual-rules
+  timeout: 1h 35m
+  variables:
+    DRIVER_NAME: panvk
+    FDO_CI_CONCURRENT: 2 # We get OOMkills if we go too wide with asan enabled
+    MESA_VK_IGNORE_CONFORMANCE_WARNING: 1
+    PANVK_DEBUG: "sync,cs,coherent_before_cached"
+    DEQP_SUITE: panfrost-g610-vk-asan
+    LAVA_TAGS: at-least-8gb
+
+panfrost-g925-vk:arm64:
+  parallel: 4
+  extends:
+    - .lava-arm64-test-vk
+    - .panfrost-test
+    - .lava-mt8196-rauru-navi-sku0:arm64
+    - .panfrost-vk-rules
+  variables:
+    DRIVER_NAME: panvk
+    MESA_VK_IGNORE_CONFORMANCE_WARNING: 1
+    PANVK_DEBUG: "sync,cs,coherent_before_cached"
+    DEQP_SUITE: panfrost-g925-vk
+    HWCI_START_WESTON: 1
+
+panfrost-g925-angle:arm64:
+  extends:
+    - .lava-arm64-test-gl
+    - .panfrost-test
+    - .test-angle
+    - .lava-mt8196-rauru-navi-sku0:arm64
+    - .panfrost-vk-rules
+  variables:
+    MESA_VK_IGNORE_CONFORMANCE_WARNING: 1
+    DEQP_SUITE: panvk-angle
+    # Disable max-fails feature in deqp-runner since it seems to be broken in this specific job
+    DEQP_RUNNER_MAX_FAILS: null

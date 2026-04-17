@@ -45,7 +45,7 @@ lima_vs_disk_cache_store(struct disk_cache *cache,
    disk_cache_compute_key(cache, key, sizeof(*key), cache_key);
 
    if (lima_debug & LIMA_DEBUG_DISK_CACHE) {
-      char sha1[41];
+      char sha1[SHA1_DIGEST_STRING_LENGTH];
       _mesa_sha1_format(sha1, cache_key);
       fprintf(stderr, "[mesa disk cache] storing %s\n", sha1);
    }
@@ -73,7 +73,7 @@ lima_fs_disk_cache_store(struct disk_cache *cache,
    disk_cache_compute_key(cache, key, sizeof(*key), cache_key);
 
    if (lima_debug & LIMA_DEBUG_DISK_CACHE) {
-      char sha1[41];
+      char sha1[SHA1_DIGEST_STRING_LENGTH];
       _mesa_sha1_format(sha1, cache_key);
       fprintf(stderr, "[mesa disk cache] storing %s\n", sha1);
    }
@@ -101,7 +101,7 @@ lima_vs_disk_cache_retrieve(struct disk_cache *cache,
    disk_cache_compute_key(cache, key, sizeof(*key), cache_key);
 
    if (lima_debug & LIMA_DEBUG_DISK_CACHE) {
-      char sha1[41];
+      char sha1[SHA1_DIGEST_STRING_LENGTH];
       _mesa_sha1_format(sha1, cache_key);
       fprintf(stderr, "[mesa disk cache] retrieving %s: ", sha1);
    }
@@ -153,7 +153,7 @@ lima_fs_disk_cache_retrieve(struct disk_cache *cache,
    disk_cache_compute_key(cache, key, sizeof(*key), cache_key);
 
    if (lima_debug & LIMA_DEBUG_DISK_CACHE) {
-      char sha1[41];
+      char sha1[SHA1_DIGEST_STRING_LENGTH];
       _mesa_sha1_format(sha1, cache_key);
       fprintf(stderr, "[mesa disk cache] retrieving %s: ", sha1);
    }
@@ -193,12 +193,12 @@ lima_disk_cache_init(struct lima_screen *screen)
 {
    const struct build_id_note *note =
       build_id_find_nhdr_for_addr(lima_disk_cache_init);
-   assert(note && build_id_length(note) == 20); /* sha1 */
+   assert(note && build_id_length(note) == BUILD_ID_EXPECTED_HASH_LENGTH); /* sha1 */
 
    const uint8_t *id_sha1 = build_id_data(note);
    assert(id_sha1);
 
-   char timestamp[41];
+   char timestamp[SHA1_DIGEST_STRING_LENGTH];
    _mesa_sha1_format(timestamp, id_sha1);
 
    screen->disk_cache = disk_cache_create(screen->base.get_name(&screen->base), timestamp, 0);

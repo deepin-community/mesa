@@ -34,6 +34,7 @@ public:
    BlockCycleEstimator(Program* program_) : program(program_) {}
 
    Program* program;
+   Block* block;
 
    int32_t cur_cycle = 0;
    int32_t res_available[(int)BlockCycleEstimator::resource_count] = {0};
@@ -43,6 +44,7 @@ public:
 
    void add(aco_ptr<Instruction>& instr);
    void join(const BlockCycleEstimator& other);
+   double get_freq() const;
 
 private:
    unsigned get_waitcnt_cost(wait_imm imm);
@@ -142,7 +144,12 @@ is_dual_issue_capable(const Program& program, const Instruction& instr)
       }
       return false;
    }
-   default: return false;
+   default:
+      if (instr.isVINTERP_INREG())
+         return program.gfx_level >= GFX11_5;
+      if (instr.isVOPC() && instr_info.classes[(int)instr.opcode] == instr_class::valu32)
+         return program.gfx_level == GFX11_5;
+      return false;
    }
 }
 
@@ -185,9 +192,25 @@ get_perf_info(const Program& program, const Instruction& instr)
       case instr_class::exp: return {0, WAIT_USE(export_gds, 1)};
       case instr_class::vmem: return {0, WAIT_USE(vmem, 1)};
       case instr_class::wmma: {
-         /* int8 and (b)f16 have the same performance. */
-         uint8_t cost = instr.opcode == aco_opcode::v_wmma_i32_16x16x16_iu4 ? 16 : 32;
-         return {cost, WAIT_USE(valu, cost)};
+         uint8_t cost;
+         if (program.gfx_level < GFX12) {
+            /* int8 and (b)f16 have the same performance. */
+            cost = instr.opcode == aco_opcode::v_wmma_i32_16x16x16_iu4 ? 16 : 32;
+         } else {
+            /* Half the cost of GFX11, int4/8 and (b)f8 twice as fast as (b)f16.*/
+            switch (instr.opcode) {
+            case aco_opcode::v_wmma_f32_16x16x16_f16:
+            case aco_opcode::v_wmma_f32_16x16x16_bf16:
+            case aco_opcode::v_wmma_f16_16x16x16_f16:
+            case aco_opcode::v_wmma_bf16_16x16x16_bf16:
+            case aco_opcode::v_swmmac_f32_16x16x32_f16:
+            case aco_opcode::v_swmmac_f32_16x16x32_bf16:
+            case aco_opcode::v_swmmac_f16_16x16x32_f16:
+            case aco_opcode::v_swmmac_bf16_16x16x32_bf16: cost = 16; break;
+            default: cost = 8; break;
+            }
+         }
+         return {4 + cost, WAIT_USE(valu, cost)};
       }
       case instr_class::barrier:
       case instr_class::waitcnt:
@@ -258,7 +281,7 @@ BlockCycleEstimator::cycles_until_res_available(aco_ptr<Instruction>& instr)
 }
 
 static std::array<unsigned, wait_type_num>
-get_wait_counter_info(amd_gfx_level gfx_level, aco_ptr<Instruction>& instr)
+get_wait_counter_info(Program* program, aco_ptr<Instruction>& instr)
 {
    /* These numbers are all a bit nonsense. LDS/VMEM/SMEM/EXP performance
     * depends a lot on the situation. */
@@ -271,12 +294,12 @@ get_wait_counter_info(amd_gfx_level gfx_level, aco_ptr<Instruction>& instr)
       info[wait_type_exp] = 13;
    } else if (instr->isFlatLike()) {
       info[wait_type_lgkm] = instr->isFlat() ? 20 : 0;
-      if (!instr->definitions.empty() || gfx_level < GFX10)
+      if (!instr->definitions.empty() || program->gfx_level < GFX10)
          info[wait_type_vm] = 320;
       else
          info[wait_type_vs] = 320;
    } else if (instr->isSMEM()) {
-      wait_type type = gfx_level >= GFX12 ? wait_type_km : wait_type_lgkm;
+      wait_type type = program->gfx_level >= GFX12 ? wait_type_km : wait_type_lgkm;
       if (instr->definitions.empty()) {
          info[type] = 200;
       } else if (instr->operands.empty()) { /* s_memtime and s_memrealtime */
@@ -294,14 +317,14 @@ get_wait_counter_info(amd_gfx_level gfx_level, aco_ptr<Instruction>& instr)
       }
    } else if (instr->isDS()) {
       info[wait_type_lgkm] = 20;
-   } else if (instr->isVMEM() && instr->definitions.empty() && gfx_level >= GFX10) {
+   } else if (instr->isVMEM() && instr->definitions.empty() && program->gfx_level >= GFX10) {
       info[wait_type_vs] = 320;
    } else if (instr->isVMEM()) {
-      uint8_t vm_type = get_vmem_type(gfx_level, instr.get());
+      uint8_t vm_type = get_vmem_type(instr.get(), program->dev.has_point_sample_accel);
       wait_type type = wait_type_vm;
-      if (gfx_level >= GFX12 && vm_type == vmem_bvh)
+      if (program->gfx_level >= GFX12 && vm_type == vmem_bvh)
          type = wait_type_bvh;
-      else if (gfx_level >= GFX12 && vm_type == vmem_sampler)
+      else if (program->gfx_level >= GFX12 && vm_type == vmem_sampler)
          type = wait_type_sample;
       info[type] = 320;
    }
@@ -323,8 +346,7 @@ get_wait_imm(Program* program, aco_ptr<Instruction>& instr)
          imm.exp = wait_imm::unset_counter;
    } else {
       /* If an instruction increases a counter, it waits for it to be below maximum first. */
-      std::array<unsigned, wait_type_num> wait_info =
-         get_wait_counter_info(program->gfx_level, instr);
+      std::array<unsigned, wait_type_num> wait_info = get_wait_counter_info(program, instr);
       wait_imm max = wait_imm::max(program->gfx_level);
       for (unsigned i = 0; i < wait_type_num; i++) {
          if (wait_info[i])
@@ -413,7 +435,7 @@ BlockCycleEstimator::add(aco_ptr<Instruction>& instr)
          mem_ops[i].pop_front();
    }
 
-   std::array<unsigned, wait_type_num> wait_info = get_wait_counter_info(program->gfx_level, instr);
+   std::array<unsigned, wait_type_num> wait_info = get_wait_counter_info(program, instr);
    for (unsigned i = 0; i < wait_type_num; i++) {
       if (wait_info[i])
          mem_ops[i].push_back(cur_cycle + wait_info[i]);
@@ -439,22 +461,57 @@ BlockCycleEstimator::join(const BlockCycleEstimator& pred)
 {
    assert(cur_cycle == 0);
 
+   double mul = pred.get_freq() / get_freq();
+   mul = std::min(mul, 1.0);
+
    for (unsigned i = 0; i < (unsigned)resource_count; i++) {
       assert(res_usage[i] == 0);
-      res_available[i] = MAX2(res_available[i], pred.res_available[i] - pred.cur_cycle);
+      res_available[i] = MAX2(res_available[i], (pred.res_available[i] - pred.cur_cycle) * mul);
    }
 
    for (unsigned i = 0; i < 512; i++)
-      reg_available[i] = MAX2(reg_available[i], pred.reg_available[i] - pred.cur_cycle + cur_cycle);
+      reg_available[i] = MAX2(reg_available[i], (pred.reg_available[i] - pred.cur_cycle) * mul);
 
    for (unsigned i = 0; i < wait_type_num; i++) {
       std::deque<int32_t>& ops = mem_ops[i];
       const std::deque<int32_t>& pred_ops = pred.mem_ops[i];
       for (unsigned j = 0; j < MIN2(ops.size(), pred_ops.size()); j++)
-         ops.rbegin()[j] = MAX2(ops.rbegin()[j], pred_ops.rbegin()[j] - pred.cur_cycle);
+         ops.rbegin()[j] = MAX2(ops.rbegin()[j], (pred_ops.rbegin()[j] - pred.cur_cycle) * mul);
       for (int j = pred_ops.size() - ops.size() - 1; j >= 0; j--)
-         ops.push_front(pred_ops[j] - pred.cur_cycle);
+         ops.push_front((pred_ops[j] - pred.cur_cycle) * mul);
    }
+}
+
+double
+BlockCycleEstimator::get_freq() const
+{
+   /* TODO: it would be nice to be able to consider estimated loop trip
+    * counts used for loop unrolling.
+    */
+
+   /* TODO: estimate the trip_count of divergent loops (those which break
+    * divergent) higher than of uniform loops
+    */
+
+   /* Assume loops execute 8-2 times, uniform branches are taken 50% the time,
+    * and any lane in the wave takes a side of a divergent branch 75% of the
+    * time.
+    */
+   double iter = 1.0;
+   iter *= block->loop_nest_depth > 0 ? 8.0 : 1.0;
+   iter *= block->loop_nest_depth > 1 ? 4.0 : 1.0;
+   iter *= block->loop_nest_depth > 2 ? pow(2.0, block->loop_nest_depth - 2) : 1.0;
+   iter *= pow(0.5, block->uniform_if_depth);
+   iter *= pow(0.75, block->divergent_if_logical_depth);
+
+   bool divergent_if_linear_else =
+      block->logical_preds.empty() && block->linear_preds.size() == 1 &&
+      block->linear_succs.size() == 1 &&
+      program->blocks[block->linear_preds[0]].kind & (block_kind_branch | block_kind_invert);
+   if (divergent_if_linear_else)
+      iter *= 0.25;
+
+   return iter;
 }
 
 } /* end namespace */
@@ -466,8 +523,8 @@ collect_presched_stats(Program* program)
    RegisterDemand presched_demand;
    for (Block& block : program->blocks)
       presched_demand.update(block.register_demand);
-   program->statistics[aco_statistic_sgpr_presched] = presched_demand.sgpr;
-   program->statistics[aco_statistic_vgpr_presched] = presched_demand.vgpr;
+   program->statistics.presgprs = presched_demand.sgpr;
+   program->statistics.prevgprs = presched_demand.vgpr;
 }
 
 /* instructions/branches/vmem_clauses/smem_clauses/cycles */
@@ -478,31 +535,30 @@ collect_preasm_stats(Program* program)
       std::set<Instruction*> vmem_clause;
       std::set<Instruction*> smem_clause;
 
-      program->statistics[aco_statistic_instructions] += block.instructions.size();
+      program->statistics.instrs += block.instructions.size();
 
       for (aco_ptr<Instruction>& instr : block.instructions) {
          const bool is_branch =
             instr->isSOPP() && instr_info.classes[(int)instr->opcode] == instr_class::branch;
          if (is_branch)
-            program->statistics[aco_statistic_branches]++;
+            program->statistics.branches++;
 
          if (instr->isVALU() || instr->isVINTRP())
-            program->statistics[aco_statistic_valu]++;
+            program->statistics.valu++;
          if (instr->isSALU() && !instr->isSOPP() &&
              instr_info.classes[(int)instr->opcode] != instr_class::waitcnt)
-            program->statistics[aco_statistic_salu]++;
+            program->statistics.salu++;
          if (instr->isVOPD())
-            program->statistics[aco_statistic_vopd]++;
+            program->statistics.vopd++;
 
-         if ((instr->isVMEM() || instr->isScratch() || instr->isGlobal()) &&
-             !instr->operands.empty()) {
+         if ((instr->isVMEM() || instr->isFlatLike()) && !instr->operands.empty()) {
             if (std::none_of(vmem_clause.begin(), vmem_clause.end(),
                              [&](Instruction* other)
                              { return should_form_clause(instr.get(), other); }))
-               program->statistics[aco_statistic_vmem_clauses]++;
+               program->statistics.vclause++;
             vmem_clause.insert(instr.get());
 
-            program->statistics[aco_statistic_vmem]++;
+            program->statistics.vmem++;
          } else {
             vmem_clause.clear();
          }
@@ -511,10 +567,10 @@ collect_preasm_stats(Program* program)
             if (std::none_of(smem_clause.begin(), smem_clause.end(),
                              [&](Instruction* other)
                              { return should_form_clause(instr.get(), other); }))
-               program->statistics[aco_statistic_smem_clauses]++;
+               program->statistics.sclause++;
             smem_clause.insert(instr.get());
 
-            program->statistics[aco_statistic_smem]++;
+            program->statistics.smem++;
          } else {
             smem_clause.clear();
          }
@@ -524,6 +580,8 @@ collect_preasm_stats(Program* program)
    double latency = 0;
    double usage[(int)BlockCycleEstimator::resource_count] = {0};
    std::vector<BlockCycleEstimator> blocks(program->blocks.size(), program);
+   for (Block& block : program->blocks)
+      blocks[block.index].block = &block;
 
    constexpr const unsigned vmem_latency = 320;
    for (const Definition def : program->args_pending_vmem) {
@@ -543,32 +601,7 @@ collect_preasm_stats(Program* program)
          instr->pass_flags = block_est.cur_cycle - before;
       }
 
-      /* TODO: it would be nice to be able to consider estimated loop trip
-       * counts used for loop unrolling.
-       */
-
-      /* TODO: estimate the trip_count of divergent loops (those which break
-       * divergent) higher than of uniform loops
-       */
-
-      /* Assume loops execute 8-2 times, uniform branches are taken 50% the time,
-       * and any lane in the wave takes a side of a divergent branch 75% of the
-       * time.
-       */
-      double iter = 1.0;
-      iter *= block.loop_nest_depth > 0 ? 8.0 : 1.0;
-      iter *= block.loop_nest_depth > 1 ? 4.0 : 1.0;
-      iter *= block.loop_nest_depth > 2 ? pow(2.0, block.loop_nest_depth - 2) : 1.0;
-      iter *= pow(0.5, block.uniform_if_depth);
-      iter *= pow(0.75, block.divergent_if_logical_depth);
-
-      bool divergent_if_linear_else =
-         block.logical_preds.empty() && block.linear_preds.size() == 1 &&
-         block.linear_succs.size() == 1 &&
-         program->blocks[block.linear_preds[0]].kind & (block_kind_branch | block_kind_invert);
-      if (divergent_if_linear_else)
-         iter *= 0.25;
-
+      double iter = block_est.get_freq();
       latency += block_est.cur_cycle * iter;
       for (unsigned i = 0; i < (unsigned)BlockCycleEstimator::resource_count; i++)
          usage[i] += block_est.res_usage[i] * iter;
@@ -594,8 +627,8 @@ collect_preasm_stats(Program* program)
          program->workgroup_size / (double)align(program->workgroup_size, program->wave_size);
    wave64_per_cycle *= max_utilization;
 
-   program->statistics[aco_statistic_latency] = round(latency);
-   program->statistics[aco_statistic_inv_throughput] = round(1.0 / wave64_per_cycle);
+   program->statistics.latency = round(latency);
+   program->statistics.invthroughput = round(1.0 / wave64_per_cycle);
 
    if (debug_flags & DEBUG_PERF_INFO) {
       aco_print_program(program, stderr, print_no_ssa | print_perf_info);
@@ -620,7 +653,7 @@ collect_preasm_stats(Program* program)
 void
 collect_postasm_stats(Program* program, const std::vector<uint32_t>& code)
 {
-   program->statistics[aco_statistic_hash] = util_hash_crc32(code.data(), code.size() * 4);
+   program->statistics.hash = util_hash_crc32(code.data(), code.size() * 4);
 }
 
 Instruction_cycle_info

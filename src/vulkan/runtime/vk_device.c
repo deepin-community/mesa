@@ -23,18 +23,23 @@
 
 #include "vk_device.h"
 
+#include "vk_alloc.h"
 #include "vk_common_entrypoints.h"
+#include "vk_fence.h"
 #include "vk_instance.h"
 #include "vk_log.h"
 #include "vk_physical_device.h"
 #include "vk_queue.h"
+#include "vk_semaphore.h"
 #include "vk_sync.h"
 #include "vk_sync_timeline.h"
 #include "vk_util.h"
+#include "util/compiler.h"
 #include "util/u_debug.h"
 #include "util/hash_table.h"
 #include "util/perf/cpu_trace.h"
 #include "util/ralloc.h"
+#include "util/timespec.h"
 
 static enum vk_device_timeline_mode
 get_timeline_mode(struct vk_physical_device *physical_device)
@@ -83,6 +88,42 @@ collect_enabled_features(struct vk_device *device,
    if (pCreateInfo->pEnabledFeatures)
       vk_set_physical_device_features_1_0(&device->enabled_features, pCreateInfo->pEnabledFeatures);
    vk_set_physical_device_features(&device->enabled_features, pCreateInfo->pNext);
+}
+
+static VkResult
+vk_device_memory_report_init(struct vk_device *device,
+                             const VkDeviceCreateInfo *pCreateInfo)
+{
+   struct vk_device_memory_report *mem_reports = NULL;
+   uint32_t count = 0;
+
+   vk_foreach_struct_const(pnext, pCreateInfo->pNext) {
+      if (pnext->sType == VK_STRUCTURE_TYPE_DEVICE_DEVICE_MEMORY_REPORT_CREATE_INFO_EXT)
+         count++;
+   }
+
+   if (!count)
+      return VK_SUCCESS;
+
+   mem_reports = vk_alloc(&device->alloc, sizeof(*mem_reports) * count,
+                          8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+   if (!mem_reports)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+   count = 0;
+   vk_foreach_struct_const(pnext, pCreateInfo->pNext) {
+      if (pnext->sType == VK_STRUCTURE_TYPE_DEVICE_DEVICE_MEMORY_REPORT_CREATE_INFO_EXT) {
+         const struct VkDeviceDeviceMemoryReportCreateInfoEXT *report = (void *)pnext;
+         mem_reports[count].callback = report->pfnUserCallback;
+         mem_reports[count].data = report->pUserData;
+         count++;
+      }
+   }
+
+   device->memory_report_count = count;
+   device->memory_reports = mem_reports;
+
+   return VK_SUCCESS;
 }
 
 VkResult
@@ -149,7 +190,6 @@ vk_device_init(struct vk_device *device,
 
    list_inithead(&device->queues);
 
-   device->drm_fd = -1;
    device->mem_cache = NULL;
 
    device->timeline_mode = get_timeline_mode(physical_device);
@@ -177,13 +217,13 @@ vk_device_init(struct vk_device *device,
       break;
 
    default:
-      unreachable("Invalid timeline mode");
+      UNREACHABLE("Invalid timeline mode");
    }
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
    mtx_init(&device->swapchain_private_mtx, mtx_plain);
    device->swapchain_private = NULL;
-#endif /* DETECT_OS_ANDROID */
+#endif /* VK_USE_PLATFORM_ANDROID_KHR */
 
    simple_mtx_init(&device->trace_mtx, mtx_plain);
 
@@ -200,7 +240,38 @@ vk_device_init(struct vk_device *device,
       }
    }
 
+   if (device->enabled_extensions.KHR_calibrated_timestamps ||
+       device->enabled_extensions.EXT_calibrated_timestamps) {
+      /* sorted by preference */
+      const VkTimeDomainKHR calibrate_domains[] = {
+         VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_KHR,
+         VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR,
+      };
+      for (uint32_t i = 0; i < ARRAY_SIZE(calibrate_domains); i++) {
+         const VkTimeDomainKHR domain = calibrate_domains[i];
+         uint64_t ts;
+         if (vk_device_get_timestamp(NULL, domain, &ts) == VK_SUCCESS) {
+            device->calibrate_time_domain = domain;
+            break;
+         }
+      }
+
+      assert(device->calibrate_time_domain != VK_TIME_DOMAIN_DEVICE_KHR);
+      device->device_time_domain_period =
+         (uint64_t)ceilf(device->physical->properties.timestampPeriod);
+   }
+
+   result = vk_device_memory_report_init(device, pCreateInfo);
+   if (result != VK_SUCCESS)
+      return result;
+
    return VK_SUCCESS;
+}
+
+static void
+vk_device_memory_report_finish(struct vk_device *device)
+{
+   vk_free(&device->alloc, device->memory_reports);
 }
 
 void
@@ -209,15 +280,19 @@ vk_device_finish(struct vk_device *device)
    /* Drivers should tear down their own queues */
    assert(list_is_empty(&device->queues));
 
+   if (device->sync)
+      device->sync->finalize(device->sync);
+
+   vk_device_memory_report_finish(device);
    vk_memory_trace_finish(device);
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
    if (device->swapchain_private) {
       hash_table_foreach(device->swapchain_private, entry)
          util_sparse_array_finish(entry->data);
       ralloc_free(device->swapchain_private);
    }
-#endif /* DETECT_OS_ANDROID */
+#endif /* VK_USE_PLATFORM_ANDROID_KHR */
 
    simple_mtx_destroy(&device->trace_mtx);
 
@@ -551,6 +626,254 @@ vk_common_DeviceWaitIdle(VkDevice _device)
       if (result != VK_SUCCESS)
          return result;
    }
+
+   return VK_SUCCESS;
+}
+
+VkResult
+vk_device_copy_semaphore_payloads(struct vk_device *device,
+                                  uint32_t wait_semaphore_count,
+                                  const VkSemaphoreSubmitInfo *wait_semaphores,
+                                  uint32_t signal_semaphore_count,
+                                  const VkSemaphoreSubmitInfo *signal_semaphores,
+                                  uint32_t fence_count,
+                                  const VkFence *fences)
+{
+   if (device->copy_sync_payloads == NULL)
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+
+   STACK_ARRAY(struct vk_sync_wait, waits, wait_semaphore_count);
+   STACK_ARRAY(struct vk_sync_timeline_point *, wait_points,
+               wait_semaphore_count);
+   STACK_ARRAY(struct vk_sync *, resets, wait_semaphore_count);
+   STACK_ARRAY(struct vk_sync_signal, signals,
+               signal_semaphore_count + fence_count);
+   STACK_ARRAY(struct vk_sync_timeline_point *, signal_points,
+               signal_semaphore_count + fence_count);
+   uint32_t wait_count = 0, reset_count = 0, signal_count = 0;
+   VkResult result = VK_SUCCESS;
+
+   for (uint32_t i = 0; i < wait_semaphore_count; i++) {
+      VK_FROM_HANDLE(vk_semaphore, semaphore, wait_semaphores[i].semaphore);
+
+      struct vk_sync_wait wait = {
+         .sync = vk_semaphore_get_active_sync(semaphore),
+         .stage_mask = wait_semaphores[i].stageMask,
+         .wait_value = semaphore->type == VK_SEMAPHORE_TYPE_TIMELINE ?
+                       wait_semaphores[i].value : 0,
+      };
+      struct vk_sync_timeline_point *wait_point = NULL;
+      VkResult result = vk_sync_wait_unwrap(device, &wait, &wait_point);
+      if (unlikely(result != VK_SUCCESS))
+         goto fail;
+
+      if (wait.sync == NULL)
+         continue;
+
+      wait_points[wait_count] = wait_point;
+      waits[wait_count] = wait;
+      wait_count++;
+   }
+
+   for (uint32_t i = 0; i < signal_semaphore_count; i++) {
+      VK_FROM_HANDLE(vk_semaphore, semaphore, signal_semaphores[i].semaphore);
+
+      if (semaphore->type == VK_SEMAPHORE_TYPE_TIMELINE &&
+          signal_semaphores[i].value == 0) {
+         result = vk_errorf(device, VK_ERROR_UNKNOWN,
+                            "Tried to signal a timeline with value 0");
+         goto fail;
+      }
+
+      struct vk_sync_signal signal = {
+         .sync = vk_semaphore_get_active_sync(semaphore),
+         .stage_mask = signal_semaphores[i].stageMask,
+         .signal_value = semaphore->type == VK_SEMAPHORE_TYPE_TIMELINE ?
+                         signal_semaphores[i].value : 0,
+      };
+      struct vk_sync_timeline_point *signal_point = NULL;
+      VkResult result = vk_sync_signal_unwrap(device, &signal, &signal_point);
+      if (unlikely(result != VK_SUCCESS))
+         goto fail;
+
+      signal_points[signal_count] = signal_point;
+      signals[signal_count] = signal;
+      signal_count++;
+   }
+
+   for (uint32_t i = 0; i < fence_count; i++) {
+      VK_FROM_HANDLE(vk_fence, fence, fences[i]);
+
+      struct vk_sync_signal signal = {
+         .sync = vk_fence_get_active_sync(fence),
+         .stage_mask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+      };
+      struct vk_sync_timeline_point *signal_point = NULL;
+      VkResult result = vk_sync_signal_unwrap(device, &signal, &signal_point);
+      if (unlikely(result != VK_SUCCESS))
+         goto fail;
+
+      /* Timeline fences aren't a thing */
+      assert(signal_point == NULL);
+
+      signal_points[signal_count] = signal_point;
+      signals[signal_count] = signal;
+      signal_count++;
+   }
+
+   if (wait_count == 0) {
+      /* Nothing to wait on.  Just signal everything */
+      result = vk_sync_signal_many(device, signal_count, signals);
+      if (result != VK_SUCCESS)
+         goto fail;
+   } else if (signal_count > 0) {
+      /* Wait for time points to materialize */
+      result = vk_sync_wait_many(device, wait_count, waits,
+                                 VK_SYNC_WAIT_PENDING, UINT64_MAX);
+      if (result != VK_SUCCESS)
+         goto fail;
+
+      /* Now do the copy */
+      result = device->copy_sync_payloads(device, wait_count, waits,
+                                          signal_count, signals);
+      if (result != VK_SUCCESS)
+         goto fail;
+   }
+
+   /* Reset any syncs which were waited on but not signaled */
+   for (uint32_t i = 0; i < wait_count; i++) {
+      bool was_signaled = false;
+      for (uint32_t j = 0; j < signal_count; j++) {
+         if (signals[j].sync == waits[i].sync) {
+            was_signaled = true;
+            break;
+         }
+      }
+
+      if (!was_signaled)
+         resets[reset_count++] = waits[i].sync;
+   }
+
+   if (reset_count > 0) {
+      result = vk_sync_reset_many(device, reset_count, resets);
+      if (result != VK_SUCCESS)
+         goto fail;
+   }
+
+   /* Reset any temporary semaphores we waited on */
+   for (uint32_t i = 0; i < wait_semaphore_count; i++) {
+      VK_FROM_HANDLE(vk_semaphore, semaphore, wait_semaphores[i].semaphore);
+
+      vk_semaphore_reset_temporary(device, semaphore);
+   }
+
+   /* Install time points */
+   for (uint32_t i = 0; i < signal_count; i++) {
+      if (signal_points[i] == NULL)
+         continue;
+
+      vk_sync_timeline_point_install(device, signal_points[i]);
+
+      /* Installing the point consumes our reference */
+      signal_points[i] = NULL;
+   }
+
+fail:
+
+   for (uint32_t i = 0; i < signal_count; i++) {
+      if (signal_points[i] != NULL)
+         vk_sync_timeline_point_unref(device, signal_points[i]);
+   }
+
+   STACK_ARRAY_FINISH(waits);
+   STACK_ARRAY_FINISH(wait_points);
+   STACK_ARRAY_FINISH(resets);
+   STACK_ARRAY_FINISH(signals);
+   STACK_ARRAY_FINISH(signal_points);
+
+   return result;
+}
+
+VkResult
+vk_device_get_timestamp(struct vk_device *device, VkTimeDomainKHR domain,
+                        uint64_t *timestamp)
+{
+   if (domain == VK_TIME_DOMAIN_DEVICE_KHR) {
+      assert(device && device->get_timestamp);
+      return device->get_timestamp(device, timestamp);
+   }
+
+   /* device is not used for host time domains */
+#ifndef _WIN32
+   clockid_t clockid;
+   struct timespec ts;
+
+   switch (domain) {
+   case VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR:
+      clockid = CLOCK_MONOTONIC;
+      break;
+   case VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_KHR:
+      /* The "RAW" clocks on Linux are called "FAST" on FreeBSD */
+#if defined(CLOCK_MONOTONIC_RAW)
+      clockid = CLOCK_MONOTONIC_RAW;
+      break;
+#elif defined(CLOCK_MONOTONIC_FAST)
+      clockid = CLOCK_MONOTONIC_FAST;
+      break;
+#else
+      FALLTHROUGH;
+#endif
+   default:
+      goto fail;
+   }
+
+   if (clock_gettime(clockid, &ts) < 0)
+      goto fail;
+
+   *timestamp = (uint64_t)ts.tv_sec * NSEC_PER_SEC + ts.tv_nsec;
+   return VK_SUCCESS;
+
+fail:
+#endif /* _WIN32 */
+   return VK_ERROR_FEATURE_NOT_PRESENT;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+vk_common_GetCalibratedTimestampsKHR(
+   VkDevice _device, uint32_t timestampCount,
+   const VkCalibratedTimestampInfoKHR *pTimestampInfos, uint64_t *pTimestamps,
+   uint64_t *pMaxDeviation)
+{
+   VK_FROM_HANDLE(vk_device, device, _device);
+   uint64_t begin, end;
+   VkResult result;
+
+   /* collect timestamps as tight as possible */
+   result =
+      vk_device_get_timestamp(device, device->calibrate_time_domain, &begin);
+   for (uint32_t i = 0; i < timestampCount; i++) {
+      const VkTimeDomainKHR domain = pTimestampInfos[i].timeDomain;
+      if (domain == device->calibrate_time_domain)
+         pTimestamps[i] = begin;
+      else
+         result |= vk_device_get_timestamp(device, domain, &pTimestamps[i]);
+   }
+   result |=
+      vk_device_get_timestamp(device, device->calibrate_time_domain, &end);
+
+   if (result != VK_SUCCESS)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+   uint64_t max_clock_period = 0;
+   for (uint32_t i = 0; i < timestampCount; i++) {
+      const VkTimeDomainKHR domain = pTimestampInfos[i].timeDomain;
+      const uint64_t period = domain == VK_TIME_DOMAIN_DEVICE_KHR
+         ? device->device_time_domain_period
+         : domain != device->calibrate_time_domain ? 1 : 0;
+      max_clock_period = MAX2(max_clock_period, period);
+   }
+
+   *pMaxDeviation = vk_time_max_deviation(begin, end, max_clock_period);
 
    return VK_SUCCESS;
 }

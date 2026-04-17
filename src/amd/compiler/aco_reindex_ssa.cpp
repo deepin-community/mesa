@@ -69,10 +69,17 @@ reindex_program(idx_ctx& ctx, Program* program)
    }
 
    /* update program members */
-   program->private_segment_buffer = Temp(ctx.renames[program->private_segment_buffer.id()],
-                                          program->private_segment_buffer.regClass());
-   program->scratch_offset =
-      Temp(ctx.renames[program->scratch_offset.id()], program->scratch_offset.regClass());
+   for (auto& private_segment_buffer : program->private_segment_buffers) {
+      private_segment_buffer =
+         Temp(ctx.renames[private_segment_buffer.id()], private_segment_buffer.regClass());
+   }
+   for (auto& scratch_offset : program->scratch_offsets) {
+      scratch_offset =
+         Temp(ctx.renames[scratch_offset.id()], scratch_offset.regClass());
+   }
+   program->stack_ptr = Temp(ctx.renames[program->stack_ptr.id()], program->stack_ptr.regClass());
+   program->static_scratch_rsrc =
+      Temp(ctx.renames[program->static_scratch_rsrc.id()], program->static_scratch_rsrc.regClass());
    program->temp_rc = ctx.temp_rc;
 }
 

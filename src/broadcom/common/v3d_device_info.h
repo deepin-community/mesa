@@ -27,6 +27,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * Struct for tracking features of the V3D chip across driver and compiler.
  */
@@ -52,6 +56,9 @@ struct v3d_device_info {
         /** If the hw has accumulator registers */
         bool has_accumulators;
 
+        /** If kernel supports GPU reset counter */
+        bool has_reset_counter;
+
         /** Granularity for the Clipper XY Scaling */
         float clipper_xy_granularity;
 
@@ -66,6 +73,11 @@ struct v3d_device_info {
         /** Minimum size for a buffer storing the Control List Executor (CLE) */
         uint32_t cle_buffer_min_size;
 };
+
+/* TFU has a 64-bytes readhead. To avoid the unit reading unmaped memory
+ * we need to overallocate buffers that could be read by the TFU.
+ */
+#define V3D_TFU_READAHEAD_SIZE 64
 
 typedef int (*v3d_ioctl_fun)(int fd, unsigned long request, void *arg);
 
@@ -92,5 +104,9 @@ v3d_device_has_unpack_max0(const struct v3d_device_info *devinfo)
                 (devinfo->rev >= 7 ||
                  (devinfo->rev == 6 && devinfo->compat_rev >= 4)));
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -225,8 +225,13 @@ print_csv_event(struct u_trace_context *utctx,
                 int32_t delta,
                 const void *indirect)
 {
-   fprintf(utctx->out, "%u,%u,%"PRIu64",%s,\n",
+   fprintf(utctx->out, "%u,%u,%"PRIu64",%s,",
            utctx->frame_nr, utctx->batch_nr, ns, evt->tp->name);
+   if (evt->tp->print) {
+      evt->tp->print(utctx->out, evt->payload, indirect);
+   } else {
+      fprintf(utctx->out, "\n");
+   }
 }
 
 static struct u_trace_printer csv_printer = {
@@ -681,6 +686,7 @@ process_chunk(void *job, void *gdata, int thread_index)
       uint64_t ns = utctx->read_timestamp(utctx,
                                           chunk->timestamps,
                                           utctx->timestamp_size_bytes * idx,
+                                          evt->tp->flags,
                                           chunk->flush_data);
       int32_t delta;
 
@@ -788,6 +794,16 @@ u_trace_init(struct u_trace *ut, struct u_trace_context *utctx)
 }
 
 void
+u_trace_move(struct u_trace *dst, struct u_trace *src)
+{
+   dst->utctx = src->utctx;
+   list_replace(&src->trace_chunks, &dst->trace_chunks);
+   dst->num_traces = src->num_traces;
+   src->num_traces = 0;
+   list_delinit(&src->trace_chunks);
+}
+
+void
 u_trace_fini(struct u_trace *ut)
 {
    /* Normally the list of trace-chunks would be empty, if they
@@ -871,11 +887,17 @@ u_trace_clone_append(struct u_trace_iterator begin_it,
       if (from_chunk == end_it.chunk)
          to_copy = MIN2(to_copy, end_it.event_idx - from_idx);
 
+      /* Reserve space in the chunk before emitting the copy as it could also
+       * add its own tracepoints.
+       */
+      unsigned to_chunk_idx = to_chunk->num_traces;
+      to_chunk->num_traces += to_copy;
+
       copy_buffer(begin_it.ut->utctx, cmdstream,
                   from_chunk->timestamps,
                   begin_it.ut->utctx->timestamp_size_bytes * from_idx,
                   to_chunk->timestamps,
-                  begin_it.ut->utctx->timestamp_size_bytes * to_chunk->num_traces,
+                  begin_it.ut->utctx->timestamp_size_bytes * to_chunk_idx,
                   begin_it.ut->utctx->timestamp_size_bytes * to_copy);
 
       if (from_chunk->has_indirect) {
@@ -883,16 +905,16 @@ u_trace_clone_append(struct u_trace_iterator begin_it,
                      from_chunk->indirects,
                      begin_it.ut->utctx->max_indirect_size_bytes * from_idx,
                      to_chunk->indirects,
-                     begin_it.ut->utctx->max_indirect_size_bytes * to_chunk->num_traces,
+                     begin_it.ut->utctx->max_indirect_size_bytes * to_chunk_idx,
                      begin_it.ut->utctx->max_indirect_size_bytes * to_copy);
       }
 
-      memcpy(&to_chunk->traces[to_chunk->num_traces],
+      memcpy(&to_chunk->traces[to_chunk_idx],
              &from_chunk->traces[from_idx],
              to_copy * sizeof(struct u_trace_event));
 
       /* Take a refcount on payloads from from_chunk if needed. */
-      if (begin_it.ut != into) {
+      if (from_chunk != to_chunk) {
          struct u_trace_payload_buf **in_payload;
          u_vector_foreach (in_payload, &from_chunk->payloads) {
             struct u_trace_payload_buf **out_payload =
@@ -903,7 +925,6 @@ u_trace_clone_append(struct u_trace_iterator begin_it,
       }
 
       into->num_traces += to_copy;
-      to_chunk->num_traces += to_copy;
       from_idx += to_copy;
 
       assert(from_idx <= from_chunk->num_traces);
@@ -974,11 +995,13 @@ u_trace_appendv(struct u_trace *ut,
                                tp->flags);
 
    if (ut->utctx->enabled_traces & U_TRACE_TYPE_INDIRECTS) {
+      uint64_t dst_offset = 0;
       for (unsigned i = 0; i < n_indirects; i++) {
-         ut->utctx->capture_data(ut, cs, chunk->indirects,
-                                 ut->utctx->max_indirect_size_bytes * tp_idx,
-                                 addresses[i].bo, addresses[i].offset,
-                                 indirect_sizes_B[i]);
+         ut->utctx->capture_data(
+            ut, cs, chunk->indirects,
+            ut->utctx->max_indirect_size_bytes * tp_idx + dst_offset,
+            addresses[i].bo, addresses[i].offset, indirect_sizes_B[i]);
+         dst_offset += indirect_sizes_B[i];
       }
       chunk->has_indirect |= n_indirects > 0;
    }

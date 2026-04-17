@@ -40,14 +40,11 @@ struct pipe_context;
 
 enum blitter_attrib_type {
    UTIL_BLITTER_ATTRIB_NONE,
-   UTIL_BLITTER_ATTRIB_COLOR,
    UTIL_BLITTER_ATTRIB_TEXCOORD_XY,
    UTIL_BLITTER_ATTRIB_TEXCOORD_XYZW,
 };
 
-union blitter_attrib {
-   float color[4];
-
+struct blitter_attrib {
    struct {
       float x1, y1, x2, y2, z, w;
    } texcoord;
@@ -95,7 +92,7 @@ struct blitter_context
                           int x1, int y1, int x2, int y2,
                           float depth, unsigned num_instances,
                           enum blitter_attrib_type type,
-                          const union blitter_attrib *attrib);
+                          const struct blitter_attrib *attrib);
 
    /* Whether the blitter is running. */
    bool running;
@@ -110,6 +107,7 @@ struct blitter_context
    void *saved_velem_state;   /**< vertex elements state */
    void *saved_rs_state;      /**< rasterizer state */
    void *saved_fs, *saved_vs, *saved_gs, *saved_tcs, *saved_tes; /**< shaders */
+   void *saved_ms;
 
    struct pipe_framebuffer_state saved_fb_state;  /**< framebuffer state */
    struct pipe_stencil_ref saved_stencil_ref;     /**< stencil ref */
@@ -133,6 +131,7 @@ struct blitter_context
    struct pipe_vertex_buffer saved_vertex_buffers[PIPE_MAX_ATTRIBS];
 
    unsigned saved_num_so_targets;
+   enum mesa_prim saved_so_output_prim;
    struct pipe_stream_output_target *saved_so_targets[PIPE_MAX_SO_BUFFERS];
 
    struct pipe_query *saved_render_cond_query;
@@ -170,7 +169,7 @@ struct pipe_context *util_blitter_get_pipe(struct blitter_context *blitter)
 }
 
 /**
- * Override PIPE_CAP_TEXTURE_MULTISAMPLE as reported by the driver.
+ * Override pipe_caps.texture_multisample as reported by the driver.
  */
 void util_blitter_set_texture_multisample(struct blitter_context *blitter,
                                           bool supported);
@@ -183,7 +182,7 @@ void util_blitter_draw_rectangle(struct blitter_context *blitter,
                                  int x1, int y1, int x2, int y2,
                                  float depth, unsigned num_instances,
                                  enum blitter_attrib_type type,
-                                 const union blitter_attrib *attrib);
+                                 const struct blitter_attrib *attrib);
 
 
 /*
@@ -243,6 +242,18 @@ void util_blitter_copy_texture(struct blitter_context *blitter,
                                struct pipe_resource *src,
                                unsigned src_level,
                                const struct pipe_box *srcbox);
+
+/**
+ * Helper to determine if util_blitter_blit_generic() will use txf.  If
+ * the driver is providing an fs_override, it needs to know whether
+ * txf will be used.
+ */
+bool util_blitter_blit_with_txf(struct blitter_context *blitter,
+                                const struct pipe_box *dstbox,
+                                struct pipe_sampler_view *src,
+                                const struct pipe_box *srcbox,
+                                unsigned src_width0, unsigned src_height0,
+                                unsigned filter);
 
 /**
  * This is a generic implementation of pipe->blit, which accepts
@@ -391,6 +402,7 @@ void util_blitter_custom_resolve_color(struct blitter_context *blitter,
 /* Used by vc4 for 8/16-bit linear-to-tiled blits */
 void util_blitter_custom_shader(struct blitter_context *blitter,
                                 struct pipe_surface *dstsurf,
+                                unsigned width, unsigned height,
                                 void *custom_vs, void *custom_fs);
 
 /* Used by D3D12 for non-MSAA -> MSAA stencil blits */
@@ -475,6 +487,13 @@ util_blitter_save_tesseval_shader(struct blitter_context *blitter,
 }
 
 static inline void
+util_blitter_save_mesh_shader(struct blitter_context *blitter,
+                              void *sh)
+{
+   blitter->saved_ms = sh;
+}
+
+static inline void
 util_blitter_save_framebuffer(struct blitter_context *blitter,
                               const struct pipe_framebuffer_state *state)
 {
@@ -549,12 +568,15 @@ util_blitter_save_vertex_buffers(struct blitter_context *blitter,
 static inline void
 util_blitter_save_so_targets(struct blitter_context *blitter,
                              unsigned num_targets,
-                             struct pipe_stream_output_target **targets)
+                             struct pipe_stream_output_target **targets,
+                             enum mesa_prim output_prim)
 {
    unsigned i;
    assert(num_targets <= ARRAY_SIZE(blitter->saved_so_targets));
 
    blitter->saved_num_so_targets = num_targets;
+   blitter->saved_so_output_prim = output_prim;
+
    for (i = 0; i < num_targets; i++)
       pipe_so_target_reference(&blitter->saved_so_targets[i],
                                targets[i]);

@@ -20,8 +20,6 @@
 #include "vk_command_pool.h"
 #include "vk_common_entrypoints.h"
 
-#define SQTT_BUFFER_ALIGN_SHIFT 12
-
 bool
 radv_is_instruction_timing_enabled(void)
 {
@@ -34,40 +32,24 @@ radv_sqtt_queue_events_enabled(void)
    return debug_get_bool_option("RADV_THREAD_TRACE_QUEUE_EVENTS", true);
 }
 
-static enum radv_queue_family
-radv_ip_to_queue_family(enum amd_ip_type t)
-{
-   switch (t) {
-   case AMD_IP_GFX:
-      return RADV_QUEUE_GENERAL;
-   case AMD_IP_COMPUTE:
-      return RADV_QUEUE_COMPUTE;
-   case AMD_IP_SDMA:
-      return RADV_QUEUE_TRANSFER;
-   default:
-      unreachable("Unknown IP type");
-   }
-}
-
 static void
-radv_emit_wait_for_idle(const struct radv_device *device, struct radeon_cmdbuf *cs, int family)
+radv_emit_wait_for_idle(const struct radv_device *device, struct radv_cmd_stream *cs)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   const enum radv_queue_family qf = radv_ip_to_queue_family(family);
    enum rgp_flush_bits sqtt_flush_bits = 0;
    radv_cs_emit_cache_flush(
-      device->ws, cs, pdev->info.gfx_level, NULL, 0, qf,
-      (family == RADV_QUEUE_COMPUTE ? RADV_CMD_FLAG_CS_PARTIAL_FLUSH
-                                    : (RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_PS_PARTIAL_FLUSH)) |
+      device->ws, cs, pdev->info.gfx_level, NULL, 0,
+      (cs->hw_ip == AMD_IP_COMPUTE ? RADV_CMD_FLAG_CS_PARTIAL_FLUSH
+                                   : (RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_PS_PARTIAL_FLUSH)) |
          RADV_CMD_FLAG_INV_ICACHE | RADV_CMD_FLAG_INV_SCACHE | RADV_CMD_FLAG_INV_VCACHE | RADV_CMD_FLAG_INV_L2,
       &sqtt_flush_bits, 0);
 }
 
 static void
-radv_emit_sqtt_start(const struct radv_device *device, struct radeon_cmdbuf *cs, enum radv_queue_family qf)
+radv_emit_sqtt_start(const struct radv_device *device, struct radv_cmd_stream *cs)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   const bool is_compute_queue = qf == RADV_QUEUE_COMPUTE;
+   const bool is_compute_queue = cs->hw_ip == AMD_IP_COMPUTE;
    struct ac_pm4_state *pm4;
 
    pm4 = ac_pm4_create_sized(&pdev->info, false, 512, is_compute_queue);
@@ -77,17 +59,17 @@ radv_emit_sqtt_start(const struct radv_device *device, struct radeon_cmdbuf *cs,
    ac_sqtt_emit_start(&pdev->info, pm4, &device->sqtt, is_compute_queue);
    ac_pm4_finalize(pm4);
 
-   radeon_check_space(device->ws, cs, pm4->ndw);
-   radeon_emit_array(cs, pm4->pm4, pm4->ndw);
+   radeon_check_space(device->ws, cs->b, pm4->ndw);
+   ac_pm4_emit_commands(cs->b, pm4);
 
    ac_pm4_free_state(pm4);
 }
 
 static void
-radv_emit_sqtt_stop(const struct radv_device *device, struct radeon_cmdbuf *cs, enum radv_queue_family qf)
+radv_emit_sqtt_stop(const struct radv_device *device, struct radv_cmd_stream *cs)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   const bool is_compute_queue = qf == RADV_QUEUE_COMPUTE;
+   const bool is_compute_queue = cs->hw_ip == AMD_IP_COMPUTE;
    struct ac_pm4_state *pm4;
 
    pm4 = ac_pm4_create_sized(&pdev->info, false, 512, is_compute_queue);
@@ -97,89 +79,68 @@ radv_emit_sqtt_stop(const struct radv_device *device, struct radeon_cmdbuf *cs, 
    ac_sqtt_emit_stop(&pdev->info, pm4, is_compute_queue);
    ac_pm4_finalize(pm4);
 
-   radeon_check_space(device->ws, cs, pm4->ndw);
-   radeon_emit_array(cs, pm4->pm4, pm4->ndw);
+   radeon_check_space(device->ws, cs->b, pm4->ndw);
+   ac_pm4_emit_commands(cs->b, pm4);
 
    ac_pm4_clear_state(pm4, &pdev->info, false, is_compute_queue);
 
    if (pdev->info.has_sqtt_rb_harvest_bug) {
       /* Some chips with disabled RBs should wait for idle because FINISH_DONE doesn't work. */
-      radv_emit_wait_for_idle(device, cs, qf);
+      radv_emit_wait_for_idle(device, cs);
    }
 
    ac_sqtt_emit_wait(&pdev->info, pm4, &device->sqtt, is_compute_queue);
    ac_pm4_finalize(pm4);
 
-   radeon_check_space(device->ws, cs, pm4->ndw);
-   radeon_emit_array(cs, pm4->pm4, pm4->ndw);
+   radeon_check_space(device->ws, cs->b, pm4->ndw);
+   ac_pm4_emit_commands(cs->b, pm4);
 
    ac_pm4_free_state(pm4);
 }
 
+static void
+radv_emit_sqtt_userdata_cs(const struct radv_device *device, struct radv_cmd_stream *cs, uint32_t count,
+                           const uint32_t *dwords)
+{
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+
+   radeon_check_space(device->ws, cs->b, 2 + count);
+   radeon_begin(cs);
+
+   /* Without the perfctr bit the CP might not always pass the
+    * write on correctly. */
+   if (pdev->info.gfx_level >= GFX10)
+      radeon_set_uconfig_perfctr_reg_seq(pdev->info.gfx_level, cs->hw_ip, R_030D08_SQ_THREAD_TRACE_USERDATA_2, count);
+   else
+      radeon_set_uconfig_reg_seq(R_030D08_SQ_THREAD_TRACE_USERDATA_2, count);
+   radeon_emit_array(dwords, count);
+
+   radeon_end();
+}
+
 void
-radv_emit_sqtt_userdata(const struct radv_cmd_buffer *cmd_buffer, const void *data, uint32_t num_dwords)
+radv_emit_sqtt_userdata(const struct radv_cmd_buffer *cmd_buffer, const void *data, uint32_t num_dwords,
+                        enum radv_sqtt_userdata_flags flags)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   const struct radv_physical_device *pdev = radv_device_physical(device);
-   const enum amd_gfx_level gfx_level = pdev->info.gfx_level;
-   const enum radv_queue_family qf = cmd_buffer->qf;
-   struct radeon_cmdbuf *cs = cmd_buffer->cs;
+   const bool is_gfx_or_ace = cmd_buffer->qf == RADV_QUEUE_GENERAL || cmd_buffer->qf == RADV_QUEUE_COMPUTE;
+   struct radv_cmd_stream *cs = cmd_buffer->cs;
    const uint32_t *dwords = (uint32_t *)data;
 
-   /* SQTT user data packets aren't supported on SDMA queues. */
-   if (cmd_buffer->qf == RADV_QUEUE_TRANSFER)
+   /* SQTT user data packets are only supported on GFX or ACE queues. */
+   if (!is_gfx_or_ace)
       return;
 
    while (num_dwords > 0) {
       uint32_t count = MIN2(num_dwords, 2);
 
-      radeon_check_space(device->ws, cs, 2 + count);
-
-      /* Without the perfctr bit the CP might not always pass the
-       * write on correctly. */
-      if (pdev->info.gfx_level >= GFX10)
-         radeon_set_uconfig_perfctr_reg_seq(gfx_level, qf, cs, R_030D08_SQ_THREAD_TRACE_USERDATA_2, count);
-      else
-         radeon_set_uconfig_reg_seq(cs, R_030D08_SQ_THREAD_TRACE_USERDATA_2, count);
-      radeon_emit_array(cs, dwords, count);
+      if (flags & RADV_SQTT_USERDATA_MAIN_CS)
+         radv_emit_sqtt_userdata_cs(device, cs, count, dwords);
+      if (flags & RADV_SQTT_USERDATA_GANG_CS)
+         radv_emit_sqtt_userdata_cs(device, cmd_buffer->gang.cs, count, dwords);
 
       dwords += count;
       num_dwords -= count;
-   }
-}
-
-void
-radv_emit_spi_config_cntl(const struct radv_device *device, struct radeon_cmdbuf *cs, bool enable)
-{
-   const struct radv_physical_device *pdev = radv_device_physical(device);
-
-   if (pdev->info.gfx_level >= GFX9) {
-      uint32_t spi_config_cntl = S_031100_GPR_WRITE_PRIORITY(0x2c688) | S_031100_EXP_PRIORITY_ORDER(3) |
-                                 S_031100_ENABLE_SQG_TOP_EVENTS(enable) | S_031100_ENABLE_SQG_BOP_EVENTS(enable);
-
-      if (pdev->info.gfx_level >= GFX10)
-         spi_config_cntl |= S_031100_PS_PKR_PRIORITY_CNTL(3);
-
-      radeon_set_uconfig_reg(cs, R_031100_SPI_CONFIG_CNTL, spi_config_cntl);
-   } else {
-      /* SPI_CONFIG_CNTL is a protected register on GFX6-GFX8. */
-      radeon_set_privileged_config_reg(cs, R_009100_SPI_CONFIG_CNTL,
-                                       S_009100_ENABLE_SQG_TOP_EVENTS(enable) | S_009100_ENABLE_SQG_BOP_EVENTS(enable));
-   }
-}
-
-void
-radv_emit_inhibit_clockgating(const struct radv_device *device, struct radeon_cmdbuf *cs, bool inhibit)
-{
-   const struct radv_physical_device *pdev = radv_device_physical(device);
-
-   if (pdev->info.gfx_level >= GFX11)
-      return; /* not needed */
-
-   if (pdev->info.gfx_level >= GFX10) {
-      radeon_set_uconfig_reg(cs, R_037390_RLC_PERFMON_CLK_CNTL, S_037390_PERFMON_CLOCK_STATE(inhibit));
-   } else if (pdev->info.gfx_level >= GFX8) {
-      radeon_set_uconfig_reg(cs, R_0372FC_RLC_PERFMON_CLK_CNTL, S_0372FC_PERFMON_CLOCK_STATE(inhibit));
    }
 }
 
@@ -263,7 +224,6 @@ static bool
 radv_sqtt_init_queue_event(struct radv_device *device)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   const struct radv_instance *instance = radv_physical_device_instance(pdev);
    VkCommandPool cmd_pool;
    VkResult result;
 
@@ -278,7 +238,7 @@ radv_sqtt_init_queue_event(struct radv_device *device)
 
    device->sqtt_command_pool[0] = vk_command_pool_from_handle(cmd_pool);
 
-   if (!(instance->debug_flags & RADV_DEBUG_NO_COMPUTE_QUEUE)) {
+   if (radv_compute_queue_enabled(pdev)) {
       const VkCommandPoolCreateInfo create_comp_info = {
          .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
          .queueFamilyIndex = RADV_QUEUE_COMPUTE,
@@ -314,41 +274,141 @@ radv_sqtt_finish_queue_event(struct radv_device *device)
    simple_mtx_destroy(&device->sqtt_command_pool_mtx);
 }
 
+VkResult
+radv_sqtt_allocate_buffer(VkDevice device, uint64_t size, uint32_t memory_type_index, VkBuffer *buffer,
+                          VkDeviceMemory *memory)
+{
+   VkResult result;
+
+   VkBufferCreateInfo buffer_create_info = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .pNext =
+         &(VkBufferUsageFlags2CreateInfo){
+            .sType = VK_STRUCTURE_TYPE_BUFFER_USAGE_FLAGS_2_CREATE_INFO,
+            .usage = VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT,
+         },
+      .size = size,
+   };
+
+   result = radv_CreateBuffer(device, &buffer_create_info, NULL, buffer);
+   if (result != VK_SUCCESS)
+      return result;
+
+   VkDeviceBufferMemoryRequirements buffer_mem_req_info = {
+      .sType = VK_STRUCTURE_TYPE_DEVICE_BUFFER_MEMORY_REQUIREMENTS,
+      .pCreateInfo = &buffer_create_info,
+   };
+   VkMemoryRequirements2 mem_reqs = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
+   };
+
+   radv_GetDeviceBufferMemoryRequirements(device, &buffer_mem_req_info, &mem_reqs);
+
+   VkMemoryAllocateInfo alloc_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .allocationSize = mem_reqs.memoryRequirements.size,
+      .memoryTypeIndex = memory_type_index,
+   };
+
+   result = radv_AllocateMemory(device, &alloc_info, NULL, memory);
+   if (result != VK_SUCCESS)
+      goto fail_buffer;
+
+   VkBindBufferMemoryInfo bind_info = {
+      .sType = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO,
+      .buffer = *buffer,
+      .memory = *memory,
+   };
+
+   result = radv_BindBufferMemory2(device, 1, &bind_info);
+   if (result != VK_SUCCESS)
+      goto fail_memory;
+
+   return result;
+
+fail_memory:
+   radv_FreeMemory(device, *memory, NULL);
+fail_buffer:
+   radv_DestroyBuffer(device, *buffer, NULL);
+   return result;
+}
+
+void
+radv_sqtt_destroy_buffer(VkDevice device, VkBuffer buffer, VkDeviceMemory memory)
+{
+   radv_DestroyBuffer(device, buffer, NULL);
+   radv_FreeMemory(device, memory, NULL);
+}
+
 static bool
 radv_sqtt_init_bo(struct radv_device *device)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
    unsigned max_se = pdev->info.max_se;
-   struct radeon_winsys *ws = device->ws;
+   VkDeviceMemory memory, staging_memory;
+   VkBuffer buffer, staging_buffer;
    VkResult result;
    uint64_t size;
+   uint64_t va;
+   void *ptr;
 
    /* The buffer size and address need to be aligned in HW regs. Align the
     * size as early as possible so that we do all the allocation & addressing
     * correctly. */
-   device->sqtt.buffer_size = align64(device->sqtt.buffer_size, 1u << SQTT_BUFFER_ALIGN_SHIFT);
+   device->sqtt.buffer_size = align64(device->sqtt.buffer_size, 1ull << SQTT_BUFFER_ALIGN_SHIFT);
 
    /* Compute total size of the thread trace BO for all SEs. */
-   size = align64(sizeof(struct ac_sqtt_data_info) * max_se, 1 << SQTT_BUFFER_ALIGN_SHIFT);
+   size = align64(sizeof(struct ac_sqtt_data_info) * max_se, 1ull << SQTT_BUFFER_ALIGN_SHIFT);
    size += device->sqtt.buffer_size * (uint64_t)max_se;
 
-   struct radeon_winsys_bo *bo = NULL;
-   result = radv_bo_create(device, NULL, size, 4096, RADEON_DOMAIN_VRAM,
-                           RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_ZERO_VRAM,
-                           RADV_BO_PRIORITY_SCRATCH, 0, true, &bo);
-   device->sqtt.bo = bo;
+   /* Allocate the SQTT buffer (it must be in VRAM). */
+   const uint32_t memory_type_index = radv_find_memory_index(
+      pdev,
+      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+         (device->rgp_use_staging_buffer ? 0
+                                         : VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
+
+   result = radv_sqtt_allocate_buffer(radv_device_to_handle(device), size, memory_type_index, &buffer, &memory);
    if (result != VK_SUCCESS)
       return false;
 
-   result = ws->buffer_make_resident(ws, device->sqtt.bo, true);
+   VkBufferDeviceAddressInfo addr_info = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+      .buffer = buffer,
+   };
+
+   va = vk_common_GetBufferDeviceAddress(radv_device_to_handle(device), &addr_info);
+
+   /* Allocate a staging buffer in GTT. */
+   if (device->rgp_use_staging_buffer) {
+      const uint32_t staging_memory_type_index =
+         radv_find_memory_index(pdev, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+                                         VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+
+      result = radv_sqtt_allocate_buffer(radv_device_to_handle(device), size, staging_memory_type_index,
+                                         &staging_buffer, &staging_memory);
+      if (result != VK_SUCCESS)
+         return false;
+   }
+
+   VkMemoryMapInfo mem_map_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO,
+      .memory = device->rgp_use_staging_buffer ? staging_memory : memory,
+      .size = VK_WHOLE_SIZE,
+   };
+
+   result = radv_MapMemory2(radv_device_to_handle(device), &mem_map_info, &ptr);
    if (result != VK_SUCCESS)
       return false;
 
-   device->sqtt.ptr = radv_buffer_map(ws, device->sqtt.bo);
-   if (!device->sqtt.ptr)
-      return false;
-
-   device->sqtt.buffer_va = radv_buffer_get_va(device->sqtt.bo);
+   device->sqtt_size = size;
+   device->sqtt_buffer = buffer;
+   device->sqtt_memory = memory;
+   device->sqtt_staging_buffer = staging_buffer;
+   device->sqtt_staging_memory = staging_memory;
+   device->sqtt.buffer_va = va;
+   device->sqtt.bo = &device->sqtt_buffer;
+   device->sqtt.ptr = ptr;
 
    return true;
 }
@@ -356,12 +416,20 @@ radv_sqtt_init_bo(struct radv_device *device)
 static void
 radv_sqtt_finish_bo(struct radv_device *device)
 {
-   struct radeon_winsys *ws = device->ws;
+   VkDeviceMemory memory = device->rgp_use_staging_buffer ? device->sqtt_staging_memory : device->sqtt_memory;
 
-   if (unlikely(device->sqtt.bo)) {
-      ws->buffer_make_resident(ws, device->sqtt.bo, false);
-      radv_bo_destroy(device, NULL, device->sqtt.bo);
+   if (memory) {
+      VkMemoryUnmapInfo unmap_info = {
+         .sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO,
+         .memory = memory,
+      };
+
+      radv_UnmapMemory2(radv_device_to_handle(device), &unmap_info);
    }
+
+   radv_sqtt_destroy_buffer(radv_device_to_handle(device), device->sqtt_buffer, device->sqtt_memory);
+   if (device->rgp_use_staging_buffer)
+      radv_sqtt_destroy_buffer(radv_device_to_handle(device), device->sqtt_staging_buffer, device->sqtt_staging_memory);
 }
 
 static VkResult
@@ -437,11 +505,15 @@ radv_unregister_queues(struct radv_device *device, struct ac_sqtt *sqtt)
 bool
 radv_sqtt_init(struct radv_device *device)
 {
+   const struct radv_physical_device *pdev = radv_device_physical(device);
    struct ac_sqtt *sqtt = &device->sqtt;
 
    /* Default buffer size set to 32MB per SE. */
    device->sqtt.buffer_size = (uint32_t)debug_get_num_option("RADV_THREAD_TRACE_BUFFER_SIZE", 32 * 1024 * 1024);
    device->sqtt.instruction_timing_enabled = radv_is_instruction_timing_enabled();
+
+   /* Whether to use a staging buffer for faster reads on dGPUs. */
+   device->rgp_use_staging_buffer = pdev->info.has_dedicated_vram;
 
    if (!radv_sqtt_init_bo(device))
       return false;
@@ -463,17 +535,17 @@ void
 radv_sqtt_finish(struct radv_device *device)
 {
    struct ac_sqtt *sqtt = &device->sqtt;
-   struct radeon_winsys *ws = device->ws;
 
    radv_sqtt_finish_bo(device);
-   radv_sqtt_finish_queue_event(device);
 
    for (unsigned i = 0; i < 2; i++) {
-      if (device->sqtt.start_cs[i])
-         ws->cs_destroy(device->sqtt.start_cs[i]);
-      if (device->sqtt.stop_cs[i])
-         ws->cs_destroy(device->sqtt.stop_cs[i]);
+      if (device->sqtt_start_cmdbuf[i])
+         radv_sqtt_free_cmdbuf(device, i, device->sqtt_start_cmdbuf[i]);
+      if (device->sqtt_stop_cmdbuf[i])
+         radv_sqtt_free_cmdbuf(device, i, device->sqtt_stop_cmdbuf[i]);
    }
+
+   radv_sqtt_finish_queue_event(device);
 
    radv_unregister_queues(device, sqtt);
 
@@ -498,144 +570,282 @@ radv_sqtt_resize_bo(struct radv_device *device)
    return radv_sqtt_init_bo(device);
 }
 
-bool
+static void
+radv_sqtt_copy_buffer(VkCommandBuffer cmdbuf, VkBuffer src_buffer, VkBuffer dst_buffer, uint64_t size)
+{
+   VkMemoryBarrier2 pre_barrier = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+      .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+      .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
+   };
+
+   VkDependencyInfo pre_dep_info = {
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .memoryBarrierCount = 1,
+      .pMemoryBarriers = &pre_barrier,
+   };
+
+   radv_CmdPipelineBarrier2(cmdbuf, &pre_dep_info);
+
+   VkBufferCopy2 copy = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_COPY_2,
+      .srcOffset = 0,
+      .size = size,
+   };
+
+   VkCopyBufferInfo2 copy_info = {
+      .sType = VK_STRUCTURE_TYPE_COPY_BUFFER_INFO_2,
+      .srcBuffer = src_buffer,
+      .dstBuffer = dst_buffer,
+      .regionCount = 1,
+      .pRegions = &copy,
+   };
+
+   radv_CmdCopyBuffer2(cmdbuf, &copy_info);
+
+   VkMemoryBarrier2 post_barrier = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+      .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+      .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT,
+   };
+
+   VkDependencyInfo post_dep_info = {
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .memoryBarrierCount = 1,
+      .pMemoryBarriers = &post_barrier,
+   };
+
+   radv_CmdPipelineBarrier2(cmdbuf, &post_dep_info);
+}
+
+static bool
 radv_begin_sqtt(struct radv_queue *queue)
 {
    struct radv_device *device = radv_queue_device(queue);
    const struct radv_physical_device *pdev = radv_device_physical(device);
    enum radv_queue_family family = queue->state.qf;
    struct radeon_winsys *ws = device->ws;
-   struct radeon_cmdbuf *cs;
+   VkCommandBuffer cmdbuf;
    VkResult result;
 
-   /* Destroy the previous start CS and create a new one. */
-   if (device->sqtt.start_cs[family]) {
-      ws->cs_destroy(device->sqtt.start_cs[family]);
-      device->sqtt.start_cs[family] = NULL;
+   /* Destroy the previous start cmdbuf and create a new one. */
+   if (device->sqtt_start_cmdbuf[family]) {
+      radv_sqtt_free_cmdbuf(device, family, device->sqtt_start_cmdbuf[family]);
+      device->sqtt_start_cmdbuf[family] = NULL;
    }
 
-   cs = ws->cs_create(ws, radv_queue_ring(queue), false);
-   if (!cs)
+   result = radv_sqtt_allocate_cmdbuf(device, family, &cmdbuf);
+   if (result != VK_SUCCESS)
       return false;
 
-   radeon_check_space(ws, cs, 512);
+   struct radv_cmd_stream *cs = radv_cmd_buffer_from_handle(cmdbuf)->cs;
 
-   switch (family) {
-   case RADV_QUEUE_GENERAL:
-      radeon_emit(cs, PKT3(PKT3_CONTEXT_CONTROL, 1, 0));
-      radeon_emit(cs, CC0_UPDATE_LOAD_ENABLES(1));
-      radeon_emit(cs, CC1_UPDATE_SHADOW_ENABLES(1));
-      break;
-   case RADV_QUEUE_COMPUTE:
-      radeon_emit(cs, PKT3(PKT3_NOP, 0, 0));
-      radeon_emit(cs, 0);
-      break;
-   default:
-      unreachable("Incorrect queue family");
-      break;
-   }
+   VkCommandBufferBeginInfo begin_info = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+   };
+
+   result = radv_BeginCommandBuffer(cmdbuf, &begin_info);
+   if (result != VK_SUCCESS)
+      return false;
+
+   radeon_check_space(ws, cs->b, 512);
 
    /* Make sure to wait-for-idle before starting SQTT. */
-   radv_emit_wait_for_idle(device, cs, family);
+   radv_emit_wait_for_idle(device, cs);
 
    /* Disable clock gating before starting SQTT. */
-   radv_emit_inhibit_clockgating(device, cs, true);
+   ac_emit_cp_inhibit_clockgating(cs->b, pdev->info.gfx_level, true);
 
    /* Enable SQG events that collects thread trace data. */
-   radv_emit_spi_config_cntl(device, cs, true);
-
-   radv_perfcounter_emit_spm_reset(cs);
+   ac_emit_cp_spi_config_cntl(cs->b, pdev->info.gfx_level, true);
 
    if (device->spm.bo) {
+      ac_emit_spm_reset(cs->b);
+
       /* Enable all shader stages by default. */
       radv_perfcounter_emit_shaders(device, cs, ac_sqtt_get_shader_mask(&pdev->info));
 
-      radv_emit_spm_setup(device, cs, family);
+      radv_emit_spm_setup(device, cs);
    }
 
    /* Start SQTT. */
-   radv_emit_sqtt_start(device, cs, family);
+   radv_emit_sqtt_start(device, cs);
 
    if (device->spm.bo) {
-      radeon_check_space(ws, cs, 8);
-      radv_perfcounter_emit_spm_start(device, cs, family);
+      radeon_check_space(ws, cs->b, 8);
+      ac_emit_spm_start(cs->b, cs->hw_ip, &pdev->info);
    }
 
-   result = ws->cs_finalize(cs);
-   if (result != VK_SUCCESS) {
-      ws->cs_destroy(cs);
+   result = radv_EndCommandBuffer(cmdbuf);
+   if (result != VK_SUCCESS)
       return false;
-   }
 
-   device->sqtt.start_cs[family] = cs;
+   VkCommandBufferSubmitInfo cmdbuf_info = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+      .commandBuffer = cmdbuf,
+   };
 
-   return radv_queue_internal_submit(queue, cs);
+   VkSubmitInfo2 submit_info = {
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+      .commandBufferInfoCount = 1,
+      .pCommandBufferInfos = &cmdbuf_info,
+   };
+
+   result = device->layer_dispatch.rgp.QueueSubmit2(radv_queue_to_handle(queue), 1, &submit_info, VK_NULL_HANDLE);
+   if (result != VK_SUCCESS)
+      return false;
+
+   device->sqtt_start_cmdbuf[family] = cmdbuf;
+
+   return true;
 }
 
-bool
+static bool
 radv_end_sqtt(struct radv_queue *queue)
 {
    struct radv_device *device = radv_queue_device(queue);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
    enum radv_queue_family family = queue->state.qf;
    struct radeon_winsys *ws = device->ws;
-   struct radeon_cmdbuf *cs;
+   VkCommandBuffer cmdbuf;
    VkResult result;
 
-   /* Destroy the previous stop CS and create a new one. */
-   if (device->sqtt.stop_cs[family]) {
-      ws->cs_destroy(device->sqtt.stop_cs[family]);
-      device->sqtt.stop_cs[family] = NULL;
+   /* Destroy the previous stop cmdbuf and create a new one. */
+   if (device->sqtt_stop_cmdbuf[family]) {
+      radv_sqtt_free_cmdbuf(device, family, device->sqtt_stop_cmdbuf[family]);
+      device->sqtt_stop_cmdbuf[family] = NULL;
    }
 
-   cs = ws->cs_create(ws, radv_queue_ring(queue), false);
-   if (!cs)
+   result = radv_sqtt_allocate_cmdbuf(device, family, &cmdbuf);
+   if (result != VK_SUCCESS)
       return false;
 
-   radeon_check_space(ws, cs, 512);
+   struct radv_cmd_stream *cs = radv_cmd_buffer_from_handle(cmdbuf)->cs;
 
-   switch (family) {
-   case RADV_QUEUE_GENERAL:
-      radeon_emit(cs, PKT3(PKT3_CONTEXT_CONTROL, 1, 0));
-      radeon_emit(cs, CC0_UPDATE_LOAD_ENABLES(1));
-      radeon_emit(cs, CC1_UPDATE_SHADOW_ENABLES(1));
-      break;
-   case RADV_QUEUE_COMPUTE:
-      radeon_emit(cs, PKT3(PKT3_NOP, 0, 0));
-      radeon_emit(cs, 0);
-      break;
-   default:
-      unreachable("Incorrect queue family");
-      break;
-   }
+   VkCommandBufferBeginInfo begin_info = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+   };
+
+   result = radv_BeginCommandBuffer(cmdbuf, &begin_info);
+   if (result != VK_SUCCESS)
+      return false;
+
+   radeon_check_space(ws, cs->b, 512);
 
    /* Make sure to wait-for-idle before stopping SQTT. */
-   radv_emit_wait_for_idle(device, cs, family);
+   radv_emit_wait_for_idle(device, cs);
 
    if (device->spm.bo) {
-      radeon_check_space(ws, cs, 8);
-      radv_perfcounter_emit_spm_stop(device, cs, family);
+      radeon_check_space(ws, cs->b, 8);
+      ac_emit_spm_stop(cs->b, cs->hw_ip, &pdev->info);
    }
 
    /* Stop SQTT. */
-   radv_emit_sqtt_stop(device, cs, family);
+   radv_emit_sqtt_stop(device, cs);
 
-   radv_perfcounter_emit_spm_reset(cs);
+   if (device->spm.bo)
+      ac_emit_spm_reset(cs->b);
 
    /* Restore previous state by disabling SQG events. */
-   radv_emit_spi_config_cntl(device, cs, false);
+   ac_emit_cp_spi_config_cntl(cs->b, pdev->info.gfx_level, false);
 
    /* Restore previous state by re-enabling clock gating. */
-   radv_emit_inhibit_clockgating(device, cs, false);
+   ac_emit_cp_inhibit_clockgating(cs->b, pdev->info.gfx_level, false);
 
-   result = ws->cs_finalize(cs);
-   if (result != VK_SUCCESS) {
-      ws->cs_destroy(cs);
-      return false;
+   /* Copy to the staging buffers for faster reads on dGPUs. */
+   if (device->rgp_use_staging_buffer) {
+      radv_sqtt_copy_buffer(cmdbuf, device->sqtt_buffer, device->sqtt_staging_buffer, device->sqtt_size);
+      if (device->spm.bo)
+         radv_sqtt_copy_buffer(cmdbuf, device->spm_buffer, device->spm_staging_buffer, device->spm.buffer_size);
    }
 
-   device->sqtt.stop_cs[family] = cs;
+   result = radv_EndCommandBuffer(cmdbuf);
+   if (result != VK_SUCCESS)
+      return false;
 
-   return radv_queue_internal_submit(queue, cs);
+   VkCommandBufferSubmitInfo cmdbuf_info = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+      .commandBuffer = cmdbuf,
+   };
+
+   VkSubmitInfo2 submit_info = {
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+      .commandBufferInfoCount = 1,
+      .pCommandBufferInfos = &cmdbuf_info,
+   };
+
+   result = device->layer_dispatch.rgp.QueueSubmit2(radv_queue_to_handle(queue), 1, &submit_info, VK_NULL_HANDLE);
+   if (result != VK_SUCCESS)
+      return false;
+
+   device->sqtt_stop_cmdbuf[family] = cmdbuf;
+
+   return true;
+}
+
+void
+radv_sqtt_start_capturing(struct radv_queue *queue)
+{
+   struct radv_device *device = radv_queue_device(queue);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+
+   if (ac_check_profile_state(&pdev->info)) {
+      fprintf(stderr, "radv: Canceling RGP trace request as a hang condition has been "
+                      "detected. Force the GPU into a profiling mode with e.g. "
+                      "\"echo profile_peak  > "
+                      "/sys/class/drm/card0/device/power_dpm_force_performance_level\"\n");
+      return;
+   }
+
+   /* Reserve a VMID to allow the KMD to update SPM_VMID accordingly. */
+   if (device->ws->reserve_vmid(device->ws) < 0) {
+      fprintf(stderr, "radv: Failed to reserve VMID for SQTT tracing.\n");
+      return;
+   }
+
+   /* Sample CPU/GPU clocks before starting the trace. */
+   if (!radv_sqtt_sample_clocks(device)) {
+      fprintf(stderr, "radv: Failed to sample clocks\n");
+      return;
+   }
+
+   radv_begin_sqtt(queue);
+   assert(!device->sqtt_enabled);
+   device->sqtt_enabled = true;
+}
+
+bool
+radv_sqtt_stop_capturing(struct radv_queue *queue)
+{
+   struct radv_device *device = radv_queue_device(queue);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   struct ac_sqtt_trace sqtt_trace = {0};
+   struct ac_spm_trace spm_trace;
+   bool captured = true;
+
+   radv_end_sqtt(queue);
+   device->sqtt_enabled = false;
+
+   /* TODO: Do something better than this whole sync. */
+   device->vk.dispatch_table.QueueWaitIdle(radv_queue_to_handle(queue));
+
+   device->ws->unreserve_vmid(device->ws);
+
+   if (radv_get_sqtt_trace(queue, &sqtt_trace) && (!device->spm.bo || radv_get_spm_trace(queue, &spm_trace))) {
+      ac_dump_rgp_capture(&pdev->info, &sqtt_trace, device->spm.bo ? &spm_trace : NULL);
+   } else {
+      /* Failed to capture because the buffer was too small. */
+      captured = false;
+   }
+
+   /* Clear resources used for this capture. */
+   radv_reset_sqtt_trace(device);
+
+   return captured;
 }
 
 bool
@@ -643,10 +853,14 @@ radv_get_sqtt_trace(struct radv_queue *queue, struct ac_sqtt_trace *sqtt_trace)
 {
    struct radv_device *device = radv_queue_device(queue);
    const struct radv_physical_device *pdev = radv_device_physical(device);
+   const struct radv_instance *instance = radv_physical_device_instance(pdev);
    const struct radeon_info *gpu_info = &pdev->info;
 
    if (!ac_sqtt_get_trace(&device->sqtt, gpu_info, sqtt_trace)) {
-      if (!radv_sqtt_resize_bo(device))
+      /* Do not try to automatically resize the SQTT buffer for per-submit captures because this
+       * doesn't make much sense and the buffer size can be increased by the user.
+       */
+      if (!instance->vk.trace_per_submit && !radv_sqtt_resize_bo(device))
          fprintf(stderr, "radv: Failed to resize the SQTT buffer.\n");
       return false;
    }
@@ -685,10 +899,9 @@ radv_reset_sqtt_trace(struct radv_device *device)
    /* Clear timed cmdbufs. */
    simple_mtx_lock(&device->sqtt_command_pool_mtx);
    for (unsigned i = 0; i < ARRAY_SIZE(device->sqtt_command_pool); i++) {
-      /* If RADV_DEBUG_NO_COMPUTE_QUEUE is used, there's no compute sqtt command pool */
       if (device->sqtt_command_pool[i])
-         vk_common_TrimCommandPool(radv_device_to_handle(device), vk_command_pool_to_handle(device->sqtt_command_pool[i]),
-                                0);
+         vk_common_TrimCommandPool(radv_device_to_handle(device),
+                                   vk_command_pool_to_handle(device->sqtt_command_pool[i]), 0);
    }
    simple_mtx_unlock(&device->sqtt_command_pool_mtx);
 }
@@ -709,8 +922,8 @@ radv_get_calibrated_timestamps(struct radv_device *device, uint64_t *cpu_timesta
                                                                .timeDomain = VK_TIME_DOMAIN_DEVICE_KHR,
                                                             }};
 
-   result =
-      radv_GetCalibratedTimestampsKHR(radv_device_to_handle(device), 2, timestamp_infos, timestamps, &max_deviation);
+   result = device->vk.dispatch_table.GetCalibratedTimestampsKHR(radv_device_to_handle(device), 2, timestamp_infos,
+                                                                 timestamps, &max_deviation);
    if (result != VK_SUCCESS)
       return result;
 
@@ -724,13 +937,56 @@ bool
 radv_sqtt_sample_clocks(struct radv_device *device)
 {
    uint64_t cpu_timestamp = 0, gpu_timestamp = 0;
+   uint64_t shader_clock_freq, memory_clock_freq;
+   struct radeon_winsys *ws = device->ws;
    VkResult result;
 
    result = radv_get_calibrated_timestamps(device, &cpu_timestamp, &gpu_timestamp);
    if (result != VK_SUCCESS)
       return false;
 
-   return ac_sqtt_add_clock_calibration(&device->sqtt, cpu_timestamp, gpu_timestamp);
+   if (!ac_sqtt_add_clock_calibration(&device->sqtt, cpu_timestamp, gpu_timestamp))
+      return false;
+
+   shader_clock_freq = ws->query_value(ws, RADEON_CURRENT_SCLK);
+   memory_clock_freq = ws->query_value(ws, RADEON_CURRENT_MCLK);
+
+   ac_sqtt_set_gpu_trace_clocks(&device->sqtt, shader_clock_freq, memory_clock_freq);
+   return true;
+}
+
+VkResult
+radv_sqtt_allocate_cmdbuf(struct radv_device *device, enum radv_queue_family queue_family, VkCommandBuffer *pcmdbuf)
+{
+   VkCommandPool command_pool = vk_command_pool_to_handle(device->sqtt_command_pool[queue_family]);
+   VkResult result;
+
+   simple_mtx_lock(&device->sqtt_command_pool_mtx);
+
+   const VkCommandBufferAllocateInfo alloc_info = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool = command_pool,
+      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandBufferCount = 1,
+   };
+
+   result = vk_common_AllocateCommandBuffers(radv_device_to_handle(device), &alloc_info, pcmdbuf);
+
+   simple_mtx_unlock(&device->sqtt_command_pool_mtx);
+
+   return result;
+}
+
+void
+radv_sqtt_free_cmdbuf(struct radv_device *device, enum radv_queue_family queue_family, VkCommandBuffer cmdbuf)
+{
+   VkCommandPool command_pool = vk_command_pool_to_handle(device->sqtt_command_pool[queue_family]);
+
+   simple_mtx_lock(&device->sqtt_command_pool_mtx);
+
+   vk_common_FreeCommandBuffers(radv_device_to_handle(device), command_pool, 1, &cmdbuf);
+
+   simple_mtx_unlock(&device->sqtt_command_pool_mtx);
 }
 
 VkResult
@@ -745,18 +1001,9 @@ radv_sqtt_get_timed_cmdbuf(struct radv_queue *queue, struct radeon_winsys_bo *ti
 
    assert(queue_family == RADV_QUEUE_GENERAL || queue_family == RADV_QUEUE_COMPUTE);
 
-   simple_mtx_lock(&device->sqtt_command_pool_mtx);
-
-   const VkCommandBufferAllocateInfo alloc_info = {
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-      .commandPool = vk_command_pool_to_handle(device->sqtt_command_pool[queue_family]),
-      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-      .commandBufferCount = 1,
-   };
-
-   result = vk_common_AllocateCommandBuffers(radv_device_to_handle(device), &alloc_info, &cmdbuf);
+   result = radv_sqtt_allocate_cmdbuf(device, queue_family, &cmdbuf);
    if (result != VK_SUCCESS)
-      goto fail;
+      return result;
 
    const VkCommandBufferBeginInfo begin_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -765,23 +1012,24 @@ radv_sqtt_get_timed_cmdbuf(struct radv_queue *queue, struct radeon_winsys_bo *ti
 
    result = radv_BeginCommandBuffer(cmdbuf, &begin_info);
    if (result != VK_SUCCESS)
-      goto fail;
+      return result;
 
-   radeon_check_space(device->ws, radv_cmd_buffer_from_handle(cmdbuf)->cs, 28);
+   struct radv_cmd_buffer *cmd_buffer = radv_cmd_buffer_from_handle(cmdbuf);
+   struct radv_cmd_stream *cs = cmd_buffer->cs;
+
+   radeon_check_space(device->ws, cs->b, 28);
 
    timestamp_va = radv_buffer_get_va(timestamp_bo) + timestamp_offset;
 
-   radv_cs_add_buffer(device->ws, radv_cmd_buffer_from_handle(cmdbuf)->cs, timestamp_bo);
+   radv_cs_add_buffer(device->ws, cs->b, timestamp_bo);
 
    radv_write_timestamp(radv_cmd_buffer_from_handle(cmdbuf), timestamp_va, timestamp_stage);
 
    result = radv_EndCommandBuffer(cmdbuf);
    if (result != VK_SUCCESS)
-      goto fail;
+      return result;
 
    *pcmdbuf = cmdbuf;
 
-fail:
-   simple_mtx_unlock(&device->sqtt_command_pool_mtx);
    return result;
 }

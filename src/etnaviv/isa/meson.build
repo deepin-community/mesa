@@ -97,10 +97,11 @@ disasm = executable(
 
 if with_tools.contains('etnaviv')
   isa_bindings_rs = rust.bindgen(
-    input : 'bindings.h',
+    input : [ 'bindings.h', etnaviv_enums_h ],
     output : 'isa_bindings.rs',
     include_directories : [inc_src],
     args : [
+      bindgen_output_args,
       '--disable-header-comment',
       '--ignore-functions',
       '--allowlist-type', 'etna_asm_result',
@@ -116,38 +117,35 @@ if with_tools.contains('etnaviv')
     isa_bindings_rs,
     gnu_symbol_visibility : 'hidden',
     rust_abi : 'rust',
-    rust_args: [
-      '-Anon_camel_case_types',
-    ],
   )
 
   dep_indexmap = dependency('indexmap',
     version : '>= 2.2.6',
-    fallback : ['indexmap', 'dep_indexmap'],
+    fallback : ['indexmap-2-rs', 'dep_indexmap'],
     required : true,
   )
 
   dep_roxmltree = dependency('roxmltree',
     version : '>= 0.20.roxmltree',
-    fallback : ['roxmltree', 'dep_roxmltree'],
+    fallback : ['roxmltree-0.20-rs', 'dep_roxmltree'],
     required : true,
   )
 
   dep_syn = dependency('syn',
     version : '>= 2.0.15',
-    fallback : ['syn', 'dep_syn'],
+    fallback : ['syn-2-rs', 'dep_syn'],
     required : true,
   )
 
   dep_pest_generator = dependency('pest_generator',
     version: '>= 2.7.6',
-    fallback: ['pest_generator', 'dep_pest_generator'],
+    fallback: ['pest_generator-2-rs', 'dep_pest_generator'],
     required: true,
   )
 
   dep_pest = dependency('pest',
     version: '>= 2.7.6',
-    fallback: ['pest', 'dep_pest'],
+    fallback: ['pest-2-rs', 'dep_pest'],
     required: true,
   )
 
@@ -155,6 +153,7 @@ if with_tools.contains('etnaviv')
     'etnaviv_isa_proc',
     files('isa_proc.rs', 'isa.rs'),
     dependencies : [dep_indexmap, dep_roxmltree, dep_syn, dep_pest_generator],
+    rust_args : rust_global_args,
   )
 
   if with_tests
@@ -167,6 +166,7 @@ if with_tools.contains('etnaviv')
     files('lib.rs'),
     gnu_symbol_visibility : 'hidden',
     rust_abi : 'c',
+    rust_args : rust_global_args,
     dependencies: [dep_indexmap, dep_roxmltree, dep_pest],
     link_with: [_libetnaviv_isa_bindings_gen, _libetnaviv_isa_proc_rs],
   )
@@ -175,7 +175,7 @@ if with_tools.contains('etnaviv')
     'etnaviv-assembler',
     ['assembler.c'],
     gnu_symbol_visibility: 'hidden',
-    dependencies: [ idep_libetnaviv_decode ],
+    dependencies: [ idep_libetnaviv_decode, idep_etnaviv_enums_h ],
     link_with: [libetnaviv_encode, libetnaviv_isa_rs],
   )
 else

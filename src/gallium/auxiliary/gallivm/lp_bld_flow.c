@@ -31,9 +31,6 @@
  * @author Jose Fonseca <jfonseca@vmware.com>
  */
 
-#include "util/u_debug.h"
-#include "util/u_memory.h"
-
 #include "lp_bld_init.h"
 #include "lp_bld_type.h"
 #include "lp_bld_flow.h"
@@ -228,7 +225,7 @@ void
 lp_build_loop_begin(struct lp_build_loop_state *state,
                     struct gallivm_state *gallivm,
                     LLVMValueRef start)
-                    
+
 {
    LLVMBuilderRef builder = gallivm->builder;
 
@@ -481,8 +478,8 @@ lp_build_endif(struct lp_build_if_state *ifthen)
 }
 
 
-static LLVMBuilderRef
-create_builder_at_entry(struct gallivm_state *gallivm)
+LLVMBuilderRef
+lp_create_builder_at_entry(struct gallivm_state *gallivm)
 {
    LLVMBuilderRef builder = gallivm->builder;
    LLVMBasicBlockRef current_block = LLVMGetInsertBlock(builder);
@@ -522,7 +519,7 @@ lp_build_alloca(struct gallivm_state *gallivm,
                 const char *name)
 {
    LLVMBuilderRef builder = gallivm->builder;
-   LLVMBuilderRef first_builder = create_builder_at_entry(gallivm);
+   LLVMBuilderRef first_builder = lp_create_builder_at_entry(gallivm);
    LLVMValueRef res;
 
    res = LLVMBuildAlloca(first_builder, type, name);
@@ -542,7 +539,7 @@ lp_build_alloca_undef(struct gallivm_state *gallivm,
                       LLVMTypeRef type,
                       const char *name)
 {
-   LLVMBuilderRef first_builder = create_builder_at_entry(gallivm);
+   LLVMBuilderRef first_builder = lp_create_builder_at_entry(gallivm);
    LLVMValueRef res;
 
    res = LLVMBuildAlloca(first_builder, type, name);
@@ -573,7 +570,7 @@ lp_build_array_alloca(struct gallivm_state *gallivm,
                       LLVMValueRef count,
                       const char *name)
 {
-   LLVMBuilderRef first_builder = create_builder_at_entry(gallivm);
+   LLVMBuilderRef first_builder = lp_create_builder_at_entry(gallivm);
    LLVMValueRef res;
 
    res = LLVMBuildArrayAlloca(first_builder, type, count, name);

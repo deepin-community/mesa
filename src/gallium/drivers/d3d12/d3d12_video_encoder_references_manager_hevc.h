@@ -26,14 +26,15 @@
 
 #include "d3d12_video_types.h"
 #include "d3d12_video_encoder_references_manager.h"
+#include "pipe/p_video_state.h"
 
 class d3d12_video_encoder_references_manager_hevc : public d3d12_video_encoder_references_manager_interface
 {
  public:
-   void begin_frame(D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA curFrameData,
+   void begin_frame(const D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA1& curFrameData,
                     bool bUsedAsReference,
                     struct pipe_picture_desc *picture);
-   bool get_current_frame_picture_control_data(D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA &codecAllocation);
+   bool get_current_frame_picture_control_data(D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA1 &codecAllocation);
    D3D12_VIDEO_ENCODE_REFERENCE_FRAMES get_current_reference_frames();
 
    bool is_current_frame_used_as_reference()
@@ -47,8 +48,17 @@ class d3d12_video_encoder_references_manager_hevc : public d3d12_video_encoder_r
    void end_frame()
    { }
 
-   d3d12_video_encoder_references_manager_hevc()
-   { }
+   d3d12_video_encoder_references_manager_hevc(bool fArrayOfTextures) : m_fArrayOfTextures(fArrayOfTextures)
+   {
+      // Reserve memory for typical HEVC encoder usage to avoid per-frame allocations
+      m_CurrentFrameReferencesData.pReferenceFramesReconPictureDescriptors.reserve(PIPE_H265_MAX_DPB_SIZE);
+      m_CurrentFrameReferencesData.ReferenceTextures.pResources.reserve(PIPE_H265_MAX_DPB_SIZE);
+      m_CurrentFrameReferencesData.ReferenceTextures.pSubresources.reserve(PIPE_H265_MAX_DPB_SIZE);
+      m_CurrentFrameReferencesData.pList0ReferenceFrames.reserve(PIPE_H265_MAX_NUM_LIST_REF);
+      m_CurrentFrameReferencesData.pList1ReferenceFrames.reserve(PIPE_H265_MAX_NUM_LIST_REF);
+      m_CurrentFrameReferencesData.pList0RefPicModifications.reserve(PIPE_H265_MAX_NUM_LIST_REF);
+      m_CurrentFrameReferencesData.pList1RefPicModifications.reserve(PIPE_H265_MAX_NUM_LIST_REF);
+   }
 
    ~d3d12_video_encoder_references_manager_hevc()
    { }
@@ -56,8 +66,10 @@ class d3d12_video_encoder_references_manager_hevc : public d3d12_video_encoder_r
  private:
    // Class helpers
    void update_fifo_dpb_push_front_cur_recon_pic();
+#ifdef MESA_DEBUG
    void print_dpb();
    void print_l0_l1_lists();
+#endif
 
    // Class members
    struct d3d12_video_dpb
@@ -80,7 +92,8 @@ class d3d12_video_encoder_references_manager_hevc : public d3d12_video_encoder_r
    current_frame_references_data m_CurrentFrameReferencesData;
 
    bool m_isCurrentFrameUsedAsReference = false;
-   D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC1 m_curFrameState = {};
+   D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC2 m_curFrameState = {};
+   bool m_fArrayOfTextures = false;
 };
 
 #endif

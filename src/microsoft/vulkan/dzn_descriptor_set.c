@@ -80,15 +80,8 @@ desc_type_to_range_type(VkDescriptorType in, bool writeable)
    case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
       return writeable ? D3D12_DESCRIPTOR_RANGE_TYPE_UAV : D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
    default:
-      unreachable("Unsupported desc type");
+      UNREACHABLE("Unsupported desc type");
    }
-}
-
-static bool
-is_dynamic_desc_type(VkDescriptorType desc_type)
-{
-   return (desc_type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
-           desc_type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC);
 }
 
 static bool
@@ -218,7 +211,7 @@ dzn_descriptor_set_layout_create(struct dzn_device *device,
 
          uint32_t factor =
             dzn_descriptor_type_depends_on_shader_usage(desc_type, device->bindless) ? 2 : 1;
-         if (is_dynamic_desc_type(desc_type))
+         if (vk_descriptor_type_is_dynamic(desc_type))
             dynamic_buffer_count += bindings[i].descriptorCount * factor;
          else
             dynamic_ranges_offset += bindings[i].descriptorCount * factor;
@@ -246,7 +239,7 @@ dzn_descriptor_set_layout_create(struct dzn_device *device,
    VK_MULTIALLOC_DECL(&ma, struct dzn_descriptor_set_layout_binding, binfos,
                       binding_count);
 
-   if (!vk_descriptor_set_layout_multizalloc(&device->vk, &ma))
+   if (!vk_descriptor_set_layout_multizalloc(&device->vk, &ma, pCreateInfo))
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    set_layout->static_samplers = static_samplers;
@@ -272,7 +265,7 @@ dzn_descriptor_set_layout_create(struct dzn_device *device,
    VkResult ret =
       vk_create_sorted_bindings(pCreateInfo->pBindings,
                                 pCreateInfo->bindingCount,
-                                &ordered_bindings);
+                                &ordered_bindings, NULL, NULL);
    if (ret != VK_SUCCESS) {
       vk_descriptor_set_layout_destroy(&device->vk, &set_layout->vk);
       return ret;
@@ -304,7 +297,7 @@ dzn_descriptor_set_layout_create(struct dzn_device *device,
          ordered_bindings[i].pImmutableSamplers != NULL;
       bool has_static_sampler = device->support_static_samplers &&
          has_immutable_samplers && desc_count == 1;
-      bool is_dynamic = is_dynamic_desc_type(desc_type);
+      bool is_dynamic = vk_descriptor_type_is_dynamic(desc_type);
 
       D3D12_SHADER_VISIBILITY visibility = device->bindless ?
          D3D12_SHADER_VISIBILITY_ALL :
@@ -679,7 +672,7 @@ dzn_pipeline_layout_create(struct dzn_device *device,
 
       for (uint32_t b = 0; b < set_layout->binding_count; b++) {
          binding_trans[b] = set_layout->bindings[b].base_shader_register;
-         if (is_dynamic_desc_type(set_layout->bindings[b].type)) {
+         if (vk_descriptor_type_is_dynamic(set_layout->bindings[b].type)) {
             layout->binding_translation[j].binding_class[b] = DZN_PIPELINE_BINDING_DYNAMIC_BUFFER;
             if (device->bindless)
                binding_trans[b] += dynamic_buffer_base;
@@ -861,7 +854,7 @@ dzn_pipeline_layout_create(struct dzn_device *device,
 
       root_param->ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
       root_param->Constants.ShaderRegister = 0;
-      root_param->Constants.Num32BitValues = ALIGN(push_constant_size, 4) / 4;
+      root_param->Constants.Num32BitValues = align(push_constant_size, 4) / 4;
       root_param->Constants.RegisterSpace = DZN_REGISTER_SPACE_PUSH_CONSTANT;
       root_param->ShaderVisibility = translate_desc_visibility(push_constant_flags);
       root_dwords += root_param->Constants.Num32BitValues;
@@ -1127,7 +1120,7 @@ dzn_bindless_descriptor_set_write_image_view_desc(volatile struct dxil_spirv_bin
       map[desc_offset].texture_idx = iview->srv_bindless_slot;
       break;
    default:
-      unreachable("Unexpected descriptor type");
+      UNREACHABLE("Unexpected descriptor type");
    }
 }
 
@@ -1145,7 +1138,7 @@ dzn_bindless_descriptor_set_write_buffer_view_desc(volatile struct dxil_spirv_bi
       map[desc_offset].texture_idx = bview->uav_bindless_slot;
       break;
    default:
-      unreachable("Unexpected descriptor type");
+      UNREACHABLE("Unexpected descriptor type");
    }
 }
 
@@ -1164,7 +1157,7 @@ need_custom_buffer_descriptor(struct dzn_device *device, const struct dzn_buffer
 {
    *out_desc = *info;
    uint32_t upper_bound_default_descriptor;
-   uint32_t size_align, offset_align;
+   uint64_t size_align, offset_align;
    /* Canonicalize descriptor types for hash/compare, and get size/align info */
    switch (info->type) {
    case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
@@ -1284,7 +1277,7 @@ dzn_buffer_get_bindless_buffer_descriptor(struct dzn_device *device,
       slot = bdesc->buffer->uav_bindless_slot;
       break;
    default:
-      unreachable("Unexpected descriptor type");
+      UNREACHABLE("Unexpected descriptor type");
    }
 
    struct dzn_buffer_desc local_desc;
@@ -1687,7 +1680,7 @@ dzn_descriptor_set_init(struct dzn_descriptor_set *set,
       dzn_foreach_pool_type(type) {
          set->heap_offsets[type] = pool->free_offset[type];
          if (device->bindless)
-            set->heap_offsets[type] = ALIGN(set->heap_offsets[type], 2);
+            set->heap_offsets[type] = align(set->heap_offsets[type], 2);
          set->heap_sizes[type] = layout->range_desc_count[type] + variable_descriptor_count[type];
          set->pool->free_offset[type] = set->heap_offsets[type] + set->heap_sizes[type];
       }
@@ -1774,14 +1767,8 @@ dzn_descriptor_pool_create(struct dzn_device *device,
       uint32_t num_desc = pCreateInfo->pPoolSizes[p].descriptorCount;
 
       if (device->bindless) {
-         switch (type) {
-         case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
-         case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
-            break;
-         default:
+         if (!vk_descriptor_type_is_dynamic(type))
             pool->desc_count[0] += num_desc;
-            break;
-         }
       } else {
          switch (type) {
          case VK_DESCRIPTOR_TYPE_SAMPLER:
@@ -1807,7 +1794,7 @@ dzn_descriptor_pool_create(struct dzn_device *device,
          case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
             break;
          default:
-            unreachable("Unsupported desc type");
+            UNREACHABLE("Unsupported desc type");
          }
       }
    }
@@ -2244,7 +2231,7 @@ dzn_descriptor_set_write(struct dzn_device *device,
       break;
 
    default:
-      unreachable("invalid descriptor type");
+      UNREACHABLE("invalid descriptor type");
       break;
    }
 
@@ -2281,8 +2268,7 @@ dzn_descriptor_set_copy(struct dzn_device *device,
          MIN2(dzn_descriptor_set_remaining_descs_in_binding(src_set->layout, &src_ptr),
               dzn_descriptor_set_remaining_descs_in_binding(dst_set->layout, &dst_ptr));
 
-      if (src_type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
-          src_type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC) {
+      if (vk_descriptor_type_is_dynamic(src_type)) {
          uint32_t src_idx =
             dzn_descriptor_set_ptr_get_buffer_idx(src_set->layout, &src_ptr);
          uint32_t dst_idx =
@@ -2449,7 +2435,7 @@ dzn_descriptor_update_template_create(struct dzn_device *device,
                                                       &ptr, false, device->bindless);
          }
 
-         if (is_dynamic_desc_type(type)) {
+         if (vk_descriptor_type_is_dynamic(type)) {
             entry->buffer_idx = dzn_descriptor_set_ptr_get_buffer_idx(set_layout, &ptr);
          } else if (type != VK_DESCRIPTOR_TYPE_SAMPLER) {
             if (is_buffer_desc_type_without_view(type))
@@ -2627,7 +2613,7 @@ dzn_UpdateDescriptorSetWithTemplate(VkDevice _device,
          break;
 
       default:
-         unreachable("invalid descriptor type");
+         UNREACHABLE("invalid descriptor type");
       }
    }
 }

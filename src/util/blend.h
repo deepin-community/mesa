@@ -9,6 +9,8 @@
 
 #include <stdbool.h>
 
+#include "util/macros.h"
+
 #define PIPE_BLENDFACTOR_INVERT_BIT (0x10)
 
 enum pipe_blendfactor {
@@ -49,6 +51,44 @@ util_blendfactor_without_invert(enum pipe_blendfactor factor)
 {
    /* By construction of the enum */
    return (enum pipe_blendfactor)(factor & ~PIPE_BLENDFACTOR_INVERT_BIT);
+}
+
+/**
+ * Color blend factor enums are treated as their alpha counterpart when used
+ * as the alpha blend factor.  This helper just converts from color to alpha.
+ */
+static inline enum pipe_blendfactor
+util_blendfactor_to_alpha(enum pipe_blendfactor factor)
+{
+   switch (factor) {
+#define UTIL_BLENDFACTOR_TO_ALPHA_CASE(x)       \
+   case PIPE_BLENDFACTOR_##x##_COLOR:           \
+      return PIPE_BLENDFACTOR_##x##_ALPHA;      \
+   case PIPE_BLENDFACTOR_INV_##x##_COLOR:       \
+      return PIPE_BLENDFACTOR_INV_##x##_ALPHA;
+
+   UTIL_BLENDFACTOR_TO_ALPHA_CASE(SRC)
+   UTIL_BLENDFACTOR_TO_ALPHA_CASE(DST)
+   UTIL_BLENDFACTOR_TO_ALPHA_CASE(CONST)
+   UTIL_BLENDFACTOR_TO_ALPHA_CASE(SRC1)
+
+#undef UTIL_BLENDFACTOR_TO_ALPHA_CASE
+
+   case PIPE_BLENDFACTOR_ONE:
+   case PIPE_BLENDFACTOR_SRC_ALPHA:
+   case PIPE_BLENDFACTOR_DST_ALPHA:
+   case PIPE_BLENDFACTOR_SRC_ALPHA_SATURATE:
+   case PIPE_BLENDFACTOR_CONST_ALPHA:
+   case PIPE_BLENDFACTOR_SRC1_ALPHA:
+   case PIPE_BLENDFACTOR_ZERO:
+   case PIPE_BLENDFACTOR_INV_SRC_ALPHA:
+   case PIPE_BLENDFACTOR_INV_DST_ALPHA:
+   case PIPE_BLENDFACTOR_INV_CONST_ALPHA:
+   case PIPE_BLENDFACTOR_INV_SRC1_ALPHA:
+      return factor;
+   }
+
+   UNREACHABLE("Invalid blend factor");
 }
 
 enum pipe_blend_func {

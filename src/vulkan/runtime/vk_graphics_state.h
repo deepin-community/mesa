@@ -341,7 +341,7 @@ struct vk_rasterization_state {
        *
        * MESA_VK_DYNAMIC_RS_DEPTH_BIAS_FACTORS
        */
-      float constant;
+      float constant_factor;
 
       /** VkPipelineRasterizationStateCreateInfo::depthBiasClamp
        *
@@ -353,7 +353,7 @@ struct vk_rasterization_state {
        *
        * MESA_VK_DYNAMIC_RS_DEPTH_BIAS_FACTORS
        */
-      float slope;
+      float slope_factor;
 
       /** VkDepthBiasRepresentationInfoEXT::depthBiasRepresentation
        *
@@ -414,7 +414,7 @@ vk_rasterization_state_depth_clip_enable(const struct vk_rasterization_state *rs
    case VK_MESA_DEPTH_CLIP_ENABLE_TRUE:      return true;
    case VK_MESA_DEPTH_CLIP_ENABLE_NOT_CLAMP: return !rs->depth_clamp_enable;
    }
-   unreachable("Invalid depth clip enable");
+   UNREACHABLE("Invalid depth clip enable");
 }
 
 /***/
@@ -794,6 +794,9 @@ struct vk_render_pass_state {
 
    /** VkAttachmentSampleCountInfoAMD::depthStencilAttachmentSamples */
    uint8_t depth_stencil_attachment_samples;
+
+   /** VkCustomResolveCreateInfoEXT::customResolve */
+   bool custom_resolve;
 };
 
 static inline bool
@@ -1207,7 +1210,7 @@ vk_dynamic_graphics_state_fill(struct vk_dynamic_graphics_state *dyn,
 static inline void
 vk_dynamic_graphics_state_dirty_all(struct vk_dynamic_graphics_state *d)
 {
-   BITSET_SET_RANGE(d->dirty, 0, MESA_VK_DYNAMIC_GRAPHICS_STATE_ENUM_MAX - 1);
+   BITSET_SET_COUNT(d->dirty, 0, MESA_VK_DYNAMIC_GRAPHICS_STATE_ENUM_MAX);
 }
 
 /** Mark all states in the given vk_dynamic_graphics_state not dirty

@@ -23,12 +23,14 @@
 #ifndef VK_META_H
 #define VK_META_H
 
+#include "vk_internal_exts.h"
 #include "vk_limits.h"
 #include "vk_object.h"
+#include "vk_util.h"
 
 #include "util/simple_mtx.h"
 
-#include "compiler/nir/nir.h"
+#include "compiler/shader_enums.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,9 +48,6 @@ struct vk_meta_rect {
    uint32_t layer;
 };
 
-#define VK_PRIMITIVE_TOPOLOGY_META_RECT_LIST_MESA (VkPrimitiveTopology)11
-#define VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA (VkImageViewCreateFlagBits)0x80000000
-
 struct vk_meta_copy_image_properties {
    union {
       struct {
@@ -57,6 +56,11 @@ struct vk_meta_copy_image_properties {
           */
          VkFormat view_format;
       } color;
+
+      struct {
+         /* Format to use for a specific image plane. */
+         VkFormat view_format;
+      } plane[3];
 
       struct {
          struct {
@@ -102,10 +106,14 @@ struct vk_meta_device {
    struct hash_table *cache;
    simple_mtx_t cache_mtx;
 
+   VkPipelineCache pipeline_cache;
+
    uint32_t max_bind_map_buffer_size_B;
    bool use_layered_rendering;
    bool use_gs_for_layer;
    bool use_stencil_export;
+
+   bool use_rect_list_pipeline;
 
    struct {
       /* Optimal workgroup size for each possible chunk size. This should be
@@ -154,14 +162,25 @@ void vk_meta_device_finish(struct vk_device *device,
 /** Keys should start with one of these to ensure uniqueness */
 enum vk_meta_object_key_type {
    VK_META_OBJECT_KEY_TYPE_INVALID = 0,
-   VK_META_OBJECT_KEY_CLEAR_PIPELINE,
-   VK_META_OBJECT_KEY_BLIT_PIPELINE,
-   VK_META_OBJECT_KEY_BLIT_SAMPLER,
-   VK_META_OBJECT_KEY_COPY_BUFFER_PIPELINE,
-   VK_META_OBJECT_KEY_COPY_IMAGE_TO_BUFFER_PIPELINE,
-   VK_META_OBJECT_KEY_COPY_BUFFER_TO_IMAGE_PIPELINE,
-   VK_META_OBJECT_KEY_COPY_IMAGE_PIPELINE,
-   VK_META_OBJECT_KEY_FILL_BUFFER_PIPELINE,
+
+   VK_META_OBJECT_KEY_CLEAR,
+   VK_META_OBJECT_KEY_BLIT,
+   VK_META_OBJECT_KEY_COPY_BUFFER,
+   VK_META_OBJECT_KEY_COPY_IMAGE_TO_BUFFER,
+   VK_META_OBJECT_KEY_COPY_BUFFER_TO_IMAGE_CS,
+   VK_META_OBJECT_KEY_COPY_BUFFER_TO_IMAGE_GFX,
+   VK_META_OBJECT_KEY_COPY_IMAGE_CS,
+   VK_META_OBJECT_KEY_COPY_IMAGE_GFX,
+   VK_META_OBJECT_KEY_FILL_BUFFER,
+
+   /* BVH build pipelines */
+   VK_META_OBJECT_KEY_BVH_PIPELINE_LAYOUT,
+   VK_META_OBJECT_KEY_LEAF,
+   VK_META_OBJECT_KEY_MORTON,
+   VK_META_OBJECT_KEY_LBVH_MAIN,
+   VK_META_OBJECT_KEY_LBVH_GENERATE_IR,
+   VK_META_OBJECT_KEY_PLOC,
+   VK_META_OBJECT_KEY_HPLOC,
 
    /* Should be used as an offset for driver-specific object types. */
    VK_META_OBJECT_KEY_DRIVER_OFFSET = 0x80000000,
@@ -411,7 +430,7 @@ vk_image_view_type_to_sampler_dim(VkImageViewType view_type)
       return GLSL_SAMPLER_DIM_3D;
 
    default:
-      unreachable();
+      UNREACHABLE("");
    }
 }
 
@@ -431,7 +450,7 @@ vk_image_view_type_is_array(VkImageViewType view_type)
       return false;
 
    default:
-      unreachable();
+      UNREACHABLE("");
    }
 }
 

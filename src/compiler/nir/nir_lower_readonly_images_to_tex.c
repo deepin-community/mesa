@@ -125,7 +125,7 @@ lower_readonly_image_instr_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin
       num_srcs = 1;
       break;
    default:
-      unreachable("Unsupported intrinsic");
+      UNREACHABLE("Unsupported intrinsic");
    }
 
    b->cursor = nir_before_instr(&intrin->instr);
@@ -136,6 +136,7 @@ lower_readonly_image_instr_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin
    tex->sampler_dim = glsl_get_sampler_dim(deref->type);
    tex->is_array = glsl_sampler_type_is_array(deref->type);
    tex->is_shadow = false;
+   tex->can_speculate = nir_instr_can_speculate(&intrin->instr);
 
    unsigned coord_components =
       glsl_get_sampler_dim_coordinate_components(tex->sampler_dim);
@@ -169,7 +170,8 @@ lower_readonly_image_instr_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin
       }
 
       tex->dest_type = nir_intrinsic_dest_type(intrin);
-      nir_def_init(&tex->instr, &tex->def, 4, 32);
+      unsigned bit_size = nir_alu_type_get_type_size(tex->dest_type);
+      nir_def_init(&tex->instr, &tex->def, 4, bit_size);
       break;
    }
 
@@ -192,7 +194,7 @@ lower_readonly_image_instr_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin
       break;
 
    default:
-      unreachable("Unsupported intrinsic");
+      UNREACHABLE("Unsupported intrinsic");
    }
 
    nir_builder_instr_insert(b, &tex->instr);

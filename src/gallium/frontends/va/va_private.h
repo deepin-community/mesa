@@ -60,7 +60,7 @@
 #define VL_VA_DRIVER(ctx) ((vlVaDriver *)ctx->pDriverData)
 #define VL_VA_PSCREEN(ctx) (VL_VA_DRIVER(ctx)->vscreen->pscreen)
 
-#define VL_VA_MAX_IMAGE_FORMATS 21
+#define VL_VA_MAX_IMAGE_FORMATS 22
 #define VL_VA_ENC_GOP_COEFF 16
 
 #define UINT_TO_PTR(x) ((void*)(uintptr_t)(x))
@@ -100,6 +100,9 @@
                                  VA_ENC_PACKED_HEADER_MISC | \
                                  VA_ENC_PACKED_HEADER_RAW_DATA)
 
+/* vaCreateContext flags */
+#define VL_VA_CREATE_CONTEXT_PROTECTED (1 << 16)
+
 static inline enum pipe_video_chroma_format
 ChromaToPipe(int format)
 {
@@ -126,6 +129,8 @@ VaFourccToPipeFormat(unsigned format)
       return PIPE_FORMAT_NV12;
    case VA_FOURCC('P','0','1','0'):
       return PIPE_FORMAT_P010;
+   case VA_FOURCC('P','0','1','2'):
+      return PIPE_FORMAT_P012;
    case VA_FOURCC('P','0','1','6'):
       return PIPE_FORMAT_P016;
    case VA_FOURCC('I','4','2','0'):
@@ -177,6 +182,8 @@ PipeFormatToVaFourcc(enum pipe_format p_format)
       return VA_FOURCC('N','V','1','2');
    case PIPE_FORMAT_P010:
       return VA_FOURCC('P','0','1','0');
+   case PIPE_FORMAT_P012:
+      return VA_FOURCC('P','0','1','2');
    case PIPE_FORMAT_P016:
       return VA_FOURCC('P','0','1','6');
    case PIPE_FORMAT_IYUV:
@@ -186,7 +193,7 @@ PipeFormatToVaFourcc(enum pipe_format p_format)
    case PIPE_FORMAT_UYVY:
       return VA_FOURCC('U','Y','V','Y');
    case PIPE_FORMAT_YUYV:
-      return VA_FOURCC('Y','U','Y','V');
+      return VA_FOURCC('Y','U','Y','2');
    case PIPE_FORMAT_B8G8R8A8_UNORM:
       return VA_FOURCC('B','G','R','A');
    case PIPE_FORMAT_R8G8B8A8_UNORM:
@@ -227,17 +234,13 @@ PipeToProfile(enum pipe_video_profile profile)
       return VAProfileMPEG2Simple;
    case PIPE_VIDEO_PROFILE_MPEG2_MAIN:
       return VAProfileMPEG2Main;
-   case PIPE_VIDEO_PROFILE_MPEG4_SIMPLE:
-      return VAProfileMPEG4Simple;
-   case PIPE_VIDEO_PROFILE_MPEG4_ADVANCED_SIMPLE:
-      return VAProfileMPEG4AdvancedSimple;
    case PIPE_VIDEO_PROFILE_VC1_SIMPLE:
       return VAProfileVC1Simple;
    case PIPE_VIDEO_PROFILE_VC1_MAIN:
       return VAProfileVC1Main;
    case PIPE_VIDEO_PROFILE_VC1_ADVANCED:
       return VAProfileVC1Advanced;
-   case PIPE_VIDEO_PROFILE_MPEG4_AVC_BASELINE:
+   case PIPE_VIDEO_PROFILE_MPEG4_AVC_CONSTRAINED_BASELINE:
       return VAProfileH264ConstrainedBaseline;
    case PIPE_VIDEO_PROFILE_MPEG4_AVC_MAIN:
       return VAProfileH264Main;
@@ -261,13 +264,22 @@ PipeToProfile(enum pipe_video_profile profile)
       return VAProfileVP9Profile2;
    case PIPE_VIDEO_PROFILE_AV1_MAIN:
       return VAProfileAV1Profile0;
+   case PIPE_VIDEO_PROFILE_AV1_PROFILE2:
+#if VA_CHECK_VERSION(1, 23, 0)
+      return VAProfileAV1Profile2;
+#else
+      return VAProfileNone;
+#endif
    case PIPE_VIDEO_PROFILE_MPEG4_AVC_EXTENDED:
    case PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH422:
    case PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH444:
-   case PIPE_VIDEO_PROFILE_MPEG4_AVC_CONSTRAINED_BASELINE:
+   case PIPE_VIDEO_PROFILE_MPEG4_AVC_BASELINE:
    case PIPE_VIDEO_PROFILE_HEVC_MAIN_12:
    case PIPE_VIDEO_PROFILE_HEVC_MAIN_STILL:
    case PIPE_VIDEO_PROFILE_HEVC_MAIN_444:
+   case PIPE_VIDEO_PROFILE_HEVC_MAIN10_444:
+   case PIPE_VIDEO_PROFILE_HEVC_MAIN_422:
+   case PIPE_VIDEO_PROFILE_HEVC_MAIN10_422:
    case PIPE_VIDEO_PROFILE_UNKNOWN:
       return VAProfileNone;
    default:
@@ -284,10 +296,6 @@ ProfileToPipe(VAProfile profile)
       return PIPE_VIDEO_PROFILE_MPEG2_SIMPLE;
    case VAProfileMPEG2Main:
       return PIPE_VIDEO_PROFILE_MPEG2_MAIN;
-   case VAProfileMPEG4Simple:
-      return PIPE_VIDEO_PROFILE_MPEG4_SIMPLE;
-   case VAProfileMPEG4AdvancedSimple:
-      return PIPE_VIDEO_PROFILE_MPEG4_ADVANCED_SIMPLE;
    case VAProfileVC1Simple:
       return PIPE_VIDEO_PROFILE_VC1_SIMPLE;
    case VAProfileVC1Main:
@@ -295,7 +303,7 @@ ProfileToPipe(VAProfile profile)
    case VAProfileVC1Advanced:
       return PIPE_VIDEO_PROFILE_VC1_ADVANCED;
    case VAProfileH264ConstrainedBaseline:
-      return PIPE_VIDEO_PROFILE_MPEG4_AVC_BASELINE;
+      return PIPE_VIDEO_PROFILE_MPEG4_AVC_CONSTRAINED_BASELINE;
    case VAProfileH264Main:
       return PIPE_VIDEO_PROFILE_MPEG4_AVC_MAIN;
    case VAProfileH264High:
@@ -316,6 +324,10 @@ ProfileToPipe(VAProfile profile)
       return PIPE_VIDEO_PROFILE_VP9_PROFILE2;
    case VAProfileAV1Profile0:
       return PIPE_VIDEO_PROFILE_AV1_MAIN;
+#if VA_CHECK_VERSION(1, 23, 0)
+   case VAProfileAV1Profile2:
+      return PIPE_VIDEO_PROFILE_AV1_PROFILE2;
+#endif
    case VAProfileNone:
        return PIPE_VIDEO_PROFILE_UNKNOWN;
    default:
@@ -326,6 +338,7 @@ ProfileToPipe(VAProfile profile)
 typedef struct {
    struct vl_screen *vscreen;
    struct pipe_context *pipe;
+   struct pipe_context *pipe2;
    struct handle_table *htab;
    struct vl_compositor compositor;
    struct vl_compositor_state cstate;
@@ -334,9 +347,6 @@ typedef struct {
    char vendor_string[256];
 
    bool has_external_handles;
-
-   int efc_count;
-   void *last_efc_surface;
 } vlVaDriver;
 
 typedef struct {
@@ -362,7 +372,6 @@ typedef struct {
    VABufferInfo export_state;
    unsigned int coded_size;
    struct pipe_enc_feedback_metadata extended_metadata;
-   struct pipe_video_buffer *derived_image_buffer;
    void *feedback;
    struct vlVaContext *ctx;
    struct vlVaSurface *coded_surf;
@@ -375,7 +384,6 @@ typedef struct vlVaContext {
    union {
       struct pipe_picture_desc base;
       struct pipe_mpeg12_picture_desc mpeg12;
-      struct pipe_mpeg4_picture_desc mpeg4;
       struct pipe_vc1_picture_desc vc1;
       struct pipe_h264_picture_desc h264;
       struct pipe_h265_picture_desc h265;
@@ -385,25 +393,14 @@ typedef struct vlVaContext {
       struct pipe_h264_enc_picture_desc h264enc;
       struct pipe_h265_enc_picture_desc h265enc;
       struct pipe_av1_enc_picture_desc av1enc;
-      struct pipe_vpp_desc vidproc;
    } desc;
 
    struct {
-      unsigned long long int frame_num;
-      unsigned int start_code_size;
-      unsigned int vti_bits;
-      unsigned int quant_scale;
-      VAPictureParameterBufferMPEG4 pps;
-      uint8_t start_code[32];
-   } mpeg4;
+      struct pipe_vpp_desc vpp;
+      struct vlVaSurface *dst_surface;
+   } proc;
 
    struct {
-      unsigned sampling_factor;
-      #define MJPEG_SAMPLING_FACTOR_NV12   (0x221111)
-      #define MJPEG_SAMPLING_FACTOR_YUY2   (0x221212)
-      #define MJPEG_SAMPLING_FACTOR_YUV422 (0x211111)
-      #define MJPEG_SAMPLING_FACTOR_YUV444 (0x111111)
-      #define MJPEG_SAMPLING_FACTOR_YUV400 (0x11)
       uint8_t slice_header[MAX_MJPEG_SLICE_HEADER_SIZE];
       unsigned int slice_header_size;
    } mjpeg;
@@ -413,19 +410,17 @@ typedef struct vlVaContext {
    int target_id;
    int gop_coeff;
    bool needs_begin_frame;
-   void *blit_cs;
    int packed_header_type;
    bool packed_header_emulation_bytes;
    struct set *surfaces;
    struct set *buffers;
    unsigned slice_data_offset;
    bool have_slice_params;
+   mtx_t mutex;
 
    struct {
-      void **buffers;
-      unsigned *sizes;
-      unsigned num_buffers;
-      unsigned allocated_size;
+      struct util_dynarray buffers;
+      struct util_dynarray sizes;
    } bs;
 } vlVaContext;
 
@@ -433,7 +428,6 @@ typedef struct {
    enum pipe_video_profile profile;
    enum pipe_video_entrypoint entrypoint;
    enum pipe_h2645_enc_rate_control_method rc;
-   unsigned int rt_format;
 } vlVaConfig;
 
 typedef struct vlVaSurface {
@@ -441,10 +435,12 @@ typedef struct vlVaSurface {
    struct util_dynarray subpics; /* vlVaSubpicture */
    vlVaContext *ctx;
    vlVaBuffer *coded_buf;
-   bool full_range;
-   struct pipe_fence_handle *fence;
-   struct vlVaSurface *efc_surface; /* input surface for EFC */
+   struct pipe_fence_handle *fence; /* pipe_video_codec fence */
+   struct pipe_fence_handle *pipe_fence; /* pipe_context fence */
    bool is_dpb;
+   unsigned int strides[3];
+   unsigned int offsets[3];
+   unsigned int data_size;
 } vlVaSurface;
 
 typedef struct {
@@ -563,67 +559,186 @@ VAStatus vlVaHandleVAProcPipelineParameterBufferType(vlVaDriver *drv, vlVaContex
 VAStatus vlVaHandleSurfaceAllocate(vlVaDriver *drv, vlVaSurface *surface, struct pipe_video_buffer *templat,
                                    const uint64_t *modifiers, unsigned int modifiers_count);
 struct pipe_video_buffer *vlVaGetSurfaceBuffer(vlVaDriver *drv, vlVaSurface *surface);
+void vlVaSurfaceFlush(vlVaDriver *drv, vlVaSurface *surf);
 void vlVaAddRawHeader(struct util_dynarray *headers, uint8_t type, uint32_t size, uint8_t *buf,
                       bool is_slice, uint32_t emulation_bytes_start);
 void vlVaGetBufferFeedback(vlVaBuffer *buf);
 void vlVaSetSurfaceContext(vlVaDriver *drv, vlVaSurface *surf, vlVaContext *context);
+VAStatus vlVaPostProcCompositor(vlVaDriver *drv, struct pipe_video_buffer *src, struct pipe_video_buffer *dst,
+                                enum vl_compositor_deinterlace deinterlace, struct pipe_vpp_desc *param);
 void vlVaGetReferenceFrame(vlVaDriver *drv, VASurfaceID surface_id, struct pipe_video_buffer **ref_frame);
-void vlVaHandlePictureParameterBufferMPEG12(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandleIQMatrixBufferMPEG12(vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandleSliceParameterBufferMPEG12(vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandlePictureParameterBufferH264(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandleIQMatrixBufferH264(vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandleSliceParameterBufferH264(vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandlePictureParameterBufferVC1(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandleSliceParameterBufferVC1(vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandlePictureParameterBufferMPEG4(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandleIQMatrixBufferMPEG4(vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandleSliceParameterBufferMPEG4(vlVaContext *context, vlVaBuffer *buf);
-void vlVaDecoderFixMPEG4Startcode(vlVaContext *context);
-void vlVaGetJpegSliceHeader(vlVaContext *context);
-void vlVaHandlePictureParameterBufferHEVC(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandleIQMatrixBufferHEVC(vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandleSliceParameterBufferHEVC(vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandlePictureParameterBufferMJPEG(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandleIQMatrixBufferMJPEG(vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandleHuffmanTableBufferType(vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandleSliceParameterBufferMJPEG(vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandlePictureParameterBufferVP9(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandleSliceParameterBufferVP9(vlVaContext *context, vlVaBuffer *buf);
-void vlVaDecoderVP9BitstreamHeader(vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandlePictureParameterBufferAV1(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandleSliceParameterBufferAV1(vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandleVAEncMiscParameterTypeQualityLevel(struct pipe_enc_quality_modes *p, vlVaQualityBits *in);
-VAStatus vlVaHandleVAEncPictureParameterBufferTypeH264(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);
-VAStatus vlVaHandleVAEncSliceParameterBufferTypeH264(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);
-VAStatus vlVaHandleVAEncSequenceParameterBufferTypeH264(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);
-VAStatus vlVaHandleVAEncMiscParameterTypeRateControlH264(vlVaContext *context, VAEncMiscParameterBuffer *buf);
-VAStatus vlVaHandleVAEncMiscParameterTypeFrameRateH264(vlVaContext *context, VAEncMiscParameterBuffer *buf);
-VAStatus vlVaHandleVAEncPackedHeaderDataBufferTypeH264(vlVaContext *context, vlVaBuffer *buf);
-VAStatus vlVaHandleVAEncMiscParameterTypeTemporalLayerH264(vlVaContext *context, VAEncMiscParameterBuffer *buf);
-VAStatus vlVaHandleVAEncMiscParameterTypeQualityLevelH264(vlVaContext *context, VAEncMiscParameterBuffer *buf);
-VAStatus vlVaHandleVAEncMiscParameterTypeMaxFrameSizeH264(vlVaContext *context, VAEncMiscParameterBuffer *buf);
-VAStatus vlVaHandleVAEncMiscParameterTypeHRDH264(vlVaContext *context, VAEncMiscParameterBuffer *buf);
-VAStatus vlVaHandleVAEncPictureParameterBufferTypeHEVC(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);
-VAStatus vlVaHandleVAEncSliceParameterBufferTypeHEVC(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);
-VAStatus vlVaHandleVAEncSequenceParameterBufferTypeHEVC(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);
-VAStatus vlVaHandleVAEncMiscParameterTypeRateControlHEVC(vlVaContext *context, VAEncMiscParameterBuffer *buf);
-VAStatus vlVaHandleVAEncMiscParameterTypeFrameRateHEVC(vlVaContext *context, VAEncMiscParameterBuffer *buf);
-VAStatus vlVaHandleVAEncPackedHeaderDataBufferTypeHEVC(vlVaContext *context, vlVaBuffer *buf);
-VAStatus vlVaHandleVAEncMiscParameterTypeQualityLevelHEVC(vlVaContext *context, VAEncMiscParameterBuffer *buf);
-VAStatus vlVaHandleVAEncMiscParameterTypeMaxFrameSizeHEVC(vlVaContext *context, VAEncMiscParameterBuffer *buf);
-VAStatus vlVaHandleVAEncMiscParameterTypeHRDHEVC(vlVaContext *context, VAEncMiscParameterBuffer *buf);
-VAStatus vlVaHandleVAEncMiscParameterTypeTemporalLayerHEVC(vlVaContext *context, VAEncMiscParameterBuffer *buf);
+VAStatus vlVaHandleDecBufferType(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);
+
+#if VIDEO_CODEC_MPEG12DEC
+#define PROC
+#define TAIL
+#else
+#define PROC static inline
+#define TAIL {}
+#endif
+PROC void vlVaHandlePictureParameterBufferMPEG12(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC void vlVaHandleIQMatrixBufferMPEG12(vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC void vlVaHandleSliceParameterBufferMPEG12(vlVaContext *context, vlVaBuffer *buf) TAIL;
+#undef PROC
+#undef TAIL
+
+#if VIDEO_CODEC_JPEGDEC
+#define PROC
+#define TAIL
+#else
+#define PROC static inline
+#define TAIL {}
+#endif
+PROC void vlVaHandlePictureParameterBufferMJPEG(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC void vlVaHandleIQMatrixBufferMJPEG(vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC void vlVaHandleHuffmanTableBufferType(vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC void vlVaHandleSliceParameterBufferMJPEG(vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC void vlVaGetJpegSliceHeader(vlVaContext *context) TAIL;
+#undef PROC
+#undef TAIL
+
+#if VIDEO_CODEC_VC1DEC
+#define PROC
+#define TAIL
+#else
+#define PROC static inline
+#define TAIL {}
+#endif
+PROC void vlVaHandlePictureParameterBufferVC1(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC void vlVaHandleSliceParameterBufferVC1(vlVaContext *context, vlVaBuffer *buf) TAIL;
+#undef PROC
+#undef TAIL
+
+#if VIDEO_CODEC_VP9DEC
+#define PROC
+#define TAIL
+#else
+#define PROC static inline
+#define TAIL {}
+#endif
+PROC void vlVaHandlePictureParameterBufferVP9(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC void vlVaHandleSliceParameterBufferVP9(vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC void vlVaDecoderVP9BitstreamHeader(vlVaContext *context, vlVaBuffer *buf) TAIL;
+#undef PROC
+#undef TAIL
+
+#if VIDEO_CODEC_H264DEC
+#define PROC
+#define TAIL
+#else
+#define PROC static inline
+#define TAIL {}
+#endif
+PROC void vlVaHandlePictureParameterBufferH264(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC void vlVaHandleIQMatrixBufferH264(vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC void vlVaHandleSliceParameterBufferH264(vlVaContext *context, vlVaBuffer *buf) TAIL;
+#undef PROC
+#undef TAIL
+
+#if VIDEO_CODEC_H265DEC
+#define PROC
+#define TAIL
+#else
+#define PROC static inline
+#define TAIL {}
+#endif
+PROC void vlVaHandlePictureParameterBufferHEVC(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC void vlVaHandleIQMatrixBufferHEVC(vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC void vlVaHandleSliceParameterBufferHEVC(vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC void vlVaDecoderHEVCBitstreamHeader(vlVaContext *context, vlVaBuffer *buf) TAIL;
+#undef PROC
+#undef TAIL
+
+#if VIDEO_CODEC_AV1DEC
+#define PROC
+#define TAIL
+#define TAIL_S
+#else
+#define PROC static inline
+#define TAIL {}
+#define TAIL_S {return VA_STATUS_ERROR_UNIMPLEMENTED;}
+#endif
+PROC VAStatus vlVaHandlePictureParameterBufferAV1(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf) TAIL_S;
+PROC void vlVaHandleSliceParameterBufferAV1(vlVaContext *context, vlVaBuffer *buf) TAIL;
+#undef PROC
+#undef TAIL
+#undef TAIL_S
+
+#if VIDEO_CODEC_H264ENC
+#define HAS_ENCODE
+#define PROC
+#define TAIL
+#else
+#define PROC static inline
+#define TAIL {return VA_STATUS_ERROR_UNIMPLEMENTED;}
+#endif
+PROC VAStatus vlVaHandleVAEncPictureParameterBufferTypeH264(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncSliceParameterBufferTypeH264(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncSequenceParameterBufferTypeH264(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncMiscParameterTypeRateControlH264(vlVaContext *context, VAEncMiscParameterBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncMiscParameterTypeFrameRateH264(vlVaContext *context, VAEncMiscParameterBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncPackedHeaderDataBufferTypeH264(vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncMiscParameterTypeTemporalLayerH264(vlVaContext *context, VAEncMiscParameterBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncMiscParameterTypeQualityLevelH264(vlVaContext *context, VAEncMiscParameterBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncMiscParameterTypeMaxFrameSizeH264(vlVaContext *context, VAEncMiscParameterBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncMiscParameterTypeHRDH264(vlVaContext *context, VAEncMiscParameterBuffer *buf) TAIL;
+#undef PROC
+#undef TAIL
+
+#if VIDEO_CODEC_H265ENC
+#define HAS_ENCODE
+#define PROC
+#define TAIL
+#else
+#define PROC static inline
+#define TAIL {return VA_STATUS_ERROR_UNIMPLEMENTED;}
+#endif
+PROC VAStatus vlVaHandleVAEncPictureParameterBufferTypeHEVC(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncSliceParameterBufferTypeHEVC(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncSequenceParameterBufferTypeHEVC(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncMiscParameterTypeRateControlHEVC(vlVaContext *context, VAEncMiscParameterBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncMiscParameterTypeFrameRateHEVC(vlVaContext *context, VAEncMiscParameterBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncPackedHeaderDataBufferTypeHEVC(vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncMiscParameterTypeQualityLevelHEVC(vlVaContext *context, VAEncMiscParameterBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncMiscParameterTypeMaxFrameSizeHEVC(vlVaContext *context, VAEncMiscParameterBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncMiscParameterTypeHRDHEVC(vlVaContext *context, VAEncMiscParameterBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncMiscParameterTypeTemporalLayerHEVC(vlVaContext *context, VAEncMiscParameterBuffer *buf) TAIL;
+#undef PROC
+#undef TAIL
 
 #if VA_CHECK_VERSION(1, 16, 0)
-VAStatus vlVaHandleVAEncSequenceParameterBufferTypeAV1(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);
-VAStatus vlVaHandleVAEncPictureParameterBufferTypeAV1(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);
-VAStatus vlVaHandleVAEncMiscParameterTypeRateControlAV1(vlVaContext *context, VAEncMiscParameterBuffer *buf);
-VAStatus vlVaHandleVAEncPackedHeaderDataBufferTypeAV1(vlVaContext *context, vlVaBuffer *buf);
-VAStatus vlVaHandleVAEncMiscParameterTypeFrameRateAV1(vlVaContext *context, VAEncMiscParameterBuffer *buf);
-VAStatus vlVaHandleVAEncMiscParameterTypeQualityLevelAV1(vlVaContext *context, VAEncMiscParameterBuffer *buf);
-VAStatus vlVaHandleVAEncMiscParameterTypeMaxFrameSizeAV1(vlVaContext *context, VAEncMiscParameterBuffer *buf);
-VAStatus vlVaHandleVAEncMiscParameterTypeHRDAV1(vlVaContext *context, VAEncMiscParameterBuffer *buf);
-VAStatus vlVaHandleVAEncSliceParameterBufferTypeAV1(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);
+#if VIDEO_CODEC_AV1ENC
+#define HAS_ENCODE
+#define PROC
+#define TAIL
+#else
+#define PROC static inline
+#define TAIL {return VA_STATUS_ERROR_UNIMPLEMENTED;}
 #endif
+PROC VAStatus vlVaHandleVAEncSequenceParameterBufferTypeAV1(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncPictureParameterBufferTypeAV1(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncMiscParameterTypeRateControlAV1(vlVaContext *context, VAEncMiscParameterBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncPackedHeaderDataBufferTypeAV1(vlVaContext *context, vlVaBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncMiscParameterTypeFrameRateAV1(vlVaContext *context, VAEncMiscParameterBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncMiscParameterTypeQualityLevelAV1(vlVaContext *context, VAEncMiscParameterBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncMiscParameterTypeMaxFrameSizeAV1(vlVaContext *context, VAEncMiscParameterBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncMiscParameterTypeHRDAV1(vlVaContext *context, VAEncMiscParameterBuffer *buf) TAIL;
+PROC VAStatus vlVaHandleVAEncSliceParameterBufferTypeAV1(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf) TAIL;
+#undef PROC
+#undef TAIL
+#endif
+
+#ifdef HAS_ENCODE
+#define PROC
+#define TAIL
+#else
+#define PROC static inline
+#define TAIL {return VA_STATUS_ERROR_UNIMPLEMENTED;}
+#endif
+PROC VAStatus vlVaHandleEncBufferType(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf) TAIL;
+#undef PROC
+#undef TAIL
+
+void vlVaHandleVAEncMiscParameterTypeQualityLevel(struct pipe_enc_quality_modes *p, vlVaQualityBits *in);
+
 #endif //VA_PRIVATE_H

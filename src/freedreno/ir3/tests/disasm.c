@@ -33,6 +33,7 @@
 #define INSTR_6XX_RAW(i, d, ...) { .gpu_id = 630, .instr = NULL, .instr_raw = i, .expected = d, __VA_ARGS__ }
 #define INSTR_7XX(i, d, ...) { .chip_id = 0x07030001, .instr = #i, .instr_raw = 0, .expected = d, __VA_ARGS__ }
 #define INSTR_7XX_RAW(i, d, ...) { .chip_id = 0x07030001, .instr = NULL, .instr_raw = i, .expected = d, __VA_ARGS__ }
+#define INSTR_8XX(i, d, ...) { .chip_id = 0x44050000, .instr = #i, .instr_raw = 0, .expected = d, __VA_ARGS__ }
 /* clang-format on */
 
 static const struct test {
@@ -68,6 +69,10 @@ static const struct test {
    INSTR_6XX(07020000_00000000, "predf"),
    INSTR_6XX(07820000_00000000, "prede"),
 
+   INSTR_7XX(00000003_00000000, "(eolm)(eogm)nop"),
+   INSTR_7XX(00000001_00000000, "(eolm)nop"),
+   INSTR_8XX(00001004_00000000, "(ss)(eostsc)nop"),
+
    /* cat1 */
    INSTR_6XX(20244000_00000020, "mov.f32f32 r0.x, c8.x"),
    INSTR_6XX(20200000_00000020, "mov.f16f16 hr0.x, hc8.x"),
@@ -91,13 +96,23 @@ static const struct test {
    INSTR_6XX(20400006_00003800, "mov.f16f16 hr1.z, h(0.500000)"),
    INSTR_6XX(204880f5_00000000, "mova1 a1.x, 0"),
 
+   INSTR_6XX(201108f4_00000000, "mova.u a0.x, (r)hr0.x"),
+   INSTR_6XX(204888f5_00000000, "mova1.u a1.x, 0"),
+   INSTR_8XX(20130cf4_008000c0, "mova.u.r (sat)a0.x, hr48.x, 0, 1"),
+
    INSTR_7XX(2004c005_00000405, "cov.f32u32 r1.y, (last)r1.y"),
+
+   INSTR_7XX(200440c0_ae800004, "movs.f32f32 r48.x, r1.x, 93"),
+   INSTR_7XX(201100c0_c000040b, "movs.s16s16 hr48.x, (last)hr2.w, a0.x"),
+   INSTR_7XX(201504c0_000000c0, "cov.s32s16 (sat)hr48.x, r48.x"),
 
    /* cat2 */
    INSTR_6XX(40104002_0c210001, "add.f hr0.z, r0.y, c<a0.x + 33>"),
    INSTR_6XX(40b80804_10408004, "(nop3) cmps.f.lt r1.x, (abs)r1.x, c16.x"),
    INSTR_6XX(47308a02_00002000, "(rpt2)bary.f (ei)r0.z, (r)0, r0.x"),
+   INSTR_6XX(47308802_00002000, "(nop1) bary.f (ei)r0.z, 0, r0.x"),
    INSTR_6XX(47348000_00002000, "flat.b (ei)r0.x, 0, r0.x"),
+   INSTR_6XX(473c8000_00002000, "(nop2) flat.b (ei)r0.x, 0, r0.x"),
    INSTR_6XX(43480801_00008001, "(nop3) absneg.s hr0.y, (abs)hr0.y"),
    INSTR_6XX(42280807_27ff0000, "(nop3) add.s hr1.w, hr0.x, h(-1)"),
    INSTR_6XX(40a500f8_2c000004, "cmps.f.ne p0.x, hr1.x, h(0.0)"),
@@ -112,6 +127,9 @@ static const struct test {
    INSTR_7XX(42380800_04010400, "(nop3) add.s r0.x, (last)r0.x, (last)r0.y"),
    INSTR_7XX(42930000_04000406, "cmps.u.ge r0.x, (last)r1.z, (last)r0.x"),
 
+   INSTR_7XX(429000f5_100600c1, "cmps.u.lt up0.y, r48.y, c1.z"),
+   INSTR_7XX(4490000c_10534007, "add.f.mul2.lt r3.x, (neg)r1.w, c20.w"),
+
    /* cat3 */
    INSTR_6XX(66000000_10421041, "sel.f16 hr0.x, hc16.y, hr0.x, hc16.z"),
    INSTR_6XX(64848109_109a9099, "(rpt1)sel.b32 r2.y, c38.y, (r)r2.y, c38.z"),
@@ -125,6 +143,7 @@ static const struct test {
    INSTR_6XX(65900820_0c0aac05, "(nop3) shlg hr8.x, hc<a0.x + 5>, hr8.x, hc<a0.x + 10>"), /* not seen in blob */
    INSTR_6XX(65ae0c5c_0002a001, "(nop3) shlg r23.x, r0.y, r23.x, r0.z"), /* (nop3) shlg.b32 r23.x, (r)r0.y, (r)r23.x, r0.z */
    INSTR_6XX(64018802_0002e003, "(nop3) shrm hr0.z, (neg)hr0.w, hr0.w, hr0.z"),
+   INSTR_6XX(646084c3_1fff300a, "shrm r48.w, 10, r48.y, 4095"),
    INSTR_6XX(64818802_0002e003, "(nop3) shlm hr0.z, (neg)hr0.w, hr0.w, hr0.z"),
    INSTR_6XX(65018802_0002e003, "(nop3) shrg hr0.z, (neg)hr0.w, hr0.w, hr0.z"),
    INSTR_6XX(66018802_0002e003, "(nop3) andg hr0.z, (neg)hr0.w, hr0.w, hr0.z"),
@@ -134,9 +153,14 @@ static const struct test {
    /* custom test with qcom_dot8 function from cl_qcom_dot_product8 */
    INSTR_6XX(66818c02_0002e003, "(sat)(nop3) dp2acc.mixed.low r0.z, r0.w, r0.w, r0.z"), /* (nop3) dp2acc (sat)r0.z, (signed)(low)(r)r0.w, (low)(r)r0.w, r0.z */
    INSTR_6XX(6681c802_8002a003, "(nop3) dp4acc.unsigned.low r0.z, r0.w, r0.w, (neg)r0.z"), /* (nop3) dp4acc r0.z, (unsigned)(r)r0.w, (r)r0.w, (neg)r0.z */
+   INSTR_6XX(7681c002_00002002, "(sy)dp4acc.unsigned.low r0.z, r0.z, r0.w, r0.x"),
 
    INSTR_7XX(61808000_04020400, "madsh.m16 r0.x, (last)r0.x, r0.y, (last)r0.z"),
    INSTR_7XX(64838806_04088406, "(nop3) sel.b32 r1.z, (last)r1.z, r1.w, (last)r2.x"),
+   INSTR_7XX(6286880e_040ee002, "(nop3) mad.f32.mul2 r3.z, (neg)r0.z, r3.y, (last)r3.z"),
+   INSTR_8XX(6206000a_040a0610, "mad.u24 r2.z, 16, r3.x, (last)r2.z"),
+   INSTR_8XX(62000800_06030402, "(nop1) mad.u24 r0.x, (last)r0.z, r0.x, 3"),
+   INSTR_8XX(63820009_07024409, "mad.f32 r2.y, (neg)(last)r2.y, r1.x, (1.0)"),
 
    /* cat4 */
    INSTR_6XX(8010000a_00000003, "rcp r2.z, r0.w"),
@@ -186,6 +210,9 @@ static const struct test {
 
    INSTR_6XX(a7000000_00000000, "tcinv"),
 
+   /* custom */
+   INSTR_6XX(a0c07f04_0cc00005, "sam.rck (xyzw)r1.x, r0.z, s#6, t#6"),
+
    /* cat6 */
 
    INSTR_5XX(c6e60000_00010600, "ldgb.untyped.4d.u32.1 r0.x, g[0], r1.x, r0.x"), /* ldgb.a.untyped.1dtype.u32.1 r0.x, g[r1.x], r0.x, 0 */
@@ -204,40 +231,44 @@ static const struct test {
    // TODO is this a real instruction?  Or float -6.0 ?
    // INSTR_6XX(c0c00000_00000000, "stg.f16 g[hr0.x], hr0.x, hr0.x", .parse_fail=true),
    /* dEQP-GLES31.functional.tessellation.invariance.outer_edge_symmetry.isolines_equal_spacing_ccw */
-   INSTR_6XX(c0d20906_02800004, "stg.a.f32 g[r1.x+(r1.z)<<2], r0.z, 2"), /* stg.a.f32 g[r1.x+(r1.z<<2)], r0.z, 2 */
-   INSTR_6XX(c0da052e_01800042, "stg.a.s32 g[r0.z+(r11.z)<<2], r8.y, 1"), /* stg.a.s32 g[r0.z+(r11.z<<2)], r8.y, 1 */
-   INSTR_6XX(c0dc052e_01800042, "stg.a.u8 g[r0.z+(r11.z)<<2], hr8.y, 1"),
+   INSTR_6XX(c0d20906_02800004, "stg.a.f32 g[r1.x+(r1.z<<2)], r0.z, 2"),
+   INSTR_6XX(c0da052e_01800042, "stg.a.s32 g[r0.z+(r11.z<<2)], r8.y, 1"),
+   INSTR_6XX(c0dc052e_01800042, "stg.a.u8 g[r0.z+r11.z], hr8.y, 1"),
    INSTR_6XX(c0ca0505_03800042, "stg.s32 g[r0.z+5], r8.y, 3"),
    INSTR_6XX(c0ca0500_03800042, "stg.s32 g[r0.z], r8.y, 3"),
    INSTR_6XX(c0ca0531_03800242, "stg.s32 g[r0.z+305], r8.y, 3"),
    INSTR_5XX(c0ce0100_02800000, "stg.u8_32 g[r0.x], r0.x, 2"),
    INSTR_5XX(c0c00100_02800000, "stg.f16 g[r0.x], hr0.x, 2"),
 
+   /* dEQP-VK.ray_query.builtin.objectraydirection.geom.aabbs */
+   INSTR_7XX(c380941e_0703c079, "ray_intersection r7.z, [r3.w], r15.x, r1.w, r18.z"),
+   /* dEQP-VK.ray_query.builtin.rayqueryterminate.geom.triangles */
+   INSTR_7XX(c0260207_00630100, "resbase.untyped.1d.u32.1.imm.base0 r1.w, 1"), /* resbase.u32.1d.mode4.base0 r1.w, 1 */
+
    /* Customely crafted */
-   INSTR_6XX(c0d61104_01800228, "stg.a.u32 g[r2.x+(r1.x+1)<<2], r5.x, 1"),
-   INSTR_6XX(c0d61104_01802628, "stg.a.u32 g[r2.x+r1.x<<4+3<<2], r5.x, 1"),
+   INSTR_6XX(c0d61104_01800228, "stg.a.u32 g[r2.x+((r1.x+1)<<2)], r5.x, 1"),
+   INSTR_6XX(c0d61104_01802628, "stg.a.u32 g[r2.x+(((r1.x<<2)+3)<<2)], r5.x, 1"),
 
    INSTR_7XX(c0d20505_07bfc006, "stg.a.f32 g[r0.z+r1.y+255], r0.w, 7"),
    INSTR_7XX(c0d20507_04812006, "stg.a.f32 g[c0.z+r1.w+4], r0.w, 4"),
 
-   INSTR_6XX(c0020011_04c08023, "ldg.a.f32 r4.y, g[r0.z+(r4.y)<<2], 4"), /* ldg.a.f32 r4.y, g[r0.z+(r4.y<<2)], 4 */
-   INSTR_6XX(c0060006_01c18017, "ldg.a.u32 r1.z, g[r1.z+(r2.w)<<2], 1"), /* ldg.a.u32 r1.z, g[r1.z+(r2.w<<2)], 1 */
+   INSTR_6XX(c0020011_04c08023, "ldg.a.f32 r4.y, g[r0.z+(r4.y<<2)], 4"),
+   INSTR_6XX(c0060006_01c18017, "ldg.a.u32 r1.z, g[r1.z+(r2.w<<2)], 1"),
    INSTR_6XX(c0060006_0181800f, "ldg.u32 r1.z, g[r1.z+7], 1"),
    INSTR_6XX(c0060006_01818001, "ldg.u32 r1.z, g[r1.z], 1"),
    INSTR_6XX(c0060003_0180c269, "ldg.u32 r0.w, g[r0.w+308], 1"),
    INSTR_6XX(c0040003_0180c269, "ldg.u16 hr0.w, g[r0.w+308], 1"),
 
    /* Found in TCS/TES shaders of GTA V */
-   INSTR_6XX(c0020007_03c1420f, "ldg.a.f32 r1.w, g[r1.y+(r1.w+1)<<2], 3"), /* ldg.a.f32 r1.w, g[r1.y+((r1.w+1)<<2)], 3 */
+   INSTR_6XX(c0020007_03c1420f, "ldg.a.f32 r1.w, g[r1.y+((r1.w+1)<<2)], 3"),
 
    /* Customely crafted */
-   INSTR_6XX(c0020007_03c1740f, "ldg.a.f32 r1.w, g[r1.y+r1.w<<5+2<<2], 3"),
+   INSTR_6XX(c0020007_03c1740f, "ldg.a.f32 r1.w, g[r1.y+(((r1.w<<3)+2)<<2)], 3"),
 
-   INSTR_6XX(c0020011_04c08023, "ldg.a.f32 r4.y, g[r0.z+(r4.y)<<2], 4"), /* ldg.a.f32 r4.y, g[r0.z+(r4.y<<2)], 4 */
-   INSTR_6XX(c0060006_01c18017, "ldg.a.u32 r1.z, g[r1.z+(r2.w)<<2], 1"), /* ldg.a.u32 r1.z, g[r1.z+(r2.w<<2)], 1 */
-   INSTR_6XX(c0000006_01c18017, "ldg.a.f16 hr1.z, g[r1.z+(r2.w)<<2], 1"),
+   INSTR_6XX(c0000006_01c18017, "ldg.a.f16 hr1.z, g[r1.z+(r2.w<<1)], 1"),
    INSTR_6XX(c0060006_0181800f, "ldg.u32 r1.z, g[r1.z+7], 1"),
    INSTR_6XX(c0060006_01818001, "ldg.u32 r1.z, g[r1.z], 1"),
+   INSTR_6XX(c0060006_01c1b017, "ldg.a.u32 r1.z, g[r1.z+(r2.w<<5)], 1"),
 
    INSTR_7XX(c0020411_04c08023, "ldg.a.f32 r4.y, g[r0.z+r4.y+2], 4"),
    INSTR_7XX(c0004006_01c1a017, "ldg.a.f16 hr1.z, g[c1.z+r2.w+32], 1"),
@@ -278,6 +309,9 @@ static const struct test {
 
    INSTR_7XX(d1260406_00e77100, "(sy)stib.b.untyped.1d.u32.4.imm.base0 r1.z, r0.x+4, 2"),
    INSTR_7XX(c3260002_01e1b100, "ldib.b.untyped.1d.u32.4.imm.base0 r0.z, r0.y+12, 0"),
+   INSTR_7XX(c7661840_4de74144, "stib.b.untyped.1d.u32.1.uniform.base2 r16.x, r19.y+29, r3.x"),
+
+   INSTR_6XX(c0260d0a_0a61b180, "ldib.b.untyped.1d.u32.rck.4.nonuniform.base0 r2.z, r2.z, r1.z"),
 
    /* dEQP-GLES31.functional.tessellation.invariance.outer_edge_symmetry.isolines_equal_spacing_ccw */
    INSTR_6XX(c2c21100_04800006, "stlw.f32 l[r2.x], r0.w, 4"),
@@ -393,6 +427,7 @@ static const struct test {
    INSTR_6XX(c0260000_00478200, "ldc.offset1.1.imm r0.x, r0.x, 0"), /* ldc.1.mode0.base0 r0.x, r0.x, 0 */
    INSTR_6XX(c0260000_00478400, "ldc.offset2.1.imm r0.x, r0.x, 0"), /* ldc.1.mode0.base0 r0.x, r0.x, 0 */
    INSTR_6XX(c0260000_00478600, "ldc.offset3.1.imm r0.x, r0.x, 0"), /* ldc.1.mode0.base0 r0.x, r0.x, 0 */
+   INSTR_8XX(c0260000_00678600, "ldc.offset3.1.imm r0.x, r0.x, 0"),
 
    /* dEQP-VK.glsl.arrays.length.float_fragment */
    INSTR_6XX(c02600c1_00c7a900, "ldc.u.offset0.3.imm.base0 r48.y, 0, 0"), /* ldc.u.3.mode4.base0 sr48.y, 0, 0 */
@@ -435,6 +470,9 @@ static const struct test {
    /* dEQP-GLES31.functional.shaders.opaque_type_indexing.sampler.const_literal.fragment.sampler2d */
    INSTR_6XX(a0c01f04_0cc00005, "sam (f32)(xyzw)r1.x, r0.z, s#6, t#6"),
 
+   /* custom */
+   INSTR_6XX(a0c01f04_0cc40005, "sam.clp (f32)(xyzw)r1.x, r0.z, r0.x, s#6, t#6"),
+
    /* dEQP-GLES31.functional.shaders.opaque_type_indexing.sampler.uniform.fragment.sampler2d */
    INSTR_4XX(a0c81f02_00800001, "sam.s2en.uniform (f32)(xyzw)r0.z, r0.x, hr1.x"), /* sam.s2en.mode0 (f32)(xyzw)r0.z, r0.x, hr1.x */ /* same for 5xx */
    INSTR_6XX(a0c81f07_0100000b, "sam.s2en.uniform (f32)(xyzw)r1.w, r1.y, hr2.x"), /* sam.s2en.mode0 (f32)(xyzw)r1.w, r1.y, hr2.x */
@@ -442,6 +480,9 @@ static const struct test {
    /* dEQP-GLES31.functional.shaders.opaque_type_indexing.sampler.dynamically_uniform.fragment.sampler2d */
    INSTR_4XX(a0c81f02_80800001, "sam.s2en.nonuniform (f32)(xyzw)r0.z, r0.x, hr1.x"), /* sam.s2en.uniform (f32)(xyzw)r0.z, r0.x, hr1.x */ /* same for 5xx */
    INSTR_6XX(a0c81f07_8100000b, "sam.s2en.nonuniform (f32)(xyzw)r1.w, r1.y, hr2.x"), /* sam.s2en.mode4 (f32)(xyzw)r1.w, r1.y, hr2.x */
+
+   /* custom */
+   INSTR_6XX(a1083f06_c0240805, "samb.base0.clp (u32)(xyzw)r1.z, r0.z, r1.x, s#1, t#0"), /* sam.s2en.mode4.clp (f32)(xyzw)r1.w, r1.y, hr2.x */
 
    /* NonUniform: */
    /* dEQP-VK.descriptor_indexing.storage_buffer */
@@ -493,9 +534,26 @@ static const struct test {
    INSTR_7XX(fbc21000_00000000, "(sy)(ss)(jp)lock"),
 
    /* dEQP-VK.pipeline.monolithic.sampler.border_swizzle.r4g4b4a4_unorm_pack16.rg1a.opaque_white.gather_1.no_swizzle_hint */
-   INSTR_7XX(e45401a0_bfba7736, "alias.tex.b32.1 r40.x, (-1.456763)"),
+   INSTR_7XX(e41401a0_bfba7736, "alias.tex.f32.1 r40.x, (-1.456763)"),
    /* dEQP-VK.synchronization.op.single_queue.event.write_draw_indexed_read_image_geometry.image_128x128_r32g32b32a32_sfloat */
-   INSTR_7XX(e44c0009_00000007, "alias.tex.b32.0 r2.y, c1.w"),
+   INSTR_7XX(e40c0009_00000007, "alias.tex.f32.0 r2.y, c1.w"),
+   /* dEQP-VK.binding_model.shader_access.primary_cmd_buf.storage_image.geometry.single_descriptor.2d_base_mip */
+   INSTR_7XX(ec1501a0_00000006, "(jp)alias.tex.b32.1 r40.x, (0x6)"),
+   /* dEQP-VK.subgroups.quad.graphics.subgroupquadbroadcast_i16vec2 */
+   INSTR_7XX(e41100a0_00000002, "alias.tex.b16.0 hr40.x, h(0x2)"),
+
+   /* dEQP-VK.glsl.derivate.dfdx.constant.float */
+   INSTR_7XX(e4108003_00003c00, "alias.rt.f16.0 rt0.w, h(1.000000)"),
+   INSTR_7XX(f4088000_00000000, "(sy)alias.rt.f16.0 rt0.x, hc0.x"),
+
+   /* dEQP-VK.glsl.opaque_type_indexing.ubo.const_literal_fragment */
+   INSTR_7XX(e40c8008_00000010, "alias.rt.f32.0 rt2.x, c4.x"),
+
+   /* dEQP-VK.dynamic_rendering.primary_cmd_buff.suballocation.multisample_resolve.layers_3.r16g16_unorm.samples_4_resolve_level_4 */
+   INSTR_7XX(e4148008_3f800000, "alias.rt.f32.0 rt2.x, (1.000000)"),
+
+   /* dEQP-VK.renderpass.suballocation.multisample_resolve.layers_3.r8g8b8a8_uint.samples_2_baseLayer1 */
+   INSTR_7XX(e4158007_000000ff, "alias.rt.b32.0 rt1.w, (0xff)"),
 
    INSTR_6XX(ffffffff_ffffffff, "raw 0xFFFFFFFFFFFFFFFF"),
    /* clang-format on */

@@ -46,7 +46,8 @@
 #include <pipe/p_state.h>
 
 #include "util/u_call_once.h"
-#include <mapi/glapi/glapi.h>
+#include "mesa/glapi/glapi/glapi.h"
+#include "dispatch.h"
 
 #include <GL/mesa_glinterop.h>
 
@@ -158,7 +159,7 @@ wgl_add_config(_EGLDisplay *disp, const struct stw_pixelformat_info *stw_config,
 
       _eglLinkConfig(&conf->base);
    } else {
-      unreachable("duplicates should not be possible");
+      UNREACHABLE("duplicates should not be possible");
       return NULL;
    }
 
@@ -269,8 +270,7 @@ wgl_initialize_impl(_EGLDisplay *disp, HDC hdc)
    disp->Extensions.MESA_query_driver = EGL_TRUE;
 
    /* Report back to EGL the bitmask of priorities supported */
-   disp->Extensions.IMG_context_priority = wgl_dpy->screen->get_param(
-      wgl_dpy->screen, PIPE_CAP_CONTEXT_PRIORITY_MASK);
+   disp->Extensions.IMG_context_priority = wgl_dpy->screen->caps.context_priority_mask;
    disp->Extensions.NV_context_priority_realtime =
       disp->Extensions.IMG_context_priority &
       (1 << __EGL_CONTEXT_PRIORITY_REALTIME_BIT);
@@ -337,7 +337,7 @@ wgl_initialize(_EGLDisplay *disp)
       ret = wgl_initialize_impl(disp, disp->PlatformDisplay);
       break;
    default:
-      unreachable("Callers ensure we cannot get here.");
+      UNREACHABLE("Callers ensure we cannot get here.");
       return EGL_FALSE;
    }
 
@@ -507,27 +507,9 @@ wgl_destroy_surface(_EGLDisplay *disp, _EGLSurface *surf)
 }
 
 static void
-wgl_gl_flush_get(_glapi_proc *glFlush)
-{
-   *glFlush = _glapi_get_proc_address("glFlush");
-}
-
-static void
 wgl_gl_flush()
 {
-   static void (*glFlush)(void);
-   static util_once_flag once = UTIL_ONCE_FLAG_INIT;
-
-   util_call_once_data(&once, (util_call_once_data_func)wgl_gl_flush_get,
-                       &glFlush);
-
-   /* if glFlush is not available things are horribly broken */
-   if (!glFlush) {
-      _eglLog(_EGL_WARNING, "wgl: failed to find glFlush entry point");
-      return;
-   }
-
-   glFlush();
+   CALL_Flush(GET_DISPATCH(), ());
 }
 
 /**
@@ -658,7 +640,7 @@ wgl_create_window_surface(_EGLDisplay *disp, _EGLConfig *conf,
    const struct stw_pixelformat_info *stw_conf = wgl_conf->stw_config[1]
                                                     ? wgl_conf->stw_config[1]
                                                     : wgl_conf->stw_config[0];
-   wgl_surf->fb = stw_framebuffer_create(
+   wgl_surf->fb = stw_framebuffer_create(NULL,
       native_window, stw_conf, STW_FRAMEBUFFER_EGL_WINDOW, &wgl_dpy->base);
    if (!wgl_surf->fb) {
       free(wgl_surf);
@@ -881,7 +863,7 @@ wgl_create_image_khr_texture(_EGLDisplay *disp, _EGLContext *ctx,
       gl_target = GL_TEXTURE_CUBE_MAP;
       break;
    default:
-      unreachable("Unexpected target in wgl_create_image_khr_texture()");
+      UNREACHABLE("Unexpected target in wgl_create_image_khr_texture()");
       return EGL_NO_IMAGE_KHR;
    }
 
@@ -1106,7 +1088,7 @@ wgl_wait_sync_khr(_EGLDisplay *disp, _EGLSync *sync)
 
    struct pipe_context *pipe = wgl_ctx->ctx->st->pipe;
    if (pipe->fence_server_sync)
-      pipe->fence_server_sync(pipe, wgl_sync->fence);
+      pipe->fence_server_sync(pipe, wgl_sync->fence, 0);
 
    return EGL_TRUE;
 }

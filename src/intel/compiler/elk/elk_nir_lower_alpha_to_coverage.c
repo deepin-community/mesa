@@ -107,7 +107,7 @@ elk_nir_lower_alpha_to_coverage(nir_shader *shader,
          if (intrin->intrinsic != nir_intrinsic_store_output)
             continue;
 
-         /* We call nir_lower_io_to_temporaries to lower FS outputs to
+         /* We call nir_lower_io_vars_to_temporaries to lower FS outputs to
           * temporaries with a copy at the end so this should be the last
           * block in the shader.
           */
@@ -183,10 +183,8 @@ elk_nir_lower_alpha_to_coverage(nir_shader *shader,
 
    nir_src_rewrite(&sample_mask_write->src[0], dither_mask);
 
-   nir_metadata_preserve(impl, nir_metadata_control_flow);
-   return true;
+   return nir_progress(true, impl, nir_metadata_control_flow);
 
 skip:
-   nir_metadata_preserve(impl, nir_metadata_all);
-   return false;
+   return nir_no_progress(impl);
 }

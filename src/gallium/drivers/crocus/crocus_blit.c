@@ -41,7 +41,7 @@ void crocus_blitter_begin(struct crocus_context *ice, enum crocus_blitter_op op,
    util_blitter_save_tesseval_shader(ice->blitter, ice->shaders.uncompiled[MESA_SHADER_TESS_EVAL]);
    util_blitter_save_geometry_shader(ice->blitter, ice->shaders.uncompiled[MESA_SHADER_GEOMETRY]);
    util_blitter_save_so_targets(ice->blitter, ice->state.so_targets,
-                                (struct pipe_stream_output_target**)ice->state.so_target);
+                                (struct pipe_stream_output_target**)ice->state.so_target, MESA_PRIM_UNKNOWN);
    util_blitter_save_vertex_buffers(ice->blitter, ice->state.vertex_buffers,
                                     util_last_bit(ice->state.bound_vertex_buffers));
    util_blitter_save_vertex_elements(ice->blitter, (void *)ice->state.cso_vertex_elements);
@@ -52,7 +52,9 @@ void crocus_blitter_begin(struct crocus_context *ice, enum crocus_blitter_op op,
       util_blitter_save_fragment_shader(ice->blitter, ice->shaders.uncompiled[MESA_SHADER_FRAGMENT]);
       util_blitter_save_sample_mask(ice->blitter, ice->state.sample_mask, 0);
       util_blitter_save_rasterizer(ice->blitter, ice->state.cso_rast);
-      util_blitter_save_scissor(ice->blitter, &ice->state.scissors[0]);
+      util_blitter_save_scissor(ice->blitter, &(struct pipe_scissor_state) {
+         ice->state.scissors[0].minx, ice->state.scissors[0].miny,
+         ice->state.scissors[0].maxx, ice->state.scissors[0].maxy });
       util_blitter_save_viewport(ice->blitter, &ice->state.viewports[0]);
       util_blitter_save_fragment_constant_buffer_slot(ice->blitter, &ice->state.shaders[MESA_SHADER_FRAGMENT].constbufs[0]);
    }
@@ -432,7 +434,7 @@ crocus_blit(struct pipe_context *ctx, const struct pipe_blit_info *info)
                                              info->src.level,
                                              &info->src.box, NULL);
 
-               pipe_surface_release(ctx, &dst_view);
+               pipe_surface_unref(ctx, &dst_view);
             }
             return;
          }

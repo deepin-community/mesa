@@ -26,140 +26,6 @@
 #include "nir_builder.h"
 
 /**
- * Return the intrinsic if it matches the mask in "modes", else return NULL.
- */
-static nir_intrinsic_instr *
-get_io_intrinsic(nir_instr *instr, nir_variable_mode modes,
-                 nir_variable_mode *out_mode)
-{
-   if (instr->type != nir_instr_type_intrinsic)
-      return NULL;
-
-   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-
-   switch (intr->intrinsic) {
-   case nir_intrinsic_load_input:
-   case nir_intrinsic_load_per_primitive_input:
-   case nir_intrinsic_load_input_vertex:
-   case nir_intrinsic_load_interpolated_input:
-   case nir_intrinsic_load_per_vertex_input:
-      *out_mode = nir_var_shader_in;
-      return modes & nir_var_shader_in ? intr : NULL;
-   case nir_intrinsic_load_output:
-   case nir_intrinsic_load_per_vertex_output:
-   case nir_intrinsic_store_output:
-   case nir_intrinsic_store_per_vertex_output:
-      *out_mode = nir_var_shader_out;
-      return modes & nir_var_shader_out ? intr : NULL;
-   default:
-      return NULL;
-   }
-}
-
-/**
- * Recompute the IO "base" indices from scratch to remove holes or to fix
- * incorrect base values due to changes in IO locations by using IO locations
- * to assign new bases. The mapping from locations to bases becomes
- * monotonically increasing.
- */
-bool
-nir_recompute_io_bases(nir_shader *nir, nir_variable_mode modes)
-{
-   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-
-   BITSET_DECLARE(inputs, NUM_TOTAL_VARYING_SLOTS);
-   BITSET_DECLARE(per_prim_inputs, NUM_TOTAL_VARYING_SLOTS);  /* FS only */
-   BITSET_DECLARE(dual_slot_inputs, NUM_TOTAL_VARYING_SLOTS); /* VS only */
-   BITSET_DECLARE(outputs, NUM_TOTAL_VARYING_SLOTS);
-   BITSET_ZERO(inputs);
-   BITSET_ZERO(per_prim_inputs);
-   BITSET_ZERO(dual_slot_inputs);
-   BITSET_ZERO(outputs);
-
-   /* Gather the bitmasks of used locations. */
-   nir_foreach_block_safe(block, impl) {
-      nir_foreach_instr_safe(instr, block) {
-         nir_variable_mode mode;
-         nir_intrinsic_instr *intr = get_io_intrinsic(instr, modes, &mode);
-         if (!intr)
-            continue;
-
-         nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
-         unsigned num_slots = sem.num_slots;
-         if (sem.medium_precision)
-            num_slots = (num_slots + sem.high_16bits + 1) / 2;
-
-         if (mode == nir_var_shader_in) {
-            for (unsigned i = 0; i < num_slots; i++) {
-               if (intr->intrinsic == nir_intrinsic_load_per_primitive_input)
-                  BITSET_SET(per_prim_inputs, sem.location + i);
-               else
-                  BITSET_SET(inputs, sem.location + i);
-
-               if (sem.high_dvec2)
-                  BITSET_SET(dual_slot_inputs, sem.location + i);
-            }
-         } else if (!sem.dual_source_blend_index) {
-            for (unsigned i = 0; i < num_slots; i++)
-               BITSET_SET(outputs, sem.location + i);
-         }
-      }
-   }
-
-   const unsigned num_normal_inputs = BITSET_COUNT(inputs) + BITSET_COUNT(dual_slot_inputs);
-
-   /* Renumber bases. */
-   bool changed = false;
-
-   nir_foreach_block_safe(block, impl) {
-      nir_foreach_instr_safe(instr, block) {
-         nir_variable_mode mode;
-         nir_intrinsic_instr *intr = get_io_intrinsic(instr, modes, &mode);
-         if (!intr)
-            continue;
-
-         nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
-         unsigned num_slots = sem.num_slots;
-         if (sem.medium_precision)
-            num_slots = (num_slots + sem.high_16bits + 1) / 2;
-
-         if (mode == nir_var_shader_in) {
-            if (intr->intrinsic == nir_intrinsic_load_per_primitive_input) {
-               nir_intrinsic_set_base(intr,
-                                      num_normal_inputs +
-                                      BITSET_PREFIX_SUM(per_prim_inputs, sem.location));
-            } else {
-               nir_intrinsic_set_base(intr,
-                                      BITSET_PREFIX_SUM(inputs, sem.location) +
-                                      BITSET_PREFIX_SUM(dual_slot_inputs, sem.location) +
-                                      (sem.high_dvec2 ? 1 : 0));
-            }
-         } else if (sem.dual_source_blend_index) {
-            nir_intrinsic_set_base(intr,
-                                   BITSET_PREFIX_SUM(outputs, NUM_TOTAL_VARYING_SLOTS));
-         } else {
-            nir_intrinsic_set_base(intr,
-                                   BITSET_PREFIX_SUM(outputs, sem.location));
-         }
-         changed = true;
-      }
-   }
-
-   if (changed) {
-      nir_metadata_preserve(impl, nir_metadata_control_flow);
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-   }
-
-   if (modes & nir_var_shader_in)
-      nir->num_inputs = BITSET_COUNT(inputs);
-   if (modes & nir_var_shader_out)
-      nir->num_outputs = BITSET_COUNT(outputs);
-
-   return changed;
-}
-
-/**
  * Lower mediump inputs and/or outputs to 16 bits.
  *
  * \param modes            Whether to lower inputs, outputs, or both.
@@ -180,7 +46,7 @@ nir_lower_mediump_io(nir_shader *nir, nir_variable_mode modes,
    nir_foreach_block_safe(block, impl) {
       nir_foreach_instr_safe(instr, block) {
          nir_variable_mode mode;
-         nir_intrinsic_instr *intr = get_io_intrinsic(instr, modes, &mode);
+         nir_intrinsic_instr *intr = nir_get_io_intrinsic(instr, modes, &mode);
          if (!intr)
             continue;
 
@@ -228,8 +94,8 @@ nir_lower_mediump_io(nir_shader *nir, nir_variable_mode modes,
             bool is_fragdepth = (nir->info.stage == MESA_SHADER_FRAGMENT &&
                                  sem.location == FRAG_RESULT_DEPTH);
             if (!sem.medium_precision &&
-                (is_varying || is_fragdepth || val->parent_instr->type != nir_instr_type_alu ||
-                 nir_instr_as_alu(val->parent_instr)->op != upconvert_op)) {
+                (is_varying || is_fragdepth || !nir_def_is_alu(val) ||
+                 nir_def_as_alu(val)->op != upconvert_op)) {
                continue;
             }
 
@@ -263,8 +129,7 @@ nir_lower_mediump_io(nir_shader *nir, nir_variable_mode modes,
             intr->def.bit_size = 16;
             nir_intrinsic_set_dest_type(intr, (type & ~32) | 16);
             nir_def *dst = convert(&b, &intr->def);
-            nir_def_rewrite_uses_after(&intr->def, dst,
-                                       dst->parent_instr);
+            nir_def_rewrite_uses_after(&intr->def, dst);
          }
 
          if (use_16bit_slots && is_varying &&
@@ -283,119 +148,37 @@ nir_lower_mediump_io(nir_shader *nir, nir_variable_mode modes,
    if (changed && use_16bit_slots)
       nir_recompute_io_bases(nir, modes);
 
-   if (changed) {
-      nir_metadata_preserve(impl, nir_metadata_control_flow);
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-   }
-
-   return changed;
+   return nir_progress(changed, impl, nir_metadata_control_flow);
 }
 
-/**
- * Set the mediump precision bit for those shader inputs and outputs that are
- * set in the "modes" mask. Non-generic varyings (that GLES3 doesn't have)
- * are ignored. The "types" mask can be (nir_type_float | nir_type_int), etc.
- */
-bool
-nir_force_mediump_io(nir_shader *nir, nir_variable_mode modes,
-                     nir_alu_type types)
+static bool
+clear_mediump_io_flag(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
-   bool changed = false;
-   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-   assert(impl);
+   /* The mediump flag must be preserved for XFB, but other IO
+    * doesn't need it.
+    */
+   if (nir_intrinsic_has_io_semantics(intr) &&
+       !nir_instr_xfb_write_mask(intr)) {
+      nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
 
-   nir_foreach_block_safe(block, impl) {
-      nir_foreach_instr_safe(instr, block) {
-         nir_variable_mode mode;
-         nir_intrinsic_instr *intr = get_io_intrinsic(instr, modes, &mode);
-         if (!intr)
-            continue;
-
-         nir_alu_type type;
-         if (nir_intrinsic_has_src_type(intr))
-            type = nir_intrinsic_src_type(intr);
-         else
-            type = nir_intrinsic_dest_type(intr);
-         if (!(type & types))
-            continue;
-
-         nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
-
-         if (nir->info.stage == MESA_SHADER_FRAGMENT &&
-             mode == nir_var_shader_out) {
-            /* Only accept FS outputs. */
-            if (sem.location < FRAG_RESULT_DATA0 &&
-                sem.location != FRAG_RESULT_COLOR)
-               continue;
-         } else if (nir->info.stage == MESA_SHADER_VERTEX &&
-                    mode == nir_var_shader_in) {
-            /* Accept all VS inputs. */
-         } else {
-            /* Only accept generic varyings. */
-            if (sem.location < VARYING_SLOT_VAR0 ||
-                sem.location > VARYING_SLOT_VAR31)
-               continue;
-         }
-
-         sem.medium_precision = 1;
+      if (sem.medium_precision) {
+         sem.medium_precision = 0;
          nir_intrinsic_set_io_semantics(intr, sem);
-         changed = true;
+         return true;
       }
    }
-
-   if (changed) {
-      nir_metadata_preserve(impl, nir_metadata_control_flow);
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-   }
-
-   return changed;
+   return false;
 }
 
-/**
- * Remap 16-bit varying slots to the original 32-bit varying slots.
- * This only changes IO semantics and bases.
+/* Set nir_io_semantics.medium_precision to 0 if it has no effect.
+ *
+ * This is recommended after nir_lower_mediump_io and before
+ * nir_opt_varyings / nir_opt_vectorize_io.
  */
 bool
-nir_unpack_16bit_varying_slots(nir_shader *nir, nir_variable_mode modes)
+nir_clear_mediump_io_flag(nir_shader *nir)
 {
-   bool changed = false;
-   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-   assert(impl);
-
-   nir_foreach_block_safe(block, impl) {
-      nir_foreach_instr_safe(instr, block) {
-         nir_variable_mode mode;
-         nir_intrinsic_instr *intr = get_io_intrinsic(instr, modes, &mode);
-         if (!intr)
-            continue;
-
-         nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
-
-         if (sem.location < VARYING_SLOT_VAR0_16BIT ||
-             sem.location > VARYING_SLOT_VAR15_16BIT)
-            continue;
-
-         sem.location = VARYING_SLOT_VAR0 +
-                        (sem.location - VARYING_SLOT_VAR0_16BIT) * 2 +
-                        sem.high_16bits;
-         sem.high_16bits = 0;
-         nir_intrinsic_set_io_semantics(intr, sem);
-         changed = true;
-      }
-   }
-
-   if (changed)
-      nir_recompute_io_bases(nir, modes);
-
-   if (changed) {
-      nir_metadata_preserve(impl, nir_metadata_control_flow);
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-   }
-
-   return changed;
+   return nir_shader_intrinsics_pass(nir, clear_mediump_io_flag, nir_metadata_all, NULL);
 }
 
 static bool
@@ -457,7 +240,7 @@ nir_lower_mediump_vars_impl(nir_function_impl *impl, nir_variable_mode modes,
                   break;
                default:
                   nir_print_instr(instr, stderr);
-                  unreachable("unsupported deref type");
+                  UNREACHABLE("unsupported deref type");
                }
             }
 
@@ -491,12 +274,10 @@ nir_lower_mediump_vars_impl(nir_function_impl *impl, nir_variable_mode modes,
                   replace = nir_u2u32(&b, &intrin->def);
                   break;
                default:
-                  unreachable("Invalid 16-bit type");
+                  UNREACHABLE("Invalid 16-bit type");
                }
 
-               nir_def_rewrite_uses_after(&intrin->def,
-                                          replace,
-                                          replace->parent_instr);
+               nir_def_rewrite_uses_after(&intrin->def, replace);
                progress = true;
                break;
             }
@@ -521,7 +302,7 @@ nir_lower_mediump_vars_impl(nir_function_impl *impl, nir_variable_mode modes,
                   replace = nir_i2imp(&b, data);
                   break;
                default:
-                  unreachable("Invalid 16-bit type");
+                  UNREACHABLE("Invalid 16-bit type");
                }
 
                nir_src_rewrite(&intrin->src[1], replace);
@@ -555,13 +336,7 @@ nir_lower_mediump_vars_impl(nir_function_impl *impl, nir_variable_mode modes,
       }
    }
 
-   if (progress) {
-      nir_metadata_preserve(impl, nir_metadata_control_flow);
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-   }
-
-   return progress;
+   return nir_progress(progress, impl, nir_metadata_control_flow);
 }
 
 bool
@@ -743,15 +518,16 @@ can_opt_16bit_src(nir_def *ssa, nir_alu_type src_type, bool sext_matters)
          else if (opt_i16_u16)
             can_opt &= (const_is_u16(comp) || const_is_i16(comp));
       } else if (nir_scalar_is_alu(comp)) {
-         nir_alu_instr *alu = nir_instr_as_alu(comp.def->parent_instr);
-         if (alu->src[0].src.ssa->bit_size != 16)
-            return false;
+         nir_alu_instr *alu = nir_def_as_alu(comp.def);
+         bool is_16bit = alu->src[0].src.ssa->bit_size == 16;
 
-         if (alu->op == nir_op_f2f32)
+         if ((alu->op == nir_op_f2f32 && is_16bit) ||
+             alu->op == nir_op_unpack_half_2x16_split_x ||
+             alu->op == nir_op_unpack_half_2x16_split_y)
             can_opt &= opt_f16;
-         else if (alu->op == nir_op_i2i32)
+         else if (alu->op == nir_op_i2i32 && is_16bit)
             can_opt &= opt_i16 || opt_i16_u16;
-         else if (alu->op == nir_op_u2u32)
+         else if (alu->op == nir_op_u2u32 && is_16bit)
             can_opt &= opt_u16 || opt_i16_u16;
          else
             return false;
@@ -784,6 +560,23 @@ opt_16bit_src(nir_builder *b, nir_instr *instr, nir_src *src, nir_alu_type src_t
       } else {
          /* conversion instruction */
          new_comps[i] = nir_scalar_chase_alu_src(comp, 0);
+         if (new_comps[i].def->bit_size != 16) {
+            assert(new_comps[i].def->bit_size == 32);
+
+            nir_def *extract = nir_mov_scalar(b, new_comps[i]);
+            switch (nir_scalar_alu_op(comp)) {
+            case nir_op_unpack_half_2x16_split_x:
+               extract = nir_unpack_32_2x16_split_x(b, extract);
+               break;
+            case nir_op_unpack_half_2x16_split_y:
+               extract = nir_unpack_32_2x16_split_y(b, extract);
+               break;
+            default:
+               UNREACHABLE("unsupported alu op");
+            }
+
+            new_comps[i] = nir_get_scalar(extract, 0);
+         }
       }
    }
 
@@ -908,7 +701,7 @@ opt_16bit_destination(nir_def *ssa, nir_alu_type dest_type, unsigned exec_mode,
          alu->op = nir_op_pack_32_2x16;
          break;
       default:
-         unreachable("unsupported conversion op");
+         UNREACHABLE("unsupported conversion op");
       };
    }
 

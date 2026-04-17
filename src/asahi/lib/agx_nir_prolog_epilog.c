@@ -5,14 +5,16 @@
  */
 
 #include "gallium/include/pipe/p_defines.h"
+#include "poly/cl/libpoly.h"
+#include "poly/nir/poly_nir.h"
 #include "util/format/u_formats.h"
 #include "agx_abi.h"
 #include "agx_linker.h"
-#include "agx_nir_lower_gs.h"
+#include "agx_nir.h"
 #include "agx_nir_lower_vbo.h"
-#include "agx_nir_passes.h"
 #include "agx_pack.h"
 #include "agx_tilebuffer.h"
+#include "libagx.h"
 #include "nir.h"
 #include "nir_builder.h"
 #include "nir_builder_opcodes.h"
@@ -52,26 +54,7 @@ agx_nir_lower_poly_stipple(nir_shader *s)
    nir_demote_if(b, nir_ieq_imm(b, bit, 0));
    s->info.fs.uses_discard = true;
 
-   nir_metadata_preserve(b->impl, nir_metadata_control_flow);
-   return true;
-}
-
-static bool
-lower_vbo(nir_shader *s, const struct agx_velem_key *key,
-          const struct agx_robustness rs)
-{
-   struct agx_attribute out[AGX_MAX_VBUFS];
-
-   for (unsigned i = 0; i < AGX_MAX_VBUFS; ++i) {
-      out[i] = (struct agx_attribute){
-         .divisor = key[i].divisor,
-         .stride = key[i].stride,
-         .format = key[i].format,
-         .instanced = key[i].instanced,
-      };
-   }
-
-   return agx_nir_lower_vbo(s, out, rs);
+   return nir_progress(true, b->impl, nir_metadata_control_flow);
 }
 
 static int
@@ -79,15 +62,20 @@ map_vs_part_uniform(nir_intrinsic_instr *intr, unsigned nr_attribs)
 {
    switch (intr->intrinsic) {
    case nir_intrinsic_load_vbo_base_agx:
-      return 4 * nir_src_as_uint(intr->src[0]);
+      return AGX_ABI_VUNI_VBO_BASE(nir_src_as_uint(intr->src[0]));
+
    case nir_intrinsic_load_attrib_clamp_agx:
-      return (4 * nr_attribs) + (2 * nir_src_as_uint(intr->src[0]));
+      return AGX_ABI_VUNI_VBO_CLAMP(nr_attribs, nir_src_as_uint(intr->src[0]));
+
    case nir_intrinsic_load_first_vertex:
-      return (6 * nr_attribs);
+      return AGX_ABI_VUNI_FIRST_VERTEX(nr_attribs);
+
    case nir_intrinsic_load_base_instance:
-      return (6 * nr_attribs) + 2;
-   case nir_intrinsic_load_input_assembly_buffer_agx:
-      return (6 * nr_attribs) + 8;
+      return AGX_ABI_VUNI_BASE_INSTANCE(nr_attribs);
+
+   case nir_intrinsic_load_vertex_param_buffer_poly:
+      return AGX_ABI_VUNI_VERTEX_PARAMS(nr_attribs);
+
    default:
       return -1;
    }
@@ -98,13 +86,17 @@ map_fs_part_uniform(nir_intrinsic_instr *intr)
 {
    switch (intr->intrinsic) {
    case nir_intrinsic_load_blend_const_color_r_float:
-      return 4;
+      return AGX_ABI_FUNI_BLEND_R;
+
    case nir_intrinsic_load_blend_const_color_g_float:
-      return 6;
+      return AGX_ABI_FUNI_BLEND_G;
+
    case nir_intrinsic_load_blend_const_color_b_float:
-      return 8;
+      return AGX_ABI_FUNI_BLEND_B;
+
    case nir_intrinsic_load_blend_const_color_a_float:
-      return 10;
+      return AGX_ABI_FUNI_BLEND_A;
+
    default:
       return -1;
    }
@@ -131,11 +123,49 @@ lower_non_monolithic_uniforms(nir_builder *b, nir_intrinsic_instr *intr,
       b->cursor = nir_instr_remove(&intr->instr);
       nir_def *offs =
          nir_imul_imm(b, nir_u2u32(b, intr->src[0].ssa), AGX_TEXTURE_LENGTH);
-      nir_def_rewrite_uses(&intr->def, nir_vec2(b, nir_imm_int(b, 0), offs));
+      nir_def_rewrite_uses(&intr->def,
+                           nir_bindless_image_agx(b, offs, .desc_set = 0));
       return true;
    } else {
       return false;
    }
+}
+
+bool
+agx_nir_lower_non_monolithic_uniforms(nir_shader *nir, unsigned nr)
+{
+   return nir_shader_intrinsics_pass(nir, lower_non_monolithic_uniforms,
+                                     nir_metadata_control_flow, &nr);
+}
+
+static bool
+lower_adjacency(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   const struct agx_vs_prolog_key *key = data;
+   b->cursor = nir_before_instr(&intr->instr);
+
+   if (intr->intrinsic != nir_intrinsic_load_vertex_id)
+      return false;
+
+   nir_def *id = nir_load_vertex_id(b);
+
+   if (key->adjacency == MESA_PRIM_LINES_ADJACENCY) {
+      id = poly_map_to_line_adj(b, id);
+   } else if (key->adjacency == MESA_PRIM_TRIANGLE_STRIP_ADJACENCY) {
+      id = poly_map_to_tri_strip_adj(b, id);
+   } else if (key->adjacency == MESA_PRIM_LINE_STRIP_ADJACENCY) {
+      id = poly_map_to_line_strip_adj(b, id);
+   } else if (key->adjacency == MESA_PRIM_TRIANGLES_ADJACENCY) {
+      /* Sequence (0, 2, 4), (6, 8, 10), ... */
+      id = nir_imul_imm(b, id, 2);
+   } else {
+      UNREACHABLE("unknown");
+   }
+
+   id = poly_nir_load_vertex_id(b, id);
+
+   nir_def_replace(&intr->def, id);
+   return true;
 }
 
 void
@@ -148,40 +178,91 @@ agx_nir_vs_prolog(nir_builder *b, const void *key_)
    /* First, construct a passthrough shader reading each attribute and exporting
     * the value. We also need to export vertex/instance ID in their usual regs.
     */
-   unsigned i = 0;
-   nir_def *vec = NULL;
-   unsigned vec_idx = ~0;
-   BITSET_FOREACH_SET(i, key->component_mask, AGX_MAX_ATTRIBS * 4) {
-      unsigned a = i / 4;
-      unsigned c = i % 4;
+   if (!key->static_vi) {
+      unsigned i = 0;
+      nir_def *vec = NULL;
+      unsigned vec_idx = ~0;
+      BITSET_FOREACH_SET(i, key->component_mask, AGX_MAX_ATTRIBS * 4) {
+         unsigned a = i / 4;
+         unsigned c = i % 4;
 
-      if (vec_idx != a) {
-         vec = nir_load_input(b, 4, 32, nir_imm_int(b, 0), .base = a);
-         vec_idx = a;
+         if (vec_idx != a) {
+            vec = nir_load_input(b, 4, 32, nir_imm_int(b, 0), .base = a);
+            vec_idx = a;
+         }
+
+         nir_export_agx(b, nir_channel(b, vec, c),
+                        .base = AGX_ABI_VIN_ATTRIB(i));
       }
+   }
 
-      nir_export_agx(b, nir_channel(b, vec, c), .base = AGX_ABI_VIN_ATTRIB(i));
+   if (!key->hw) {
+      nir_export_agx(b, nir_channel(b, nir_load_global_invocation_id(b, 32), 0),
+                     .base = AGX_ABI_VIN_VERTEX_ID_ZERO_BASE);
    }
 
    nir_export_agx(b, nir_load_vertex_id(b), .base = AGX_ABI_VIN_VERTEX_ID);
    nir_export_agx(b, nir_load_instance_id(b), .base = AGX_ABI_VIN_INSTANCE_ID);
 
    /* Now lower the resulting program using the key */
-   lower_vbo(b->shader, key->attribs, key->robustness);
+   if (!key->static_vi) {
+      agx_nir_lower_vbo(b->shader, key->attribs, key->robustness, false);
+
+      /* Clean up redundant vertex ID loads */
+      if (!key->hw || key->adjacency) {
+         NIR_PASS(_, b->shader, nir_opt_cse);
+         NIR_PASS(_, b->shader, nir_opt_dce);
+      }
+   }
 
    if (!key->hw) {
-      agx_nir_lower_sw_vs(b->shader, key->sw_index_size_B);
+      b->cursor = nir_before_impl(nir_shader_get_entrypoint(b->shader));
+      poly_nir_lower_sw_vs(b->shader);
+   } else if (key->adjacency) {
+      nir_shader_intrinsics_pass(b->shader, lower_adjacency,
+                                 nir_metadata_control_flow, (void *)key);
    }
+   nir_inline_sysval(b->shader, nir_intrinsic_load_index_size_poly,
+                     key->sw_index_size_B);
 
    /* Finally, lower uniforms according to our ABI */
    unsigned nr = DIV_ROUND_UP(BITSET_LAST_BIT(key->component_mask), 4);
-   nir_shader_intrinsics_pass(b->shader, lower_non_monolithic_uniforms,
-                              nir_metadata_control_flow, &nr);
+   agx_nir_lower_non_monolithic_uniforms(b->shader, nr);
    b->shader->info.io_lowered = true;
 }
 
 static bool
-lower_input_to_prolog(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+gather_inputs(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_input)
+      return false;
+
+   unsigned idx = nir_src_as_uint(intr->src[0]) + nir_intrinsic_base(intr);
+   unsigned comp = nir_intrinsic_component(intr);
+
+   assert(intr->def.bit_size == 32 && "todo: push conversions up?");
+   unsigned base = 4 * idx + comp;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   BITSET_WORD *comps_read = data;
+   nir_component_mask_t mask = nir_def_components_read(&intr->def);
+
+   u_foreach_bit(c, mask) {
+      BITSET_SET(comps_read, base + c);
+   }
+
+   return false;
+}
+
+bool
+agx_nir_gather_vs_inputs(nir_shader *s, BITSET_WORD *attrib_components_read)
+{
+   return nir_shader_intrinsics_pass(
+      s, gather_inputs, nir_metadata_control_flow, attrib_components_read);
+}
+
+static bool
+lower_input_to_prolog(nir_builder *b, nir_intrinsic_instr *intr, void *_data)
 {
    if (intr->intrinsic != nir_intrinsic_load_input)
       return false;
@@ -197,24 +278,15 @@ lower_input_to_prolog(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       nir_load_exported_agx(b, intr->def.num_components, intr->def.bit_size,
                             .base = AGX_ABI_VIN_ATTRIB(base));
 
-   BITSET_WORD *comps_read = data;
-   nir_component_mask_t mask = nir_def_components_read(&intr->def);
-
-   u_foreach_bit(c, mask) {
-      BITSET_SET(comps_read, base + c);
-   }
-
    nir_def_replace(&intr->def, val);
    return true;
 }
 
 bool
-agx_nir_lower_vs_input_to_prolog(nir_shader *s,
-                                 BITSET_WORD *attrib_components_read)
+agx_nir_lower_vs_input_to_prolog(nir_shader *s)
 {
    return nir_shader_intrinsics_pass(s, lower_input_to_prolog,
-                                     nir_metadata_control_flow,
-                                     attrib_components_read);
+                                     nir_metadata_control_flow, NULL);
 }
 
 static bool
@@ -348,20 +420,21 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
       key->rt_formats, ARRAY_SIZE(key->rt_formats), key->nr_samples, true);
 
    if (key->force_small_tile)
-      tib.tile_size = (struct agx_tile_size){16, 16};
+      tib.tile_size = 16 * 16;
 
    bool force_translucent = false;
    nir_lower_blend_options opts = {
       .scalar_blend_const = true,
-      .logicop_enable = key->blend.logicop_func != PIPE_LOGICOP_COPY,
+      .logicop_enable = key->blend.logicop_enable,
       .logicop_func = key->blend.logicop_func,
    };
 
-   static_assert(ARRAY_SIZE(opts.format) == 8, "max RTs out of sync");
+   static_assert(ARRAY_SIZE(opts.rt) == 8, "max RTs out of sync");
 
    for (unsigned i = 0; i < 8; ++i) {
-      opts.format[i] = key->rt_formats[i];
       opts.rt[i] = (nir_lower_blend_rt){
+         .format = key->rt_formats[i],
+
          .rgb.src_factor = key->blend.rt[i].rgb_src_factor,
          .rgb.dst_factor = key->blend.rt[i].rgb_dst_factor,
          .rgb.func = key->blend.rt[i].rgb_func,
@@ -384,11 +457,7 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
       if (key->rt_formats[i] == PIPE_FORMAT_NONE)
          continue;
 
-      /* TODO: Flakes some dEQPs, seems to invoke UB. Revisit later.
-       * dEQP-GLES2.functional.fragment_ops.interaction.basic_shader.77
-       * dEQP-GLES2.functional.fragment_ops.interaction.basic_shader.98
-       */
-      if (0 /* agx_tilebuffer_supports_mask(&tib, i) */) {
+      if (agx_tilebuffer_supports_mask(&tib, i)) {
          colormasks[i] = key->blend.rt[i].colormask;
          opts.rt[i].colormask = (uint8_t)BITFIELD_MASK(4);
       } else {
@@ -408,7 +477,8 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
 
    /* Alpha-to-coverage must be lowered before alpha-to-one */
    if (key->blend.alpha_to_coverage)
-      NIR_PASS(_, b->shader, agx_nir_lower_alpha_to_coverage, tib.nr_samples);
+      NIR_PASS(_, b->shader, nir_lower_alpha_to_coverage, tib.nr_samples, false,
+               NULL);
 
    /* Depth/stencil writes must be deferred until after all discards,
     * particularly alpha-to-coverage.
@@ -429,14 +499,14 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
 
    /* Alpha-to-one must be lowered before blending */
    if (key->blend.alpha_to_one)
-      NIR_PASS(_, b->shader, agx_nir_lower_alpha_to_one);
+      NIR_PASS(_, b->shader, nir_lower_alpha_to_one);
 
    NIR_PASS(_, b->shader, nir_lower_blend, &opts);
 
    unsigned rt_spill = key->link.rt_spill_base;
    NIR_PASS(_, b->shader, agx_nir_lower_tilebuffer, &tib, colormasks, &rt_spill,
             write_samples, &force_translucent);
-   NIR_PASS(_, b->shader, agx_nir_lower_texture, false);
+   NIR_PASS(_, b->shader, agx_nir_lower_texture);
    NIR_PASS(_, b->shader, agx_nir_lower_multisampled_image_store);
 
    /* If the API shader runs once per sample, then the epilog runs once per
@@ -511,7 +581,7 @@ lower_output_to_epilog(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       return true;
    }
 
-   if (intr->intrinsic == nir_intrinsic_discard_agx &&
+   if (intr->intrinsic == nir_intrinsic_demote_samples &&
        b->shader->info.fs.early_fragment_tests) {
 
       if (!ctx->masked_samples) {
@@ -641,12 +711,11 @@ agx_nir_lower_stats_fs(nir_shader *s)
    nir_def *samples = nir_bit_count(b, nir_load_sample_mask_in(b));
    unsigned query = PIPE_STAT_QUERY_PS_INVOCATIONS;
 
-   nir_def *addr = nir_load_stat_query_address_agx(b, .base = query);
+   nir_def *addr = nir_load_stat_query_address_poly(b, .base = query);
    nir_global_atomic(b, 32, addr, samples, .atomic_op = nir_atomic_op_iadd);
 
    nir_pop_if(b, NULL);
-   nir_metadata_preserve(b->impl, nir_metadata_control_flow);
-   return true;
+   return nir_progress(true, b->impl, nir_metadata_control_flow);
 }
 
 void
@@ -659,7 +728,7 @@ agx_nir_fs_prolog(nir_builder *b, const void *key_)
    /* First, insert code for any emulated features */
    if (key->api_sample_mask != 0xff) {
       /* Kill samples that are NOT covered by the mask */
-      nir_discard_agx(b, nir_imm_intN_t(b, key->api_sample_mask ^ 0xff, 16));
+      nir_demote_samples(b, nir_imm_intN_t(b, key->api_sample_mask ^ 0xff, 16));
       b->shader->info.fs.uses_discard = true;
    }
 
@@ -673,7 +742,7 @@ agx_nir_fs_prolog(nir_builder *b, const void *key_)
    }
 
    if (key->polygon_stipple) {
-      NIR_PASS_V(b->shader, agx_nir_lower_poly_stipple);
+      NIR_PASS(_, b->shader, agx_nir_lower_poly_stipple);
    }
 
    /* Then, lower the prolog */

@@ -32,22 +32,8 @@
  *  multi plane overlay (MPO) and deliver more power efficient use cases.
  *
  *
- *  @section main_api Main API Functions
- *  @subsection create VPE Create
- *  @link vpe_create @endlink
- *  @subsection destroy VPE Destroy
- *  @link vpe_destroy @endlink
- *  @subsection check_support VPE Check Support
- *  @link vpe_check_support @endlink
- *  @subsection vpe_build_noops VPE Build No-Operation Commands
- *  @link vpe_build_noops @endlink
- *  @subsection build_commands VPE Build Commands
- *  @link vpe_build_commands @endlink
- *  @subsection get_optimal_num_of_taps VPE Get the Optimal Number of Taps
- *  @link vpe_get_optimal_num_of_taps @endlink
- *  @file         vpelib.h
  *  @brief        This is the file containing the main API for the VPE library.
- *
+ *  @file         vpelib.h
  */
 
 #pragma once
@@ -59,7 +45,9 @@
 extern "C" {
 #endif
 
-/** @brief Create the VPE lib instance.
+/**
+ * @function vpe_create
+ * @brief Create the VPE lib instance.
  *
  * Caler provides the current asic info,
  * logging and system memory APIs.
@@ -135,6 +123,48 @@ enum vpe_status vpe_build_commands(
  * @param[in,out]  scaling_info  [in] source and destination rectangles [out] calculated taps.
  */
 void vpe_get_optimal_num_of_taps(struct vpe *vpe, struct vpe_scaling_info *scaling_info);
+
+/**
+ * @brief
+ *  Build the command descriptor for timestamp operation
+ *  gets global gpu timestamp and writes it to the given gpu address
+ *
+ * @param[in,out]  buf            [in]  memory allocated for the command buffer.
+ *                                If size is 0, it reports the required size for this checked
+ *                                operation. [out] the next write address and the filled sizes.
+ * @param[in]      dst_address    address where the data is written to
+ * @return status
+ */
+enum vpe_status vpe_build_timestamp(struct vpe_buf *buf, uint64_t dst_address);
+
+/**
+ * @brief
+ *  Build the command descriptor for resolve operation
+ *  copies the data from the read address to the write address to the number of dwords specified.
+ *
+ * @param[in,out]  buf            [in] memory allocated for the command buffer.
+ *                                If size is 0, it reports the required size for this checked
+ *                                operation. [out] the next write address and the filled sizes.
+ * @param[in]      read_addr      GPU virtual address where the data is read from
+ * @param[in]      write_addr     GPU virtual address where the data is written to
+ * @param[in]      dword_count    number of dwords to be copierd
+ * @return status
+ */
+enum vpe_status vpe_build_resolve_query(
+    struct vpe_buf *buf, uint64_t read_addr, uint64_t write_addr, uint32_t dword_count);
+
+/**
+ * @brief create the vpe engine instance.
+ * @param[in] param  provide the asic version.
+ * @return           vpe engine instance if valid. NULL otherwise
+ */
+const struct vpe_engine *vpe_create_engine(struct vpe_init_data *param);
+
+/**
+ * destroy the vpe engine instance.
+ * @param[in] engine  vpe engine instance created by vpe_create_engine()
+ */
+void vpe_destroy_engine(struct vpe_engine **engine);
 
 #ifdef __cplusplus
 }

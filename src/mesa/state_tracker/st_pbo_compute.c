@@ -630,7 +630,7 @@ do_shader_conversion(nir_builder *b, nir_def *pixel,
 static nir_shader *
 create_conversion_shader(struct st_context *st, enum pipe_texture_target target, unsigned num_components)
 {
-   const nir_shader_compiler_options *options = st_get_nir_compiler_options(st, MESA_SHADER_COMPUTE);
+   const nir_shader_compiler_options *options = st->screen->nir_options[MESA_SHADER_COMPUTE];
    nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, options, "%s", "convert");
    b.shader->info.workgroup_size[0] = target != PIPE_TEXTURE_1D ? 8 : 64;
    b.shader->info.workgroup_size[1] = target != PIPE_TEXTURE_1D ? 8 : 1;
@@ -683,6 +683,7 @@ create_conversion_shader(struct st_context *st, enum pipe_texture_target target,
    txf->coord_components = coord_components;
    txf->texture_index = 0;
    txf->sampler_index = 0;
+   txf->can_speculate = true;
    txf->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
    txf->src[1] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(&b, 0));
    txf->src[2].src_type = nir_tex_src_texture_deref;
@@ -1003,15 +1004,16 @@ download_texture_compute(struct st_context *st,
    assert(cs);
    struct cso_context *cso = st->cso_context;
 
-   pipe->set_constant_buffer(pipe, PIPE_SHADER_COMPUTE, 0, false, &cb);
+   struct pipe_resource *releasebuf = NULL;
+   pipe_upload_constant_buffer0(st->pipe, MESA_SHADER_COMPUTE, &cb, &releasebuf);
 
    cso_save_compute_state(cso, CSO_BIT_COMPUTE_SHADER | CSO_BIT_COMPUTE_SAMPLERS);
    cso_set_compute_shader_handle(cso, cs);
 
    /* Set up the sampler_view */
+   struct pipe_sampler_view *sampler_view = NULL;
    {
       struct pipe_sampler_view templ;
-      struct pipe_sampler_view *sampler_view;
       struct pipe_sampler_state sampler = {0};
       const struct pipe_sampler_state *samplers[1] = {&sampler};
       const struct util_format_description *desc = util_format_description(dst_format);
@@ -1111,14 +1113,12 @@ download_texture_compute(struct st_context *st,
       if (sampler_view == NULL)
          goto fail;
 
-      pipe->set_sampler_views(pipe, PIPE_SHADER_COMPUTE, 0, 1, 0, false,
+      pipe->set_sampler_views(pipe, MESA_SHADER_COMPUTE, 0, 1, 0,
                               &sampler_view);
-      st->state.num_sampler_views[PIPE_SHADER_COMPUTE] =
-         MAX2(st->state.num_sampler_views[PIPE_SHADER_COMPUTE], 1);
+      st->state.num_sampler_views[MESA_SHADER_COMPUTE] =
+         MAX2(st->state.num_sampler_views[MESA_SHADER_COMPUTE], 1);
 
-      pipe_sampler_view_reference(&sampler_view, NULL);
-
-      cso_set_samplers(cso, PIPE_SHADER_COMPUTE, 1, samplers);
+      cso_set_samplers(cso, MESA_SHADER_COMPUTE, 1, samplers);
    }
 
    /* Set up destination buffer */
@@ -1127,7 +1127,7 @@ download_texture_compute(struct st_context *st,
                          src->target == PIPE_TEXTURE_CUBE_ARRAY ?
                          /* only use image stride for 3d images to avoid pulling in IMAGE_HEIGHT pixelstore */
                          _mesa_image_image_stride(pack, width, height, format, type) :
-                         _mesa_image_row_stride(pack, width, format, type) * height;
+                         (size_t)_mesa_image_row_stride(pack, width, format, type) * height;
    intptr_t buffer_size = (depth + (dim == 3 ? pack->SkipImages : 0)) * img_stride;
    assert(buffer_size <= UINT32_MAX);
    {
@@ -1144,7 +1144,7 @@ download_texture_compute(struct st_context *st,
       buffer.buffer = dst;
       buffer.buffer_size = buffer_size;
 
-      pipe->set_shader_buffers(pipe, PIPE_SHADER_COMPUTE, 0, 1, &buffer, 0x1);
+      pipe->set_shader_buffers(pipe, MESA_SHADER_COMPUTE, 0, 1, &buffer, 0x1);
    }
 
    struct pipe_grid_info info = { 0 };
@@ -1159,21 +1159,23 @@ download_texture_compute(struct st_context *st,
 
    pipe->launch_grid(pipe, &info);
 
+   st->pipe->sampler_view_release(st->pipe, sampler_view);
 fail:
    cso_restore_compute_state(cso);
 
    /* Unbind all because st/mesa won't do it if the current shader doesn't
     * use them.
     */
-   pipe->set_sampler_views(pipe, PIPE_SHADER_COMPUTE, 0, 0,
-                           st->state.num_sampler_views[PIPE_SHADER_COMPUTE],
-                           false, NULL);
-   st->state.num_sampler_views[PIPE_SHADER_COMPUTE] = 0;
-   pipe->set_shader_buffers(pipe, PIPE_SHADER_COMPUTE, 0, 1, NULL, 0);
+   pipe->set_sampler_views(pipe, MESA_SHADER_COMPUTE, 0, 0,
+                           st->state.num_sampler_views[MESA_SHADER_COMPUTE],
+                           NULL);
+   st->state.num_sampler_views[MESA_SHADER_COMPUTE] = 0;
+   pipe->set_shader_buffers(pipe, MESA_SHADER_COMPUTE, 0, 1, NULL, 0);
 
-   st->ctx->NewDriverState |= ST_NEW_CS_CONSTANTS |
-                              ST_NEW_CS_SSBOS |
-                              ST_NEW_CS_SAMPLER_VIEWS;
+   ST_SET_STATE3(st->ctx->NewDriverState, ST_NEW_CS_CONSTANTS,
+                 ST_NEW_CS_SSBOS, ST_NEW_CS_SAMPLER_VIEWS);
+
+   pipe_resource_release(pipe, releasebuf);
 
    return dst;
 }
@@ -1305,11 +1307,12 @@ st_GetTexSubImage_shader(struct gl_context * ctx,
       return false;
 
    view_target = get_target_from_texture(src);
-   /* I don't know why this works
-    * only for the texture rects
-    * but that's how it is
-    */
-   if ((src->target != PIPE_TEXTURE_RECT &&
+
+   /* 64K x 64K aren't supported by the shader (pbo_data::width/height have 16 bits) */
+   if (width >= UINT16_MAX || height >= UINT16_MAX ||
+       /* I don't know why this works only for the texture rects
+        * but that's how it is. */
+       (src->target != PIPE_TEXTURE_RECT &&
        /* this would need multiple samplerviews */
        ((util_format_is_depth_and_stencil(src_format) && util_format_is_depth_and_stencil(dst_format)) ||
        /* these format just doesn't work and science can't explain why */
@@ -1360,7 +1363,7 @@ st_pbo_compute_deinit(struct st_context *st)
             }
             free(spec);
          }
-         ralloc_free(async->specialized.table);
+         _mesa_set_fini(&async->specialized, NULL);
          free(async);
       } else {
          st->pipe->delete_compute_state(st->pipe, entry->data);

@@ -107,8 +107,11 @@ v3d_memory_barrier(struct pipe_context *pctx, unsigned int flags)
 		return;
 
         /* We only need to flush jobs writing to SSBOs/images. */
-        perf_debug("Flushing all jobs for glMemoryBarrier(), could do better");
-        v3d_flush(pctx);
+        hash_table_foreach(v3d->jobs, entry) {
+                struct v3d_job *job = entry->data;
+                if (job->tmu_dirty_rcl)
+                        v3d_job_submit(v3d, job);
+        }
 }
 
 static void
@@ -126,13 +129,13 @@ v3d_invalidate_resource(struct pipe_context *pctx, struct pipe_resource *prsc)
                 return;
 
         struct v3d_job *job = entry->data;
-        if (job->key.zsbuf && job->key.zsbuf->texture == prsc) {
+        if (job->zsbuf.texture && job->zsbuf.texture == prsc) {
                 job->store &= ~(PIPE_CLEAR_DEPTH | PIPE_CLEAR_STENCIL);
                 return;
         }
 
         for (int i = 0; i < job->nr_cbufs; i++) {
-                if (job->cbufs[i] && job->cbufs[i]->texture == prsc) {
+                if (job->cbufs[i].texture && job->cbufs[i].texture == prsc) {
                         job->store &= ~(PIPE_CLEAR_COLOR0 << i);
                         return;
                 }
@@ -187,8 +190,8 @@ v3d_line_smoothing_enabled(struct v3d_context *v3d)
         if (v3d->framebuffer.nr_cbufs <= 0)
                 return false;
 
-        struct pipe_surface *cbuf = v3d->framebuffer.cbufs[0];
-        if (!cbuf)
+        const struct pipe_surface *cbuf = &v3d->framebuffer.cbufs[0];
+        if (!cbuf->texture)
                 return false;
 
         /* Modifying the alpha for pure integer formats probably
@@ -225,7 +228,7 @@ v3d_ensure_prim_counts_allocated(struct v3d_context *ctx)
 
         /* Init all 7 counters and 1 padding to 0 */
         uint32_t zeroes[8] = { 0 };
-        u_upload_data(ctx->uploader,
+        u_upload_data_ref(ctx->uploader,
                       0, sizeof(zeroes), 32, zeroes,
                       &ctx->prim_counts_offset,
                       &ctx->prim_counts);
@@ -233,23 +236,23 @@ v3d_ensure_prim_counts_allocated(struct v3d_context *ctx)
 
 void
 v3d_flag_dirty_sampler_state(struct v3d_context *v3d,
-                             enum pipe_shader_type shader)
+                             mesa_shader_stage shader)
 {
         switch (shader) {
-        case PIPE_SHADER_VERTEX:
+        case MESA_SHADER_VERTEX:
                 v3d->dirty |= V3D_DIRTY_VERTTEX;
                 break;
-        case PIPE_SHADER_GEOMETRY:
+        case MESA_SHADER_GEOMETRY:
                 v3d->dirty |= V3D_DIRTY_GEOMTEX;
                 break;
-        case PIPE_SHADER_FRAGMENT:
+        case MESA_SHADER_FRAGMENT:
                 v3d->dirty |= V3D_DIRTY_FRAGTEX;
                 break;
-        case PIPE_SHADER_COMPUTE:
+        case MESA_SHADER_COMPUTE:
                 v3d->dirty |= V3D_DIRTY_COMPTEX;
                 break;
         default:
-                unreachable("Unsupported shader stage");
+                UNREACHABLE("Unsupported shader stage");
         }
 }
 
@@ -258,7 +261,7 @@ v3d_get_tile_buffer_size(const struct v3d_device_info *devinfo,
                          bool is_msaa,
                          bool double_buffer,
                          uint32_t nr_cbufs,
-                         struct pipe_surface **cbufs,
+                         struct pipe_surface *cbufs,
                          struct pipe_surface *bbuf,
                          uint32_t *tile_width,
                          uint32_t *tile_height,
@@ -270,19 +273,27 @@ v3d_get_tile_buffer_size(const struct v3d_device_info *devinfo,
         uint32_t total_bpp = 0;
         *max_bpp = 0;
         for (int i = 0; i < nr_cbufs; i++) {
-                if (cbufs[i]) {
-                        struct v3d_surface *surf = v3d_surface(cbufs[i]);
-                        *max_bpp = MAX2(*max_bpp, surf->internal_bpp);
-                        total_bpp += 4 * v3d_internal_bpp_words(surf->internal_bpp);
+                if (cbufs[i].texture) {
+                        uint8_t internal_bpp;
+                        v3d_format_get_internal_type_and_bpp(devinfo,
+                                                             cbufs[i].format,
+                                                             NULL,
+                                                             &internal_bpp);
+                        *max_bpp = MAX2(*max_bpp, internal_bpp);
+                        total_bpp += 4 * v3d_internal_bpp_words(internal_bpp);
                         max_cbuf_idx = MAX2(i, max_cbuf_idx);
                 }
         }
-
-        if (bbuf) {
-                struct v3d_surface *bsurf = v3d_surface(bbuf);
+        assert(bbuf);
+        if (bbuf->texture) {
+                uint8_t internal_bpp;
+                v3d_format_get_internal_type_and_bpp(devinfo,
+                                                     bbuf->format,
+                                                     NULL,
+                                                     &internal_bpp);
                 assert(bbuf->texture->nr_samples <= 1 || is_msaa);
-                *max_bpp = MAX2(*max_bpp, bsurf->internal_bpp);
-                total_bpp += 4 * v3d_internal_bpp_words(bsurf->internal_bpp);
+                *max_bpp = MAX2(*max_bpp, internal_bpp);
+                total_bpp += 4 * v3d_internal_bpp_words(internal_bpp);
         }
 
         v3d_choose_tile_size(devinfo, max_cbuf_idx + 1,
@@ -297,6 +308,10 @@ v3d_context_destroy(struct pipe_context *pctx)
         struct v3d_context *v3d = v3d_context(pctx);
 
         v3d_flush(pctx);
+
+        /* Make sure all jobs are done before destroying the context */
+        drmSyncobjWait(v3d->fd, &v3d->out_sync, 1, INT64_MAX,
+                       DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL, NULL);
 
         util_dynarray_foreach(&v3d->global_buffers, struct pipe_resource *, res) {
                 pipe_resource_reference(res, NULL);
@@ -349,6 +364,38 @@ v3d_get_sample_position(struct pipe_context *pctx,
                 xy[0] = 0.5 + xoffsets[sample_index] * .125;
                 xy[1] = .125 + sample_index * .25;
         }
+}
+
+static uint32_t
+v3d_get_reset_count(struct v3d_context *v3d, bool per_context)
+{
+        struct drm_v3d_get_param reset_counter = {
+                .param = per_context ? DRM_V3D_PARAM_CONTEXT_RESET_COUNTER :
+                                       DRM_V3D_PARAM_GLOBAL_RESET_COUNTER,
+        };
+        ASSERTED int ret =
+                v3d_ioctl(v3d->fd, DRM_IOCTL_V3D_GET_PARAM, &reset_counter);
+        assert(!ret);
+
+        return reset_counter.value;
+}
+
+static enum pipe_reset_status
+v3d_get_device_reset_status(struct pipe_context *pctx)
+{
+        struct v3d_context *v3d = v3d_context(pctx);
+
+        uint32_t global_reset_count = v3d_get_reset_count(v3d, false);
+        if (global_reset_count == v3d->global_reset_count)
+                return PIPE_NO_RESET;
+        v3d->global_reset_count = global_reset_count;
+
+        uint32_t context_reset_count = v3d_get_reset_count(v3d, true);
+        if (context_reset_count == v3d->context_reset_count)
+                return PIPE_INNOCENT_CONTEXT_RESET;
+        v3d->context_reset_count = context_reset_count;
+
+        return PIPE_GUILTY_CONTEXT_RESET;
 }
 
 bool
@@ -417,6 +464,13 @@ v3d_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
         v3d->fd = screen->fd;
 
         slab_create_child(&v3d->transfer_pool, &screen->transfer_pool);
+
+        v3d->robust_buffer = flags & PIPE_CONTEXT_ROBUST_BUFFER_ACCESS;
+        if (screen->devinfo.has_reset_counter) {
+                pctx->get_device_reset_status = v3d_get_device_reset_status;
+                v3d->global_reset_count = v3d_get_reset_count(v3d, false);
+                v3d->context_reset_count = v3d_get_reset_count(v3d, true);
+        }
 
         v3d->uploader = u_upload_create_default(&v3d->base);
         v3d->base.stream_uploader = v3d->uploader;

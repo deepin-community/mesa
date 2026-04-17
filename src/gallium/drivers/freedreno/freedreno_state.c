@@ -102,15 +102,15 @@ fd_set_sample_locations(struct pipe_context *pctx, size_t size,
 static void
 fd_set_min_samples(struct pipe_context *pctx, unsigned min_samples) in_dt
 {
-   struct fd_context *ctx = fd_context(pctx);
-   ctx->min_samples = min_samples;
-   fd_context_dirty(ctx, FD_DIRTY_MIN_SAMPLES);
+   /* We don't need to track min_samples, because the frontend lowers it to
+    * info->fs.uses_sample_shading for us.
+    */
 }
 
 static void
 upload_user_buffer(struct pipe_context *pctx, struct pipe_constant_buffer *cb)
 {
-   u_upload_data(pctx->stream_uploader, 0, cb->buffer_size, 64,
+   u_upload_data_ref(pctx->stream_uploader, 0, cb->buffer_size, 64,
                  cb->user_buffer, &cb->buffer_offset, &cb->buffer);
    cb->user_buffer = NULL;
 }
@@ -124,14 +124,14 @@ upload_user_buffer(struct pipe_context *pctx, struct pipe_constant_buffer *cb)
  * index>0 will be UBO's.. well, I'll worry about that later
  */
 static void
-fd_set_constant_buffer(struct pipe_context *pctx, enum pipe_shader_type shader,
-                       uint index, bool take_ownership,
+fd_set_constant_buffer(struct pipe_context *pctx, mesa_shader_stage shader,
+                       uint index,
                        const struct pipe_constant_buffer *cb) in_dt
 {
    struct fd_context *ctx = fd_context(pctx);
    struct fd_constbuf_stateobj *so = &ctx->constbuf[shader];
 
-   util_copy_constant_buffer(&so->cb[index], cb, take_ownership);
+   util_copy_constant_buffer(&so->cb[index], cb);
 
    /* Note that gallium frontends can unbind constant buffers by
     * passing a NULL cb, or a cb with no buffer:
@@ -154,7 +154,7 @@ fd_set_constant_buffer(struct pipe_context *pctx, enum pipe_shader_type shader,
 }
 
 void
-fd_set_shader_buffers(struct pipe_context *pctx, enum pipe_shader_type shader,
+fd_set_shader_buffers(struct pipe_context *pctx, mesa_shader_stage shader,
                       unsigned start, unsigned count,
                       const struct pipe_shader_buffer *buffers,
                       unsigned writable_bitmask) in_dt
@@ -200,7 +200,7 @@ fd_set_shader_buffers(struct pipe_context *pctx, enum pipe_shader_type shader,
 }
 
 void
-fd_set_shader_images(struct pipe_context *pctx, enum pipe_shader_type shader,
+fd_set_shader_images(struct pipe_context *pctx, mesa_shader_stage shader,
                      unsigned start, unsigned count,
                      unsigned unbind_num_trailing_slots,
                      const struct pipe_image_view *images) in_dt
@@ -300,10 +300,10 @@ fd_set_framebuffer_state(struct pipe_context *pctx,
     * created.
     */
    for (unsigned i = 0; i < framebuffer->nr_cbufs; i++) {
-      if (!framebuffer->cbufs[i])
+      if (!framebuffer->cbufs[i].texture)
          continue;
 
-      enum pipe_format format = framebuffer->cbufs[i]->format;
+      enum pipe_format format = framebuffer->cbufs[i].format;
       unsigned nr = util_format_get_nr_components(format);
 
       ctx->all_mrt_channel_mask |= BITFIELD_MASK(nr) << (4 * i);
@@ -325,7 +325,7 @@ fd_set_framebuffer_state(struct pipe_context *pctx,
       fd_batch_reference(&old_batch, NULL);
    } else if (ctx->batch) {
       DBG("%d: cbufs[0]=%p, zsbuf=%p", ctx->batch->needs_flush,
-          framebuffer->cbufs[0], framebuffer->zsbuf);
+          framebuffer->cbufs[0].texture, framebuffer->zsbuf.texture);
       fd_batch_flush(ctx->batch);
    }
 
@@ -472,8 +472,7 @@ fd_set_vertex_buffers(struct pipe_context *pctx, unsigned count,
       }
    }
 
-   util_set_vertex_buffers_mask(so->vb, &so->enabled_mask, vb, count,
-                                true);
+   util_set_vertex_buffers_mask(so->vb, &so->enabled_mask, vb, count);
    so->count = util_last_bit(so->enabled_mask);
 
    if (!vb)
@@ -653,7 +652,8 @@ fd_stream_output_target_destroy(struct pipe_context *pctx,
 static void
 fd_set_stream_output_targets(struct pipe_context *pctx, unsigned num_targets,
                              struct pipe_stream_output_target **targets,
-                             const unsigned *offsets) in_dt
+                             const unsigned *offsets,
+                             enum mesa_prim output_prim) in_dt
 {
    struct fd_context *ctx = fd_context(pctx);
    struct fd_streamout_stateobj *so = &ctx->streamout;
@@ -713,39 +713,7 @@ fd_bind_compute_state(struct pipe_context *pctx, void *state) in_dt
 {
    struct fd_context *ctx = fd_context(pctx);
    ctx->compute = state;
-   fd_context_dirty_shader(ctx, PIPE_SHADER_COMPUTE, FD_DIRTY_SHADER_PROG);
-}
-
-/* TODO pipe_context::set_compute_resources() should DIAF and clover
- * should be updated to use pipe_context::set_constant_buffer() and
- * pipe_context::set_shader_images().  Until then just directly frob
- * the UBO/image state to avoid the rest of the driver needing to
- * know about this bastard api..
- */
-static void
-fd_set_compute_resources(struct pipe_context *pctx, unsigned start,
-                         unsigned count, struct pipe_surface **prscs) in_dt
-{
-   struct fd_context *ctx = fd_context(pctx);
-   struct fd_constbuf_stateobj *so = &ctx->constbuf[PIPE_SHADER_COMPUTE];
-
-   for (unsigned i = 0; i < count; i++) {
-      const uint32_t index = i + start + 1;   /* UBOs start at index 1 */
-
-      if (!prscs) {
-         util_copy_constant_buffer(&so->cb[index], NULL, false);
-         so->enabled_mask &= ~(1 << index);
-      } else if (prscs[i]->format == PIPE_FORMAT_NONE) {
-         struct pipe_constant_buffer cb = {
-               .buffer = prscs[i]->texture,
-         };
-         util_copy_constant_buffer(&so->cb[index], &cb, false);
-         so->enabled_mask |= (1 << index);
-      } else {
-         // TODO images
-         unreachable("finishme");
-      }
-   }
+   fd_context_dirty_shader(ctx, MESA_SHADER_COMPUTE, FD_DIRTY_SHADER_PROG);
 }
 
 /* used by clover to bind global objects, returning the bo address
@@ -756,40 +724,35 @@ fd_set_global_binding(struct pipe_context *pctx, unsigned first, unsigned count,
                       struct pipe_resource **prscs, uint32_t **handles) in_dt
 {
    struct fd_context *ctx = fd_context(pctx);
-   struct fd_global_bindings_stateobj *so = &ctx->global_bindings;
-   unsigned mask = 0;
+   unsigned old_size = util_dynarray_num_elements(&ctx->global_bindings, *prscs);
 
-   if (prscs) {
-      for (unsigned i = 0; i < count; i++) {
-         unsigned n = i + first;
+   if (old_size < first + count) {
+      /* we are screwed no matter what */
+      if (!util_dynarray_grow(&ctx->global_bindings, *prscs,
+                              (first + count) - old_size))
+         UNREACHABLE("out of memory");
 
-         mask |= BIT(n);
+      for (unsigned i = old_size; i < first + count; i++)
+         *util_dynarray_element(&ctx->global_bindings,
+                                struct pipe_resource *, i) = NULL;
+   }
 
-         pipe_resource_reference(&so->buf[n], prscs[i]);
+   for (unsigned i = first; i < first + count; ++i) {
+      struct pipe_resource **res = util_dynarray_element(&ctx->global_bindings,
+                                                         struct pipe_resource *,
+                                                         first + i);
+      if (prscs && prscs[i]) {
+         pipe_resource_reference(res, prscs[i]);
 
-         if (so->buf[n]) {
-            struct fd_resource *rsc = fd_resource(so->buf[n]);
-            uint32_t offset = *handles[i];
-            uint64_t iova = fd_bo_get_iova(rsc->bo) + offset;
+         struct fd_resource *rsc = fd_resource(prscs[i]);
+         uint32_t offset = *handles[i];
+         uint64_t iova = fd_bo_get_iova(rsc->bo) + offset;
 
-            /* Yes, really, despite what the type implies: */
-            memcpy(handles[i], &iova, sizeof(iova));
-         }
-
-         if (prscs[i])
-            so->enabled_mask |= BIT(n);
-         else
-            so->enabled_mask &= ~BIT(n);
+         /* Yes, really, despite what the type implies: */
+         memcpy(handles[i], &iova, sizeof(iova));
+      } else {
+         pipe_resource_reference(res, NULL);
       }
-   } else {
-      mask = (BIT(count) - 1) << first;
-
-      for (unsigned i = 0; i < count; i++) {
-         unsigned n = i + first;
-         pipe_resource_reference(&so->buf[n], NULL);
-      }
-
-      so->enabled_mask &= ~mask;
    }
 }
 
@@ -832,7 +795,6 @@ fd_state_init(struct pipe_context *pctx)
 
    if (has_compute(fd_screen(pctx->screen))) {
       pctx->bind_compute_state = fd_bind_compute_state;
-      pctx->set_compute_resources = fd_set_compute_resources;
       pctx->set_global_binding = fd_set_global_binding;
    }
 

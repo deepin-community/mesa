@@ -39,8 +39,7 @@
  * the abstract elk_reg type into the actual hardware instruction encoding.
  */
 
-#ifndef ELK_REG_H
-#define ELK_REG_H
+#pragma once
 
 #include <stdbool.h>
 #include "util/compiler.h"
@@ -83,6 +82,7 @@ struct intel_device_info;
 
 /** Number of message register file registers */
 #define ELK_MAX_MRF(gen) (gen == 6 ? 24 : 16)
+#define ELK_MAX_MRF_ALL  24
 
 #define ELK_SWIZZLE4(a,b,c,d) (((a)<<0) | ((b)<<2) | ((c)<<4) | ((d)<<6))
 #define ELK_GET_SWZ(swz, idx) (((swz) >> ((idx)*2)) & 0x3)
@@ -317,7 +317,7 @@ elk_regs_negative_equal(const struct elk_reg *a, const struct elk_reg *b)
       case ELK_REGISTER_TYPE_B:
       case ELK_REGISTER_TYPE_NF:
       default:
-         unreachable("not reached");
+         UNREACHABLE("not reached");
       }
    } else {
       struct elk_reg tmp = *a;
@@ -360,7 +360,7 @@ type_sz(unsigned type)
    case ELK_REGISTER_TYPE_B:
       return 1;
    default:
-      unreachable("not reached");
+      UNREACHABLE("not reached");
    }
 }
 
@@ -397,7 +397,7 @@ elk_int_type(unsigned sz, bool is_signed)
    case 8:
       return (is_signed ? ELK_REGISTER_TYPE_Q : ELK_REGISTER_TYPE_UQ);
    default:
-      unreachable("Not reached.");
+      UNREACHABLE("Not reached.");
    }
 }
 
@@ -564,7 +564,7 @@ elk_vecn_reg(unsigned width, enum elk_reg_file file,
    case 16:
       return elk_vec16_reg(file, nr, subnr);
    default:
-      unreachable("Invalid register width");
+      UNREACHABLE("Invalid register width");
    }
 }
 
@@ -1359,6 +1359,4 @@ elk_type_is_float(enum elk_reg_type type)
 
 #ifdef __cplusplus
 }
-#endif
-
 #endif
