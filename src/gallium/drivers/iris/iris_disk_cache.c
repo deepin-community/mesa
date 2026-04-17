@@ -36,8 +36,10 @@
 #include "util/build_id.h"
 #include "util/disk_cache.h"
 #include "util/mesa-sha1.h"
-#include "intel/compiler/brw_compiler.h"
+#include "intel/compiler/brw/brw_compiler.h"
+#ifdef INTEL_USE_ELK
 #include "intel/compiler/elk/elk_compiler.h"
+#endif
 
 #include "iris_context.h"
 
@@ -57,7 +59,7 @@ iris_disk_cache_compute_key(struct disk_cache *cache,
     * It's essentially random data which we don't want to include in our
     * hashing and comparisons.  We'll set a proper value on a cache hit.
     */
-   union brw_any_prog_key prog_key;
+   union iris_any_prog_key prog_key;
    memcpy(&prog_key, orig_prog_key, prog_key_size);
    prog_key.base.program_string_id = 0;
 
@@ -87,16 +89,20 @@ iris_disk_cache_store(struct disk_cache *cache,
    if (!cache)
       return;
 
-   gl_shader_stage stage = ish->nir->info.stage;
+   mesa_shader_stage stage = ish->nir->info.stage;
    const struct brw_stage_prog_data *brw = shader->brw_prog_data;
+#ifdef INTEL_USE_ELK
    const struct elk_stage_prog_data *elk = shader->elk_prog_data;
    assert((brw == NULL) != (elk == NULL));
+#else
+   assert(brw);
+#endif
 
    cache_key cache_key;
    iris_disk_cache_compute_key(cache, ish, prog_key, prog_key_size, cache_key);
 
    if (debug) {
-      char sha1[41];
+      char sha1[SHA1_DIGEST_STRING_LENGTH];
       _mesa_sha1_format(sha1, cache_key);
       fprintf(stderr, "[mesa disk cache] storing %s\n", sha1);
    }
@@ -122,10 +128,10 @@ iris_disk_cache_store(struct disk_cache *cache,
       union brw_any_prog_data serializable;
       assert(prog_data_s <= sizeof(serializable));
       memcpy(&serializable, shader->brw_prog_data, prog_data_s);
-      serializable.base.param = NULL;
       serializable.base.relocs = NULL;
       blob_write_bytes(&blob, &serializable, prog_data_s);
    } else {
+#ifdef INTEL_USE_ELK
       size_t prog_data_s = elk_prog_data_size(stage);
       union elk_any_prog_data serializable;
       assert(prog_data_s <= sizeof(serializable));
@@ -133,23 +139,28 @@ iris_disk_cache_store(struct disk_cache *cache,
       serializable.base.param = NULL;
       serializable.base.relocs = NULL;
       blob_write_bytes(&blob, &serializable, prog_data_s);
+#else
+      UNREACHABLE("no elk support");
+#endif
    }
 
    blob_write_bytes(&blob, shader->map, shader->program_size);
    blob_write_uint32(&blob, shader->num_system_values);
    blob_write_bytes(&blob, shader->system_values,
                     shader->num_system_values * sizeof(uint32_t));
-   blob_write_uint32(&blob, shader->kernel_input_size);
    if (brw) {
       blob_write_bytes(&blob, brw->relocs,
-                       brw->num_relocs * sizeof(struct brw_shader_reloc));
-      blob_write_bytes(&blob, brw->param,
-                       brw->nr_params * sizeof(uint32_t));
+                       brw->num_relocs * sizeof(struct intel_shader_reloc));
+      blob_write_bytes(&blob, shader->ubo_ranges, sizeof(shader->ubo_ranges));
    } else {
+#ifdef INTEL_USE_ELK
       blob_write_bytes(&blob, elk->relocs,
-                       elk->num_relocs * sizeof(struct elk_shader_reloc));
+                       elk->num_relocs * sizeof(struct intel_shader_reloc));
       blob_write_bytes(&blob, elk->param,
                        elk->nr_params * sizeof(uint32_t));
+#else
+      UNREACHABLE("no elk support");
+#endif
    }
    blob_write_bytes(&blob, &shader->bt, sizeof(shader->bt));
 
@@ -181,7 +192,7 @@ iris_disk_cache_retrieve(struct iris_screen *screen,
 {
 #ifdef ENABLE_SHADER_CACHE
    struct disk_cache *cache = screen->disk_cache;
-   gl_shader_stage stage = ish->nir->info.stage;
+   mesa_shader_stage stage = ish->nir->info.stage;
 
    if (!cache)
       return false;
@@ -190,7 +201,7 @@ iris_disk_cache_retrieve(struct iris_screen *screen,
    iris_disk_cache_compute_key(cache, ish, prog_key, key_size, cache_key);
 
    if (debug) {
-      char sha1[41];
+      char sha1[SHA1_DIGEST_STRING_LENGTH];
       _mesa_sha1_format(sha1, cache_key);
       fprintf(stderr, "[mesa disk cache] retrieving %s: ", sha1);
    }
@@ -204,24 +215,37 @@ iris_disk_cache_retrieve(struct iris_screen *screen,
    if (!buffer)
       return false;
 
-   const uint32_t prog_data_size = screen->brw ? brw_prog_data_size(stage)
-                                               : elk_prog_data_size(stage);
+   const uint32_t prog_data_size =
+#ifdef INTEL_USE_ELK
+      screen->elk ? elk_prog_data_size(stage) :
+#endif
+      brw_prog_data_size(stage);
 
    void *prog_data = ralloc_size(NULL, prog_data_size);
    const void *assembly;
    uint32_t num_system_values;
-   uint32_t kernel_input_size;
    uint32_t *system_values = NULL;
    uint32_t *so_decls = NULL;
 
    struct brw_stage_prog_data *brw = screen->brw ? prog_data : NULL;
+#ifdef INTEL_USE_ELK
    struct elk_stage_prog_data *elk = screen->elk ? prog_data : NULL;
    assert((brw == NULL) != (elk == NULL));
+#else
+   assert(brw);
+#endif
 
    struct blob_reader blob;
    blob_reader_init(&blob, buffer, size);
    blob_copy_bytes(&blob, prog_data, prog_data_size);
-   assembly = blob_read_bytes(&blob, brw ? brw->program_size : elk->program_size);
+
+   const unsigned program_size =
+#ifdef INTEL_USE_ELK
+      elk ? elk->program_size :
+#endif
+      brw->program_size;
+
+   assembly = blob_read_bytes(&blob, program_size);
    num_system_values = blob_read_uint32(&blob);
    if (num_system_values) {
       system_values =
@@ -230,30 +254,24 @@ iris_disk_cache_retrieve(struct iris_screen *screen,
                       num_system_values * sizeof(uint32_t));
    }
 
-   kernel_input_size = blob_read_uint32(&blob);
-
    if (brw) {
       brw->relocs = NULL;
       if (brw->num_relocs) {
-         struct brw_shader_reloc *relocs =
-            ralloc_array(NULL, struct brw_shader_reloc, brw->num_relocs);
+         struct intel_shader_reloc *relocs =
+            ralloc_array(NULL, struct intel_shader_reloc, brw->num_relocs);
          blob_copy_bytes(&blob, relocs,
-                         brw->num_relocs * sizeof(struct brw_shader_reloc));
+                         brw->num_relocs * sizeof(struct intel_shader_reloc));
          brw->relocs = relocs;
       }
-
-      brw->param = NULL;
-      if (brw->nr_params) {
-         brw->param = ralloc_array(NULL, uint32_t, brw->nr_params);
-         blob_copy_bytes(&blob, brw->param, brw->nr_params * sizeof(uint32_t));
-      }
+      blob_copy_bytes(&blob, shader->ubo_ranges, sizeof(shader->ubo_ranges));
    } else {
+#ifdef INTEL_USE_ELK
       elk->relocs = NULL;
       if (elk->num_relocs) {
-         struct elk_shader_reloc *relocs =
-            ralloc_array(NULL, struct elk_shader_reloc, elk->num_relocs);
+         struct intel_shader_reloc *relocs =
+            ralloc_array(NULL, struct intel_shader_reloc, elk->num_relocs);
          blob_copy_bytes(&blob, relocs,
-                         elk->num_relocs * sizeof(struct elk_shader_reloc));
+                         elk->num_relocs * sizeof(struct intel_shader_reloc));
          elk->relocs = relocs;
       }
 
@@ -263,6 +281,9 @@ iris_disk_cache_retrieve(struct iris_screen *screen,
          blob_copy_bytes(&blob, elk->param,
                          elk->nr_params * sizeof(uint32_t));
       }
+#else
+      UNREACHABLE("no elk support");
+#endif
    }
 
    struct iris_binding_table bt;
@@ -272,8 +293,10 @@ iris_disk_cache_retrieve(struct iris_screen *screen,
        stage == MESA_SHADER_TESS_EVAL ||
        stage == MESA_SHADER_GEOMETRY) {
       struct intel_vue_map *vue_map =
-         screen->brw ? &brw_vue_prog_data(prog_data)->vue_map
-                     : &elk_vue_prog_data(prog_data)->vue_map;
+#ifdef INTEL_USE_ELK
+         screen->elk ? &elk_vue_prog_data(prog_data)->vue_map :
+#endif
+         &brw_vue_prog_data(prog_data)->vue_map;
       so_decls = screen->vtbl.create_so_decl_list(&ish->stream_output, vue_map);
    }
 
@@ -286,16 +309,20 @@ iris_disk_cache_retrieve(struct iris_screen *screen,
    if (num_cbufs || ish->nir->num_uniforms)
       num_cbufs++;
 
-   if (num_system_values || kernel_input_size)
+   if (num_system_values)
       num_cbufs++;
 
    if (brw)
-      iris_apply_brw_prog_data(shader, brw);
+      iris_apply_brw_prog_data(shader, brw, NULL);
    else
+#ifdef INTEL_USE_ELK
       iris_apply_elk_prog_data(shader, elk);
+#else
+      UNREACHABLE("no elk support");
+#endif
 
    iris_finalize_program(shader, so_decls, system_values,
-                         num_system_values, kernel_input_size, num_cbufs,
+                         num_system_values, num_cbufs,
                          &bt);
 
    assert(stage < ARRAY_SIZE(cache_id_for_stage));
@@ -327,7 +354,7 @@ iris_disk_cache_init(struct iris_screen *screen)
    char renderer[5 + 40 + 1] = {0};
 
    if (screen->brw) {
-      char device_info_sha[41];
+      char device_info_sha[SHA1_DIGEST_STRING_LENGTH];
       brw_device_sha1(device_info_sha, screen->devinfo);
       memcpy(renderer, "iris_", 5);
       memcpy(renderer + 5, device_info_sha, 40);
@@ -340,17 +367,20 @@ iris_disk_cache_init(struct iris_screen *screen)
 
    const struct build_id_note *note =
       build_id_find_nhdr_for_addr(iris_disk_cache_init);
-   assert(note && build_id_length(note) == 20); /* sha1 */
+   assert(note && build_id_length(note) == BUILD_ID_EXPECTED_HASH_LENGTH); /* sha1 */
 
    const uint8_t *id_sha1 = build_id_data(note);
    assert(id_sha1);
 
-   char timestamp[41];
+   char timestamp[SHA1_DIGEST_STRING_LENGTH];
    _mesa_sha1_format(timestamp, id_sha1);
 
-   const uint64_t driver_flags = screen->brw ?
-      brw_get_compiler_config_value(screen->brw) :
-      elk_get_compiler_config_value(screen->elk);
+   const uint64_t driver_flags =
+#ifdef INTEL_USE_ELK
+      screen->elk ? elk_get_compiler_config_value(screen->elk) :
+#endif
+      brw_get_compiler_config_value(screen->brw);
+
    screen->disk_cache = disk_cache_create(renderer, timestamp, driver_flags);
 #endif
 }

@@ -44,8 +44,7 @@ static void emit_const_ptrs(struct fd_ringbuffer *ring,
                             struct fd_bo **bos, uint32_t *offsets);
 
 static void
-emit_const_asserts(struct fd_ringbuffer *ring,
-                   const struct ir3_shader_variant *v, uint32_t regid,
+emit_const_asserts(const struct ir3_shader_variant *v, uint32_t regid,
                    uint32_t sizedwords)
 {
    assert((v->type == MESA_SHADER_VERTEX) ||
@@ -98,6 +97,9 @@ static inline void
 ir3_emit_constant_data(const struct ir3_shader_variant *v,
                        struct fd_ringbuffer *ring)
 {
+   if (v->compiler->options.push_ubo_with_preamble)
+      return;
+
    const struct ir3_const_state *const_state = ir3_const_state(v);
    const struct ir3_ubo_analysis_state *state = &const_state->ubo_state;
 
@@ -188,7 +190,8 @@ ir3_emit_ubos(struct fd_context *ctx, const struct ir3_shader_variant *v,
               struct fd_ringbuffer *ring, struct fd_constbuf_stateobj *constbuf)
 {
    const struct ir3_const_state *const_state = ir3_const_state(v);
-   uint32_t offset = const_state->offsets.ubo;
+   uint32_t offset =
+      const_state->allocs.consts[IR3_CONST_ALLOC_UBO_PTRS].offset_vec4;
 
    /* a6xx+ uses UBO state and ldc instead of pointers emitted in
     * const state and ldg:
@@ -196,7 +199,8 @@ ir3_emit_ubos(struct fd_context *ctx, const struct ir3_shader_variant *v,
    if (ctx->screen->gen >= 6)
       return;
 
-   if (v->constlen > offset) {
+   if (ir3_const_can_upload(&const_state->allocs, IR3_CONST_ALLOC_UBO_PTRS,
+                            v->constlen)) {
       uint32_t params = const_state->num_ubos;
       uint32_t offsets[params];
       struct fd_bo *bos[params];
@@ -216,7 +220,7 @@ ir3_emit_ubos(struct fd_context *ctx, const struct ir3_shader_variant *v,
           */
          if (cb->user_buffer) {
             struct pipe_context *pctx = &ctx->base;
-            u_upload_data(pctx->stream_uploader, 0, cb->buffer_size, 64,
+            u_upload_data_ref(pctx->stream_uploader, 0, cb->buffer_size, 64,
                           cb->user_buffer, &cb->buffer_offset, &cb->buffer);
             cb->user_buffer = NULL;
          }
@@ -243,8 +247,10 @@ ir3_emit_image_dims(struct fd_screen *screen,
                     struct fd_shaderimg_stateobj *si)
 {
    const struct ir3_const_state *const_state = ir3_const_state(v);
-   uint32_t offset = const_state->offsets.image_dims;
-   if (v->constlen > offset) {
+   uint32_t offset =
+      const_state->allocs.consts[IR3_CONST_ALLOC_IMAGE_DIMS].offset_vec4;
+   if (ir3_const_can_upload(&const_state->allocs, IR3_CONST_ALLOC_IMAGE_DIMS,
+                            v->constlen)) {
       uint32_t dims[align(const_state->image_dims.count, 4)];
       unsigned mask = const_state->image_dims.mask;
 
@@ -295,8 +301,8 @@ ir3_emit_immediates(const struct ir3_shader_variant *v,
                     struct fd_ringbuffer *ring)
 {
    const struct ir3_const_state *const_state = ir3_const_state(v);
-   uint32_t base = const_state->offsets.immediate;
-   int size = DIV_ROUND_UP(const_state->immediates_count, 4);
+   uint32_t base = const_state->allocs.max_const_offset_vec4;
+   int size = DIV_ROUND_UP(v->imm_state.count, 4);
 
    /* truncate size to avoid writing constants that shader
     * does not use:
@@ -308,7 +314,7 @@ ir3_emit_immediates(const struct ir3_shader_variant *v,
    size *= 4;
 
    if (size > 0)
-      emit_const_user(ring, v, base, size, const_state->immediates);
+      emit_const_user(ring, v, base, size, v->imm_state.values);
 
    /* NIR constant data has the same lifetime as immediates, so upload it
     * now, too.
@@ -322,7 +328,13 @@ ir3_emit_link_map(const struct ir3_shader_variant *producer,
                   struct fd_ringbuffer *ring)
 {
    const struct ir3_const_state *const_state = ir3_const_state(consumer);
-   uint32_t base = const_state->offsets.primitive_map;
+   if (!ir3_const_can_upload(&const_state->allocs,
+                             IR3_CONST_ALLOC_PRIMITIVE_MAP,
+                             consumer->constlen))
+      return;
+
+   uint32_t base =
+      const_state->allocs.consts[IR3_CONST_ALLOC_PRIMITIVE_MAP].offset_vec4;
    int size = DIV_ROUND_UP(consumer->input_size, 4);
 
    /* truncate size to avoid writing constants that shader
@@ -345,8 +357,10 @@ emit_tfbos(struct fd_context *ctx, const struct ir3_shader_variant *v,
 {
    /* streamout addresses after driver-params: */
    const struct ir3_const_state *const_state = ir3_const_state(v);
-   uint32_t offset = const_state->offsets.tfbo;
-   if (v->constlen > offset) {
+   uint32_t offset =
+      const_state->allocs.consts[IR3_CONST_ALLOC_TFBO].offset_vec4;
+   if (ir3_const_can_upload(&const_state->allocs, IR3_CONST_ALLOC_TFBO,
+                            v->constlen)) {
       struct fd_streamout_stateobj *so = &ctx->streamout;
       const struct ir3_stream_output_info *info = &v->stream_output;
       uint32_t params = 4;
@@ -375,7 +389,7 @@ emit_tfbos(struct fd_context *ctx, const struct ir3_shader_variant *v,
 static inline void
 emit_common_consts(const struct ir3_shader_variant *v,
                    struct fd_ringbuffer *ring, struct fd_context *ctx,
-                   enum pipe_shader_type t) assert_dt
+                   mesa_shader_stage t) assert_dt
 {
    enum fd_dirty_shader_state dirty = ctx->dirty_shader[t];
 
@@ -411,22 +425,6 @@ emit_common_consts(const struct ir3_shader_variant *v,
       struct fd_shaderimg_stateobj *si = &ctx->shaderimg[t];
       ring_wfi(ctx->batch, ring);
       ir3_emit_image_dims(ctx->screen, v, ring, si);
-   }
-}
-
-/* emit kernel params */
-static inline void
-emit_kernel_params(struct fd_context *ctx, const struct ir3_shader_variant *v,
-                   struct fd_ringbuffer *ring, const struct pipe_grid_info *info)
-   assert_dt
-{
-   const struct ir3_const_state *const_state = ir3_const_state(v);
-   uint32_t offset = const_state->offsets.kernel_params;
-   if (v->constlen > offset) {
-      ring_wfi(ctx->batch, ring);
-      emit_const_user(ring, v, offset * 4,
-                      align(v->cs.req_input_mem, 4),
-                      (uint32_t *)info->input);
    }
 }
 
@@ -467,7 +465,8 @@ ir3_emit_driver_params(const struct ir3_shader_variant *v,
    assert(v->need_driver_params);
 
    const struct ir3_const_state *const_state = ir3_const_state(v);
-   uint32_t offset = const_state->offsets.driver_param;
+   uint32_t offset =
+      const_state->allocs.consts[IR3_CONST_ALLOC_DRIVER_PARAMS].offset_vec4;
 
    /* Only emit as many params as needed, i.e. up to the highest enabled UCP
     * plane. However a binning pass may drop even some of these, so limit to
@@ -542,7 +541,13 @@ ir3_emit_hs_driver_params(const struct ir3_shader_variant *v,
    assert(v->need_driver_params);
 
    const struct ir3_const_state *const_state = ir3_const_state(v);
-   uint32_t offset = const_state->offsets.driver_param;
+   if (!ir3_const_can_upload(&const_state->allocs,
+                             IR3_CONST_ALLOC_DRIVER_PARAMS,
+                             v->constlen))
+      return;
+
+   uint32_t offset =
+      const_state->allocs.consts[IR3_CONST_ALLOC_DRIVER_PARAMS].offset_vec4;
    struct ir3_driver_params_tcs hs_params = ir3_build_driver_params_tcs(ctx);
 
    const uint32_t hs_params_size =
@@ -562,7 +567,7 @@ ir3_emit_vs_consts(const struct ir3_shader_variant *v,
 {
    assert(v->type == MESA_SHADER_VERTEX);
 
-   emit_common_consts(v, ring, ctx, PIPE_SHADER_VERTEX);
+   emit_common_consts(v, ring, ctx, MESA_SHADER_VERTEX);
 
    /* emit driver params every time: */
    if (info && v->need_driver_params) {
@@ -581,7 +586,7 @@ ir3_emit_fs_consts(const struct ir3_shader_variant *v,
 {
    assert(v->type == MESA_SHADER_FRAGMENT);
 
-   emit_common_consts(v, ring, ctx, PIPE_SHADER_FRAGMENT);
+   emit_common_consts(v, ring, ctx, MESA_SHADER_FRAGMENT);
 }
 
 static inline struct ir3_driver_params_cs
@@ -613,19 +618,20 @@ ir3_emit_cs_driver_params(const struct ir3_shader_variant *v,
                           const struct pipe_grid_info *info)
    assert_dt
 {
-   emit_kernel_params(ctx, v, ring, info);
-
    /* a3xx/a4xx can inject these directly */
    if (ctx->screen->gen <= 4)
       return;
 
    /* emit compute-shader driver-params: */
    const struct ir3_const_state *const_state = ir3_const_state(v);
-   uint32_t offset = const_state->offsets.driver_param;
+   uint32_t offset =
+      const_state->allocs.consts[IR3_CONST_ALLOC_DRIVER_PARAMS].offset_vec4;
    uint32_t size =
       align(MIN2(const_state->num_driver_params, (v->constlen - offset) * 4), 16);
 
-   if (v->constlen > offset) {
+   if (size > 0 &&
+       ir3_const_can_upload(&const_state->allocs, IR3_CONST_ALLOC_DRIVER_PARAMS,
+                            v->constlen)) {
       ring_wfi(ctx->batch, ring);
 
       struct ir3_driver_params_cs compute_params = ir3_build_driver_params_cs(v, info);
@@ -634,7 +640,7 @@ ir3_emit_cs_driver_params(const struct ir3_shader_variant *v,
          struct pipe_resource *buffer = NULL;
          unsigned buffer_offset;
 
-         u_upload_data(ctx->base.const_uploader, 0, sizeof(compute_params),
+         u_upload_data_ref(ctx->base.const_uploader, 0, sizeof(compute_params),
                        16, &compute_params,  &buffer_offset, &buffer);
 
          /* Copy the indirect params into the driver param buffer.  The layout
@@ -663,9 +669,9 @@ ir3_emit_cs_consts(const struct ir3_shader_variant *v,
                    struct fd_ringbuffer *ring, struct fd_context *ctx,
                    const struct pipe_grid_info *info) assert_dt
 {
-   assert(gl_shader_stage_is_compute(v->type));
+   assert(mesa_shader_stage_is_compute(v->type));
 
-   emit_common_consts(v, ring, ctx, PIPE_SHADER_COMPUTE);
+   emit_common_consts(v, ring, ctx, MESA_SHADER_COMPUTE);
 
    ir3_emit_cs_driver_params(v, ring, ctx, info);
 }

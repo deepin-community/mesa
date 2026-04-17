@@ -42,12 +42,12 @@ struct nvkmd_mem;
 struct nvkmd_va;
 
 VkFormatFeatureFlags2
-nvk_get_image_format_features(struct nvk_physical_device *pdevice,
+nvk_get_image_format_features(const struct nvk_physical_device *pdev,
                               VkFormat format, VkImageTiling tiling,
                               uint64_t drm_format_mod);
 
 void
-nvk_get_drm_format_modifier_properties_list(struct nvk_physical_device *pdev,
+nvk_get_drm_format_modifier_properties_list(const struct nvk_physical_device *pdev,
                                             VkFormat vk_format,
                                             VkBaseOutStructure *ext);
 
@@ -79,8 +79,14 @@ struct nvk_image {
     */
    bool disjoint;
 
+   /** True if this image uses separate depth/stencil
+    *
+    * In this case, stencil will be in planes[1].
+    */
+   bool separate_zs;
+
    uint8_t plane_count;
-   struct nvk_image_plane planes[3];
+   struct nvk_image_plane planes[NVK_MAX_IMAGE_PLANES];
 
    /* In order to support D32_SFLOAT_S8_UINT, a temp area is
     * needed. The stencil plane can't be a copied using the DMA
@@ -97,6 +103,15 @@ struct nvk_image {
     */
    struct nvk_image_plane linear_tiled_shadow;
    struct nvkmd_mem *linear_tiled_shadow_mem;
+
+   /* This indicates that we would like to compress the image and would prefer
+    * larger pages and a dedicated allocation.
+    */
+   bool can_compress;
+   /* This indicates that we actually have compressed the image. This is set at
+    * bind time.
+    */
+   bool is_compressed;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(nvk_image, vk.base, VkImage, VK_OBJECT_TYPE_IMAGE)
@@ -113,8 +128,14 @@ nvk_image_base_address(const struct nvk_image *image, uint8_t plane)
    return nvk_image_plane_base_address(&image->planes[plane]);
 }
 
+static inline uint64_t
+nvk_image_size_B(const struct nvk_image *image, uint8_t plane)
+{
+   return image->planes[plane].nil.size_B;
+}
+
 static inline uint8_t
-nvk_image_aspects_to_plane(ASSERTED const struct nvk_image *image,
+nvk_image_aspects_to_plane(const struct nvk_image *image,
                            VkImageAspectFlags aspectMask)
 {
    /* Memory planes are only allowed for memory operations */
@@ -130,6 +151,15 @@ nvk_image_aspects_to_plane(ASSERTED const struct nvk_image *image,
    assert(aspectMask == (VK_IMAGE_ASPECT_DEPTH_BIT |
                          VK_IMAGE_ASPECT_STENCIL_BIT) ||
           util_bitcount(aspectMask) == 1);
+
+   if (image->separate_zs) {
+      assert(util_bitcount(aspectMask) == 1);
+      switch(aspectMask) {
+      case VK_IMAGE_ASPECT_DEPTH_BIT: return 0;
+      case VK_IMAGE_ASPECT_STENCIL_BIT: return 1;
+      default: UNREACHABLE("Not a depth/stencil aspect");
+      }
+   }
 
    switch(aspectMask) {
    case VK_IMAGE_ASPECT_PLANE_1_BIT: return 1;

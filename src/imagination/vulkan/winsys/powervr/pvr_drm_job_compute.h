@@ -26,6 +26,9 @@
 
 #include <vulkan/vulkan.h>
 
+#include "pvr_macros.h"
+
+struct pvr_device_info;
 struct pvr_winsys;
 struct pvr_winsys_compute_ctx;
 struct pvr_winsys_compute_ctx_create_info;
@@ -39,6 +42,7 @@ struct vk_sync;
 VkResult pvr_drm_winsys_compute_ctx_create(
    struct pvr_winsys *ws,
    const struct pvr_winsys_compute_ctx_create_info *create_info,
+   const struct pvr_device_info *dev_info,
    struct pvr_winsys_compute_ctx **const ctx_out);
 void pvr_drm_winsys_compute_ctx_destroy(struct pvr_winsys_compute_ctx *ctx);
 
@@ -47,5 +51,12 @@ VkResult pvr_drm_winsys_compute_submit(
    const struct pvr_winsys_compute_submit_info *submit_info,
    const struct pvr_device_info *dev_info,
    struct vk_sync *signal_sync);
+
+#ifdef PVR_PER_ARCH
+void PVR_PER_ARCH(drm_compute_ctx_static_state_init)(
+   const struct pvr_winsys_compute_ctx_create_info *create_info,
+   uint8_t *stream_ptr_start,
+   uint32_t *stream_len_ptr);
+#endif
 
 #endif /* PVR_DRM_JOB_COMPUTE_H */

@@ -92,6 +92,7 @@
 #include "drm-uapi/v3d_drm.h"
 
 #include "vk_alloc.h"
+#include "perfcntrs/v3d_perfcntrs.h"
 #include "simulator/v3d_simulator.h"
 
 #include "v3dv_cl.h"
@@ -102,7 +103,7 @@
 #if MESA_DEBUG
 #define v3dv_assert(x) ({ \
    if (unlikely(!(x))) \
-      fprintf(stderr, "%s:%d ASSERT: %s", __FILE__, __LINE__, #x); \
+      mesa_loge("%s:%d ASSERT: %s", __FILE__, __LINE__, #x); \
 })
 #else
 #define v3dv_assert(x)
@@ -110,24 +111,25 @@
 
 #define perf_debug(...) do {                       \
    if (V3D_DBG(PERF))                            \
-      fprintf(stderr, __VA_ARGS__);                \
+      mesa_logi(__VA_ARGS__);                \
 } while (0)
 
 struct v3dv_instance;
-
+struct v3dv_image;
+struct v3dv_format_plane;
+struct v3dv_format;
 struct v3d_simulator_file;
-
-/* Minimum required by the Vulkan 1.1 spec */
-#define MAX_MEMORY_ALLOCATION_SIZE (1ull << 30)
-
-/* Maximum performance counters number */
-#define V3D_MAX_PERFCNT 93
 
 struct v3dv_physical_device {
    struct vk_physical_device vk;
 
    char *name;
+
+   /* primary node (cardN) of the render device */
+   int32_t primary_fd;
+   /* render node (renderN) of the render device */
    int32_t render_fd;
+   /* primary node (cardN) of the display device, if available */
    int32_t display_fd;
 
    /* We need these because it is not clear how to detect
@@ -139,7 +141,7 @@ struct v3dv_physical_device {
    dev_t primary_devid;
    dev_t render_devid;
 
-   uint8_t driver_build_sha1[20];
+   uint8_t driver_build_sha1[SHA1_DIGEST_LENGTH];
    uint8_t pipeline_cache_uuid[VK_UUID_SIZE];
    uint8_t device_uuid[VK_UUID_SIZE];
    uint8_t driver_uuid[VK_UUID_SIZE];
@@ -157,6 +159,7 @@ struct v3dv_physical_device {
    VkPhysicalDeviceMemoryProperties memory;
 
    struct v3d_device_info devinfo;
+   struct v3d_perfcntrs *perfcntr;
 
 #if USE_V3D_SIMULATOR
    struct v3d_simulator_file *sim_file;
@@ -203,8 +206,6 @@ v3dv_device_lookup_bo(struct v3dv_physical_device *device, uint32_t handle)
 
 VkResult v3dv_wsi_init(struct v3dv_physical_device *physical_device);
 void v3dv_wsi_finish(struct v3dv_physical_device *physical_device);
-struct v3dv_image *v3dv_wsi_get_image_from_swapchain(VkSwapchainKHR swapchain,
-                                                     uint32_t index);
 
 void v3dv_meta_clear_init(struct v3dv_device *device);
 void v3dv_meta_clear_finish(struct v3dv_device *device);
@@ -224,6 +225,9 @@ bool v3dv_meta_can_use_tlb(struct v3dv_image *image,
 
 struct v3dv_instance {
    struct vk_instance vk;
+
+   struct driOptionCache dri_options;
+   struct driOptionCache available_dri_options;
 
    bool pipeline_cache_enabled;
    bool default_pipeline_cache_enabled;
@@ -319,12 +323,23 @@ struct v3dv_pipeline_key {
    bool msaa;
    bool sample_alpha_to_coverage;
    bool sample_alpha_to_one;
+   bool software_blend;
    uint8_t cbufs;
    struct {
       enum pipe_format format;
       uint8_t swizzle[4];
    } color_fmt[V3D_MAX_DRAW_BUFFERS];
+   struct {
+           enum pipe_blend_func rgb_func;
+           enum pipe_blendfactor rgb_src_factor;
+           enum pipe_blendfactor rgb_dst_factor;
+           enum pipe_blend_func alpha_func;
+           enum pipe_blendfactor alpha_src_factor;
+           enum pipe_blendfactor alpha_dst_factor;
+   } blend[V3D_MAX_DRAW_BUFFERS];
    uint8_t f32_color_rb;
+   uint8_t norm_16;
+   uint8_t snorm;
    uint32_t va_swap_rb_mask;
    bool has_multiview;
    bool line_smooth;
@@ -337,7 +352,7 @@ struct v3dv_pipeline_cache_stats {
    uint32_t on_disk_hit;
 };
 
-/* Equivalent to gl_shader_stage, but including the coordinate shaders
+/* Equivalent to mesa_shader_stage, but including the coordinate shaders
  *
  * FIXME: perhaps move to common
  */
@@ -354,7 +369,7 @@ enum broadcom_shader_stage {
 
 /* Assumes that coordinate shaders will be custom-handled by the caller */
 static inline enum broadcom_shader_stage
-gl_shader_stage_to_broadcom(gl_shader_stage stage)
+mesa_shader_stage_to_broadcom(mesa_shader_stage stage)
 {
    switch (stage) {
    case MESA_SHADER_VERTEX:
@@ -366,11 +381,11 @@ gl_shader_stage_to_broadcom(gl_shader_stage stage)
    case MESA_SHADER_COMPUTE:
       return BROADCOM_SHADER_COMPUTE;
    default:
-      unreachable("Unknown gl shader stage");
+      UNREACHABLE("Unknown gl shader stage");
    }
 }
 
-static inline gl_shader_stage
+static inline mesa_shader_stage
 broadcom_shader_stage_to_gl(enum broadcom_shader_stage stage)
 {
    switch (stage) {
@@ -385,7 +400,7 @@ broadcom_shader_stage_to_gl(enum broadcom_shader_stage stage)
    case BROADCOM_SHADER_COMPUTE:
       return MESA_SHADER_COMPUTE;
    default:
-      unreachable("Unknown broadcom shader stage");
+      UNREACHABLE("Unknown broadcom shader stage");
    }
 }
 
@@ -422,7 +437,7 @@ broadcom_binning_shader_stage_for_render_stage(enum broadcom_shader_stage stage)
    case BROADCOM_SHADER_GEOMETRY:
       return BROADCOM_SHADER_GEOMETRY_BIN;
    default:
-      unreachable("Invalid shader stage");
+      UNREACHABLE("Invalid shader stage");
    }
 }
 
@@ -435,7 +450,7 @@ broadcom_shader_stage_name(enum broadcom_shader_stage stage)
    case BROADCOM_SHADER_GEOMETRY_BIN:
       return "MESA_SHADER_GEOMETRY_BIN";
    default:
-      return gl_shader_stage_name(broadcom_shader_stage_to_gl(stage));
+      return mesa_shader_stage_name(broadcom_shader_stage_to_gl(stage));
    }
 }
 
@@ -601,35 +616,6 @@ struct v3dv_device_memory {
 #define V3D_OUTPUT_IMAGE_FORMAT_NO 255
 #define TEXTURE_DATA_FORMAT_NO     255
 
-#define V3DV_MAX_PLANE_COUNT 3
-struct v3dv_format_plane {
-   /* One of V3D42_OUTPUT_IMAGE_FORMAT_*, or OUTPUT_IMAGE_FORMAT_NO */
-   uint8_t rt_type;
-
-   /* One of V3D42_TEXTURE_DATA_FORMAT_*. */
-   uint8_t tex_type;
-
-   /* Swizzle to apply to the RGBA shader output for storing to the tile
-    * buffer, to the RGBA tile buffer to produce shader input (for
-    * blending), and for turning the rgba8888 texture sampler return
-    * value into shader rgba values.
-    */
-   uint8_t swizzle[4];
-
-   /* Whether the return value is 16F/I/UI or 32F/I/UI. */
-   uint8_t return_size;
-};
-
-struct v3dv_format {
-   /* Non 0 plane count implies supported */
-   uint8_t plane_count;
-
-   struct v3dv_format_plane planes[V3DV_MAX_PLANE_COUNT];
-
-   /* If the format supports (linear) filtering when texturing. */
-   bool supports_filtering;
-};
-
 /* Note that although VkImageAspectFlags would allow to combine more than one
  * PLANE bit, for all the use cases we implement that use VkImageAspectFlags,
  * only one plane is allowed, like for example vkCmdCopyImage:
@@ -656,7 +642,7 @@ static uint8_t v3dv_plane_from_aspect(VkImageAspectFlags aspect)
    case VK_IMAGE_ASPECT_MEMORY_PLANE_2_BIT_EXT:
       return 2;
    default:
-      unreachable("invalid image aspect");
+      UNREACHABLE("invalid image aspect");
    }
 }
 
@@ -724,6 +710,10 @@ struct v3dv_image {
     * This holds a tiled copy of the image we can use for that purpose.
     */
    struct v3dv_image *shadow;
+
+   /* Image is a WSI image.
+    */
+   bool from_wsi;
 };
 
 VkResult
@@ -1135,10 +1125,6 @@ struct v3dv_timestamp_query_cpu_job_info {
    uint32_t count;
 };
 
-/* Number of perfmons required to handle all supported performance counters */
-#define V3DV_MAX_PERFMONS DIV_ROUND_UP(V3D_MAX_PERFCNT, \
-                                       DRM_V3D_MAX_PERF_COUNTERS)
-
 struct v3dv_perf_query {
    uint32_t kperfmon_ids[V3DV_MAX_PERFMONS];
 
@@ -1190,12 +1176,7 @@ struct v3dv_job {
    /* This structure keeps track of various scores to inform a heuristic
     * for double-buffer mode.
     */
-   struct {
-      /* Cost of geometry shading */
-      uint32_t geom;
-      /* Cost of shader rendering */
-      uint32_t render;
-   } double_buffer_score;
+   struct v3d_double_buffer_score double_buffer_score;
 
    /* We only need to allocate tile state for all layers if the binner
     * writes primitives to layers other than the first. This can only be
@@ -1837,8 +1818,8 @@ void v3dv_cmd_buffer_add_private_obj(struct v3dv_cmd_buffer *cmd_buffer,
                                      uint64_t obj,
                                      v3dv_cmd_buffer_private_obj_destroy_cb destroy_cb);
 
-void v3dv_cmd_buffer_merge_barrier_state(struct v3dv_barrier_state *dst,
-                                         struct v3dv_barrier_state *src);
+void v3dv_merge_barrier_state(struct v3dv_barrier_state *dst,
+                              struct v3dv_barrier_state *src);
 
 void v3dv_cmd_buffer_consume_bcl_sync(struct v3dv_cmd_buffer *cmd_buffer,
                                       struct v3dv_job *job);
@@ -1862,6 +1843,9 @@ bool v3dv_cmd_buffer_copy_image_tfu(struct v3dv_cmd_buffer *cmd_buffer,
                                     struct v3dv_image *dst,
                                     struct v3dv_image *src,
                                     const VkImageCopy2 *region);
+
+bool v3dv_job_apply_barrier_state(struct v3dv_job *job,
+                                  struct v3dv_barrier_state *barrier);
 
 struct v3dv_event {
    struct vk_object_base base;
@@ -1934,7 +1918,7 @@ struct v3dv_pipeline_stage {
    nir_shader *nir;
 
    /* The following is the combined hash of module+entrypoint+spec_info+nir */
-   unsigned char shader_sha1[20];
+   unsigned char shader_sha1[SHA1_DIGEST_LENGTH];
 
    /** A name for this program, so you can track it in shader-db output. */
    uint32_t program_id;
@@ -2111,7 +2095,7 @@ struct v3dv_pipeline_layout {
     */
    uint32_t ref_cnt;
 
-   unsigned char sha1[20];
+   unsigned char sha1[SHA1_DIGEST_LENGTH];
 };
 
 void
@@ -2161,7 +2145,7 @@ struct v3dv_descriptor_map {
    /* NOTE: the following is only for sampler, but this is the easier place to
     * put it.
     */
-   uint8_t return_size[DESCRIPTOR_MAP_SIZE];
+   bool sampler_is_32b[DESCRIPTOR_MAP_SIZE];
 };
 
 struct v3dv_sampler {
@@ -2207,7 +2191,7 @@ struct v3dv_descriptor_maps {
 struct v3dv_pipeline_shared_data {
    uint32_t ref_cnt;
 
-   unsigned char sha1_key[20];
+   unsigned char sha1_key[SHA1_DIGEST_LENGTH];
 
    struct v3dv_descriptor_maps *maps[BROADCOM_SHADER_STAGES];
    struct v3dv_shader_variant *variants[BROADCOM_SHADER_STAGES];
@@ -2293,7 +2277,7 @@ struct v3dv_pipeline {
    struct v3dv_pipeline_shared_data *shared_data;
 
    /* It is the combined stages sha1, layout sha1, plus the pipeline key sha1. */
-   unsigned char sha1[20];
+   unsigned char sha1[SHA1_DIGEST_LENGTH];
 
    /* In general we can reuse v3dv_device->default_attribute_float, so note
     * that the following can be NULL. In 7.x this is not used, so it will be
@@ -2313,7 +2297,12 @@ struct v3dv_pipeline {
 
    /* Blend state */
    struct {
-      /* Per-RT bit mask with blend enables */
+      /* In some cases, such as when dual source blend factors are in use, we
+       * fall back to software blend lowering.
+       */
+      bool use_software;
+
+      /* Per-RT bit mask with blend enables. */
       uint8_t enables;
       /* Per-RT prepacked blend config packets */
       uint8_t cfg[V3D_MAX_DRAW_BUFFERS][V3DV_BLEND_CFG_LENGTH];
@@ -2490,16 +2479,16 @@ void v3dv_pipeline_cache_finish(struct v3dv_pipeline_cache *cache);
 void v3dv_pipeline_cache_upload_nir(struct v3dv_pipeline *pipeline,
                                     struct v3dv_pipeline_cache *cache,
                                     nir_shader *nir,
-                                    unsigned char sha1_key[20]);
+                                    unsigned char sha1_key[SHA1_DIGEST_LENGTH]);
 
 nir_shader* v3dv_pipeline_cache_search_for_nir(struct v3dv_pipeline *pipeline,
                                                struct v3dv_pipeline_cache *cache,
                                                const nir_shader_compiler_options *nir_options,
-                                               unsigned char sha1_key[20]);
+                                               unsigned char sha1_key[SHA1_DIGEST_LENGTH]);
 
 struct v3dv_pipeline_shared_data *
 v3dv_pipeline_cache_search_for_pipeline(struct v3dv_pipeline_cache *cache,
-                                        unsigned char sha1_key[20],
+                                        unsigned char sha1_key[SHA1_DIGEST_LENGTH],
                                         bool *cache_hit);
 
 void
@@ -2557,16 +2546,6 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(v3dv_render_pass, base, VkRenderPass,
 VK_DEFINE_NONDISP_HANDLE_CASTS(v3dv_sampler, base, VkSampler,
                                VK_OBJECT_TYPE_SAMPLER)
 
-static inline int
-v3dv_ioctl(int fd, unsigned long request, void *arg)
-{
-#if USE_V3D_SIMULATOR
-   return v3d_simulator_ioctl(fd, request, arg);
-#else
-   return drmIoctl(fd, request, arg);
-#endif
-}
-
 /* Flags OOM conditions in command buffer state.
  *
  * Note: notice that no-op jobs don't have a command buffer reference.
@@ -2591,34 +2570,6 @@ v3dv_flag_oom(struct v3dv_cmd_buffer *cmd_buffer, struct v3dv_job *job)
    if (__job && __job->cmd_buffer && __job->cmd_buffer->state.oom)  \
       return;                                                       \
 } while(0)                                                          \
-
-static inline uint32_t
-u64_hash(const void *key)
-{
-   return _mesa_hash_data(key, sizeof(uint64_t));
-}
-
-static inline bool
-u64_compare(const void *key1, const void *key2)
-{
-   return memcmp(key1, key2, sizeof(uint64_t)) == 0;
-}
-
-/* Helper to call hw ver specific functions */
-#define v3dv_X(device, thing) ({                      \
-   __typeof(&v3d42_##thing) v3d_X_thing;              \
-   switch (device->devinfo.ver) {                     \
-   case 42:                                           \
-      v3d_X_thing = &v3d42_##thing;                   \
-      break;                                          \
-   case 71:                                           \
-      v3d_X_thing = &v3d71_##thing;                   \
-      break;                                          \
-   default:                                           \
-      unreachable("Unsupported hardware generation"); \
-   }                                                  \
-   v3d_X_thing;                                       \
-})
 
 /* v3d_macros from common requires v3dX and V3DX definitions. Below we need to
  * define v3dX for each version supported, because when we compile code that

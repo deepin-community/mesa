@@ -47,15 +47,19 @@ cp_dma_max_byte_count(enum amd_gfx_level gfx_level)
  * clear value.
  */
 static void
-radv_cs_emit_cp_dma(struct radv_device *device, struct radeon_cmdbuf *cs, bool predicating, uint64_t dst_va,
+radv_cs_emit_cp_dma(struct radv_device *device, struct radv_cmd_stream *cs, bool predicating, uint64_t dst_va,
                     uint64_t src_va, unsigned size, unsigned flags)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
+   const bool cp_dma_use_L2 = (flags & CP_DMA_USE_L2) && pdev->info.cp_dma_use_L2;
+   const bool cp_dma_use_mall = pdev->info.gfx_level == GFX12;
+   /* GFX12: TC_L2 means MALL, which should always be set. */
+   const bool cp_dma_tc_l2_flag = cp_dma_use_L2 || cp_dma_use_mall;
    uint32_t header = 0, command = 0;
 
    assert(size <= cp_dma_max_byte_count(pdev->info.gfx_level));
 
-   radeon_check_space(device->ws, cs, 9);
+   radeon_check_space(device->ws, cs->b, 9);
    if (pdev->info.gfx_level >= GFX9)
       command |= S_415_BYTE_COUNT_GFX9(size);
    else
@@ -69,41 +73,41 @@ radv_cs_emit_cp_dma(struct radv_device *device, struct radeon_cmdbuf *cs, bool p
       command |= S_415_RAW_WAIT(1);
 
    /* Src and dst flags. */
-   if (pdev->info.gfx_level >= GFX9 && !(flags & CP_DMA_CLEAR) && src_va == dst_va)
-      header |= S_411_DST_SEL(V_411_NOWHERE); /* prefetch only */
-   else if (flags & CP_DMA_USE_L2)
+   if (cp_dma_tc_l2_flag)
       header |= S_411_DST_SEL(V_411_DST_ADDR_TC_L2);
 
    if (flags & CP_DMA_CLEAR)
       header |= S_411_SRC_SEL(V_411_DATA);
-   else if (flags & CP_DMA_USE_L2)
+   else if (cp_dma_tc_l2_flag)
       header |= S_411_SRC_SEL(V_411_SRC_ADDR_TC_L2);
 
+   radeon_begin(cs);
    if (pdev->info.gfx_level >= GFX7) {
-      radeon_emit(cs, PKT3(PKT3_DMA_DATA, 5, predicating));
-      radeon_emit(cs, header);
-      radeon_emit(cs, src_va);       /* SRC_ADDR_LO [31:0] */
-      radeon_emit(cs, src_va >> 32); /* SRC_ADDR_HI [31:0] */
-      radeon_emit(cs, dst_va);       /* DST_ADDR_LO [31:0] */
-      radeon_emit(cs, dst_va >> 32); /* DST_ADDR_HI [31:0] */
-      radeon_emit(cs, command);
+      radeon_emit(PKT3(PKT3_DMA_DATA, 5, predicating));
+      radeon_emit(header);
+      radeon_emit(src_va);       /* SRC_ADDR_LO [31:0] */
+      radeon_emit(src_va >> 32); /* SRC_ADDR_HI [31:0] */
+      radeon_emit(dst_va);       /* DST_ADDR_LO [31:0] */
+      radeon_emit(dst_va >> 32); /* DST_ADDR_HI [31:0] */
+      radeon_emit(command);
    } else {
-      assert(!(flags & CP_DMA_USE_L2));
+      assert(!cp_dma_tc_l2_flag);
       header |= S_411_SRC_ADDR_HI(src_va >> 32);
-      radeon_emit(cs, PKT3(PKT3_CP_DMA, 4, predicating));
-      radeon_emit(cs, src_va);                  /* SRC_ADDR_LO [31:0] */
-      radeon_emit(cs, header);                  /* SRC_ADDR_HI [15:0] + flags. */
-      radeon_emit(cs, dst_va);                  /* DST_ADDR_LO [31:0] */
-      radeon_emit(cs, (dst_va >> 32) & 0xffff); /* DST_ADDR_HI [15:0] */
-      radeon_emit(cs, command);
+      radeon_emit(PKT3(PKT3_CP_DMA, 4, predicating));
+      radeon_emit(src_va);                  /* SRC_ADDR_LO [31:0] */
+      radeon_emit(header);                  /* SRC_ADDR_HI [15:0] + flags. */
+      radeon_emit(dst_va);                  /* DST_ADDR_LO [31:0] */
+      radeon_emit((dst_va >> 32) & 0xffff); /* DST_ADDR_HI [15:0] */
+      radeon_emit(command);
    }
+   radeon_end();
 }
 
 static void
 radv_emit_cp_dma(struct radv_cmd_buffer *cmd_buffer, uint64_t dst_va, uint64_t src_va, unsigned size, unsigned flags)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   struct radeon_cmdbuf *cs = cmd_buffer->cs;
+   struct radv_cmd_stream *cs = cmd_buffer->cs;
    bool predicating = cmd_buffer->state.predicating;
 
    radv_cs_emit_cp_dma(device, cs, predicating, dst_va, src_va, size, flags);
@@ -115,8 +119,7 @@ radv_emit_cp_dma(struct radv_cmd_buffer *cmd_buffer, uint64_t dst_va, uint64_t s
     */
    if (flags & CP_DMA_SYNC) {
       if (cmd_buffer->qf == RADV_QUEUE_GENERAL) {
-         radeon_emit(cs, PKT3(PKT3_PFP_SYNC_ME, 0, cmd_buffer->state.predicating));
-         radeon_emit(cs, 0);
+         ac_emit_cp_pfp_sync_me(cs->b, cmd_buffer->state.predicating);
       }
 
       /* CP will see the sync flag and wait for all DMAs to complete. */
@@ -127,8 +130,26 @@ radv_emit_cp_dma(struct radv_cmd_buffer *cmd_buffer, uint64_t dst_va, uint64_t s
       radv_cmd_buffer_trace_emit(cmd_buffer);
 }
 
+/* Emit a CP DMA prefetch.
+ * This is useful for warming up caches before draw commands,
+ * for example we use it to load shader binaries and VBO descriptors into the cache.
+ * Implemented by starting a CP DMA copy where the source and destination are the same.
+ *
+ * On GPUs where CP DMA uses L2, it loads binaries into L2.
+ * On GPUs that have MALL (infinity cache), it loads binaries into MALL.
+ *
+ * More specifically:
+ *
+ * | GPU generation  | CP DMA L2 | MALL | Prefetch location |
+ * | --------------- | --------- | ---- | ----------------- |
+ * | GFX6            | -         | -    | -                 |
+ * | GFX7 - 10       | yes       | -    | L2                |
+ * | GFX10.3 - 11.5  | yes       | yes  | L2, MALL          |
+ * | GFX12           | -         | yes  | MALL              |
+ *
+ */
 void
-radv_cs_cp_dma_prefetch(const struct radv_device *device, struct radeon_cmdbuf *cs, uint64_t va, unsigned size,
+radv_cs_cp_dma_prefetch(const struct radv_device *device, struct radv_cmd_stream *cs, uint64_t va, unsigned size,
                         bool predicating)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
@@ -141,7 +162,7 @@ radv_cs_cp_dma_prefetch(const struct radv_device *device, struct radeon_cmdbuf *
 
    assert(size <= cp_dma_max_byte_count(gfx_level));
 
-   radeon_check_space(ws, cs, 9);
+   radeon_check_space(ws, cs->b, 9);
 
    uint64_t aligned_va = va & ~(SI_CPDMA_ALIGNMENT - 1);
    uint64_t aligned_size = ((va + size + SI_CPDMA_ALIGNMENT - 1) & ~(SI_CPDMA_ALIGNMENT - 1)) - aligned_va;
@@ -156,13 +177,15 @@ radv_cs_cp_dma_prefetch(const struct radv_device *device, struct radeon_cmdbuf *
 
    header |= S_411_SRC_SEL(V_411_SRC_ADDR_TC_L2);
 
-   radeon_emit(cs, PKT3(PKT3_DMA_DATA, 5, predicating));
-   radeon_emit(cs, header);
-   radeon_emit(cs, aligned_va);       /* SRC_ADDR_LO [31:0] */
-   radeon_emit(cs, aligned_va >> 32); /* SRC_ADDR_HI [31:0] */
-   radeon_emit(cs, aligned_va);       /* DST_ADDR_LO [31:0] */
-   radeon_emit(cs, aligned_va >> 32); /* DST_ADDR_HI [31:0] */
-   radeon_emit(cs, command);
+   radeon_begin(cs);
+   radeon_emit(PKT3(PKT3_DMA_DATA, 5, predicating));
+   radeon_emit(header);
+   radeon_emit(aligned_va);       /* SRC_ADDR_LO [31:0] */
+   radeon_emit(aligned_va >> 32); /* SRC_ADDR_HI [31:0] */
+   radeon_emit(aligned_va);       /* DST_ADDR_LO [31:0] */
+   radeon_emit(aligned_va >> 32); /* DST_ADDR_HI [31:0] */
+   radeon_emit(command);
+   radeon_end();
 }
 
 void
@@ -217,13 +240,18 @@ radv_cp_dma_realign_engine(struct radv_cmd_buffer *cmd_buffer, unsigned size)
 }
 
 void
-radv_cp_dma_buffer_copy(struct radv_cmd_buffer *cmd_buffer, uint64_t src_va, uint64_t dest_va, uint64_t size)
+radv_cp_dma_copy_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t src_va, uint64_t dest_va, uint64_t size)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
    enum amd_gfx_level gfx_level = pdev->info.gfx_level;
    uint64_t main_src_va, main_dest_va;
    uint64_t skipped_size = 0, realign_size = 0;
+
+   if (!(pdev->info.cp_dma_use_L2 && pdev->info.gfx_level >= GFX9)) {
+      /* Invalidate L2 in case "src_va" or "dest_va" were previously written through L2. */
+      cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_INV_L2;
+   }
 
    /* Assume that we are not going to sync after the last DMA operation. */
    cmd_buffer->state.dma_is_busy = true;
@@ -292,13 +320,18 @@ radv_cp_dma_buffer_copy(struct radv_cmd_buffer *cmd_buffer, uint64_t src_va, uin
 }
 
 void
-radv_cp_dma_clear_buffer(struct radv_cmd_buffer *cmd_buffer, uint64_t va, uint64_t size, unsigned value)
+radv_cp_dma_fill_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t va, uint64_t size, unsigned value)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
 
    if (!size)
       return;
+
+   if (!(pdev->info.cp_dma_use_L2 && pdev->info.gfx_level >= GFX9)) {
+      /* Invalidate L2 in case "va" was previously written through L2. */
+      cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_INV_L2;
+   }
 
    assert(va % 4 == 0 && size % 4 == 0);
 

@@ -146,7 +146,7 @@ iris_update_draw_parameters(struct iris_context *ice,
             ice->draw.params.baseinstance = info->start_instance;
             ice->draw.params_valid = true;
 
-            u_upload_data(ice->ctx.const_uploader, 0,
+            u_upload_data_ref(ice->ctx.const_uploader, 0,
                           sizeof(ice->draw.params), 4, &ice->draw.params,
                           &draw_params->offset, &draw_params->res);
          }
@@ -164,7 +164,7 @@ iris_update_draw_parameters(struct iris_context *ice,
          ice->draw.derived_params.drawid = drawid_offset;
          ice->draw.derived_params.is_indexed_draw = is_indexed_draw;
 
-         u_upload_data(ice->ctx.const_uploader, 0,
+         u_upload_data_ref(ice->ctx.const_uploader, 0,
                        sizeof(ice->draw.derived_params), 4,
                        &ice->draw.derived_params,
                        &derived_params->offset, &derived_params->res);
@@ -308,7 +308,7 @@ iris_draw_vbo(struct pipe_context *ctx, const struct pipe_draw_info *info,
 
    if (ice->state.dirty & IRIS_DIRTY_RENDER_RESOLVES_AND_FLUSHES) {
       bool draw_aux_buffer_disabled[IRIS_MAX_DRAW_BUFFERS] = { };
-      for (gl_shader_stage stage = 0; stage < MESA_SHADER_COMPUTE; stage++) {
+      for (mesa_shader_stage stage = 0; stage < MESA_SHADER_COMPUTE; stage++) {
          if (ice->shaders.prog[stage])
             iris_predraw_resolve_inputs(ice, batch, draw_aux_buffer_disabled,
                                         stage, true);
@@ -317,7 +317,7 @@ iris_draw_vbo(struct pipe_context *ctx, const struct pipe_draw_info *info,
    }
 
    if (ice->state.dirty & IRIS_DIRTY_RENDER_MISC_BUFFER_FLUSHES) {
-      for (gl_shader_stage stage = 0; stage < MESA_SHADER_COMPUTE; stage++)
+      for (mesa_shader_stage stage = 0; stage < MESA_SHADER_COMPUTE; stage++)
          iris_predraw_flush_buffers(ice, batch, stage);
    }
 
@@ -376,7 +376,7 @@ iris_update_grid_size_resource(struct iris_context *ice,
       grid_updated = true;
    } else if (memcmp(ice->state.last_grid, grid->grid, sizeof(grid->grid)) != 0) {
       memcpy(ice->state.last_grid, grid->grid, sizeof(grid->grid));
-      u_upload_data(ice->state.dynamic_uploader, 0, sizeof(grid->grid), 4,
+      u_upload_data_ref(ice->state.dynamic_uploader, 0, sizeof(grid->grid), 4,
                     grid->grid, &grid_ref->offset, &grid_ref->res);
       grid_updated = true;
    }
@@ -392,7 +392,7 @@ iris_update_grid_size_resource(struct iris_context *ice,
    struct iris_bo *grid_bo = iris_resource_bo(grid_ref->res);
 
    void *surf_map = NULL;
-   u_upload_alloc(ice->state.surface_uploader, 0, isl_dev->ss.size,
+   u_upload_alloc_ref(ice->state.surface_uploader, 0, isl_dev->ss.size,
                   isl_dev->ss.align, &state_ref->offset, &state_ref->res,
                   &surf_map);
    state_ref->offset +=
@@ -402,6 +402,7 @@ iris_update_grid_size_resource(struct iris_context *ice,
                          .size_B = sizeof(grid->grid),
                          .format = ISL_FORMAT_RAW,
                          .stride_B = 1,
+                         .usage = ISL_SURF_USAGE_CONSTANT_BUFFER_BIT,
                          .mocs = iris_mocs(grid_bo, isl_dev,
                                            ISL_SURF_USAGE_CONSTANT_BUFFER_BIT));
 
@@ -451,10 +452,11 @@ iris_launch_grid(struct pipe_context *ctx, const struct pipe_grid_info *grid)
    iris_binder_reserve_compute(ice);
    batch->screen->vtbl.update_binder_address(batch, &ice->state.binder);
 
-   if (ice->state.compute_predicate) {
+   if (ice->state.compute_predicate.bo) {
       batch->screen->vtbl.load_register_mem32(batch, MI_PREDICATE_RESULT,
-                                    ice->state.compute_predicate, 0);
-      ice->state.compute_predicate = NULL;
+                                    ice->state.compute_predicate.bo,
+                                    (uint32_t) ice->state.compute_predicate.offset);
+      ice->state.compute_predicate.bo = NULL;
    }
 
    iris_handle_always_flush_cache(batch);

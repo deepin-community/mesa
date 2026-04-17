@@ -22,8 +22,7 @@
  * IN THE SOFTWARE.
  */
 
-#ifndef ELK_VEC4_BUILDER_H
-#define ELK_VEC4_BUILDER_H
+#pragma once
 
 #include "elk_ir_vec4.h"
 #include "elk_ir_allocator.h"
@@ -80,7 +79,7 @@ namespace elk {
        * from this.
        */
       vec4_builder
-      at(elk_bblock_t *block, exec_node *cursor) const
+      at(elk_bblock_t *block, brw_exec_node *cursor) const
       {
          vec4_builder bld = *this;
          bld.block = block;
@@ -96,7 +95,7 @@ namespace elk {
       vec4_builder
       at_end() const
       {
-         return at(NULL, (exec_node *)&shader->instructions.tail_sentinel);
+         return at(NULL, (brw_exec_node *)&shader->instructions.tail_sentinel);
       }
 
       /**
@@ -629,7 +628,7 @@ namespace elk {
       }
 
       elk_bblock_t *block;
-      exec_node *cursor;
+      brw_exec_node *cursor;
 
       unsigned _dispatch_width;
       unsigned _group;
@@ -642,5 +641,3 @@ namespace elk {
       } annotation;
    };
 }
-
-#endif

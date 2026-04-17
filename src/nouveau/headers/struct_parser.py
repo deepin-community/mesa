@@ -11,6 +11,9 @@ import sys
 from collections import namedtuple
 from mako.template import Template
 
+import util
+
+
 TEMPLATE_RS = Template("""\
 // Copyright © 2024 Collabora Ltd. and Red Hat Inc.
 // SPDX-License-Identifier: MIT
@@ -22,11 +25,16 @@ TEMPLATE_RS = Template("""\
 use std::ops::Range;
 
 % for s in structs:
+pub const ${s.name}_MAX_BIT: usize = ${s.max_bit};
     % for f in s.fields:
         % if f.stride:
 #[inline]
-pub fn ${s.name}_${f.name}(i: usize) -> Range<usize> {
+pub const fn ${s.name}_${f.name}(i: usize) -> Range<usize> {
+        % if f.stride == 1:
+    (i + ${f.lo})..(i + ${f.hi + 1})
+        % else:
     (i * ${f.stride} + ${f.lo})..(i * ${f.stride} + ${f.hi + 1})
+        % endif
 }
         % else:
 pub const ${s.name}_${f.name}: Range<usize> = ${f.lo}..${f.hi + 1};
@@ -57,6 +65,8 @@ STRUCTS = [
     'QMDV02_03',
     'QMDV02_04',
     'QMDV03_00',
+    'QMDV04_00',
+    'QMDV05_00',
 ]
 
 Enum = namedtuple('Enum', ['name', 'value'])
@@ -76,9 +86,11 @@ class Struct(object):
     def __init__(self, name):
         self.name = name
         self.fields = []
+        self.max_bit = 0
 
     def add_field(self, name, lo, hi, stride=0):
         self.fields.append(Field(name, lo, hi, stride))
+        self.max_bit = max(self.max_bit, hi)
 
 DRF_RE = re.compile(r'(?P<hi>[0-9]+):(?P<lo>[0-9]+)')
 FIELD_NAME_RE = re.compile(r'_?(?P<dw>[0-9]+)?_?(?P<name>.*)')
@@ -159,19 +171,8 @@ def main():
     with open(args.in_h, 'r', encoding='utf-8') as f:
         structs = parse_header(nvcl, f)
 
-    try:
-        with open(args.out_rs, 'w', encoding='utf-8') as f:
-            f.write(TEMPLATE_RS.render(structs=structs))
+    util.write_template_rs(args.out_rs, TEMPLATE_RS, dict(structs=structs))
 
-    except Exception:
-        # In the event there's an error, this imports some helpers from mako
-        # to print a useful stack trace and prints it, then exits with
-        # status 1, if python is run with debug; otherwise it just raises
-        # the exception
-        import sys
-        from mako import exceptions
-        print(exceptions.text_error_template().render(), file=sys.stderr)
-        sys.exit(1)
 
 if __name__ == '__main__':
     main()

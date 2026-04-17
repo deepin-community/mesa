@@ -51,7 +51,10 @@ def find_result_types(spirv):
             assert res_arg_idx >= 0
         elif res_arg_idx >= 0:
             untyped_insts = [
+                'OpAsmTargetINTEL',
                 'OpString',
+                'OpConstantStringAMDX',
+                'OpSpecConstantStringAMDX',
                 'OpExtInstImport',
                 'OpDecorationGroup',
                 'OpLabel',

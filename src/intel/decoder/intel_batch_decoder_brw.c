@@ -6,7 +6,7 @@
 #include "intel_decoder.h"
 #include "intel_decoder_private.h"
 
-#include "compiler/brw_disasm.h"
+#include "compiler/brw/brw_disasm.h"
 
 static void
 ctx_disassemble_program_brw(struct intel_batch_decode_ctx *ctx,
@@ -20,7 +20,7 @@ ctx_disassemble_program_brw(struct intel_batch_decode_ctx *ctx,
       return;
 
    fprintf(ctx->fp, "\nReferenced %s:\n", name);
-   brw_disassemble_with_errors(ctx->brw, bo.map, 0, ctx->fp);
+   brw_disassemble_with_errors(ctx->brw, bo.map, 0, NULL, ctx->fp);
 
    if (ctx->shader_binary) {
       int size = brw_disassemble_find_end(ctx->brw, bo.map, 0);

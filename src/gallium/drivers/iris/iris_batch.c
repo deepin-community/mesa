@@ -48,8 +48,10 @@
 
 #include "common/intel_aux_map.h"
 #include "intel/common/intel_gem.h"
-#include "intel/compiler/brw_compiler.h"
+#include "intel/compiler/brw/brw_compiler.h"
+#ifdef INTEL_USE_ELK
 #include "intel/compiler/elk/elk_compiler.h"
+#endif
 #include "intel/ds/intel_tracepoints.h"
 #include "util/hash_table.h"
 #include "util/u_debug.h"
@@ -229,7 +231,7 @@ iris_init_batch(struct iris_context *ice,
          batch->other_batches[batch->num_other_batches++] = other_batch;
    }
 
-   if (INTEL_DEBUG(DEBUG_BATCH | DEBUG_BATCH_STATS)) {
+   if (INTEL_DEBUG(DEBUG_BATCH) || INTEL_DEBUG(DEBUG_BATCH_STATS)) {
       const unsigned decode_flags = INTEL_BATCH_DECODE_DEFAULT_FLAGS |
          (INTEL_DEBUG(DEBUG_COLOR) ? INTEL_BATCH_DECODE_IN_COLOR : 0);
 
@@ -239,11 +241,15 @@ iris_init_batch(struct iris_context *ice,
                                          stderr, decode_flags, NULL,
                                          decode_get_bo, decode_get_state_size, batch);
       } else {
+#ifdef INTEL_USE_ELK
          assert(screen->elk);
          intel_batch_decode_ctx_init_elk(&batch->decoder, &screen->elk->isa,
                                          screen->devinfo,
                                          stderr, decode_flags, NULL,
                                          decode_get_bo, decode_get_state_size, batch);
+#else
+         UNREACHABLE("no elk support");
+#endif
       }
       batch->decoder.dynamic_base = IRIS_MEMZONE_DYNAMIC_START;
       batch->decoder.instruction_base = IRIS_MEMZONE_SHADER_START;
@@ -275,7 +281,7 @@ iris_init_batches(struct iris_context *ice)
       iris_xe_init_batches(ice);
       break;
    default:
-      unreachable("missing");
+      UNREACHABLE("missing");
    }
 
    iris_foreach_batch(ice, batch)
@@ -534,7 +540,7 @@ iris_batch_free(const struct iris_context *ice, struct iris_batch *batch)
       iris_xe_destroy_batch(batch);
       break;
    default:
-      unreachable("missing");
+      UNREACHABLE("missing");
    }
 
    iris_destroy_batch_measure(batch->measure);
@@ -544,7 +550,7 @@ iris_batch_free(const struct iris_context *ice, struct iris_batch *batch)
 
    _mesa_hash_table_destroy(batch->bo_aux_modes, NULL);
 
-   if (INTEL_DEBUG(DEBUG_BATCH | DEBUG_BATCH_STATS))
+   if (INTEL_DEBUG(DEBUG_BATCH) || INTEL_DEBUG(DEBUG_BATCH_STATS))
       intel_batch_decode_ctx_finish(&batch->decoder);
 }
 
@@ -658,7 +664,7 @@ iris_finish_batch(struct iris_batch *batch)
 {
    const struct intel_device_info *devinfo = batch->screen->devinfo;
 
-   if (devinfo->ver == 12 && batch->name == IRIS_BATCH_RENDER) {
+   if (devinfo->ver == 12) {
       /* We re-emit constants at the beginning of every batch as a hardware
        * bug workaround, so invalidate indirect state pointers in order to
        * save ourselves the overhead of restoring constants redundantly when
@@ -711,7 +717,7 @@ replace_kernel_ctx(struct iris_batch *batch)
    case INTEL_KMD_TYPE_XE:
       return iris_xe_replace_batch(batch);
    default:
-      unreachable("missing");
+      UNREACHABLE("missing");
       return false;
    }
 }
@@ -919,7 +925,9 @@ _iris_batch_flush(struct iris_batch *batch, const char *file, int line)
 
    iris_finish_batch(batch);
 
-   if (INTEL_DEBUG(DEBUG_BATCH | DEBUG_SUBMIT | DEBUG_PIPE_CONTROL)) {
+   if (INTEL_DEBUG(DEBUG_BATCH) ||
+       INTEL_DEBUG(DEBUG_SUBMIT) ||
+       INTEL_DEBUG(DEBUG_PIPE_CONTROL)) {
       const char *basefile = strstr(file, "iris/");
       if (basefile)
          file = basefile + 5;

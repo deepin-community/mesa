@@ -205,8 +205,6 @@ enum quniform_contents {
         QUNIFORM_VIEWPORT_Z_OFFSET,
         QUNIFORM_VIEWPORT_Z_SCALE,
 
-        QUNIFORM_USER_CLIP_PLANE,
-
         /**
          * A reference to a V3D 3.x texture config parameter 0 uniform.
          *
@@ -360,6 +358,14 @@ enum quniform_contents {
          * Current value of DrawIndex for Multidraw
          */
         QUNIFORM_DRAW_ID,
+
+        /**
+         * Blend constants for software blend.
+         */
+        QUNIFORM_BLEND_CONSTANT_R,
+        QUNIFORM_BLEND_CONSTANT_G,
+        QUNIFORM_BLEND_CONSTANT_B,
+        QUNIFORM_BLEND_CONSTANT_A,
 };
 
 static inline uint32_t v3d_unit_data_create(uint32_t unit, uint32_t value)
@@ -400,17 +406,12 @@ static inline uint8_t v3d_slot_get_component(struct v3d_varying_slot slot)
 }
 
 struct v3d_key {
-        struct {
-                uint8_t swizzle[4];
-        } tex[V3D_MAX_TEXTURE_SAMPLERS];
-        struct {
-                uint8_t return_size;
-                uint8_t return_channels;
-        } sampler[V3D_MAX_TEXTURE_SAMPLERS];
+        /* Mask of sampler return sizes.
+         * 0 is 16bit
+         * 1 is 32bit
+         */
+        uint32_t sampler_is_32b;
 
-        uint8_t num_tex_used;
-        uint8_t num_samplers_used;
-        uint8_t ucp_enables;
         bool is_last_geometry_stage;
         bool robust_uniform_access;
         bool robust_storage_access;
@@ -427,24 +428,39 @@ struct v3d_fs_key {
         bool sample_alpha_to_coverage;
         bool sample_alpha_to_one;
         bool can_earlyz_with_discard;
+        bool software_blend;
         /* Mask of which color render targets are present. */
         uint8_t cbufs;
         uint8_t swap_color_rb;
         /* Mask of which render targets need to be written as 32-bit floats */
         uint8_t f32_color_rb;
-        /* Masks of which render targets need to be written as ints/uints.
-         * Used by gallium to work around lost information in TGSI.
-         */
-        uint8_t int_color_rb;
-        uint8_t uint_color_rb;
+        /* Mask of which render targets need to be written as 16-bit unorms or snorms */
+        uint8_t norm_16;
+        /* Mask of which render targets need to be written as snorms. */
+        uint8_t snorm;
+
+        uint8_t ucp_enables;
 
         /* Color format information per render target. Only set when logic
-         * operations are enabled.
+         * operations are enabled, when fbfetch is in use or when falling back
+         * to software blend.
          */
         struct {
                 enum pipe_format format;
                 uint8_t swizzle[4];
         } color_fmt[V3D_MAX_DRAW_BUFFERS];
+
+        /* Software blend state. Only set when software blend is enabled.
+         * (currently only for handling the dual source case)
+         */
+        struct {
+                enum pipe_blend_func rgb_func;
+                enum pipe_blendfactor rgb_src_factor;
+                enum pipe_blendfactor rgb_dst_factor;
+                enum pipe_blend_func alpha_func;
+                enum pipe_blendfactor alpha_src_factor;
+                enum pipe_blendfactor alpha_dst_factor;
+        } blend[V3D_MAX_DRAW_BUFFERS];
 
         enum pipe_logicop logicop_func;
         uint32_t point_sprite_mask;
@@ -815,7 +831,7 @@ struct v3d_compile {
         struct qreg start_msf;
 
         /* If the shader uses subgroup functionality */
-        bool has_subgroups;
+        bool can_use_supergroups;
 
         uint8_t vattr_sizes[V3D_MAX_VS_INPUTS / 4];
         uint32_t vpm_output_size;
@@ -1080,7 +1096,7 @@ struct v3d_compute_prog_data {
         uint32_t shared_size;
         uint16_t local_size[3];
         /* If the shader uses subgroup functionality */
-        bool has_subgroups;
+        bool can_use_supergroups;
 };
 
 struct vpm_config {
@@ -1127,7 +1143,7 @@ uint64_t *v3d_compile(const struct v3d_compiler *compiler,
                       int program_id, int variant_id,
                       uint32_t *final_assembly_size);
 
-uint32_t v3d_prog_data_size(gl_shader_stage stage);
+uint32_t v3d_prog_data_size(mesa_shader_stage stage);
 void v3d_nir_to_vir(struct v3d_compile *c);
 
 void vir_compile_destroy(struct v3d_compile *c);
@@ -1211,6 +1227,10 @@ bool v3d_nir_lower_image_load_store(nir_shader *s, struct v3d_compile *c);
 bool v3d_nir_lower_global_2x32(nir_shader *s);
 bool v3d_nir_lower_load_store_bitsize(nir_shader *s);
 bool v3d_nir_lower_algebraic(struct nir_shader *shader, const struct v3d_compile *c);
+bool v3d_nir_lower_load_output(nir_shader *s, struct v3d_compile *c);
+bool v3d_nir_lower_blend(nir_shader *s, struct v3d_compile *c);
+
+nir_def *v3d_nir_get_tlb_color(nir_builder *b, struct v3d_compile *c, int rt, int sample);
 
 void v3d_vir_emit_tex(struct v3d_compile *c, nir_tex_instr *instr);
 void v3d_vir_emit_image_load_store(struct v3d_compile *c,
@@ -1440,6 +1460,7 @@ VIR_A_ALU1(CLZ)
 VIR_A_ALU1(UTOF)
 
 VIR_M_ALU2(UMUL24)
+VIR_M_ALU2(UMUL24_RTOP0)
 VIR_M_ALU2(FMUL)
 VIR_M_ALU2(SMUL24)
 VIR_M_NODST_2(MULTOP)
@@ -1472,6 +1493,11 @@ VIR_M_ALU1(FTOSNORM16)
 
 VIR_M_ALU1(VFTOUNORM8)
 VIR_M_ALU1(VFTOSNORM8)
+
+VIR_M_ALU1(FUNPACKUNORMLO)
+VIR_M_ALU1(FUNPACKUNORMHI)
+VIR_M_ALU1(FUNPACKSNORMLO)
+VIR_M_ALU1(FUNPACKSNORMHI)
 
 VIR_M_ALU1(VFTOUNORM10LO)
 VIR_M_ALU1(VFTOUNORM10HI)
@@ -1545,6 +1571,36 @@ vir_BRANCH(struct v3d_compile *c, enum v3d_qpu_branch_cond cond)
 {
         /* The actual uniform_data value will be set at scheduling time */
         return vir_emit_nondef(c, vir_branch_inst(c, cond));
+}
+
+struct v3d_double_buffer_score {
+        uint32_t geom;
+        uint32_t render;
+};
+
+void
+v3d_update_double_buffer_score(uint32_t vertex_count,
+                               uint32_t vs_qpu_size,
+                               uint32_t fs_qpu_size,
+                               struct v3d_prog_data *vs,
+                               struct v3d_prog_data *fs,
+                               struct v3d_double_buffer_score *score);
+
+static inline bool
+v3d_double_buffer_score_ok(struct v3d_double_buffer_score *score)
+{
+        /* Double buffer decreases tile size, which increases
+         * VS invocations so too much geometry is not good.
+         */
+        if (score->geom > 200000)
+                return false;
+
+        /* We want enough rendering work to be able to hide
+         * latency from tile stores.
+         */
+        if (score->render < 200)
+                return false;
+        return true;
 }
 
 #define vir_for_each_block(block, c)                                    \

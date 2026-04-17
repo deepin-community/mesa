@@ -13,11 +13,7 @@ files_gbm = files(
 args_gbm = [
   '-DDEFAULT_BACKENDS_PATH="@0@"'.format(gbm_backends_path),
 ]
-incs_gbm = [include_directories('main'), inc_loader, inc_gallium]
-
-if with_dri2
-  subdir('backends/dri')
-endif
+incs_gbm = [include_directories('main'), inc_loader, inc_gallium, inc_util]
 
 libgbm_name = 'gbm'
 
@@ -43,7 +39,7 @@ if with_tests
   test('gbm-abi-check', abi_check, suite : ['gbm'])
 endif
 
-install_headers('main/gbm.h')
+install_headers('main/gbm.h', 'main/gbm_backend_abi.h')
 
 pkg.generate(
   name : 'gbm',
@@ -67,3 +63,8 @@ if with_symbols_check
     suite : ['gbm'],
   )
 endif
+
+dep_gbm = declare_dependency(
+  link_with : libgbm,
+  include_directories : inc_gbm,
+)

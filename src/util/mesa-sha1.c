@@ -31,7 +31,7 @@
 #include <inttypes.h>
 
 void
-_mesa_sha1_compute(const void *data, size_t size, unsigned char result[20])
+_mesa_sha1_compute(const void *data, size_t size, unsigned char result[SHA1_DIGEST_LENGTH])
 {
    struct mesa_sha1 ctx;
 

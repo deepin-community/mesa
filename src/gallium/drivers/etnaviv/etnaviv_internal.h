@@ -70,7 +70,7 @@ struct etna_specs {
    /* needs z=(z+w)/2, for older GCxxx */
    unsigned vs_need_z_div : 1;
    /* can use VS_RANGE, PS_RANGE registers*/
-   unsigned has_shader_range_registers : 1;
+   unsigned has_unified_instmem : 1;
    /* has the new sin/cos/log functions */
    unsigned has_new_transcendentals : 1;
    /* has no limit on the number of constant sources per instruction */
@@ -79,6 +79,8 @@ struct etna_specs {
    unsigned v4_compression : 1;
    /* supports single-buffer rendering with multiple pixel pipes */
    unsigned single_buffer : 1;
+   /* needs multitiled format for PE usage */
+   unsigned pe_multitiled : 1;
    /* has unified uniforms memory */
    unsigned has_unified_uniforms : 1;
    /* can load shader instructions from memory */
@@ -87,8 +89,8 @@ struct etna_specs {
    unsigned tex_astc : 1;
    /* has BLT engine instead of RS */
    unsigned use_blt : 1;
-   /* supports seamless cube map */
-   unsigned seamless_cube_map : 1;
+   /* has correct stencil 0 valuemask */
+   unsigned correct_stencil_valuemask : 1;
    /* number of bits per TS tile */
    unsigned bits_per_tile;
    /* clear value for TS (dependent on bits_per_tile) */
@@ -175,13 +177,11 @@ struct compiled_framebuffer_state {
    uint32_t GL_MULTI_SAMPLE_CONFIG;
    uint32_t PE_COLOR_FORMAT;
    uint32_t PE_DEPTH_CONFIG;
-   struct etna_reloc PE_DEPTH_ADDR;
    struct etna_reloc PE_PIPE_DEPTH_ADDR[ETNA_MAX_PIXELPIPES];
    uint32_t PE_DEPTH_STRIDE;
    uint32_t PE_HDEPTH_CONTROL;
    uint32_t PE_DEPTH_NORMALIZE;
-   struct etna_reloc PE_COLOR_ADDR;
-   struct etna_reloc PE_PIPE_COLOR_ADDR[ETNA_MAX_PIXELPIPES];
+   float depth_mrd;
    uint32_t PE_COLOR_STRIDE;
    uint32_t PE_MEM_CONFIG;
    uint32_t RA_MULTISAMPLE_UNK00E04;
@@ -190,23 +190,19 @@ struct compiled_framebuffer_state {
    uint32_t TS_MEM_CONFIG;
    uint32_t TS_DEPTH_CLEAR_VALUE;
    struct etna_reloc TS_DEPTH_STATUS_BASE;
-   struct etna_reloc TS_DEPTH_SURFACE_BASE;
    uint32_t TS_COLOR_CLEAR_VALUE;
    uint32_t TS_COLOR_CLEAR_VALUE_EXT;
    struct etna_reloc TS_COLOR_STATUS_BASE;
-   struct etna_reloc TS_COLOR_SURFACE_BASE;
    uint32_t PE_LOGIC_OP;
    uint32_t PS_CONTROL;
    uint32_t PS_CONTROL_EXT;
    uint32_t PS_OUTPUT_REG2;
-   struct etna_reloc PE_RT_COLOR_ADDR[7];
-   struct etna_reloc PE_RT_PIPE_COLOR_ADDR[7][ETNA_MAX_PIXELPIPES];
+   struct etna_reloc PE_RT_PIPE_COLOR_ADDR[PIPE_MAX_COLOR_BUFS][ETNA_MAX_PIXELPIPES];
    uint32_t PE_RT_CONFIG[7];
    uint32_t RT_TS_MEM_CONFIG[7];
    uint32_t RT_TS_COLOR_CLEAR_VALUE[7];
    uint32_t RT_TS_COLOR_CLEAR_VALUE_EXT[7];
    struct etna_reloc RT_TS_COLOR_STATUS_BASE[7];
-   struct etna_reloc RT_TS_COLOR_SURFACE_BASE[7];
    bool msaa_mode; /* adds input (and possible temp) to PS */
 };
 
@@ -233,6 +229,7 @@ struct compiled_shader_state {
    uint32_t PA_ATTRIBUTE_ELEMENT_COUNT;
    uint32_t PA_CONFIG;
    uint32_t PA_SHADER_ATTRIBUTES[VIVS_PA_SHADER_ATTRIBUTES__LEN];
+   int pa_shader_attributes_states;
    uint32_t VS_END_PC;
    uint32_t VS_OUTPUT_COUNT; /* number of outputs if point size per vertex disabled */
    uint32_t VS_OUTPUT_COUNT_PSIZE; /* number of outputs of point size per vertex enabled */
@@ -251,7 +248,9 @@ struct compiled_shader_state {
    uint32_t PS_START_PC;
    uint32_t GL_VARYING_TOTAL_COMPONENTS;
    uint32_t GL_VARYING_NUM_COMPONENTS[2];
-   uint32_t GL_VARYING_COMPONENT_USE[2];
+   uint32_t GL_VARYING_COMPONENT_USE[4];
+   uint32_t GL_HALTI5_SHADER_ATTRIBUTES[VIVS_GL_HALTI5_SHADER_ATTRIBUTES__LEN];
+   int halti5_shader_attributes_states;
    uint32_t GL_HALTI5_SH_SPECIALS;
    uint32_t FE_HALTI5_ID_CONFIG;
    unsigned vs_inst_mem_size;

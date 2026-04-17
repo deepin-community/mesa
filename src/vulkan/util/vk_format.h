@@ -36,7 +36,7 @@ extern "C" {
 extern const enum pipe_format vk_format_map[];
 
 enum pipe_format
-vk_format_to_pipe_format(enum VkFormat vkformat);
+vk_format_to_pipe_format(VkFormat vkformat);
 
 VkFormat
 vk_format_from_pipe_format(enum pipe_format format);
@@ -112,6 +112,45 @@ vk_format_stencil_only(VkFormat format)
    return VK_FORMAT_S8_UINT;
 }
 
+static inline bool
+vk_format_is_color_depth_stencil_capable(VkFormat format)
+{
+   /* Defines in the Vulkan Spec for VK_KHR_maintenance8 : "Compatible Formats
+    * for Depth-Stencil to/from Color Copies"
+    */
+   switch (format) {
+   case VK_FORMAT_D32_SFLOAT:
+   case VK_FORMAT_D32_SFLOAT_S8_UINT:
+   case VK_FORMAT_R32_SFLOAT:
+   case VK_FORMAT_R32_SINT:
+   case VK_FORMAT_R32_UINT:
+      return true;
+
+   case VK_FORMAT_X8_D24_UNORM_PACK32:
+   case VK_FORMAT_D24_UNORM_S8_UINT:
+      return true;
+
+   case VK_FORMAT_D16_UNORM:
+   case VK_FORMAT_D16_UNORM_S8_UINT:
+   case VK_FORMAT_R16_SFLOAT:
+   case VK_FORMAT_R16_UNORM:
+   case VK_FORMAT_R16_SNORM:
+   case VK_FORMAT_R16_UINT:
+   case VK_FORMAT_R16_SINT:
+      return true;
+
+   case VK_FORMAT_S8_UINT:
+   case VK_FORMAT_R8_UINT:
+   case VK_FORMAT_R8_SINT:
+   case VK_FORMAT_R8_UNORM:
+   case VK_FORMAT_R8_SNORM:
+      return true;
+
+   default:
+      return false;
+   }
+}
+
 void vk_component_mapping_to_pipe_swizzle(VkComponentMapping mapping,
                                           unsigned char out_swizzle[4]);
 
@@ -157,6 +196,16 @@ vk_format_is_srgb(VkFormat format)
    return util_format_is_srgb(vk_format_to_pipe_format(format));
 }
 
+static inline VkFormat
+vk_format_srgb_to_linear(VkFormat format)
+{
+   if (!vk_format_is_srgb(format))
+      return format;
+
+   return vk_format_from_pipe_format(
+      util_format_linear(vk_format_to_pipe_format(format)));
+}
+
 static inline bool vk_format_is_alpha(VkFormat format)
 {
    return util_format_is_alpha(vk_format_to_pipe_format(format));
@@ -174,6 +223,11 @@ static inline bool vk_format_is_alpha_on_msb(VkFormat vk_format)
 #else
           desc->swizzle[3] == PIPE_SWIZZLE_W;
 #endif
+}
+
+static inline bool vk_format_is_scaled(VkFormat vk_format)
+{
+   return util_format_is_scaled(vk_format_to_pipe_format(vk_format));
 }
 
 static inline unsigned
@@ -311,9 +365,6 @@ vk_format_get_plane_height(VkFormat format, unsigned plane, unsigned height)
 VkClearColorValue
 vk_swizzle_color_value(VkClearColorValue color,
                        VkComponentMapping swizzle, bool is_int);
-
-VkFormat
-vk_select_android_external_format(const void *next, VkFormat default_format);
 
 #ifdef __cplusplus
 }

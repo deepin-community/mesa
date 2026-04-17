@@ -10,35 +10,7 @@
 #include "nir/nir_builder.h"
 #include "radv_meta.h"
 #include "sid.h"
-#include "vk_common_entrypoints.h"
 #include "vk_format.h"
-
-VkResult
-radv_device_init_meta_etc_decode_state(struct radv_device *device, bool on_demand)
-{
-   const struct radv_physical_device *pdev = radv_device_physical(device);
-   struct radv_meta_state *state = &device->meta_state;
-
-   if (!pdev->emulate_etc2)
-      return VK_SUCCESS;
-
-   state->etc_decode.allocator = &state->alloc;
-   state->etc_decode.nir_options = &pdev->nir_options[MESA_SHADER_COMPUTE];
-   state->etc_decode.pipeline_cache = state->cache;
-   vk_texcompress_etc2_init(&device->vk, &state->etc_decode);
-
-   if (on_demand)
-      return VK_SUCCESS;
-
-   return vk_texcompress_etc2_late_init(&device->vk, &state->etc_decode);
-}
-
-void
-radv_device_finish_meta_etc_decode_state(struct radv_device *device)
-{
-   struct radv_meta_state *state = &device->meta_state;
-   vk_texcompress_etc2_finish(&device->vk, &state->etc_decode);
-}
 
 static VkPipeline
 radv_get_etc_decode_pipeline(struct radv_cmd_buffer *cmd_buffer)
@@ -63,31 +35,25 @@ decode_etc(struct radv_cmd_buffer *cmd_buffer, struct radv_image_view *src_iview
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    VkPipeline pipeline = radv_get_etc_decode_pipeline(cmd_buffer);
 
-   radv_meta_push_descriptor_set(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                 device->meta_state.etc_decode.pipeline_layout, 0, 2,
-                                 (VkWriteDescriptorSet[]){{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                                           .dstBinding = 0,
-                                                           .dstArrayElement = 0,
-                                                           .descriptorCount = 1,
-                                                           .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-                                                           .pImageInfo =
-                                                              (VkDescriptorImageInfo[]){
-                                                                 {.sampler = VK_NULL_HANDLE,
-                                                                  .imageView = radv_image_view_to_handle(src_iview),
-                                                                  .imageLayout = VK_IMAGE_LAYOUT_GENERAL},
-                                                              }},
-                                                          {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                                           .dstBinding = 1,
-                                                           .dstArrayElement = 0,
-                                                           .descriptorCount = 1,
-                                                           .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                                                           .pImageInfo = (VkDescriptorImageInfo[]){
-                                                              {
-                                                                 .sampler = VK_NULL_HANDLE,
-                                                                 .imageView = radv_image_view_to_handle(dst_iview),
-                                                                 .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-                                                              },
-                                                           }}});
+   radv_meta_bind_descriptors(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, device->meta_state.etc_decode.pipeline_layout,
+                              2,
+                              (VkDescriptorGetInfoEXT[]){{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_GET_INFO_EXT,
+                                                          .type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                                                          .data.pSampledImage =
+                                                             (VkDescriptorImageInfo[]){
+                                                                {.sampler = VK_NULL_HANDLE,
+                                                                 .imageView = radv_image_view_to_handle(src_iview),
+                                                                 .imageLayout = VK_IMAGE_LAYOUT_GENERAL},
+                                                             }},
+                                                         {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_GET_INFO_EXT,
+                                                          .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                                          .data.pStorageImage = (VkDescriptorImageInfo[]){
+                                                             {
+                                                                .sampler = VK_NULL_HANDLE,
+                                                                .imageView = radv_image_view_to_handle(dst_iview),
+                                                                .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                                             },
+                                                          }}});
 
    radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
@@ -95,8 +61,17 @@ decode_etc(struct radv_cmd_buffer *cmd_buffer, struct radv_image_view *src_iview
       offset->x, offset->y, offset->z, src_iview->image->vk.format, src_iview->image->vk.image_type,
    };
 
-   vk_common_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer), device->meta_state.etc_decode.pipeline_layout,
-                              VK_SHADER_STAGE_COMPUTE_BIT, 0, 20, push_constants);
+   const VkPushConstantsInfoKHR pc_info = {
+      .sType = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO_KHR,
+      .layout = device->meta_state.etc_decode.pipeline_layout,
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      .offset = 0,
+      .size = sizeof(push_constants),
+      .pValues = push_constants,
+   };
+
+   radv_CmdPushConstants2(radv_cmd_buffer_to_handle(cmd_buffer), &pc_info);
+
    radv_unaligned_dispatch(cmd_buffer, extent->width, extent->height, extent->depth);
 }
 
@@ -107,23 +82,29 @@ radv_meta_decode_etc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *imag
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    struct radv_meta_saved_state saved_state;
    radv_meta_save(&saved_state, cmd_buffer,
-                  RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_CONSTANTS | RADV_META_SAVE_DESCRIPTORS |
-                     RADV_META_SUSPEND_PREDICATING);
+                  RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_CONSTANTS | RADV_META_SAVE_DESCRIPTORS);
 
-   uint32_t base_slice = radv_meta_get_iview_layer(image, subresource, &offset);
-   uint32_t slice_count = image->vk.image_type == VK_IMAGE_TYPE_3D
-                             ? extent.depth
-                             : vk_image_subresource_layer_count(&image->vk, subresource);
+   const bool is_3d = image->vk.image_type == VK_IMAGE_TYPE_3D;
+   const uint32_t base_slice = is_3d ? offset.z : subresource->baseArrayLayer;
+   const uint32_t slice_count = is_3d ? extent.depth : vk_image_subresource_layer_count(&image->vk, subresource);
 
    extent = vk_image_sanitize_extent(&image->vk, extent);
    offset = vk_image_sanitize_offset(&image->vk, offset);
 
    VkFormat load_format = vk_texcompress_etc2_load_format(image->vk.format);
+
+   const VkImageViewUsageCreateInfo src_iview_usage_info = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
+      .usage = VK_IMAGE_USAGE_SAMPLED_BIT,
+   };
+
    struct radv_image_view src_iview;
    radv_image_view_init(
       &src_iview, device,
       &(VkImageViewCreateInfo){
          .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+         .pNext = &src_iview_usage_info,
+         .flags = VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
          .image = radv_image_to_handle(image),
          .viewType = vk_texcompress_etc2_image_view_type(image->vk.image_type),
          .format = load_format,
@@ -139,11 +120,19 @@ radv_meta_decode_etc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *imag
       NULL);
 
    VkFormat store_format = vk_texcompress_etc2_store_format(image->vk.format);
+
+   const VkImageViewUsageCreateInfo dst_iview_usage_info = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
+      .usage = VK_IMAGE_USAGE_STORAGE_BIT,
+   };
+
    struct radv_image_view dst_iview;
    radv_image_view_init(
       &dst_iview, device,
       &(VkImageViewCreateInfo){
          .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+         .pNext = &dst_iview_usage_info,
+         .flags = VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
          .image = radv_image_to_handle(image),
          .viewType = vk_texcompress_etc2_image_view_type(image->vk.image_type),
          .format = store_format,

@@ -1,24 +1,7 @@
 /*
  * Copyright (c) 2022 Amazon.com, Inc. or its affiliates.
  * Copyright © 2018 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include <assert.h>
@@ -74,11 +57,13 @@ panfrost_disk_cache_store(struct disk_cache *cache,
    if (!cache)
       return;
 
+   MESA_TRACE_FUNC();
+
    cache_key cache_key;
    panfrost_disk_cache_compute_key(cache, uncompiled, key, cache_key);
 
    if (debug) {
-      char sha1[41];
+      char sha1[SHA1_DIGEST_STRING_LENGTH];
       _mesa_sha1_format(sha1, cache_key);
       fprintf(stderr, "[mesa disk cache] storing %s\n", sha1);
    }
@@ -116,11 +101,13 @@ panfrost_disk_cache_retrieve(struct disk_cache *cache,
    if (!cache)
       return false;
 
+   MESA_TRACE_FUNC();
+
    cache_key cache_key;
    panfrost_disk_cache_compute_key(cache, uncompiled, key, cache_key);
 
    if (debug) {
-      char sha1[41];
+      char sha1[SHA1_DIGEST_STRING_LENGTH];
       _mesa_sha1_format(sha1, cache_key);
       fprintf(stderr, "[mesa disk cache] retrieving %s: ", sha1);
    }
@@ -137,7 +124,7 @@ panfrost_disk_cache_retrieve(struct disk_cache *cache,
    struct blob_reader blob;
    blob_reader_init(&blob, buffer, size);
 
-   util_dynarray_init(&binary->binary, NULL);
+   binary->binary = UTIL_DYNARRAY_INIT;
 
    uint32_t binary_size = blob_read_uint32(&blob);
    void *ptr = util_dynarray_resize_bytes(&binary->binary, binary_size, 1);
@@ -165,12 +152,12 @@ panfrost_disk_cache_init(struct panfrost_screen *screen)
 
    const struct build_id_note *note =
       build_id_find_nhdr_for_addr(panfrost_disk_cache_init);
-   assert(note && build_id_length(note) == 20); /* sha1 */
+   assert(note && build_id_length(note) == BUILD_ID_EXPECTED_HASH_LENGTH); /* sha1 */
 
    const uint8_t *id_sha1 = build_id_data(note);
    assert(id_sha1);
 
-   char timestamp[41];
+   char timestamp[SHA1_DIGEST_STRING_LENGTH];
    _mesa_sha1_format(timestamp, id_sha1);
 
    /* Consider any flags affecting the compile when caching */

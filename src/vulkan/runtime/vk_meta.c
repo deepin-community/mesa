@@ -27,8 +27,11 @@
 #include "vk_buffer.h"
 #include "vk_command_buffer.h"
 #include "vk_device.h"
+#include "vk_format.h"
 #include "vk_pipeline.h"
 #include "vk_util.h"
+
+#include "nir.h"
 
 #include "util/hash_table.h"
 
@@ -365,9 +368,13 @@ create_rect_list_pipeline(struct vk_device *device,
 
    info_local.pDynamicState = &dyn_info;
 
-   VkResult result = disp->CreateGraphicsPipelines(_device, VK_NULL_HANDLE,
+   VkResult result = disp->CreateGraphicsPipelines(_device, meta->pipeline_cache,
                                                    1, &info_local, NULL,
                                                    pipeline_out);
+
+   ralloc_free(vs_nir_info.nir);
+   if (use_gs)
+      ralloc_free(gs_nir_info.nir);
 
    STACK_ARRAY_FINISH(dyn_state);
    STACK_ARRAY_FINISH(stages);
@@ -453,13 +460,13 @@ vk_meta_create_graphics_pipeline(struct vk_device *device,
    }
 
    VkPipeline pipeline;
-   if (info_local.pInputAssemblyState->topology ==
-       VK_PRIMITIVE_TOPOLOGY_META_RECT_LIST_MESA) {
+   if (meta->use_rect_list_pipeline &&
+       info_local.pInputAssemblyState->topology == VK_PRIMITIVE_TOPOLOGY_META_RECT_LIST_MESA) {
       result = create_rect_list_pipeline(device, meta,
                                          &info_local,
                                          &pipeline);
    } else {
-      result = disp->CreateGraphicsPipelines(_device, VK_NULL_HANDLE,
+      result = disp->CreateGraphicsPipelines(_device, meta->pipeline_cache,
                                              1, &info_local,
                                              NULL, &pipeline);
    }
@@ -484,7 +491,7 @@ vk_meta_create_compute_pipeline(struct vk_device *device,
    VkDevice _device = vk_device_to_handle(device);
 
    VkPipeline pipeline;
-   VkResult result = disp->CreateComputePipelines(_device, VK_NULL_HANDLE,
+   VkResult result = disp->CreateComputePipelines(_device, meta->pipeline_cache,
                                                   1, info, NULL, &pipeline);
    if (result != VK_SUCCESS)
       return result;
@@ -526,7 +533,14 @@ vk_meta_create_image_view(struct vk_command_buffer *cmd,
    const struct vk_device_dispatch_table *disp = &device->dispatch_table;
    VkDevice _device = vk_device_to_handle(device);
 
-   VkResult result = disp->CreateImageView(_device, info, NULL, image_view_out);
+   /* Meta must always specify view usage */
+   assert(vk_find_struct_const(info->pNext, IMAGE_VIEW_USAGE_CREATE_INFO));
+
+   /* Meta image views are always driver-internal */
+   assert(info->flags & VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA);
+
+   VkResult result =
+      disp->CreateImageView(_device, info, NULL, image_view_out);
    if (unlikely(result != VK_SUCCESS))
       return result;
 
@@ -557,20 +571,14 @@ vk_meta_create_buffer_view(struct vk_command_buffer *cmd,
 }
 
 VkDeviceAddress
-vk_meta_buffer_address(struct vk_device *device, VkBuffer buffer,
+vk_meta_buffer_address(struct vk_device *device, VkBuffer _buffer,
                        uint64_t offset, uint64_t range)
 {
-   const VkBufferDeviceAddressInfo info = {
-      .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-      .buffer = buffer,
-   };
-   VkDeviceAddress base = device->dispatch_table.GetBufferDeviceAddress(
-      vk_device_to_handle(device), &info);
+   VK_FROM_HANDLE(vk_buffer, buffer, _buffer);
 
    /* Only called for the assert()s in vk_buffer_range(), we don't care about
     * the result.
     */
-   vk_buffer_range(vk_buffer_from_handle(buffer), offset, range);
-
-   return base + offset;
+   vk_buffer_range(buffer, offset, range);
+   return vk_buffer_address(buffer, offset);
 }

@@ -1,6 +1,64 @@
 Submitting Patches
 ==================
 
+.. _introduction:
+
+Introduction
+------------
+
+Mesa contribution is a collaborative process that works like this:
+A contributor proposes a change (usually in the form of a GitLab
+merge request), which must undergo a review (usually in the form of
+comments from the maintainers on the merge request).
+
+The maintainers either accept it as-is, reject it outright,
+or request changes from the contributor before a contribution
+can be accepted.
+
+Mesa is a project that is made up of many different subprojects,
+for example drivers, API frontends, shader compiler infrastructure,
+etc. Each of these parts may have different maintainers and/or
+different rules and conventions. It is up to the maintainers of
+each specific part to decide what is acceptable for them and
+to direct the development of that part.
+
+.. _expectations_on_contributors:
+
+Expectations on contributors
+----------------------------
+
+Due to the collaborative nature of development, the expectation is that
+the contributor engages with the maintainers and works with
+us to shape the changeset into a form that can be accepted in the project.
+
+If you want to contribute code to Mesa, we highly recommend the following:
+
+-  Familiarize yourself with `Git <https://git-scm.com>`__.
+-  Understand the code you write at least well enough to be able
+   to explain why your changes are beneficial to the project.
+-  It's up you what tools you use to write code (development environment,
+   coding assistant, etc.), but keep in mind that no tool can substitute
+   actual understanding.
+
+In case you are not familiar with the code base, it's okay to ask for help
+and guidance from more experienced developers.
+
+The submitter is responsible for the code change, regardless of where
+that code change came from, whether they wrote it themselves, used an
+"AI" or other tool, or got it from someone else. That responsibility
+includes making sure that the code change can be submitted under the
+MIT license that Mesa uses.
+
+The submitter needs to understand what code they are changing,
+what the change does, and justify that change in the commit messages.
+Using coding assistants or "AI" or other tools does not grant additional
+privileges or reduce our expectations.
+
+If you don't know programming (and don't want to learn), but you are
+interested in the Mesa project, there are plenty of other ways to
+contribute besides writing code, for example reporting bugs, benchmarking,
+testing changes, etc.
+
 .. _guidelines:
 
 Basic guidelines
@@ -35,7 +93,7 @@ Patch formatting
 
       mesa: Add support for querying GL_VERTEX_ATTRIB_ARRAY_LONG
 
-      gallium: add PIPE_CAP_DEVICE_RESET_STATUS_QUERY
+      gallium: add pipe_caps.device_reset_status_query
 
       i965: Fix missing type in local variable declaration.
 
@@ -136,7 +194,12 @@ following example::
 
     Backport-to: 21.0
 
-Multiple ``Backport-to:`` lines are allowed.
+This will backport the commit to the 21.0 branch, as well as any more recent
+stable branch. Multiple ``Backport-to:`` lines are allowed, but only the
+lowest number mentioned actually matters, so for clarity, please only use one.
+You can also use the special ``Backport-to: *`` which will nominate the commit
+to be backported to every active stable branch, making it a synonym to the ``Cc:
+mesa-stable`` below.
 
 The last option is deprecated and mostly here for historical reasons
 dating back to when patch submission was done via emails: using a ``Cc:``
@@ -186,15 +249,34 @@ Submitting Patches
 ------------------
 
 Patches are submitted to the Mesa project via a
-`GitLab <https://gitlab.freedesktop.org/mesa/mesa>`__ Merge Request.
+`GitLab <https://gitlab.freedesktop.org/mesa/mesa>`__ Merge Request (MR).
 
-Add labels to your MR to help reviewers find it. For example:
+-  Please do NOT submit your patches in email to a mailing list,
+   we only review patches on GitLab.
+-  Please do NOT paste your patches as comments in a conversation,
+   unless it is small or unless that is what the maintainers requested.
+-  If you are not familiar with how to use git, please learn that
+   before making a contribution to Mesa.
+
+When opening a merge request, we recommend the following best practices:
+
+Add a prefix to the title of the MR to indicate which part of the
+codebase is affected. This is helpful to people who receive many MRs
+and filter them by title. All commits must also have a prefix.
+If you are unsure what is the correct prefix, please check the git
+history for the files you are changing and choose based on that.
+
+If you are already in the 'developer' role,
+add labels to your MR to help reviewers find your MR.
+For example:
 
 -  Mesa changes affecting all drivers: mesa
 -  Hardware vendor specific code: AMD common, intel, ...
 -  Driver specific code: ANV, freedreno, i965, iris, radeonsi, RADV,
    vc4, ...
 -  Other tag examples: gallium, util
+
+If you don't add any labels, a bot will attempt to add the correct ones.
 
 Tick the following when creating the MR. It allows developers to rebase
 your work on top of main.
@@ -392,10 +474,16 @@ denominate the patch.
 For patches that either need to be nominated after they've landed in
 main, or that are known ahead of time to not not apply cleanly to a
 stable branch (such as due to a rename), using a GitLab MR is most
-appropriate. The MR should be based on and target the
-``staging/year.quarter`` branch, not on the ``year.quarter`` branch,
-per the stable branch policy. Assigning the MR to release maintainer for
-said branch or mentioning them is helpful, but not required.
+appropriate. The MR must be based on and target the ``YY.N`` branch, and the
+release manager will change the target to the ``staging/YY.N`` branch when
+merging it; this avoid issues with the rebasing nature of the ``staging``
+branches. Assigning the MR to release maintainer for said branch or mentioning
+them is not required but helpful, to allow them to see the MR as soon as
+possible.
+
+.. warning::
+   Do not merge your backport MR yourself, even if you think it's ready.
+   The release manager will do it once everything is ok.
 
 Make sure to use ``git cherry-pick -x`` when cherry-picking the commits
 from the main branch. This adds the "cherry picked from commit ..." line
@@ -411,12 +499,13 @@ Our documentation is written as `reStructuredText`_ files in the
 
 .. code-block:: sh
 
-   # Install dependencies (adapt for your distro)
-   apk add coreutils graphviz py3-clang clang-dev musl-dev linux-headers
-   pip3 install sphinx===5.1.1 mako===1.2.3 hawkmoth===0.16.0
+   # Install dependencies (adapt for your distribution)
+   apk add coreutils graphviz clang-dev musl-dev linux-headers
+   python3 -m venv docs-build
+   ./docs-build/bin/pip3 install sphinx===8.2.3 mako===1.2.3 hawkmoth===0.19.0 clang===$(llvm-config --version)
 
-   # Build docs
-   sphinx-build -W -b html docs docs-html/
+   # Build docs (on Debian, set LD_LIBRARY_PATH to /usr/lib/llvm-VERSION/lib so it can find libclang.so)
+   ./docs-build/bin/sphinx-build -W -b html docs docs-html/
 
 The preferred language of the documentation is US English. This
 doesn't mean that everyone is expected to pay close attention to

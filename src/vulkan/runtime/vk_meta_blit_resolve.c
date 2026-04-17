@@ -27,6 +27,7 @@
 #include "vk_device.h"
 #include "vk_format.h"
 #include "vk_pipeline.h"
+#include "vk_render_pass.h"
 
 #include "nir_builder.h"
 
@@ -52,7 +53,7 @@ vk_image_sampler_dim(const struct vk_image *image)
       else
          return GLSL_SAMPLER_DIM_2D;
    case VK_IMAGE_TYPE_3D: return GLSL_SAMPLER_DIM_3D;
-   default: unreachable("Invalid image type");
+   default: UNREACHABLE("Invalid image type");
    }
 }
 
@@ -70,7 +71,7 @@ aspect_to_tex_binding(VkImageAspectFlagBits aspect)
    case VK_IMAGE_ASPECT_COLOR_BIT: return BLIT_DESC_BINDING_COLOR;
    case VK_IMAGE_ASPECT_DEPTH_BIT: return BLIT_DESC_BINDING_DEPTH;
    case VK_IMAGE_ASPECT_STENCIL_BIT: return BLIT_DESC_BINDING_STENCIL;
-   default: unreachable("Unsupported aspect");
+   default: UNREACHABLE("Unsupported aspect");
    }
 }
 
@@ -98,9 +99,7 @@ compute_off_scale(uint32_t src_level_size,
       *dst1_out = dst0;
 
       /* Flip the source region */
-      uint32_t tmp = src0;
-      src0 = src1;
-      src1 = tmp;
+      SWAP(src0, src1);
    }
 
    double src_region_size = (double)src1 - (double)src0;
@@ -131,7 +130,7 @@ build_tex_resolve(nir_builder *b, nir_deref_instr *t,
                   VkSampleCountFlagBits samples,
                   VkResolveModeFlagBits resolve_mode)
 {
-   nir_def *accum = nir_txf_ms_deref(b, t, coord, nir_imm_int(b, 0));
+   nir_def *accum = nir_txf_ms(b, coord, nir_imm_int(b, 0), .texture_deref = t);
    if (resolve_mode == VK_RESOLVE_MODE_SAMPLE_ZERO_BIT)
       return accum;
 
@@ -139,7 +138,7 @@ build_tex_resolve(nir_builder *b, nir_deref_instr *t,
       glsl_get_sampler_result_type(t->type);
 
    for (unsigned i = 1; i < samples; i++) {
-      nir_def *val = nir_txf_ms_deref(b, t, coord, nir_imm_int(b, i));
+      nir_def *val = nir_txf_ms(b, coord, nir_imm_int(b, i), .texture_deref = t);
       switch (resolve_mode) {
       case VK_RESOLVE_MODE_AVERAGE_BIT:
          assert(base_type == GLSL_TYPE_FLOAT);
@@ -158,7 +157,7 @@ build_tex_resolve(nir_builder *b, nir_deref_instr *t,
             accum = nir_fmin(b, accum, val);
             break;
          default:
-            unreachable("Invalid sample result type");
+            UNREACHABLE("Invalid sample result type");
          }
          break;
 
@@ -174,12 +173,12 @@ build_tex_resolve(nir_builder *b, nir_deref_instr *t,
             accum = nir_fmax(b, accum, val);
             break;
          default:
-            unreachable("Invalid sample result type");
+            UNREACHABLE("Invalid sample result type");
          }
          break;
 
       default:
-         unreachable("Unsupported resolve mode");
+         UNREACHABLE("Unsupported resolve mode");
       }
    }
 
@@ -291,7 +290,7 @@ build_blit_shader(const struct vk_meta_blit_key *key)
          out_comps = 1;
          break;
       default:
-         unreachable("Unsupported aspect");
+         UNREACHABLE("Unsupported aspect");
       }
 
       const bool is_array = key->dim != GLSL_SAMPLER_DIM_3D;
@@ -305,7 +304,8 @@ build_blit_shader(const struct vk_meta_blit_key *key)
 
       nir_def *val;
       if (resolve_mode == VK_RESOLVE_MODE_NONE) {
-         val = nir_txl_deref(b, t, s, src_coord, nir_imm_float(b, 0));
+         val = nir_tex(b, src_coord, .lod = nir_imm_float(b, 0),
+                       .texture_deref = t, .sampler_deref = s);
       } else {
          val = build_tex_resolve(b, t, nir_f2u32(b, src_coord),
                                  key->src_samples, resolve_mode);
@@ -336,7 +336,7 @@ get_blit_pipeline_layout(struct vk_device *device,
                          struct vk_meta_device *meta,
                          VkPipelineLayout *layout_out)
 {
-   const char key[] = "vk-meta-blit-pipeline-layout";
+   enum vk_meta_object_key_type key = VK_META_OBJECT_KEY_BLIT;
 
    const VkDescriptorSetLayoutBinding bindings[] = {{
       .binding = BLIT_DESC_BINDING_SAMPLER,
@@ -374,7 +374,7 @@ get_blit_pipeline_layout(struct vk_device *device,
    };
 
    return vk_meta_get_pipeline_layout(device, meta, &desc_info, &push_range,
-                                      key, sizeof(key), layout_out);
+                                      &key, sizeof(key), layout_out);
 }
 
 static VkResult
@@ -470,7 +470,7 @@ get_blit_sampler(struct vk_device *device,
    } key;
 
    memset(&key, 0, sizeof(key));
-   key.key_type = VK_META_OBJECT_KEY_BLIT_SAMPLER;
+   key.key_type = VK_META_OBJECT_KEY_BLIT;
    key.filter = filter;
 
    VkSampler from_cache = vk_meta_lookup_sampler(meta, &key, sizeof(key));
@@ -551,6 +551,7 @@ do_blit(struct vk_command_buffer *cmd,
       const VkImageViewCreateInfo src_view_info = {
          .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
          .pNext = &src_view_usage,
+         .flags = VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
          .image = vk_image_to_handle(src_image),
          .viewType = vk_image_sampled_view_type(src_image),
          .format = src_format,
@@ -617,6 +618,7 @@ do_blit(struct vk_command_buffer *cmd,
       const VkImageViewCreateInfo dst_view_info = {
          .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
          .pNext = &dst_view_usage,
+         .flags = VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
          .image = vk_image_to_handle(dst_image),
          .viewType = vk_image_sampled_view_type(dst_image),
          .format = dst_format,
@@ -734,7 +736,7 @@ vk_meta_blit_image(struct vk_command_buffer *cmd,
 
    struct vk_meta_blit_key key;
    memset(&key, 0, sizeof(key));
-   key.key_type = VK_META_OBJECT_KEY_BLIT_PIPELINE;
+   key.key_type = VK_META_OBJECT_KEY_BLIT;
    key.src_samples = src_image->samples;
    key.dim = vk_image_sampler_dim(src_image);
    key.dst_format = dst_format;
@@ -771,12 +773,24 @@ vk_meta_blit_image(struct vk_command_buffer *cmd,
 
       uint32_t dst_layer_count;
       if (src_image->image_type == VK_IMAGE_TYPE_3D) {
+         /* We need to fixup to handle the 3D-->2D Array case */
+         unsigned dst_z_or_layer_offsets[] = {
+            regions[r].dstOffsets[0].z,
+            regions[r].dstOffsets[1].z
+         };
+
+         if (dst_image->image_type != VK_IMAGE_TYPE_3D) {
+            /* baseArrayLayer applied outside so we just need the count */
+            dst_z_or_layer_offsets[0] = 0;
+            dst_z_or_layer_offsets[1] = dst_subres.layerCount;
+         }
+
          uint32_t layer0, layer1;
          compute_off_scale(src_extent.depth,
                            regions[r].srcOffsets[0].z,
                            regions[r].srcOffsets[1].z,
-                           regions[r].dstOffsets[0].z,
-                           regions[r].dstOffsets[1].z,
+                           dst_z_or_layer_offsets[0],
+                           dst_z_or_layer_offsets[1],
                            &layer0, &layer1,
                            &push.z_off, &push.z_scale);
          dst_rect.layer = layer0;
@@ -825,7 +839,7 @@ vk_meta_resolve_image(struct vk_command_buffer *cmd,
 {
    struct vk_meta_blit_key key;
    memset(&key, 0, sizeof(key));
-   key.key_type = VK_META_OBJECT_KEY_BLIT_PIPELINE;
+   key.key_type = VK_META_OBJECT_KEY_BLIT;
    key.dim = vk_image_sampler_dim(src_image);
    key.src_samples = src_image->samples;
    key.resolve_mode = resolve_mode;
@@ -870,16 +884,35 @@ vk_meta_resolve_image2(struct vk_command_buffer *cmd,
    VK_FROM_HANDLE(vk_image, src_image, resolve->srcImage);
    VK_FROM_HANDLE(vk_image, dst_image, resolve->dstImage);
 
+   /* Color resolve default to be based on the format */
    VkResolveModeFlagBits resolve_mode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
    if (vk_format_is_color(src_image->format) &&
        !vk_format_is_int(src_image->format))
       resolve_mode = VK_RESOLVE_MODE_AVERAGE_BIT;
 
+   VkResolveImageFlagBitsKHR resolve_flags = 0;
+   VkResolveModeFlagBits stencil_resolve_mode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
+
+   const VkResolveImageModeInfoKHR *mode_info =
+      vk_find_struct_const(resolve->pNext, RESOLVE_IMAGE_MODE_INFO_KHR);
+   if (mode_info != NULL) {
+      resolve_flags = mode_info->flags;
+      resolve_mode = mode_info->resolveMode;
+      stencil_resolve_mode = mode_info->stencilResolveMode;
+   }
+
+   VkFormat src_format = src_image->format;
+   VkFormat dst_format = dst_image->format;
+   if (resolve_flags & VK_RESOLVE_IMAGE_SKIP_TRANSFER_FUNCTION_BIT_KHR) {
+      src_format = vk_format_srgb_to_linear(src_format);
+      dst_format = vk_format_srgb_to_linear(dst_format);
+   }
+
    vk_meta_resolve_image(cmd, meta,
-                         src_image, src_image->format, resolve->srcImageLayout,
-                         dst_image, dst_image->format, resolve->dstImageLayout,
+                         src_image, src_format, resolve->srcImageLayout,
+                         dst_image, dst_format, resolve->dstImageLayout,
                          resolve->regionCount, resolve->pRegions,
-                         resolve_mode, VK_RESOLVE_MODE_SAMPLE_ZERO_BIT);
+                         resolve_mode, stencil_resolve_mode);
 }
 
 static void
@@ -890,6 +923,7 @@ vk_meta_resolve_attachment(struct vk_command_buffer *cmd,
                            struct vk_image_view *dst_view,
                            VkImageLayout dst_image_layout,
                            VkImageAspectFlags resolve_aspects,
+                           VkRenderingAttachmentFlagsKHR att_flags,
                            VkResolveModeFlagBits resolve_mode,
                            VkResolveModeFlagBits stencil_resolve_mode,
                            VkRect2D area, uint32_t layer_count,
@@ -910,6 +944,13 @@ vk_meta_resolve_attachment(struct vk_command_buffer *cmd,
       .extent = { area.extent.width, area.extent.height, 1},
    };
 
+   VkFormat src_format = src_view->format;
+   VkFormat dst_format = dst_view->format;
+   if (att_flags & VK_RENDERING_ATTACHMENT_RESOLVE_SKIP_TRANSFER_FUNCTION_BIT_KHR) {
+      src_format = vk_format_srgb_to_linear(src_format);
+      dst_format = vk_format_srgb_to_linear(dst_format);
+   }
+
    if (view_mask) {
       u_foreach_bit(v, view_mask) {
          region.srcSubresource.baseArrayLayer = src_view->base_array_layer + v;
@@ -918,10 +959,8 @@ vk_meta_resolve_attachment(struct vk_command_buffer *cmd,
          region.dstSubresource.layerCount = 1;
 
          vk_meta_resolve_image(cmd, meta,
-                               src_view->image, src_view->format,
-                               src_image_layout,
-                               dst_view->image, dst_view->format,
-                               dst_image_layout,
+                               src_view->image, src_format, src_image_layout,
+                               dst_view->image, dst_format, dst_image_layout,
                                1, &region, resolve_mode, stencil_resolve_mode);
       }
    } else {
@@ -931,10 +970,8 @@ vk_meta_resolve_attachment(struct vk_command_buffer *cmd,
       region.dstSubresource.layerCount = layer_count;
 
       vk_meta_resolve_image(cmd, meta,
-                            src_view->image, src_view->format,
-                            src_image_layout,
-                            dst_view->image, dst_view->format,
-                            dst_image_layout,
+                            src_view->image, src_format, src_image_layout,
+                            dst_view->image, dst_format, dst_image_layout,
                             1, &region, resolve_mode, stencil_resolve_mode);
    }
 }
@@ -956,6 +993,7 @@ vk_meta_resolve_rendering(struct vk_command_buffer *cmd,
       vk_meta_resolve_attachment(cmd, meta, view, att->imageLayout,
                                  res_view, att->resolveImageLayout,
                                  VK_IMAGE_ASPECT_COLOR_BIT,
+                                 vk_get_rendering_attachment_flags(att),
                                  att->resolveMode, VK_RESOLVE_MODE_NONE,
                                  pRenderingInfo->renderArea,
                                  pRenderingInfo->layerCount,
@@ -981,6 +1019,7 @@ vk_meta_resolve_rendering(struct vk_command_buffer *cmd,
                                     res_view, d_att->resolveImageLayout,
                                     VK_IMAGE_ASPECT_DEPTH_BIT |
                                     VK_IMAGE_ASPECT_STENCIL_BIT,
+                                    0, /* Flags don't affect Z/S resolves */
                                     d_att->resolveMode, s_att->resolveMode,
                                     pRenderingInfo->renderArea,
                                     pRenderingInfo->layerCount,
@@ -993,6 +1032,7 @@ vk_meta_resolve_rendering(struct vk_command_buffer *cmd,
             vk_meta_resolve_attachment(cmd, meta, view, d_att->imageLayout,
                                        res_view, d_att->resolveImageLayout,
                                        VK_IMAGE_ASPECT_DEPTH_BIT,
+                                       0, /* Flags don't affect Z/S resolves */
                                        d_att->resolveMode, VK_RESOLVE_MODE_NONE,
                                        pRenderingInfo->renderArea,
                                        pRenderingInfo->layerCount,
@@ -1006,6 +1046,7 @@ vk_meta_resolve_rendering(struct vk_command_buffer *cmd,
             vk_meta_resolve_attachment(cmd, meta, view, s_att->imageLayout,
                                        res_view, s_att->resolveImageLayout,
                                        VK_IMAGE_ASPECT_STENCIL_BIT,
+                                       0, /* Flags don't affect Z/S resolves */
                                        VK_RESOLVE_MODE_NONE, s_att->resolveMode,
                                        pRenderingInfo->renderArea,
                                        pRenderingInfo->layerCount,

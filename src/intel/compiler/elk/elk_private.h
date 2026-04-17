@@ -22,8 +22,7 @@
  * IN THE SOFTWARE.
  */
 
-#ifndef ELK_PRIVATE_H
-#define ELK_PRIVATE_H
+#pragma once
 
 #include "elk_compiler.h"
 
@@ -61,6 +60,18 @@ inline bool elk_simd_any_compiled(const elk_simd_selection_state &state)
    return elk_simd_first_compiled(state) >= 0;
 }
 
+inline bool
+elk_needs_unlit_centroid_workaround(const struct intel_device_info *devinfo)
+{
+   /* Sandybridge doesn't do centroid interpolation correctly on unlit pixels,
+    * causing incorrect values for derivatives near triangle edges.  Enabling
+    * this flag causes the fragment shader to use non-centroid interpolation
+    * for unlit pixels, at the expense of two extra fragment shader
+    * instructions."
+    */
+   return devinfo->ver == 6;
+}
+
 bool elk_simd_should_compile(elk_simd_selection_state &state, unsigned simd);
 
 void elk_simd_mark_compiled(elk_simd_selection_state &state, unsigned simd, bool spilled);
@@ -72,5 +83,3 @@ int elk_simd_select_for_workgroup_size(const struct intel_device_info *devinfo,
                                        const unsigned *sizes);
 
 bool elk_should_print_shader(const nir_shader *shader, uint64_t debug_flag);
-
-#endif // ELK_PRIVATE_H

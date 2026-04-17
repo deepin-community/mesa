@@ -1,15 +1,15 @@
 
-AlignAfterOpenBracket: true
-AlignConsecutiveMacros: true
+AlignAfterOpenBracket: Align
+AlignConsecutiveMacros: Consecutive
 
 AllowAllArgumentsOnNextLine: false
 AllowShortCaseLabelsOnASingleLine: false
-AllowShortFunctionsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
 
 AlwaysBreakAfterReturnType: TopLevelDefinitions
 
 BraceWrapping:
-  AfterControlStatement: false
+  AfterControlStatement: Never
   AfterEnum: false
   AfterFunction: true
   AfterStruct: false
@@ -48,9 +48,13 @@ IncludeCategories:
     Priority:        3
 
 ForEachMacros:
+# There is no way to extend ForEachMacros
+# The issue tracker https://github.com/llvm/llvm-project/issues/84359
 # util
   - u_foreach_bit
   - u_foreach_bit64
+
+  - u_vector_foreach
 
   - BITSET_FOREACH_SET
   - BITSET_FOREACH_RANGE
@@ -98,6 +102,8 @@ ForEachMacros:
   - foreach_list_typed_reverse_safe
   - foreach_list_typed_safe
   - foreach_two_lists
+
+  - U_SPARSE_BITSET_FOREACH_SET
 
 # nir
   - nir_foreach_function_temp_variable
@@ -153,6 +159,9 @@ ForEachMacros:
 
   - nir_foreach_function_impl
 
+  - nir_foreach_entrypoint
+  - nir_foreach_entrypoint_safe
+
   - nir_foreach_block_unstructured
   - nir_foreach_block_unstructured_safe
 
@@ -162,6 +171,11 @@ ForEachMacros:
   - nir_foreach_block_reverse
   - nir_foreach_block_reverse_safe
   - nir_foreach_block_safe
+
+  - nir_precomp_foreach_arg
+  - nir_precomp_foreach_variant_param
+
+  - foreach_pair
 
 # egl
   - egl_relax
@@ -221,22 +235,33 @@ ForEachMacros:
   - agx_foreach_ssa_dest_rev
   - agx_foreach_ssa_src
   - agx_foreach_ssa_src_rev
+  - agx_foreach_reg_src
+  - agx_foreach_reg_dest
   - agx_foreach_successor
   - foreach_next_use
 
+# poly
+  - poly_foreach_xfb
+
 # radv
   - PHASE
+  - radv_foreach_stage
 
 # freedreno
   - ir2_foreach_instr
   - ir2_foreach_live_reg
   - ir2_foreach_avail
   - ir2_foreach_src
-  - foreach_two_lists
+  - foreach_batch
+  - perf_time
+  - perf_time_ctx
   - foreach_sched_node
   - foreach_src
   - foreach_src_n
   - foreach_src_if
+  - foreach_src_with_alias_n
+  - foreach_src_in_alias_group_n
+  - foreach_src_in_alias_group
   - foreach_dst
   - foreach_dst_n
   - foreach_dst_if
@@ -250,34 +275,28 @@ ForEachMacros:
   - foreach_ssa_src
   - foreach_input_n
   - foreach_input
-  - foreach_output_n
-  - foreach_output
   - foreach_instr
   - foreach_instr_rev
   - foreach_instr_safe
+  - foreach_instr_from
   - foreach_instr_from_safe
   - foreach_block
   - foreach_block_safe
   - foreach_block_rev
   - foreach_array
   - foreach_array_safe
-  - foreach_name_n
-  - foreach_name
-  - foreach_def
-  - foreach_use
   - foreach_interval
   - foreach_interval_safe
   - foreach_interval_rev
   - foreach_interval_rev_safe
-  - foreach_batch
   - foreach_line_in_section
-  - perf_time
-  - perf_time_ctx
   - foreach_submit
   - foreach_submit_safe
   - foreach_instr_rpt
   - foreach_instr_rpt_excl
   - foreach_instr_rpt_excl_safe
+  - foreach_bo
+  - foreach_bo_safe
 
 # Disable clang formatting by default. Drivers that use clang-format
 # inherit from this .clang-format file and re-enable formatting:

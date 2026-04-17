@@ -83,7 +83,6 @@ private:
    ExportInstr *m_last_pos_export{nullptr};
 
    int m_num_clip_dist{0};
-   int m_next_param{0};
    uint8_t m_cc_dist_mask{0};
    uint8_t m_clip_dist_write{0};
    int m_cur_clip_pos{1};
@@ -157,11 +156,18 @@ private:
    void do_get_shader_info(r600_shader *sh_info) override;
 
    VertexExportStage *m_export_stage{nullptr};
+   template <typename T>
+   using ArrayMap =
+      std::map<unsigned, T, std::less<unsigned>, Allocator<std::pair<const unsigned, T>>>;
+
+   ArrayMap<int> m_input_array_ranges;
+   ArrayMap<LocalArray *> m_input_arrays;
    int m_last_vertex_attribute_register{0};
    PRegister m_vertex_id{nullptr};
    PRegister m_instance_id{nullptr};
    PRegister m_rel_vertex_id{nullptr};
    bool m_vs_as_gs_a;
+   bool m_draw_parameters_enabled{false};
 };
 
 } // namespace r600

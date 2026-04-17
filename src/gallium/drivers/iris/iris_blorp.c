@@ -42,7 +42,7 @@
 
 #include "util/u_upload_mgr.h"
 #include "intel/common/intel_l3_config.h"
-#include "intel/compiler/brw_compiler.h"
+#include "intel/compiler/brw/brw_compiler.h"
 
 #include "genxml/gen_macros.h"
 
@@ -63,7 +63,7 @@ stream_state(struct iris_batch *batch,
    struct pipe_resource *res = NULL;
    void *ptr = NULL;
 
-   u_upload_alloc(uploader, 0, size, alignment, out_offset, &res, &ptr);
+   u_upload_alloc_ref(uploader, 0, size, alignment, out_offset, &res, &ptr);
 
    struct iris_bo *bo = iris_resource_bo(res);
    iris_use_pinned_bo(batch, bo, false, IRIS_DOMAIN_NONE);
@@ -138,7 +138,7 @@ static uint32_t
 blorp_get_dynamic_state(struct blorp_batch *batch,
                         enum blorp_dynamic_state name)
 {
-   unreachable("Not implemented");
+   UNREACHABLE("Not implemented");
 }
 
 static void *
@@ -382,14 +382,8 @@ iris_blorp_exec_render(struct blorp_batch *blorp_batch,
                          IRIS_DIRTY_LINE_STIPPLE |
                          IRIS_ALL_DIRTY_FOR_COMPUTE |
                          IRIS_DIRTY_SCISSOR_RECT |
-                         IRIS_DIRTY_VF);
-   /* Wa_14016820455
-    * On Gfx 12.5 platforms, the SF_CL_VIEWPORT pointer can be invalidated
-    * likely by a read cache invalidation when clipping is disabled, so we
-    * don't skip its dirty bit here, in order to reprogram it.
-    */
-   if (GFX_VERx10 != 125)
-      skip_bits |= IRIS_DIRTY_SF_CL_VIEWPORT;
+                         IRIS_DIRTY_VF |
+                         IRIS_DIRTY_SF_CL_VIEWPORT);
 
    uint64_t skip_stage_bits = (IRIS_ALL_STAGE_DIRTY_FOR_COMPUTE |
                                IRIS_STAGE_DIRTY_UNCOMPILED_VS |
@@ -470,6 +464,15 @@ iris_blorp_exec_blitter(struct blorp_batch *blorp_batch,
 
    iris_bo_bump_seqno(params->dst.addr.buffer, batch->next_seqno,
                       IRIS_DOMAIN_OTHER_WRITE);
+
+   /*
+    * TDOD: Add INTEL_NEEDS_WA_14025112257 check once HSD is propogated for all
+    * other impacted platforms.
+    */
+   if (batch->screen->devinfo->ver >= 20 && batch->name == IRIS_BATCH_COMPUTE) {
+      iris_emit_pipe_control_flush(batch, "WA_14025112257",
+                                   PIPE_CONTROL_STATE_CACHE_INVALIDATE);
+   }
 }
 
 static void

@@ -67,6 +67,8 @@ struct u_transfer_helper;
 struct pipe_screen;
 struct util_queue_fence;
 struct pipe_video_buffer;
+struct nir_shader;
+struct nir_shader_compiler_options;
 
 typedef struct pipe_vertex_state *
    (*pipe_create_vertex_state_func)(struct pipe_screen *screen,
@@ -89,6 +91,11 @@ typedef void (*pipe_driver_thread_func)(void *job, void *gdata, int thread_index
 struct pipe_screen {
    int refcnt;
    void *winsys_priv;
+
+   const struct pipe_caps caps;
+   const struct pipe_shader_caps shader_caps[MESA_SHADER_MESH_STAGES];
+   const struct pipe_compute_caps compute_caps;
+   const struct nir_shader_compiler_options *nir_options[MESA_SHADER_MESH_STAGES];
 
    /**
     * Get the fd associated with the screen
@@ -131,25 +138,6 @@ struct pipe_screen {
    const char *(*get_cl_cts_version)(struct pipe_screen *);
 
    /**
-    * Query an integer-valued capability/parameter/limit
-    * \param param  one of PIPE_CAP_x
-    */
-   int (*get_param)(struct pipe_screen *, enum pipe_cap param);
-
-   /**
-    * Query a float-valued capability/parameter/limit
-    * \param param  one of PIPE_CAP_x
-    */
-   float (*get_paramf)(struct pipe_screen *, enum pipe_capf param);
-
-   /**
-    * Query a per-shader-stage integer-valued capability/parameter/limit
-    * \param param  one of PIPE_CAP_x
-    */
-   int (*get_shader_param)(struct pipe_screen *, enum pipe_shader_type shader,
-                           enum pipe_shader_cap param);
-
-   /**
     * Query an integer-valued capability/parameter/limit for a codec/profile
     * \param param  one of PIPE_VIDEO_CAP_x
     */
@@ -159,23 +147,8 @@ struct pipe_screen {
                           enum pipe_video_cap param);
 
    /**
-    * Query a compute-specific capability/parameter/limit.
-    * \param ir_type shader IR type for which the param applies, or don't care
-    *                if the param is not shader related
-    * \param param   one of PIPE_COMPUTE_CAP_x
-    * \param ret     pointer to a preallocated buffer that will be
-    *                initialized to the parameter value, or NULL.
-    * \return        size in bytes of the parameter value that would be
-    *                returned.
-    */
-   int (*get_compute_param)(struct pipe_screen *,
-                            enum pipe_shader_ir ir_type,
-                            enum pipe_compute_cap param,
-                            void *ret);
-
-   /**
     * Get the sample pixel grid's size. This function requires
-    * PIPE_CAP_PROGRAMMABLE_SAMPLE_LOCATIONS to be callable.
+    * pipe_caps.programmable_sample_locations to be callable.
     *
     * \param sample_count - total number of samples
     * \param out_width - the width of the pixel grid
@@ -339,6 +312,20 @@ struct pipe_screen {
                                unsigned usage);
 
    /**
+    * Tell the driver that manages a pipe resource about its label.
+    *
+    * For GL objects that contain one or more pipe resources, make the gallium
+    * driver that manages them aware of their label.
+    *
+    * \param label A NUL-terminated string. It will remain valid only until
+    * the end of the call, so its lifetime must be managed by the implementer.
+    *
+    */
+   void (*set_resource_label)(struct pipe_screen *pscreen,
+                              struct pipe_resource *presource,
+                              const char *label);
+
+   /**
     * Get info for the given pipe resource without the need to get a
     * winsys_handle.
     *
@@ -357,15 +344,6 @@ struct pipe_screen {
                               enum pipe_resource_param param,
                               unsigned handle_usage,
                               uint64_t *value);
-
-   /**
-    * Get stride and offset for the given pipe resource without the need to get
-    * a winsys_handle.
-    */
-   void (*resource_get_info)(struct pipe_screen *screen,
-                             struct pipe_resource *resource,
-                             unsigned *stride,
-                             unsigned *offset);
 
    /**
     * Mark the resource as changed so derived internal resources will be
@@ -400,6 +378,14 @@ struct pipe_screen {
    void (*fence_reference)(struct pipe_screen *screen,
                            struct pipe_fence_handle **ptr,
                            struct pipe_fence_handle *fence);
+
+   /**
+    * Creates a semaphore that can be signaled and waited on through
+    * fence_server_sync and fence_server_signal.
+    *
+    * Drivers are required to not flush or wait on anything in this call.
+    */
+   struct pipe_fence_handle* (*semaphore_create)(struct pipe_screen *screen);
 
    /**
     * Wait for the fence to finish.
@@ -480,15 +466,6 @@ struct pipe_screen {
     */
    void (*query_memory_info)(struct pipe_screen *screen,
                              struct pipe_memory_info *info);
-
-   /**
-    * Get IR specific compiler options struct.  For PIPE_SHADER_IR_NIR this
-    * returns a 'struct nir_shader_compiler_options'.  Drivers reporting
-    * NIR as the preferred IR must implement this.
-    */
-   const void *(*get_compiler_options)(struct pipe_screen *screen,
-                                      enum pipe_shader_ir ir,
-                                      enum pipe_shader_type shader);
 
    /**
     * Returns a pointer to a driver-specific on-disk shader cache. If the
@@ -605,7 +582,7 @@ struct pipe_screen {
     */
    bool (*is_parallel_shader_compilation_finished)(struct pipe_screen *screen,
                                                    void *shader,
-                                                   enum pipe_shader_type shader_type);
+                                                   mesa_shader_stage shader_type);
 
    void (*driver_thread_add_job)(struct pipe_screen *screen,
                                  void *job,
@@ -637,10 +614,10 @@ struct pipe_screen {
     * gallium frontends should call this before passing shaders to drivers,
     * and ideally also before shader caching.
     *
-    * The driver may return a non-NULL string to trigger GLSL link failure
-    * and logging of that message in the GLSL linker log.
+    * \param optimize  If false, the driver doesn't have to optimize NIR.
     */
-   char *(*finalize_nir)(struct pipe_screen *screen, void *nir);
+   void (*finalize_nir)(struct pipe_screen *screen, struct nir_shader *nir,
+                        bool optimize);
 
    /*Separated memory/resource allocations interfaces for Vulkan */
 
@@ -771,14 +748,6 @@ struct pipe_screen {
    pipe_vertex_state_destroy_func vertex_state_destroy;
 
    /**
-    * Update a timeline semaphore value stored within a driver fence object.
-    * Future waits and signals will use the new value.
-    */
-   void (*set_fence_timeline_value)(struct pipe_screen *screen,
-                                    struct pipe_fence_handle *fence,
-                                    uint64_t value);
-
-   /**
     * Get additional data for interop_query_device_info
     *
     * \p in_data_size is how much data was allocated by the caller
@@ -832,22 +801,34 @@ struct pipe_screen {
                                        int max, uint64_t *modifiers, int *count);
 
    /**
-    * Check if the given \p target buffer is supported as output (or input for
-    * encode) for this \p profile and \p entrypoint.
-    *
-    * If \p format is different from target->buffer_format this function
-    * checks if the \p target buffer can be converted to \p format as part
-    * of the given operation (eg. encoder accepts RGB input and converts
-    * it to YUV).
-    *
-    * \return true if the buffer is supported for given operation, false
-    *         otherwise.
+    * Allocates a cut-out in the GPU's VM space.
     */
-   bool (*is_video_target_buffer_supported)(struct pipe_screen *screen,
-                                            enum pipe_format format,
-                                            struct pipe_video_buffer *target,
-                                            enum pipe_video_profile profile,
-                                            enum pipe_video_entrypoint entrypoint);
+   struct pipe_vm_allocation *(*alloc_vm)(struct pipe_screen *screen,
+                                           uint64_t start, uint64_t size);
+
+   /**
+    * Frees a cut-out allocated through alloc_vm.
+    */
+   void (*free_vm)(struct pipe_screen *screen, struct pipe_vm_allocation *alloc);
+
+   /**
+    * Binds an \p address to the given \p resource. \p needs to be created with
+    * PIPE_RESOURCE_FLAG_FRONTEND_VM
+    *
+    * \return true if the operation was successful, false otherwise.
+    */
+   bool (*resource_assign_vma)(struct pipe_screen *screen,
+                               struct pipe_resource *resource,
+                               uint64_t address);
+
+   /**
+    * Returns the virtual address of \p resource. \p resource needs to be created
+    * with PIPE_RESOURCE_FLAG_FIXED_ADDRESS.
+    *
+    * \return the virtual address of the given resource. Returns 0 on failure.
+    */
+   uint64_t (*resource_get_address)(struct pipe_screen *screen,
+                                    struct pipe_resource *resource);
 
    /**
     * pipe_screen is inherited by driver's screen but a simple cast to convert

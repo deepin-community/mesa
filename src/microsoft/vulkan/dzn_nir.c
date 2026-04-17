@@ -94,7 +94,6 @@ dzn_nir_indirect_draw_shader(struct dzn_indirect_draw_type type)
                                      type.indirect_count ? "_count" : "",
                                      type.triangle_fan ? "_triangle_fan" : "",
                                      type.triangle_fan_primitive_restart ? "_primitive_restart" : "");
-   b.shader->info.internal = true;
 
    nir_def *params_desc =
       dzn_nir_create_bo_desc(&b, nir_var_mem_ubo, 0, 0, "params", 0);
@@ -299,7 +298,6 @@ dzn_nir_triangle_fan_prim_restart_rewrite_index_shader(uint8_t old_index_size)
                                      dxil_get_base_nir_compiler_options(),
                                      "dzn_meta_triangle_prim_rewrite_index(old_index_size=%d)",
                                      old_index_size);
-   b.shader->info.internal = true;
 
    nir_def *params_desc =
       dzn_nir_create_bo_desc(&b, nir_var_mem_ubo, 0, 0, "params", 0);
@@ -384,9 +382,7 @@ dzn_nir_triangle_fan_prim_restart_rewrite_index_shader(uint8_t old_index_size)
    nir_def *read_index_count =
       nir_bcsel(&b, nir_ieq(&b, index0, prim_restart_val),
                 nir_imm_int(&b, 3), nir_imm_int(&b, 2));
-   nir_push_if(&b, nir_ult(&b, old_index_count, nir_iadd(&b, old_index_ptr, read_index_count)));
-   nir_jump(&b, nir_jump_break);
-   nir_pop_if(&b, NULL);
+   nir_break_if(&b, nir_ult(&b, old_index_count, nir_iadd(&b, old_index_ptr, read_index_count)));
 
    nir_def *old_index_offset =
       nir_imul_imm(&b, old_index_ptr, old_index_size);
@@ -462,7 +458,6 @@ dzn_nir_triangle_fan_rewrite_index_shader(uint8_t old_index_size)
                                      dxil_get_base_nir_compiler_options(),
                                      "dzn_meta_triangle_rewrite_index(old_index_size=%d)",
                                      old_index_size);
-   b.shader->info.internal = true;
 
    nir_def *params_desc =
       dzn_nir_create_bo_desc(&b, nir_var_mem_ubo, 0, 0, "params", 0);
@@ -549,7 +544,6 @@ dzn_nir_blit_vs(void)
       nir_builder_init_simple_shader(MESA_SHADER_VERTEX,
                                      dxil_get_base_nir_compiler_options(),
                                      "dzn_meta_blit_vs()");
-   b.shader->info.internal = true;
 
    nir_def *params_desc =
       dzn_nir_create_bo_desc(&b, nir_var_mem_ubo, 0, 0, "params", 0);
@@ -608,7 +602,6 @@ dzn_nir_blit_fs(const struct dzn_nir_blit_info *info)
       nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT,
                                      dxil_get_base_nir_compiler_options(),
                                      "dzn_meta_blit_fs()");
-   b.shader->info.internal = true;
 
    const struct glsl_type *tex_type =
       glsl_texture_type(info->sampler_dim, info->src_is_array, info->out_type);
@@ -944,9 +937,7 @@ dzn_nir_polygon_point_mode_gs(const nir_shader *previous_shader, struct dzn_nir_
    nir_def *loop_index = nir_load_deref(b, loop_index_deref);
    nir_def *cmp = nir_ige(b, loop_index,
                               nir_imm_int(b, 3));
-   nir_if *loop_check = nir_push_if(b, cmp);
-   nir_jump(b, nir_jump_break);
-   nir_pop_if(b, loop_check);
+   nir_break_if(b, cmp);
 
    /**
     *        [...] // Copy all variables
@@ -987,6 +978,6 @@ dzn_nir_polygon_point_mode_gs(const nir_shader *previous_shader, struct dzn_nir_
 
    nir_validate_shader(nir, "in dzn_nir_polygon_point_mode_gs");
 
-   NIR_PASS_V(nir, nir_lower_var_copies);
+   NIR_PASS(_, nir, nir_lower_var_copies);
    return b->shader;
 }

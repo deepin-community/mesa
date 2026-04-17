@@ -518,7 +518,7 @@ iris_begin_query(struct pipe_context *ctx, struct pipe_query *query)
    else
       size = sizeof(struct iris_query_snapshots);
 
-   u_upload_alloc(ice->query_buffer_uploader, 0,
+   u_upload_alloc_ref(ice->query_buffer_uploader, 0,
                   size, util_next_power_of_two(size),
                   &q->query_state_ref.offset,
                   &q->query_state_ref.res, &ptr);
@@ -837,7 +837,13 @@ set_predicate_for_result(struct iris_context *ice,
    mi_store(&b, mi_reg32(MI_PREDICATE_RESULT), result);
    mi_store(&b, query_mem64(q, offsetof(struct iris_query_snapshots,
                                         predicate_result)), result);
-   ice->state.compute_predicate = bo;
+
+   ice->state.compute_predicate = (struct iris_address) {
+      .bo = bo,
+      .offset = q->query_state_ref.offset +
+          offsetof(struct iris_query_snapshots, predicate_result),
+      .access = IRIS_DOMAIN_OTHER_WRITE
+   };
 
    iris_batch_sync_region_end(batch);
 }
@@ -852,7 +858,7 @@ iris_render_condition(struct pipe_context *ctx,
    struct iris_query *q = (void *) query;
 
    /* The old condition isn't relevant; we'll update it if necessary */
-   ice->state.compute_predicate = NULL;
+   ice->state.compute_predicate.bo = NULL;
 
    if (!q) {
       ice->state.predicate = IRIS_PREDICATE_STATE_RENDER;

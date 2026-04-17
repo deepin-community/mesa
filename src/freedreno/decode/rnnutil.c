@@ -10,16 +10,32 @@
 
 #include <assert.h>
 #include <err.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "rnn.h"
 
 #include "rnnutil.h"
+
+static bool
+in_range(struct rnndomain *dom, uint32_t regbase)
+{
+   return (dom->minoff <= regbase) && (regbase <= dom->maxoff);
+}
 
 static struct rnndomain *
 finddom(struct rnn *rnn, uint32_t regbase)
 {
+   /* A2XX/A3XX have split domains with common regs.. but the ranges
+    * overlap so we can't just use in_range() for a fast compare:
+    *
+    * Everything else has dom[0]==dom[1] so we can skip the extra
+    * lookup.
+    */
+   if (rnn->dom[0] == rnn->dom[1])
+      return rnn->dom[0];
    if (rnndec_checkaddr(rnn->vc, rnn->dom[0], regbase, 0))
       return rnn->dom[0];
    return rnn->dom[1];
@@ -99,6 +115,8 @@ rnn_load(struct rnn *rnn, const char *gpuname)
       init(rnn, "adreno/a6xx.xml", "A6XX", "A6XX");
    } else if (strstr(gpuname, "a7")) {
       init(rnn, "adreno/a6xx.xml", "A6XX", "A7XX");
+   } else if (strstr(gpuname, "a8")) {
+      init(rnn, "adreno/a6xx.xml", "A6XX", "A8XX");
    }
 }
 
@@ -116,9 +134,13 @@ rnn_regname(struct rnn *rnn, uint32_t regbase, int color)
 {
    static char buf[128];
    struct rnndecaddrinfo *info;
+   struct rnndomain *dom = finddom(rnn, regbase);
+
+   if (!in_range(dom, regbase))
+      return NULL;
 
    info = rnndec_decodeaddr(color ? rnn->vc : rnn->vc_nocolor,
-                            finddom(rnn, regbase), regbase, 0);
+                            dom, regbase, 0);
    if (info) {
       strcpy(buf, info->name);
       free(info->name);
@@ -150,12 +172,20 @@ rnn_enumname(struct rnn *rnn, const char *name, uint32_t val)
    return rnndec_decode_enum(rnn->vc, name, val);
 }
 
+int
+rnn_enumval(struct rnn *rnn, const char *enumname, const char *enumval)
+{
+   return rnndec_decode_enum_value(rnn->vc, enumname, enumval);
+}
+
 static struct rnndelem *
-regelem(struct rnndomain *domain, const char *name)
+regelem(struct rnndeccontext *ctx, struct rnndomain *domain, const char *name)
 {
    int i;
    for (i = 0; i < domain->subelemsnum; i++) {
       struct rnndelem *elem = domain->subelems[i];
+      if (!rnndec_varmatch(ctx, &elem->varinfo))
+         continue;
       if (!strcmp(elem->name, name))
          return elem;
    }
@@ -166,18 +196,20 @@ regelem(struct rnndomain *domain, const char *name)
 struct rnndelem *
 rnn_regelem(struct rnn *rnn, const char *name)
 {
-   struct rnndelem *elem = regelem(rnn->dom[0], name);
+   struct rnndelem *elem = regelem(rnn->vc, rnn->dom[0], name);
    if (elem)
       return elem;
-   return regelem(rnn->dom[1], name);
+   return regelem(rnn->vc, rnn->dom[1], name);
 }
 
 static struct rnndelem *
-regoff(struct rnndomain *domain, uint32_t offset)
+regoff(struct rnndeccontext *ctx, struct rnndomain *domain, uint32_t offset)
 {
    int i;
    for (i = 0; i < domain->subelemsnum; i++) {
       struct rnndelem *elem = domain->subelems[i];
+      if (!rnndec_varmatch(ctx, &elem->varinfo))
+         continue;
       if (elem->offset == offset)
          return elem;
    }
@@ -188,10 +220,10 @@ regoff(struct rnndomain *domain, uint32_t offset)
 struct rnndelem *
 rnn_regoff(struct rnn *rnn, uint32_t offset)
 {
-   struct rnndelem *elem = regoff(rnn->dom[0], offset);
+   struct rnndelem *elem = regoff(rnn->vc, rnn->dom[0], offset);
    if (elem)
       return elem;
-   return regoff(rnn->dom[1], offset);
+   return regoff(rnn->vc, rnn->dom[1], offset);
 }
 
 enum rnnttype

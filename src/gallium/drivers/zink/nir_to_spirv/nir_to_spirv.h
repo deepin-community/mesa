@@ -28,13 +28,16 @@
 #include <stdint.h>
 #include <vulkan/vulkan_core.h>
 
-#include "compiler/nir/nir.h"
+#include "compiler/glsl_types.h"
 #include "compiler/shader_enums.h"
 #include "pipe/p_state.h"
-
-#include "zink_compiler.h"
+#include "util/hash_table.h"
 
 #define SPIRV_VERSION(major, minor) (((major) << 16) | ((minor) << 8))
+#define ZINK_WORKGROUP_SIZE_X 1
+#define ZINK_WORKGROUP_SIZE_Y 2
+#define ZINK_WORKGROUP_SIZE_Z 3
+#define ZINK_VARIABLE_SHARED_MEM 4
 
 struct spirv_shader {
    uint32_t *words;
@@ -42,12 +45,26 @@ struct spirv_shader {
    uint32_t tcs_vertices_out_word;
 };
 
+struct ntv_info {
+   bool have_vulkan_memory_model;
+   bool have_workgroup_memory_explicit_layout;
+   bool broken_arbitary_type_const;
+   bool has_demote_to_helper;
+   struct {
+      uint8_t flush_denorms:3; // 16, 32, 64
+      uint8_t preserve_denorms:3; // 16, 32, 64
+      bool denorms_32_bit_independence:1;
+      bool denorms_all_independence:1;
+   } float_controls;
+   uint32_t spirv_version;
+   unsigned bindless_set_idx;
+};
+
 struct nir_shader;
 struct pipe_stream_output_info;
 
 struct spirv_shader *
-nir_to_spirv(struct nir_shader *s, const struct zink_shader_info *so_info,
-             const struct zink_screen *screen);
+nir_to_spirv(struct nir_shader *s, const struct ntv_info *sinfo);
 
 void
 spirv_shader_delete(struct spirv_shader *s);
@@ -74,9 +91,9 @@ zink_sampler_type(const struct glsl_type *type)
    case GLSL_SAMPLER_DIM_BUF:
       return VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
    default:
-      unreachable("unimplemented");
+      UNREACHABLE("unimplemented");
    }
-   return 0;
+   return VK_DESCRIPTOR_TYPE_MAX_ENUM;
 }
 
 static inline VkDescriptorType
@@ -95,12 +112,10 @@ zink_image_type(const struct glsl_type *type)
    case GLSL_SAMPLER_DIM_BUF:
       return VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
    default:
-      unreachable("unimplemented");
+      UNREACHABLE("unimplemented");
    }
-   return 0;
+   return VK_DESCRIPTOR_TYPE_MAX_ENUM;
 }
-
-struct nir_shader;
 
 bool
 zink_nir_lower_b2b(struct nir_shader *shader);

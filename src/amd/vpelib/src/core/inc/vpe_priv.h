@@ -46,6 +46,11 @@ extern "C" {
         vpe_priv->init.funcs.log(vpe_priv->init.funcs.log_ctx, __VA_ARGS__);                       \
     } while (0)
 
+#define vpe_event(event_id, ...)                                                                   \
+    do {                                                                                           \
+        vpe_priv->init.funcs.sys_event(event_id, __VA_ARGS__);                                     \
+    } while (0)
+
 #define container_of(ptr, type, member) (type *)(void *)((char *)ptr - offsetof(type, member))
 
 #define VPE_MIN_VIEWPORT_SIZE                                                                      \
@@ -96,7 +101,7 @@ struct vpe_cmd_output {
 
 struct vpe_cmd_info {
     enum vpe_cmd_ops ops;
-    uint8_t          cd; // count down value
+    uint16_t          cd; // count down value
 
     // input
     uint16_t             num_inputs;
@@ -166,7 +171,8 @@ struct stream_ctx {
 struct output_ctx {
     // stores the paramters built for generating vpep configs
     struct vpe_surface_info    surface;
-    struct vpe_color           bg_color;
+    struct vpe_color           mpc_bg_color;
+    struct vpe_color           opp_bg_color;
     struct vpe_rect            target_rect;
     enum vpe_alpha_mode        alpha_mode;
     struct vpe_clamping_params clamping_params;
@@ -267,8 +273,19 @@ struct vpe_priv {
     uint16_t vpe_num_instance;
     bool     collaboration_mode;
     enum vpe_expansion_mode expansion_mode;
+    const struct vpe_engine       *engine_handle; /**< vpe engine instance */
 };
 
+/** internal vpe engine instance */
+struct vpe_engine_priv {
+    struct vpe_engine pub; /**< public member */
+
+    /** internal */
+    struct vpe_init_data           init;        /**< vpe init data */
+    uint8_t                        ver_major;   /**< vpe major version */
+    uint8_t                        ver_minor;   /**< vpe minor version */
+    uint8_t                        ver_rev;     /**< vpe revision version */
+};
 #ifdef __cplusplus
 }
 #endif

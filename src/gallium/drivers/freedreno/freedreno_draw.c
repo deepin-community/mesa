@@ -57,12 +57,12 @@ batch_draw_tracking_for_dirty_bits(struct fd_batch *batch) assert_dt
 
    if (dirty & (FD_DIRTY_FRAMEBUFFER | FD_DIRTY_ZSA)) {
       if (fd_depth_enabled(ctx)) {
-         if (fd_resource(pfb->zsbuf->texture)->valid) {
+         if (fd_resource(pfb->zsbuf.texture)->valid) {
             restore_buffers |= FD_BUFFER_DEPTH;
             /* storing packed d/s depth also stores stencil, so we need
              * the stencil restored too to avoid invalidating it.
              */
-            if (pfb->zsbuf->texture->format == PIPE_FORMAT_Z24_UNORM_S8_UINT)
+            if (pfb->zsbuf.texture->format == PIPE_FORMAT_Z24_UNORM_S8_UINT)
                restore_buffers |= FD_BUFFER_STENCIL;
          } else {
             batch->invalidated |= FD_BUFFER_DEPTH;
@@ -70,26 +70,26 @@ batch_draw_tracking_for_dirty_bits(struct fd_batch *batch) assert_dt
          batch->gmem_reason |= FD_GMEM_DEPTH_ENABLED;
          if (fd_depth_write_enabled(ctx)) {
             buffers |= FD_BUFFER_DEPTH;
-            resource_written(batch, pfb->zsbuf->texture);
+            resource_written(batch, pfb->zsbuf.texture);
          } else {
-            resource_read(batch, pfb->zsbuf->texture);
+            resource_read(batch, pfb->zsbuf.texture);
          }
       }
 
       if (fd_stencil_enabled(ctx)) {
-         if (fd_resource(pfb->zsbuf->texture)->valid) {
+         if (fd_resource(pfb->zsbuf.texture)->valid) {
             restore_buffers |= FD_BUFFER_STENCIL;
             /* storing packed d/s stencil also stores depth, so we need
              * the depth restored too to avoid invalidating it.
              */
-            if (pfb->zsbuf->texture->format == PIPE_FORMAT_Z24_UNORM_S8_UINT)
+            if (pfb->zsbuf.texture->format == PIPE_FORMAT_Z24_UNORM_S8_UINT)
                restore_buffers |= FD_BUFFER_DEPTH;
          } else {
             batch->invalidated |= FD_BUFFER_STENCIL;
          }
          batch->gmem_reason |= FD_GMEM_STENCIL_ENABLED;
          buffers |= FD_BUFFER_STENCIL;
-         resource_written(batch, pfb->zsbuf->texture);
+         resource_written(batch, pfb->zsbuf.texture);
       }
    }
 
@@ -97,10 +97,10 @@ batch_draw_tracking_for_dirty_bits(struct fd_batch *batch) assert_dt
       for (unsigned i = 0; i < pfb->nr_cbufs; i++) {
          struct pipe_resource *surf;
 
-         if (!pfb->cbufs[i])
+         if (!pfb->cbufs[i].texture)
             continue;
 
-         surf = pfb->cbufs[i]->texture;
+         surf = pfb->cbufs[i].texture;
 
          if (fd_resource(surf)->valid) {
             restore_buffers |= PIPE_CLEAR_COLOR0 << i;
@@ -110,7 +110,7 @@ batch_draw_tracking_for_dirty_bits(struct fd_batch *batch) assert_dt
 
          buffers |= PIPE_CLEAR_COLOR0 << i;
 
-         resource_written(batch, pfb->cbufs[i]->texture);
+         resource_written(batch, pfb->cbufs[i].texture);
       }
    }
 
@@ -342,7 +342,7 @@ fd_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       return;
    }
 
-   struct fd_batch *batch = fd_context_batch(ctx);
+   struct fd_batch *batch = fd_context_batch_draw(ctx);
 
    batch_draw_tracking(batch, info, indirect);
 
@@ -352,7 +352,7 @@ fd_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
        * since we are dealing with a fresh batch:
        */
       fd_batch_reference(&batch, NULL);
-      batch = fd_context_batch(ctx);
+      batch = fd_context_batch_draw(ctx);
       batch_draw_tracking(batch, info, indirect);
       assert(ctx->batch == batch);
    }
@@ -371,8 +371,8 @@ fd_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    struct pipe_framebuffer_state *pfb = &batch->framebuffer;
    DBG("%p: %ux%u num_draws=%u (%s/%s)", batch, pfb->width, pfb->height,
        batch->num_draws,
-       util_format_short_name(pipe_surface_format(pfb->cbufs[0])),
-       util_format_short_name(pipe_surface_format(pfb->zsbuf)));
+       util_format_short_name(pipe_surface_format(&pfb->cbufs[0])),
+       util_format_short_name(pipe_surface_format(&pfb->zsbuf)));
 
    batch->cost += ctx->draw_cost;
 
@@ -444,10 +444,10 @@ batch_clear_tracking(struct fd_batch *batch, unsigned buffers) assert_dt
    if (buffers & PIPE_CLEAR_COLOR)
       for (unsigned i = 0; i < pfb->nr_cbufs; i++)
          if (buffers & (PIPE_CLEAR_COLOR0 << i))
-            resource_written(batch, pfb->cbufs[i]->texture);
+            resource_written(batch, pfb->cbufs[i].texture);
 
    if (buffers & (PIPE_CLEAR_DEPTH | PIPE_CLEAR_STENCIL)) {
-      resource_written(batch, pfb->zsbuf->texture);
+      resource_written(batch, pfb->zsbuf.texture);
       batch->gmem_reason |= FD_GMEM_CLEARS_DEPTH_STENCIL;
    }
 
@@ -471,7 +471,7 @@ fd_clear(struct pipe_context *pctx, unsigned buffers,
    if (!fd_render_condition_check(pctx))
       return;
 
-   struct fd_batch *batch = fd_context_batch(ctx);
+   struct fd_batch *batch = fd_context_batch_draw(ctx);
 
    batch_clear_tracking(batch, buffers);
 
@@ -481,7 +481,7 @@ fd_clear(struct pipe_context *pctx, unsigned buffers,
        * since we are dealing with a fresh batch:
        */
       fd_batch_reference(&batch, NULL);
-      batch = fd_context_batch(ctx);
+      batch = fd_context_batch_draw(ctx);
       batch_clear_tracking(batch, buffers);
       assert(ctx->batch == batch);
    }
@@ -495,8 +495,8 @@ fd_clear(struct pipe_context *pctx, unsigned buffers,
    struct pipe_framebuffer_state *pfb = &batch->framebuffer;
    DBG("%p: %x %ux%u depth=%f, stencil=%u (%s/%s)", batch, buffers, pfb->width,
        pfb->height, depth, stencil,
-       util_format_short_name(pipe_surface_format(pfb->cbufs[0])),
-       util_format_short_name(pipe_surface_format(pfb->zsbuf)));
+       util_format_short_name(pipe_surface_format(&pfb->cbufs[0])),
+       util_format_short_name(pipe_surface_format(&pfb->zsbuf)));
 
    /* if per-gen backend doesn't implement ctx->clear() generic
     * blitter clear:
@@ -558,7 +558,7 @@ fd_launch_grid(struct pipe_context *pctx,
 {
    struct fd_context *ctx = fd_context(pctx);
    const struct fd_shaderbuf_stateobj *so =
-      &ctx->shaderbuf[PIPE_SHADER_COMPUTE];
+      &ctx->shaderbuf[MESA_SHADER_COMPUTE];
    struct fd_batch *batch, *save_batch = NULL;
 
    if (!fd_render_condition_check(pctx))
@@ -577,8 +577,8 @@ fd_launch_grid(struct pipe_context *pctx,
    u_foreach_bit (i, so->enabled_mask & ~so->writable_mask)
       resource_read(batch, so->sb[i].buffer);
 
-   u_foreach_bit (i, ctx->shaderimg[PIPE_SHADER_COMPUTE].enabled_mask) {
-      struct pipe_image_view *img = &ctx->shaderimg[PIPE_SHADER_COMPUTE].si[i];
+   u_foreach_bit (i, ctx->shaderimg[MESA_SHADER_COMPUTE].enabled_mask) {
+      struct pipe_image_view *img = &ctx->shaderimg[MESA_SHADER_COMPUTE].si[i];
       if (img->access & PIPE_IMAGE_ACCESS_WRITE)
          resource_written(batch, img->resource);
       else
@@ -586,18 +586,19 @@ fd_launch_grid(struct pipe_context *pctx,
    }
 
    /* UBO's are read */
-   u_foreach_bit (i, ctx->constbuf[PIPE_SHADER_COMPUTE].enabled_mask)
-      resource_read(batch, ctx->constbuf[PIPE_SHADER_COMPUTE].cb[i].buffer);
+   u_foreach_bit (i, ctx->constbuf[MESA_SHADER_COMPUTE].enabled_mask)
+      resource_read(batch, ctx->constbuf[MESA_SHADER_COMPUTE].cb[i].buffer);
 
    /* Mark textures as being read */
-   u_foreach_bit (i, ctx->tex[PIPE_SHADER_COMPUTE].valid_textures)
-      resource_read(batch, ctx->tex[PIPE_SHADER_COMPUTE].textures[i]->texture);
+   u_foreach_bit (i, ctx->tex[MESA_SHADER_COMPUTE].valid_textures)
+      resource_read(batch, ctx->tex[MESA_SHADER_COMPUTE].textures[i]->texture);
 
    /* For global buffers, we don't really know if read or written, so assume
     * the worst:
     */
-   u_foreach_bit (i, ctx->global_bindings.enabled_mask)
-      resource_written(batch, ctx->global_bindings.buf[i]);
+   util_dynarray_foreach (&ctx->global_bindings, struct pipe_resource *, res) {
+      resource_written(batch, *res);
+   }
 
    if (info->indirect)
       resource_read(batch, info->indirect);

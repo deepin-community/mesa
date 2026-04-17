@@ -165,7 +165,19 @@ nvkmd_nouveau_exec_ctx_exec(struct nvkmd_ctx *_ctx,
    struct nvkmd_nouveau_exec_ctx *ctx = nvkmd_nouveau_exec_ctx(_ctx);
 
    for (uint32_t i = 0; i < exec_count; i++) {
-      if (unlikely(ctx->req.push_count >= ctx->max_push)) {
+      uint32_t incomplete_count = 0;
+      for (uint32_t j = i; j < exec_count; j++) {
+         if (!execs[j].incomplete)
+            break;
+
+         /* The last exec cannot be incomplete */
+         assert(j < exec_count - 1);
+
+         incomplete_count++;
+      }
+      assert(incomplete_count < ctx->max_push);
+
+      if (unlikely(ctx->req.push_count + incomplete_count >= ctx->max_push)) {
          VkResult result = nvkmd_nouveau_exec_ctx_flush(&ctx->base, log_obj);
          if (result != VK_SUCCESS)
             return result;
@@ -232,10 +244,8 @@ nvkmd_nouveau_exec_ctx_sync(struct nvkmd_ctx *_ctx,
    if (result != VK_SUCCESS)
       return result;
 
-   int err = drmSyncobjWait(ctx->ws_dev->fd,
-                            &ctx->syncobj, 1, INT64_MAX,
-                            DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT,
-                            NULL);
+   int err = drmSyncobjWait(ctx->ws_dev->fd, &ctx->syncobj, 1,
+                            INT64_MAX, 0, NULL);
    if (err) {
       return vk_errorf(log_obj, VK_ERROR_UNKNOWN,
                        "DRM_SYNCOBJ_WAIT failed: %m");

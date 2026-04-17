@@ -12,22 +12,40 @@ Requirements
 
 The Venus renderer requires
 
-- Vulkan 1.1
-- :ext:`VK_EXT_external_memory_dma_buf`
-- :ext:`VK_EXT_image_drm_format_modifier`
-- :ext:`VK_EXT_queue_family_foreign`
+- Linux platform
+   - Vulkan 1.1
+   - :ext:`VK_KHR_external_memory_fd`
+- Android platform
+   - Vulkan 1.1
+   - :ext:`VK_EXT_external_memory_dma_buf`
+   - :ext:`VK_EXT_image_drm_format_modifier`
+   - :ext:`VK_EXT_queue_family_foreign`
 
-from the host driver.  However, it violates the spec in some places currently
-and also relies on implementation-defined behaviors in others.  It is not
-expected to work on all drivers meeting the requirements.  It has only been
-tested with
+from the host driver.  However, it violates the spec and relies on
+implementation-defined behaviors to support ``vkMapMemory`` (see `below
+<#vk-memory-property-host-visible-bit>`__).  It is not expected to work on all
+drivers meeting the requirements.  It has only been tested with:
 
 - ANV 21.1 or later
-- RADV 21.1 or later (the host kernel must have
-  ``CONFIG_TRANSPARENT_HUGEPAGE`` disabled because of this `KVM issue
-  <https://github.com/google/security-research/security/advisories/GHSA-7wq5-phmq-m584>`__)
-- TURNIP 22.0 or later
-- Mali r32p0 or later
+- RADV 21.1 or later
+   - Note: you need 6.13+ kernel that already has
+     `KVM: Stop grabbing references to PFNMAP'd pages
+     <https://lore.kernel.org/all/20241010182427.1434605-1-seanjc@google.com/>`__.
+   - Note: for dGPU paired with Intel CPU, you need 6.11+ kernel patched with
+     `KVM: VMX: Always honor guest PAT on CPUs that support self-snoop
+     <https://lore.kernel.org/all/20240309010929.1403984-6-seanjc@google.com/>`__,
+     or 6.16+ kernel with VMM to opt-out ``KVM_X86_QUIRK_IGNORE_GUEST_PAT`` (QEMU
+     request is `here <https://gitlab.com/qemu-project/qemu/-/issues/2943>`__).
+- Turnip 22.0 or later
+- PanVK 25.1 or later
+- Lavapipe 22.1 or later
+- Mali (Proprietary) r32p0 or later
+- NVIDIA (Proprietary) 570.86 or later
+   - Note: if paired with Intel CPU, you need 6.11+ kernel patched with
+     `KVM: VMX: Always honor guest PAT on CPUs that support self-snoop
+     <https://lore.kernel.org/all/20240309010929.1403984-6-seanjc@google.com/>`__,
+     or 6.16+ kernel with VMM to opt-out ``KVM_X86_QUIRK_IGNORE_GUEST_PAT`` (QEMU
+     request is `here <https://gitlab.com/qemu-project/qemu/-/issues/2943>`__).
 
 The Venus driver requires supports for
 
@@ -35,15 +53,12 @@ The Venus driver requires supports for
 - ``VIRTGPU_PARAM_CAPSET_QUERY_FIX``
 - ``VIRTGPU_PARAM_RESOURCE_BLOB``
 - ``VIRTGPU_PARAM_HOST_VISIBLE``
-- ``VIRTGPU_PARAM_CROSS_DEVICE``
 - ``VIRTGPU_PARAM_CONTEXT_INIT``
 
 from the virtio-gpu kernel driver, unless vtest is used.  That usually means
 the guest kernel should be at least 5.16 or have the parameters back ported,
-paired with hypervisors such as `crosvm
-<https://chromium.googlesource.com/chromiumos/platform/crosvm>`__, or `patched
-qemu
-<https://www.collabora.com/news-and-blog/blog/2021/11/26/venus-on-qemu-enabling-new-virtual-vulkan-driver/>`__.
+paired with hypervisors such as `crosvm <https://crosvm.dev>`__, or `QEMU
+<https://www.qemu.org>`__.
 
 vtest
 -----
@@ -111,46 +126,6 @@ This is how one might want to start crosvm
 
 assuming a working system is installed to partition 1 of ``disk.img``.
 ``sudo`` or ``CAP_NET_ADMIN`` is needed to set up the TAP network device.
-
-Virtio-GPU and Virtio-WL
-------------------------
-
-In this setup, the guest userspace uses Xwayland and a special Wayland
-compositor to connect guest X11/Wayland clients to the host Wayland
-compositor, using Virtio-WL as the transport.  This setup is more tedious, but
-that should hopefully change over time.
-
-For now, the guest kernel must be built from the ``chromeos-5.10`` branch of
-the `Chrome OS kernel
-<https://chromium.googlesource.com/chromiumos/third_party/kernel>`__.
-
-To build minigbm and to enable minigbm support in virglrenderer,
-
-.. code-block:: sh
-
- $ git clone https://chromium.googlesource.com/chromiumos/platform/minigbm
- $ cd minigbm
- $ CFLAGS=-DDRV_<I915-or-your-driver> OUT=out DESTDIR=out/install make install
- $ cd ../virglrenderer
- $ meson configure out -Dminigbm_allocation=true
- $ meson compile -C out
-
-Make sure a host Wayland compositor is running.  Replace
-``--display-window-keyboard --display-window-mouse`` by
-``--wayland-sock=<path-to-wayland-socket>`` when starting crosvm.
-
-In the guest, build and start Sommelier, the special Wayland compositor,
-
-.. code-block:: sh
-
- $ git clone https://chromium.googlesource.com/chromiumos/platform2
- $ cd platform2/vm_tools/sommelier
- $ meson out -Dxwayland_path=/usr/bin/Xwayland -Dxwayland_gl_driver_path=/usr/lib/dri
- $ meson compile -C out
- $ sudo chmod 777 /dev/wl0
- $ ./out/sommelier -X --glamor
-       --xwayland-gl-driver-path=<path-to-locally-built-gl-driver> \
-       sleep infinity
 
 Optional Requirements
 ---------------------

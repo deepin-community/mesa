@@ -17,7 +17,7 @@
 #include "r300_reg.h"
 #include "radeon_compiler.h"
 
-#define MAKE_SWZ3(x, y, z)                                                                         \
+#define MAKE_SWZ3(x, y, z) \
    (RC_MAKE_SWIZZLE(RC_SWIZZLE_##x, RC_SWIZZLE_##y, RC_SWIZZLE_##z, RC_SWIZZLE_ZERO))
 
 struct swizzle_data {
@@ -98,6 +98,12 @@ r300_swizzle_is_native(rc_opcode opcode, struct rc_src_register reg)
    if (opcode == RC_OPCODE_KIL || opcode == RC_OPCODE_TEX || opcode == RC_OPCODE_TXB ||
        opcode == RC_OPCODE_TXP) {
       if (reg.Abs || reg.Negate)
+         return 0;
+
+      /* Texture coordinates can be only read from temporary file,
+       * input is just a temporary with varying in it.
+       */
+      if (reg.File != RC_FILE_TEMPORARY && reg.File != RC_FILE_INPUT)
          return 0;
 
       for (j = 0; j < 4; ++j) {

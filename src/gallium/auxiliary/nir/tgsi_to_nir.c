@@ -174,7 +174,7 @@ ttn_get_depth_layout(unsigned tgsi_fs_depth_layout)
    case TGSI_FS_DEPTH_LAYOUT_UNCHANGED:
       return FRAG_DEPTH_LAYOUT_UNCHANGED;
    default:
-      unreachable("bad TGSI FS depth layout");
+      UNREACHABLE("bad TGSI FS depth layout");
    }
 }
 
@@ -191,7 +191,7 @@ ttn_translate_interp_mode(unsigned tgsi_interp)
    case TGSI_INTERPOLATE_COLOR:
       return INTERP_MODE_NONE;
    default:
-      unreachable("bad TGSI interpolation mode");
+      UNREACHABLE("bad TGSI interpolation mode");
    }
 }
 
@@ -289,7 +289,7 @@ ttn_emit_declaration(struct ttn_compile *c)
 
       for (i = 0; i < array_size; i++) {
          unsigned idx = decl->Range.First + i;
-         nir_variable *var = rzalloc(b->shader, nir_variable);
+         nir_variable *var = nir_variable_create_zeroed(b->shader);
 
          var->data.driver_location = idx;
 
@@ -301,9 +301,9 @@ ttn_emit_declaration(struct ttn_compile *c)
          case TGSI_FILE_INPUT:
             var->data.read_only = true;
             var->data.mode = nir_var_shader_in;
-            var->name = ralloc_asprintf(var, "in_%d", idx);
+            nir_variable_set_namef(b->shader, var, "in_%d", idx);
 
-            if (c->scan->processor == PIPE_SHADER_FRAGMENT) {
+            if (c->scan->processor == MESA_SHADER_FRAGMENT) {
                if (decl->Semantic.Name == TGSI_SEMANTIC_FACE) {
                   var->type = glsl_bool_type();
                   if (c->cap_face_is_sysval) {
@@ -359,7 +359,7 @@ ttn_emit_declaration(struct ttn_compile *c)
                                             is_array ? array_size : 0);
 
             var->data.mode = nir_var_shader_out;
-            var->name = ralloc_asprintf(var, "out_%d", idx);
+            nir_variable_set_namef(b->shader, var, "out_%d", idx);
             var->data.index = 0;
             var->data.interpolation =
                ttn_translate_interp_mode(decl->Interp.Interpolate);
@@ -367,7 +367,7 @@ ttn_emit_declaration(struct ttn_compile *c)
                               semantic_name == TGSI_SEMANTIC_TESSOUTER ||
                               semantic_name == TGSI_SEMANTIC_PATCH;
 
-            if (c->scan->processor == PIPE_SHADER_FRAGMENT) {
+            if (c->scan->processor == MESA_SHADER_FRAGMENT) {
                switch (semantic_name) {
                case TGSI_SEMANTIC_COLOR: {
                   /* TODO tgsi loses some information, so we cannot
@@ -446,11 +446,11 @@ ttn_emit_declaration(struct ttn_compile *c)
             break;
          case TGSI_FILE_CONSTANT:
             var->data.mode = nir_var_uniform;
-            var->name = ralloc_asprintf(var, "uniform_%d", idx);
+            nir_variable_set_namef(b->shader, var, "uniform_%d", idx);
             var->data.location = idx;
             break;
          default:
-            unreachable("bad declaration file");
+            UNREACHABLE("bad declaration file");
             return;
          }
 
@@ -622,18 +622,12 @@ ttn_src_for_file_and_index(struct ttn_compile *c, unsigned file, unsigned index,
       case TGSI_SEMANTIC_CS_USER_DATA_AMD:
          load = nir_load_user_data_amd(b);
          break;
-      case TGSI_SEMANTIC_TESS_DEFAULT_INNER_LEVEL:
-         load = nir_load_tess_level_inner_default(b);
-         break;
-      case TGSI_SEMANTIC_TESS_DEFAULT_OUTER_LEVEL:
-         load = nir_load_tess_level_outer_default(b);
-         break;
       case TGSI_SEMANTIC_SAMPLEID:
          load = nir_load_sample_id(b);
          b->shader->info.fs.uses_sample_shading = true;
          break;
       default:
-         unreachable("bad system value");
+         UNREACHABLE("bad system value");
       }
 
       if (load->num_components == 2)
@@ -646,15 +640,15 @@ ttn_src_for_file_and_index(struct ttn_compile *c, unsigned file, unsigned index,
    }
 
    case TGSI_FILE_INPUT:
-      if (c->scan->processor == PIPE_SHADER_FRAGMENT &&
+      if (c->scan->processor == MESA_SHADER_FRAGMENT &&
           c->scan->input_semantic_name[index] == TGSI_SEMANTIC_FACE) {
          assert(!c->cap_face_is_sysval && c->input_var_face);
          return nir_src_for_ssa(ttn_emulate_tgsi_front_face(c));
-      } else if (c->scan->processor == PIPE_SHADER_FRAGMENT &&
+      } else if (c->scan->processor == MESA_SHADER_FRAGMENT &&
           c->scan->input_semantic_name[index] == TGSI_SEMANTIC_POSITION) {
          assert(!c->cap_position_is_sysval && c->input_var_position);
          return nir_src_for_ssa(nir_load_var(&c->build, c->input_var_position));
-      } else if (c->scan->processor == PIPE_SHADER_FRAGMENT &&
+      } else if (c->scan->processor == MESA_SHADER_FRAGMENT &&
           c->scan->input_semantic_name[index] == TGSI_SEMANTIC_PCOORD) {
          assert(!c->cap_point_is_sysval && c->input_var_point);
          return nir_src_for_ssa(nir_load_var(&c->build, c->input_var_point));
@@ -668,13 +662,13 @@ ttn_src_for_file_and_index(struct ttn_compile *c, unsigned file, unsigned index,
       break;
 
    case TGSI_FILE_OUTPUT:
-      if (c->scan->processor == PIPE_SHADER_FRAGMENT) {
+      if (c->scan->processor == MESA_SHADER_FRAGMENT) {
          c->outputs[index]->data.fb_fetch_output = 1;
          nir_deref_instr *deref = nir_build_deref_var(&c->build,
                                                       c->outputs[index]);
          return nir_src_for_ssa(nir_load_deref(&c->build, deref));
       }
-      unreachable("unsupported output read");
+      UNREACHABLE("unsupported output read");
       break;
 
    case TGSI_FILE_CONSTANT: {
@@ -751,7 +745,7 @@ ttn_src_for_file_and_index(struct ttn_compile *c, unsigned file, unsigned index,
    }
 
    default:
-      unreachable("bad src file");
+      UNREACHABLE("bad src file");
    }
 
 
@@ -974,9 +968,9 @@ static void
 ttn_kill_if(nir_builder *b, nir_def **src)
 {
    /* flt must be exact, because NaN shouldn't discard. (apps rely on this) */
-   b->exact = true;
+   b->fp_math_ctrl = nir_fp_exact;
    nir_def *cmp = nir_bany(b, nir_flt_imm(b, src[0], 0.0));
-   b->exact = false;
+   b->fp_math_ctrl = nir_fp_fast_math;
 
    nir_discard_if(b, cmp);
    b->shader->info.fs.uses_discard = true;
@@ -1082,7 +1076,7 @@ base_type_for_alu_type(nir_alu_type type)
    case nir_type_uint:
       return GLSL_TYPE_UINT;
    default:
-      unreachable("invalid type");
+      UNREACHABLE("invalid type");
    }
 }
 
@@ -1259,6 +1253,7 @@ ttn_tex(struct ttn_compile *c, nir_def **src)
 
    instr = nir_tex_instr_create(b->shader, num_srcs);
    instr->op = op;
+   instr->can_speculate = true; /* No shaders come from SPIR-V or GLSL. */
 
    get_texture_info(tgsi_inst->Texture.Texture,
                     &instr->sampler_dim, &instr->is_shadow, &instr->is_array);
@@ -1441,12 +1436,14 @@ ttn_txq(struct ttn_compile *c, nir_def **src)
    txs = nir_tex_instr_create(b->shader, 2);
    txs->op = nir_texop_txs;
    txs->dest_type = nir_type_uint32;
+   txs->can_speculate = true;
    get_texture_info(tgsi_inst->Texture.Texture,
                     &txs->sampler_dim, &txs->is_shadow, &txs->is_array);
 
    qlv = nir_tex_instr_create(b->shader, 1);
    qlv->op = nir_texop_query_levels;
    qlv->dest_type = nir_type_uint32;
+   qlv->can_speculate = true;
    get_texture_info(tgsi_inst->Texture.Texture,
                     &qlv->sampler_dim, &qlv->is_shadow, &qlv->is_array);
 
@@ -1540,7 +1537,7 @@ ttn_mem(struct ttn_compile *c, nir_def **src)
       addr_src_index = 0;
       break;
    default:
-      unreachable("unexpected memory opcode");
+      UNREACHABLE("unexpected memory opcode");
    }
 
    if (file == TGSI_FILE_BUFFER) {
@@ -1554,7 +1551,7 @@ ttn_mem(struct ttn_compile *c, nir_def **src)
          op = nir_intrinsic_store_ssbo;
          break;
       default:
-         unreachable("unexpected buffer opcode");
+         UNREACHABLE("unexpected buffer opcode");
       }
 
       add_ssbo_var(c, resource_index);
@@ -1585,7 +1582,7 @@ ttn_mem(struct ttn_compile *c, nir_def **src)
          op = nir_intrinsic_image_deref_store;
          break;
       default:
-         unreachable("unexpected file opcode");
+         UNREACHABLE("unexpected file opcode");
       }
 
       instr = nir_intrinsic_instr_create(b->shader, op);
@@ -1631,7 +1628,7 @@ ttn_mem(struct ttn_compile *c, nir_def **src)
 
       instr->num_components = num_components;
    } else {
-      unreachable("unexpected file");
+      UNREACHABLE("unexpected file");
    }
 
 
@@ -1696,7 +1693,7 @@ static const nir_op op_trans[TGSI_OPCODE_LAST] = {
 
    /* No function calls, yet. */
    [TGSI_OPCODE_CAL] = 0, /* XXX */
-   [TGSI_OPCODE_RET] = 0, /* XXX */
+   [TGSI_OPCODE_RET] = 0, /* Handled with nir_lower_returns */
 
    [TGSI_OPCODE_SSG] = nir_op_fsign,
    [TGSI_OPCODE_CMP] = 0,
@@ -2033,6 +2030,16 @@ ttn_emit_instruction(struct ttn_compile *c)
       dst = nir_ddy_fine(b, src[0]);
       break;
 
+   case TGSI_OPCODE_RET:
+      /* NIR returns must be at the end of the block, while TGSI returns may not
+       * be. Guarantee that by putting it inside a trivial if, which will be
+       * cleaned up by nir_opt_dead_cf.
+       */
+      nir_push_if(b, nir_imm_true(b));
+      nir_jump(b, nir_jump_return);
+      nir_pop_if(b, NULL);
+      break;
+
    default:
       if (op_trans[tgsi_op] != 0 || tgsi_op == TGSI_OPCODE_MOV) {
          dst = ttn_alu(b, op_trans[tgsi_op], dst_bitsize, src);
@@ -2195,6 +2202,11 @@ ttn_parse_tgsi(struct ttn_compile *c, const void *tgsi_tokens)
          break;
 
       case TGSI_TOKEN_TYPE_INSTRUCTION:
+         if (parser.FullToken.FullInstruction.Instruction.Opcode == TGSI_OPCODE_RET) {
+            /* We have to be conservative and add output stores before each return.
+             * Hopefully stores will be optimized out later if not actually required */
+            ttn_add_output_stores(c);
+         }
          ttn_emit_instruction(c);
          break;
 
@@ -2211,13 +2223,13 @@ static void
 ttn_read_pipe_caps(struct ttn_compile *c,
                    struct pipe_screen *screen)
 {
-   c->cap_samplers_as_deref = screen->get_param(screen, PIPE_CAP_NIR_SAMPLERS_AS_DEREF);
-   c->cap_face_is_sysval = screen->get_param(screen, PIPE_CAP_FS_FACE_IS_INTEGER_SYSVAL);
-   c->cap_position_is_sysval = screen->get_param(screen, PIPE_CAP_FS_POSITION_IS_SYSVAL);
-   c->cap_point_is_sysval = screen->get_param(screen, PIPE_CAP_FS_POINT_IS_SYSVAL);
-   c->cap_integers = screen->get_shader_param(screen, c->scan->processor, PIPE_SHADER_CAP_INTEGERS);
+   c->cap_samplers_as_deref = screen->caps.nir_samplers_as_deref;
+   c->cap_face_is_sysval = screen->caps.fs_face_is_integer_sysval;
+   c->cap_position_is_sysval = screen->caps.fs_position_is_sysval;
+   c->cap_point_is_sysval = screen->caps.fs_point_is_sysval;
+   c->cap_integers = screen->shader_caps[c->scan->processor].integers;
    c->cap_tg4_component_in_swizzle =
-       screen->get_param(screen, PIPE_CAP_TGSI_TG4_COMPONENT_IN_SWIZZLE);
+       screen->caps.tgsi_tg4_component_in_swizzle;
 }
 
 #define BITSET_SET32(bitset, u32_mask) do { \
@@ -2237,6 +2249,7 @@ ttn_compile_init(const void *tgsi_tokens,
    struct ttn_compile *c;
    struct nir_shader *s;
    struct tgsi_shader_info scan;
+   static int ttn_sh_counter = 0;
 
    assert(options || screen);
    c = rzalloc(NULL, struct ttn_compile);
@@ -2244,15 +2257,14 @@ ttn_compile_init(const void *tgsi_tokens,
    tgsi_scan_shader(tgsi_tokens, &scan);
    c->scan = &scan;
 
-   if (!options) {
-      options =
-         screen->get_compiler_options(screen, PIPE_SHADER_IR_NIR, scan.processor);
-   }
+   if (!options)
+      options = screen->nir_options[scan.processor];
 
-   c->build = nir_builder_init_simple_shader(tgsi_processor_to_shader_stage(scan.processor),
-                                             options, "TTN");
+   c->build = nir_builder_init_simple_shader(scan.processor, options, "TTN%d",
+                                             (int)p_atomic_inc_return(&ttn_sh_counter));
 
    s = c->build.shader;
+   _mesa_blake3_compute(&scan, sizeof(scan), s->info.source_blake3);
 
    if (screen) {
       ttn_read_pipe_caps(c, screen);
@@ -2261,8 +2273,6 @@ ttn_compile_init(const void *tgsi_tokens,
        * so it makes sense to preserve that behavior so users don't break. */
       c->cap_face_is_sysval = true;
    }
-
-   s->info.subgroup_size = SUBGROUP_SIZE_UNIFORM;
 
    if (s->info.stage == MESA_SHADER_FRAGMENT)
       s->info.fs.untyped_color_outputs = true;
@@ -2308,7 +2318,7 @@ ttn_compile_init(const void *tgsi_tokens,
             s->info.vs.window_space_position = value;
          break;
       case TGSI_PROPERTY_NEXT_SHADER:
-         s->info.next_stage = tgsi_processor_to_shader_stage(value);
+         s->info.next_stage = value;
          break;
       case TGSI_PROPERTY_VS_BLIT_SGPRS_AMD:
          if (s->info.stage == MESA_SHADER_VERTEX)
@@ -2340,10 +2350,12 @@ ttn_compile_init(const void *tgsi_tokens,
          if (value) {
             fprintf(stderr, "tgsi_to_nir: unhandled TGSI property %u = %u\n",
                     i, value);
-            unreachable("unhandled TGSI property");
+            UNREACHABLE("unhandled TGSI property");
          }
       }
    }
+
+   s->info.api_subgroup_size_draw_uniform = s->info.stage != MESA_SHADER_COMPUTE;
 
    if (s->info.stage == MESA_SHADER_COMPUTE &&
        (!s->info.workgroup_size[0] ||
@@ -2380,7 +2392,7 @@ ttn_optimize_nir(nir_shader *nir)
    do {
       progress = false;
 
-      NIR_PASS_V(nir, nir_lower_vars_to_ssa);
+      NIR_PASS(progress, nir, nir_lower_vars_to_ssa);
 
       /* Linking deals with unused inputs/outputs, but here we can remove
        * things local to the shader in the hopes that we can cleanup other
@@ -2396,25 +2408,31 @@ ttn_optimize_nir(nir_shader *nir)
       NIR_PASS(progress, nir, nir_opt_dead_write_vars);
 
       if (nir->options->lower_to_scalar) {
-         NIR_PASS_V(nir, nir_lower_alu_to_scalar,
+         NIR_PASS(progress, nir, nir_lower_alu_to_scalar,
                     nir->options->lower_to_scalar_filter, NULL);
-         NIR_PASS_V(nir, nir_lower_phis_to_scalar, false);
+         NIR_PASS(progress, nir, nir_lower_phis_to_scalar, NULL, NULL);
       }
 
-      NIR_PASS_V(nir, nir_lower_alu);
-      NIR_PASS_V(nir, nir_lower_pack);
-      NIR_PASS(progress, nir, nir_copy_prop);
+      NIR_PASS(progress, nir, nir_lower_alu);
+      NIR_PASS(progress, nir, nir_lower_pack);
+      NIR_PASS(progress, nir, nir_opt_copy_prop);
       NIR_PASS(progress, nir, nir_opt_remove_phis);
       NIR_PASS(progress, nir, nir_opt_dce);
       if (nir_opt_loop(nir)) {
          progress = true;
-         NIR_PASS(progress, nir, nir_copy_prop);
+         NIR_PASS(progress, nir, nir_opt_copy_prop);
          NIR_PASS(progress, nir, nir_opt_dce);
       }
       NIR_PASS(progress, nir, nir_opt_if, nir_opt_if_optimize_phi_true_false);
       NIR_PASS(progress, nir, nir_opt_dead_cf);
       NIR_PASS(progress, nir, nir_opt_cse);
-      NIR_PASS(progress, nir, nir_opt_peephole_select, 8, true, true);
+
+      nir_opt_peephole_select_options peephole_select_options = {
+         .limit = 8,
+         .indirect_load_ok = true,
+         .expensive_alu_ok = true,
+      };
+      NIR_PASS(progress, nir, nir_opt_peephole_select, &peephole_select_options);
 
       NIR_PASS(progress, nir, nir_opt_phi_precision);
       NIR_PASS(progress, nir, nir_opt_algebraic);
@@ -2427,16 +2445,8 @@ ttn_optimize_nir(nir_shader *nir)
             (nir->options->lower_flrp64 ? 64 : 0);
 
          if (lower_flrp) {
-            bool lower_flrp_progress = false;
-
-            NIR_PASS(lower_flrp_progress, nir, nir_lower_flrp,
-                     lower_flrp,
-                     false /* always_precise */);
-            if (lower_flrp_progress) {
-               NIR_PASS(progress, nir,
-                        nir_opt_constant_folding);
-               progress = true;
-            }
+            NIR_PASS(progress, nir, nir_lower_flrp,
+                     lower_flrp, false /* always_precise */);
          }
 
          /* Nothing should rematerialize any flrps, so we only need to do this
@@ -2446,7 +2456,12 @@ ttn_optimize_nir(nir_shader *nir)
       }
 
       NIR_PASS(progress, nir, nir_opt_undef);
-      NIR_PASS(progress, nir, nir_opt_conditional_discard);
+
+      nir_opt_peephole_select_options peephole_discard_options = {
+         .limit = 0,
+         .discard_ok = true,
+      };
+      NIR_PASS(progress, nir, nir_opt_peephole_select, &peephole_discard_options);
       if (nir->options->max_unroll_iterations) {
          NIR_PASS(progress, nir, nir_opt_loop_unroll);
       }
@@ -2498,8 +2513,7 @@ lower_clipdistance_to_array(nir_shader *nir)
             _mesa_set_add(deletes, deref);
          }
       }
-      if (func_progress)
-         nir_metadata_preserve(impl, nir_metadata_none);
+      nir_progress(func_progress, impl, nir_metadata_none);
       /* derefs must be queued for deletion to avoid deleting the same deref repeatedly */
       set_foreach_remove(deletes, he)
          nir_instr_remove((void*)he->key);
@@ -2523,39 +2537,39 @@ ttn_finalize_nir(struct ttn_compile *c, struct pipe_screen *screen)
 
    MESA_TRACE_FUNC();
 
-   NIR_PASS_V(nir, nir_lower_vars_to_ssa);
-   NIR_PASS_V(nir, nir_lower_reg_intrinsics_to_ssa);
+   NIR_PASS(_, nir, nir_lower_returns);
+   NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+   NIR_PASS(_, nir, nir_lower_reg_intrinsics_to_ssa);
 
-   NIR_PASS_V(nir, nir_lower_global_vars_to_local);
-   NIR_PASS_V(nir, nir_split_var_copies);
-   NIR_PASS_V(nir, nir_lower_var_copies);
-   NIR_PASS_V(nir, nir_lower_system_values);
-   NIR_PASS_V(nir, nir_lower_compute_system_values, NULL);
+   NIR_PASS(_, nir, nir_lower_global_vars_to_local);
+   NIR_PASS(_, nir, nir_split_var_copies);
+   NIR_PASS(_, nir, nir_lower_var_copies);
+   NIR_PASS(_, nir, nir_lower_system_values);
+   NIR_PASS(_, nir, nir_lower_compute_system_values, NULL);
 
-   if (!screen->get_param(screen, PIPE_CAP_TEXRECT)) {
+   if (!screen->caps.texrect) {
       const struct nir_lower_tex_options opts = { .lower_rect = true, };
-      NIR_PASS_V(nir, nir_lower_tex, &opts);
+      NIR_PASS(_, nir, nir_lower_tex, &opts);
    }
 
    /* driver needs clipdistance as array<float> */
    if ((nir->info.outputs_written &
-        (BITFIELD64_BIT(VARYING_SLOT_CLIP_DIST0) | BITFIELD64_BIT(VARYING_SLOT_CLIP_DIST1))) &&
+        (VARYING_BIT_CLIP_DIST0 | VARYING_BIT_CLIP_DIST1)) &&
         nir->options->compact_arrays) {
-      NIR_PASS_V(nir, lower_clipdistance_to_array);
+      NIR_PASS(_, nir, lower_clipdistance_to_array);
    }
 
    if (nir->options->lower_uniforms_to_ubo)
-      NIR_PASS_V(nir, nir_lower_uniforms_to_ubo, false, !c->cap_integers);
+      NIR_PASS(_, nir, nir_lower_uniforms_to_ubo, false, !c->cap_integers);
 
    if (nir->options->lower_int64_options)
-      NIR_PASS_V(nir, nir_lower_int64);
+      NIR_PASS(_, nir, nir_lower_int64);
 
    if (!c->cap_samplers_as_deref)
-      NIR_PASS_V(nir, nir_lower_samplers);
+      NIR_PASS(_, nir, nir_lower_samplers);
 
    if (screen->finalize_nir) {
-      char *msg = screen->finalize_nir(screen, nir);
-      free(msg);
+      screen->finalize_nir(screen, nir, true);
    } else {
       ttn_optimize_nir(nir);
    }
@@ -2596,8 +2610,7 @@ load_nir_from_disk_cache(struct disk_cache *cache,
                          uint8_t key[CACHE_KEY_SIZE],
                          unsigned processor)
 {
-   const nir_shader_compiler_options *options =
-      screen->get_compiler_options(screen, PIPE_SHADER_IR_NIR, processor);
+   const nir_shader_compiler_options *options = screen->nir_options[processor];
    struct blob_reader blob_reader;
    size_t size;
    nir_shader *s;

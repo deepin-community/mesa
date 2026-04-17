@@ -29,6 +29,7 @@ struct ir3_cp_ctx {
    struct ir3 *shader;
    struct ir3_shader_variant *so;
    bool progress;
+   bool lower_imm_to_const;
 };
 
 /* is it a type preserving mov, with ok flags?
@@ -124,7 +125,7 @@ static bool
 lower_immed(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr, unsigned n,
             struct ir3_register *reg, unsigned new_flags)
 {
-   if (ctx->shader->compiler->load_shader_consts_via_preamble)
+   if (!ctx->lower_imm_to_const)
       return false;
 
    if (!(new_flags & IR3_REG_IMMED))
@@ -172,10 +173,6 @@ lower_immed(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr, unsigned n,
    reg->num = ir3_const_find_imm(ctx->so, reg->uim_val);
 
    if (reg->num == INVALID_CONST_REG) {
-      /* Don't modify the const state for the binning variant. */
-      if (ctx->so->binning_pass)
-         return false;
-
       reg->num = ir3_const_add_imm(ctx->so, reg->uim_val);
 
       if (reg->num == INVALID_CONST_REG)
@@ -209,15 +206,47 @@ unuse(struct ir3_instruction *instr)
    }
 }
 
+/* Try to swap src n of instr using new_flags with src swap_n. */
+static bool
+try_swap_two_srcs(struct ir3_instruction *instr, unsigned n, unsigned new_flags,
+                  unsigned swap_n)
+{
+   /* NOTE: pre-swap first two src's before valid_flags(),
+    * which might try to dereference the n'th src:
+    */
+   swap(instr->srcs[swap_n], instr->srcs[n]);
+
+   bool valid_swap =
+      /* can we propagate mov if we move 2nd src to first? */
+      ir3_valid_flags(instr, swap_n, new_flags) &&
+      /* and does first src fit in second slot? */
+      ir3_valid_flags(instr, n, instr->srcs[n]->flags);
+
+   if (!valid_swap) {
+      /* put things back the way they were: */
+      swap(instr->srcs[swap_n], instr->srcs[n]);
+   } else {
+      /* otherwise leave things swapped */
+      instr->cat3.swapped = true;
+   }
+
+   return valid_swap;
+}
+
 /**
  * Handles the special case of the 2nd src (n == 1) to "normal" mad
  * instructions, which cannot reference a constant.  See if it is
  * possible to swap the 1st and 2nd sources.
+ * The same case is handled for sad but since it's 3-src commutative, we can
+ * also try to swap the 2nd src with the 3rd. In addition, we can try to swap
+ * either the 1st or 3rd srcs with the 2nd which may be useful since only the
+ * 2nd src supports (neg).
  */
 static bool
-try_swap_mad_two_srcs(struct ir3_instruction *instr, unsigned new_flags)
+try_swap_cat3_two_srcs(struct ir3_instruction *instr, unsigned n,
+                       unsigned new_flags)
 {
-   if (!is_mad(instr->opc))
+   if (!(is_mad(instr->opc) && n == 1) && !is_sad(instr->opc))
       return false;
 
    /* If we've already tried, nothing more to gain.. we will only
@@ -239,28 +268,23 @@ try_swap_mad_two_srcs(struct ir3_instruction *instr, unsigned new_flags)
    /* If the reason we couldn't fold without swapping is something
     * other than const source, then swapping won't help:
     */
-   if (!(new_flags & (IR3_REG_CONST | IR3_REG_SHARED)))
+   if (!(new_flags & (IR3_REG_CONST | IR3_REG_SHARED | IR3_REG_SNEG)))
       return false;
 
-   instr->cat3.swapped = true;
+   if (n == 1) {
+      /* Both mad and sad support swapping srcs 2 and 1. */
+      if (try_swap_two_srcs(instr, n, new_flags, 0)) {
+         return true;
+      }
 
-   /* NOTE: pre-swap first two src's before valid_flags(),
-    * which might try to dereference the n'th src:
-    */
-   swap(instr->srcs[0], instr->srcs[1]);
+      /* sad also supports swapping srcs 2 and 3. */
+      if (is_sad(instr->opc) && try_swap_two_srcs(instr, n, new_flags, 2)) {
+         return true;
+      }
+   }
 
-   bool valid_swap =
-      /* can we propagate mov if we move 2nd src to first? */
-      ir3_valid_flags(instr, 0, new_flags) &&
-      /* and does first src fit in second slot? */
-      ir3_valid_flags(instr, 1, instr->srcs[1]->flags);
-
-   if (!valid_swap) {
-      /* put things back the way they were: */
-      swap(instr->srcs[0], instr->srcs[1]);
-   } /* otherwise leave things swapped */
-
-   return valid_swap;
+   /* sad also supports swapping srcs 1 or 3 with 2. */
+   return is_sad(instr->opc) && try_swap_two_srcs(instr, n, new_flags, 1);
 }
 
 /**
@@ -281,6 +305,22 @@ reg_cp(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr,
       struct ir3_register *src_reg = src->srcs[0];
       unsigned new_flags = reg->flags;
 
+      /* Narrowing integer cov instructions from GPR to uGPR do not
+       * behave the way you'd expect on gen8.  Instead of "chopping"
+       * out the high bits, if any high bit is set you get 0x7fff or
+       * 0xffff depending on whether src_type is signed or unsigned.
+       * Float conversions behave as expected.
+       */
+      if (ctx->shader->compiler->has_salu_int_narrowing_quirk &&
+          (instr->opc == OPC_MOV) &&
+          (instr->cat1.dst_type != instr->cat1.src_type) &&
+          (type_size(instr->cat1.dst_type) <
+           type_size(instr->cat1.src_type)) &&
+          !type_float(instr->cat1.dst_type) &&
+          (instr->dsts[0]->flags & IR3_REG_SHARED) &&
+          !(src->srcs[0]->flags & (IR3_REG_SHARED | IR3_REG_CONST | IR3_REG_SHARED)))
+         return false;
+
       combine_flags(&new_flags, src);
 
       if (ir3_valid_flags(instr, n, new_flags)) {
@@ -298,7 +338,7 @@ reg_cp(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr,
          reg->def->instr->use_count++;
 
          return true;
-      } else if (n == 1 && try_swap_mad_two_srcs(instr, new_flags)) {
+      } else if (try_swap_cat3_two_srcs(instr, n, new_flags)) {
          return true;
       }
    } else if ((is_same_type_mov(src) || is_const_mov(src)) &&
@@ -325,7 +365,7 @@ reg_cp(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr,
           * src prior to multiply) can swap their first two srcs if
           * src[0] is !CONST and src[1] is CONST:
           */
-         if ((n == 1) && try_swap_mad_two_srcs(instr, new_flags)) {
+         if (try_swap_cat3_two_srcs(instr, n, new_flags)) {
             return true;
          } else {
             return false;
@@ -357,7 +397,8 @@ reg_cp(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr,
           * just somehow don't work out.  This restriction may only
           * apply if the first src is also CONST.
           */
-         if ((opc_cat(instr->opc) == 3) && (n == 2) &&
+         if (ctx->so->compiler->cat3_rel_offset_0_quirk &&
+             (opc_cat(instr->opc) == 3) && (n == 2) &&
              (src_reg->flags & IR3_REG_RELATIV) && (src_reg->array.offset == 0))
             return false;
 
@@ -401,6 +442,7 @@ reg_cp(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr,
 
          assert((opc_cat(instr->opc) == 1) ||
                       (opc_cat(instr->opc) == 2) ||
+                      (is_cat3_alt(instr->opc) && (n == 0 || n == 2)) ||
                       (opc_cat(instr->opc) == 6) ||
                       is_meta(instr) ||
                       (instr->opc == OPC_ISAM && (n == 1 || n == 2)) ||
@@ -541,7 +583,8 @@ instr_cp(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr)
     */
    if (is_tex(instr) && (instr->flags & IR3_INSTR_S2EN) &&
        !(instr->flags & IR3_INSTR_B) &&
-       !(ir3_shader_debug & IR3_DBG_FORCES2EN)) {
+       !(ir3_shader_debug & IR3_DBG_FORCES2EN) &&
+       !(instr->srcs[0]->flags & IR3_REG_ALIAS)) {
       /* The first src will be a collect, if both of it's
        * two sources are mov from imm, then we can
        */
@@ -570,11 +613,12 @@ instr_cp(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr)
 }
 
 bool
-ir3_cp(struct ir3 *ir, struct ir3_shader_variant *so)
+ir3_cp(struct ir3 *ir, struct ir3_shader_variant *so, bool lower_imm_to_const)
 {
    struct ir3_cp_ctx ctx = {
       .shader = ir,
       .so = so,
+      .lower_imm_to_const = lower_imm_to_const,
    };
 
    /* This is a bit annoying, and probably wouldn't be necessary if we

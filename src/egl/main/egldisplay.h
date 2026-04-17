@@ -144,16 +144,13 @@ struct _egl_extensions {
    EGLBoolean KHR_surfaceless_context;
    EGLBoolean KHR_wait_sync;
 
-   EGLBoolean MESA_drm_image;
    EGLBoolean MESA_gl_interop;
    EGLBoolean MESA_image_dma_buf_export;
    EGLBoolean MESA_query_driver;
    EGLBoolean MESA_x11_native_visual_id;
 
-   EGLBoolean NOK_swap_region;
    EGLBoolean NOK_texture_from_pixmap;
 
-   EGLBoolean NV_post_sub_buffer;
    EGLBoolean NV_context_priority_realtime;
 
    EGLBoolean WL_bind_wayland_display;
@@ -202,7 +199,6 @@ struct _egl_display {
    /* options that affect how the driver initializes the display */
    struct {
       EGLBoolean Zink;           /**< Use kopper only */
-      EGLBoolean FallbackZink;   /**< True if zink is tried as fallback */
       EGLBoolean ForceSoftware;  /**< Use software path only */
       EGLBoolean GalliumHudWarn; /**< Using hud, warn when querying buffer age */
       EGLAttrib *Attribs;        /**< Platform-specific options */

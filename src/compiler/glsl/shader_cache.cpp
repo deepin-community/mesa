@@ -53,7 +53,6 @@
 #include "ir_optimization.h"
 #include "ir_rvalue_visitor.h"
 #include "nir.h"
-#include "program.h"
 #include "serialize.h"
 #include "shader_cache.h"
 #include "util/mesa-sha1.h"
@@ -103,7 +102,7 @@ shader_cache_write_program_metadata(struct gl_context *ctx,
    blob_init(&metadata);
 
    if (ctx->Driver.ShaderCacheSerializeDriverBlob) {
-      for (unsigned i = 0; i < MESA_SHADER_STAGES; i++) {
+      for (unsigned i = 0; i < MESA_SHADER_MESH_STAGES; i++) {
          struct gl_linked_shader *sh = prog->_LinkedShaders[i];
          if (sh)
             ctx->Driver.ShaderCacheSerializeDriverBlob(ctx, sh->Program);
@@ -129,7 +128,7 @@ shader_cache_write_program_metadata(struct gl_context *ctx,
    disk_cache_put(cache, prog->data->sha1, metadata.data, metadata.size,
                   &cache_item_metadata);
 
-   char sha1_buf[41];
+   char sha1_buf[SHA1_DIGEST_STRING_LENGTH];
    if (ctx->_Shader->Flags & GLSL_CACHE_INFO) {
       _mesa_sha1_format(sha1_buf, prog->data->sha1);
       fprintf(stderr, "putting program metadata in cache: %s\n", sha1_buf);
@@ -196,7 +195,7 @@ shader_cache_read_program_metadata(struct gl_context *ctx,
    /* DRI config options may also change the output from the compiler so
     * include them as an input to sha1 creation.
     */
-   char sha1buf[41];
+   char sha1buf[SHA1_DIGEST_STRING_LENGTH];
    _mesa_sha1_format(sha1buf, ctx->Const.dri_config_options_sha1);
    ralloc_strcat(&buf, sha1buf);
 

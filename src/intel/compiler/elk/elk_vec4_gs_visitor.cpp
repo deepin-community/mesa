@@ -33,7 +33,7 @@
 #include "elk_cfg.h"
 #include "elk_fs.h"
 #include "elk_nir.h"
-#include "elk_prim.h"
+#include "compiler/intel_prim.h"
 #include "elk_private.h"
 #include "dev/intel_debug.h"
 
@@ -120,7 +120,7 @@ vec4_gs_visitor::setup_varying_inputs(int payload_reg,
       }
    }
 
-   int regs_used = ALIGN(input_array_stride * num_input_vertices,
+   int regs_used = align(input_array_stride * num_input_vertices,
                          attributes_per_reg) / attributes_per_reg;
    return payload_reg + regs_used;
 }
@@ -610,7 +610,9 @@ elk_compile_gs(const struct elk_compiler *compiler,
    GLbitfield64 inputs_read = nir->info.inputs_read;
    elk_compute_vue_map(compiler->devinfo,
                        &c.input_vue_map, inputs_read,
-                       nir->info.separate_shader, 1);
+                       nir->info.separate_shader ?
+                       INTEL_VUE_LAYOUT_SEPARATE :
+                       INTEL_VUE_LAYOUT_FIXED, 1);
 
    elk_nir_apply_key(nir, compiler, &key->base, 8);
    elk_nir_lower_vue_inputs(nir, &c.input_vue_map);
@@ -670,7 +672,7 @@ elk_compile_gs(const struct elk_compiler *compiler,
 
    /* 1 HWORD = 32 bytes = 256 bits */
    prog_data->control_data_header_size_hwords =
-      ALIGN(c.control_data_header_size_bits, 256) / 256;
+      align(c.control_data_header_size_bits, 256) / 256;
 
    /* Compute the output vertex size.
     *
@@ -724,7 +726,7 @@ elk_compile_gs(const struct elk_compiler *compiler,
    assert(compiler->devinfo->ver == 6 ||
           output_vertex_size_bytes <= GFX7_MAX_GS_OUTPUT_VERTEX_SIZE_BYTES);
    prog_data->output_vertex_size_hwords =
-      ALIGN(output_vertex_size_bytes, 32) / 32;
+      align(output_vertex_size_bytes, 32) / 32;
 
    /* Compute URB entry size.  The maximum allowed URB entry size is 32k.
     * That divides up as follows:
@@ -791,9 +793,9 @@ elk_compile_gs(const struct elk_compiler *compiler,
     * a multiple of 128 bytes in gfx6.
     */
    if (compiler->devinfo->ver >= 7) {
-      prog_data->base.urb_entry_size = ALIGN(output_size_bytes, 64) / 64;
+      prog_data->base.urb_entry_size = align(output_size_bytes, 64) / 64;
    } else {
-      prog_data->base.urb_entry_size = ALIGN(output_size_bytes, 128) / 128;
+      prog_data->base.urb_entry_size = align(output_size_bytes, 128) / 128;
    }
 
    assert(nir->info.gs.output_primitive < ARRAY_SIZE(elk::gl_prim_to_hw_prim));

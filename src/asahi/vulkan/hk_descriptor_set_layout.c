@@ -43,12 +43,10 @@ hk_descriptor_stride_align_for_type(
       break;
 
    case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
-      *stride = *alignment = sizeof(struct hk_storage_image_descriptor);
-      break;
-
    case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
    case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
-      *stride = *alignment = sizeof(struct hk_buffer_view_descriptor);
+      *stride = sizeof(struct hk_storage_image_descriptor);
+      *alignment = 8;
       break;
 
    case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
@@ -82,11 +80,11 @@ hk_descriptor_stride_align_for_type(
          *stride = MAX2(*stride, desc_stride);
          *alignment = MAX2(*alignment, desc_align);
       }
-      *stride = ALIGN(*stride, *alignment);
+      *stride = align(*stride, *alignment);
       break;
 
    default:
-      unreachable("Invalid descriptor type");
+      UNREACHABLE("Invalid descriptor type");
    }
 
    assert(*stride <= HK_MAX_DESCRIPTOR_SIZE);
@@ -143,7 +141,7 @@ hk_CreateDescriptorSetLayout(VkDevice device,
    VK_MULTIALLOC_DECL(&ma, struct hk_sampler *, samplers,
                       immutable_sampler_count);
 
-   if (!vk_descriptor_set_layout_multizalloc(&dev->vk, &ma))
+   if (!vk_descriptor_set_layout_multizalloc(&dev->vk, &ma, pCreateInfo))
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    layout->binding_count = num_bindings;
@@ -193,14 +191,9 @@ hk_CreateDescriptorSetLayout(VkDevice device,
 
       layout->binding[b].array_size = binding->descriptorCount;
 
-      switch (binding->descriptorType) {
-      case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
-      case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+      if (vk_descriptor_type_is_dynamic(binding->descriptorType)) {
          layout->binding[b].dynamic_buffer_index = dynamic_buffer_count;
          dynamic_buffer_count += binding->descriptorCount;
-         break;
-      default:
-         break;
       }
 
       const VkMutableDescriptorTypeListEXT *type_list =
@@ -337,6 +330,7 @@ hk_GetDescriptorSetLayoutSupport(
    uint64_t non_variable_size = 0;
    uint32_t variable_stride = 0;
    uint32_t variable_count = 0;
+   bool variable_is_inline_uniform_block = false;
    uint8_t dynamic_buffer_count = 0;
 
    for (uint32_t i = 0; i < pCreateInfo->bindingCount; i++) {
@@ -346,14 +340,8 @@ hk_GetDescriptorSetLayoutSupport(
       if (binding_flags != NULL && binding_flags->bindingCount > 0)
          flags = binding_flags->pBindingFlags[i];
 
-      switch (binding->descriptorType) {
-      case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
-      case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+      if (vk_descriptor_type_is_dynamic(binding->descriptorType))
          dynamic_buffer_count += binding->descriptorCount;
-         break;
-      default:
-         break;
-      }
 
       const VkMutableDescriptorTypeListEXT *type_list =
          hk_descriptor_get_type_list(binding->descriptorType, mutable_info, i);
@@ -375,6 +363,10 @@ hk_GetDescriptorSetLayoutSupport(
              */
             variable_count = MAX2(1, binding->descriptorCount);
             variable_stride = stride;
+
+            variable_is_inline_uniform_block =
+               binding->descriptorType ==
+               VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK;
          } else {
             /* Since we're aligning to the maximum and since this is just a
              * check for whether or not the max buffer size is big enough, we
@@ -406,12 +398,21 @@ hk_GetDescriptorSetLayoutSupport(
       switch (ext->sType) {
       case VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_LAYOUT_SUPPORT: {
          VkDescriptorSetVariableDescriptorCountLayoutSupport *vs = (void *)ext;
+         uint32_t max_var_count;
+
          if (variable_stride > 0) {
-            vs->maxVariableDescriptorCount =
+            max_var_count =
                (max_buffer_size - non_variable_size) / variable_stride;
          } else {
-            vs->maxVariableDescriptorCount = 0;
+            max_var_count = 0;
          }
+
+         if (variable_is_inline_uniform_block) {
+            max_var_count =
+               MIN2(max_var_count, HK_MAX_INLINE_UNIFORM_BLOCK_SIZE);
+         }
+
+         vs->maxVariableDescriptorCount = max_var_count;
          break;
       }
 

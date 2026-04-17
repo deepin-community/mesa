@@ -164,6 +164,8 @@ struct rnndomain {
 	int subelemsmax;
 	char *fullname;
 	char *file;
+	unsigned minoff;
+	unsigned maxoff;
 };
 
 struct rnngroup {

@@ -102,8 +102,8 @@ emit_wpos_adjustment(lower_wpos_ytransform_state *state,
 
    if (wpos[1]) {
       /* Now the conditional y flip: STATE_FB_WPOS_Y_TRANSFORM.xy/zw will be
-      * inversion/identity, or the other way around if we're drawing to an FBO.
-      */
+       * inversion/identity, or the other way around if we're drawing to an FBO.
+       */
       unsigned base = invert ? 0 : 2;
       /* wpos.y = wpos.y * trans.x/z + trans.y/w */
       wpos[1] = nir_ffma(b, wpos[1], nir_channel(b, wpostrans, base),
@@ -112,8 +112,7 @@ emit_wpos_adjustment(lower_wpos_ytransform_state *state,
 
    nir_def *new_wpos = nir_vec(b, &wpos[c], intr->num_components);
 
-   nir_def_rewrite_uses_after(&intr->def, new_wpos,
-                              new_wpos->parent_instr);
+   nir_def_rewrite_uses_after(&intr->def, new_wpos);
 
    return true;
 }
@@ -165,7 +164,7 @@ lower_fragcoord(lower_wpos_ytransform_state *state, nir_intrinsic_instr *intr)
          /* the driver supports lower-left origin, need to invert Y */
          invert = true;
       } else {
-         unreachable("invalid options");
+         UNREACHABLE("invalid options");
       }
    } else {
       /* Fragment shader wants origin in lower-left */
@@ -175,7 +174,7 @@ lower_fragcoord(lower_wpos_ytransform_state *state, nir_intrinsic_instr *intr)
          /* the driver supports upper-left origin, need to invert Y */
          invert = true;
       } else {
-         unreachable("invalid options");
+         UNREACHABLE("invalid options");
       }
    }
 
@@ -190,7 +189,7 @@ lower_fragcoord(lower_wpos_ytransform_state *state, nir_intrinsic_instr *intr)
          adjY[0] = -0.5f;
          adjY[1] = 0.5f;
       } else {
-         unreachable("invalid options");
+         UNREACHABLE("invalid options");
       }
    } else {
       /* Fragment shader wants pixel center half integer */
@@ -200,7 +199,7 @@ lower_fragcoord(lower_wpos_ytransform_state *state, nir_intrinsic_instr *intr)
          /* the driver supports pixel center integer, need to bias X,Y */
          adjX = adjY[0] = adjY[1] = 0.5f;
       } else {
-         unreachable("invalid options");
+         UNREACHABLE("invalid options");
       }
    }
 
@@ -263,8 +262,7 @@ lower_load_sample_pos(lower_wpos_ytransform_state *state,
                                  nir_fmax(b, neg_scale, nir_imm_float(b, 0.0)));
    nir_def *flipped_pos = nir_vector_insert_imm(b, pos, flipped_y, 1);
 
-   nir_def_rewrite_uses_after(&intr->def, flipped_pos,
-                              flipped_pos->parent_instr);
+   nir_def_rewrite_uses_after(&intr->def, flipped_pos);
 
    return true;
 }
@@ -280,10 +278,8 @@ lower_wpos_ytransform_instr(nir_builder *b, nir_intrinsic_instr *intr,
    case nir_intrinsic_load_deref: {
       nir_deref_instr *deref = nir_src_as_deref(intr->src[0]);
       nir_variable *var = nir_deref_instr_get_variable(deref);
-      if ((var->data.mode == nir_var_shader_in &&
-           var->data.location == VARYING_SLOT_POS) ||
-          (var->data.mode == nir_var_system_value &&
-           var->data.location == SYSTEM_VALUE_FRAG_COORD)) {
+      if (var->data.mode == nir_var_system_value &&
+          var->data.location == SYSTEM_VALUE_FRAG_COORD) {
          /* gl_FragCoord should not have array/struct derefs: */
          return lower_fragcoord(state, intr);
       } else if (var->data.mode == nir_var_system_value &&
@@ -319,6 +315,8 @@ bool
 nir_lower_wpos_ytransform(nir_shader *shader,
                           const nir_lower_wpos_ytransform_options *options)
 {
+   assert(shader->info.io_lowered);
+
    lower_wpos_ytransform_state state = {
       .options = options,
    };

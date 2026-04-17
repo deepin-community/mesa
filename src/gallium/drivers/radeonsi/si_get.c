@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <ctype.h>
 #include "compiler/nir/nir.h"
 #include "ac_nir.h"
 #include "ac_shader_util.h"
@@ -14,9 +15,11 @@
 #include "util/u_cpu_detect.h"
 #include "util/u_screen.h"
 #include "util/u_video.h"
-#include "vl/vl_decoder.h"
 #include "vl/vl_video_buffer.h"
 #include <sys/utsname.h>
+#include "drm-uapi/drm.h"
+#include "aco_interface.h"
+#include "nir/nir_xfb_info.h"
 
 /* The capabilities reported by the kernel has priority
    over the existing logic in si_get_video_param */
@@ -52,497 +55,8 @@ si_is_compute_copy_faster(struct pipe_screen *pscreen,
 {
    if (cpu)
       /* very basic for now */
-      return width * height * depth > 64 * 64;
+      return (uint64_t)width * height * depth > 64 * 64;
    return false;
-}
-
-static int si_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
-{
-   struct si_screen *sscreen = (struct si_screen *)pscreen;
-
-   /* Gfx8 (Polaris11) hangs, so don't enable this on Gfx8 and older chips. */
-   bool enable_sparse = sscreen->info.gfx_level >= GFX9 && sscreen->info.gfx_level < GFX12 &&
-      sscreen->info.has_sparse_vm_mappings;
-
-   switch (param) {
-   /* Supported features (boolean caps). */
-   case PIPE_CAP_ACCELERATED:
-   case PIPE_CAP_MAX_DUAL_SOURCE_RENDER_TARGETS:
-   case PIPE_CAP_ANISOTROPIC_FILTER:
-   case PIPE_CAP_OCCLUSION_QUERY:
-   case PIPE_CAP_TEXTURE_MIRROR_CLAMP:
-   case PIPE_CAP_TEXTURE_SHADOW_LOD:
-   case PIPE_CAP_TEXTURE_MIRROR_CLAMP_TO_EDGE:
-   case PIPE_CAP_BLEND_EQUATION_SEPARATE:
-   case PIPE_CAP_TEXTURE_SWIZZLE:
-   case PIPE_CAP_DEPTH_CLIP_DISABLE:
-   case PIPE_CAP_DEPTH_CLIP_DISABLE_SEPARATE:
-   case PIPE_CAP_SHADER_STENCIL_EXPORT:
-   case PIPE_CAP_VERTEX_ELEMENT_INSTANCE_DIVISOR:
-   case PIPE_CAP_FS_COORD_ORIGIN_UPPER_LEFT:
-   case PIPE_CAP_FS_COORD_PIXEL_CENTER_HALF_INTEGER:
-   case PIPE_CAP_FS_COORD_PIXEL_CENTER_INTEGER:
-   case PIPE_CAP_FRAGMENT_SHADER_TEXTURE_LOD:
-   case PIPE_CAP_FRAGMENT_SHADER_DERIVATIVES:
-   case PIPE_CAP_PRIMITIVE_RESTART:
-   case PIPE_CAP_PRIMITIVE_RESTART_FIXED_INDEX:
-   case PIPE_CAP_CONDITIONAL_RENDER:
-   case PIPE_CAP_TEXTURE_BARRIER:
-   case PIPE_CAP_INDEP_BLEND_ENABLE:
-   case PIPE_CAP_INDEP_BLEND_FUNC:
-   case PIPE_CAP_VERTEX_COLOR_UNCLAMPED:
-   case PIPE_CAP_START_INSTANCE:
-   case PIPE_CAP_NPOT_TEXTURES:
-   case PIPE_CAP_MIXED_FRAMEBUFFER_SIZES:
-   case PIPE_CAP_MIXED_COLOR_DEPTH_BITS:
-   case PIPE_CAP_VERTEX_COLOR_CLAMPED:
-   case PIPE_CAP_FRAGMENT_COLOR_CLAMPED:
-   case PIPE_CAP_VS_INSTANCEID:
-   case PIPE_CAP_COMPUTE:
-   case PIPE_CAP_TEXTURE_BUFFER_OBJECTS:
-   case PIPE_CAP_VS_LAYER_VIEWPORT:
-   case PIPE_CAP_QUERY_PIPELINE_STATISTICS:
-   case PIPE_CAP_SAMPLE_SHADING:
-   case PIPE_CAP_DRAW_INDIRECT:
-   case PIPE_CAP_CLIP_HALFZ:
-   case PIPE_CAP_VS_WINDOW_SPACE_POSITION:
-   case PIPE_CAP_POLYGON_OFFSET_CLAMP:
-   case PIPE_CAP_MULTISAMPLE_Z_RESOLVE:
-   case PIPE_CAP_QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION:
-   case PIPE_CAP_TGSI_TEXCOORD:
-   case PIPE_CAP_FS_FINE_DERIVATIVE:
-   case PIPE_CAP_CONDITIONAL_RENDER_INVERTED:
-   case PIPE_CAP_TEXTURE_FLOAT_LINEAR:
-   case PIPE_CAP_TEXTURE_HALF_FLOAT_LINEAR:
-   case PIPE_CAP_DEPTH_BOUNDS_TEST:
-   case PIPE_CAP_SAMPLER_VIEW_TARGET:
-   case PIPE_CAP_TEXTURE_QUERY_LOD:
-   case PIPE_CAP_TEXTURE_GATHER_SM5:
-   case PIPE_CAP_TEXTURE_QUERY_SAMPLES:
-   case PIPE_CAP_FORCE_PERSAMPLE_INTERP:
-   case PIPE_CAP_COPY_BETWEEN_COMPRESSED_AND_PLAIN_FORMATS:
-   case PIPE_CAP_FS_POSITION_IS_SYSVAL:
-   case PIPE_CAP_FS_FACE_IS_INTEGER_SYSVAL:
-   case PIPE_CAP_INVALIDATE_BUFFER:
-   case PIPE_CAP_SURFACE_REINTERPRET_BLOCKS:
-   case PIPE_CAP_QUERY_BUFFER_OBJECT:
-   case PIPE_CAP_QUERY_MEMORY_INFO:
-   case PIPE_CAP_SHADER_PACK_HALF_FLOAT:
-   case PIPE_CAP_FRAMEBUFFER_NO_ATTACHMENT:
-   case PIPE_CAP_ROBUST_BUFFER_ACCESS_BEHAVIOR:
-   case PIPE_CAP_POLYGON_OFFSET_UNITS_UNSCALED:
-   case PIPE_CAP_STRING_MARKER:
-   case PIPE_CAP_CULL_DISTANCE:
-   case PIPE_CAP_SHADER_ARRAY_COMPONENTS:
-   case PIPE_CAP_STREAM_OUTPUT_PAUSE_RESUME:
-   case PIPE_CAP_STREAM_OUTPUT_INTERLEAVE_BUFFERS:
-   case PIPE_CAP_DOUBLES:
-   case PIPE_CAP_TGSI_TEX_TXF_LZ:
-   case PIPE_CAP_TES_LAYER_VIEWPORT:
-   case PIPE_CAP_BINDLESS_TEXTURE:
-   case PIPE_CAP_QUERY_TIMESTAMP:
-   case PIPE_CAP_QUERY_TIME_ELAPSED:
-   case PIPE_CAP_NIR_SAMPLERS_AS_DEREF:
-   case PIPE_CAP_MEMOBJ:
-   case PIPE_CAP_LOAD_CONSTBUF:
-   case PIPE_CAP_INT64:
-   case PIPE_CAP_SHADER_CLOCK:
-   case PIPE_CAP_CAN_BIND_CONST_BUFFER_AS_VERTEX:
-   case PIPE_CAP_ALLOW_MAPPED_BUFFERS_DURING_EXECUTION:
-   case PIPE_CAP_SIGNED_VERTEX_BUFFER_OFFSET:
-   case PIPE_CAP_SHADER_BALLOT:
-   case PIPE_CAP_SHADER_GROUP_VOTE:
-   case PIPE_CAP_FBFETCH:
-   case PIPE_CAP_COMPUTE_GRID_INFO_LAST_BLOCK:
-   case PIPE_CAP_IMAGE_LOAD_FORMATTED:
-   case PIPE_CAP_PREFER_COMPUTE_FOR_MULTIMEDIA:
-   case PIPE_CAP_TGSI_DIV:
-   case PIPE_CAP_PACKED_UNIFORMS:
-   case PIPE_CAP_GL_SPIRV:
-   case PIPE_CAP_ALPHA_TO_COVERAGE_DITHER_CONTROL:
-   case PIPE_CAP_MAP_UNSYNCHRONIZED_THREAD_SAFE:
-   case PIPE_CAP_NO_CLIP_ON_COPY_TEX:
-   case PIPE_CAP_SHADER_ATOMIC_INT64:
-   case PIPE_CAP_FRONTEND_NOOP:
-   case PIPE_CAP_DEMOTE_TO_HELPER_INVOCATION:
-   case PIPE_CAP_PREFER_REAL_BUFFER_IN_CONSTBUF0:
-   case PIPE_CAP_COMPUTE_SHADER_DERIVATIVES:
-   case PIPE_CAP_IMAGE_ATOMIC_INC_WRAP:
-   case PIPE_CAP_IMAGE_STORE_FORMATTED:
-   case PIPE_CAP_ALLOW_DRAW_OUT_OF_ORDER:
-   case PIPE_CAP_QUERY_SO_OVERFLOW:
-   case PIPE_CAP_GLSL_TESS_LEVELS_AS_INPUTS:
-   case PIPE_CAP_DEVICE_RESET_STATUS_QUERY:
-   case PIPE_CAP_TEXTURE_MULTISAMPLE:
-   case PIPE_CAP_ALLOW_GLTHREAD_BUFFER_SUBDATA_OPT: /* TODO: remove if it's slow */
-   case PIPE_CAP_NULL_TEXTURES:
-   case PIPE_CAP_HAS_CONST_BW:
-   case PIPE_CAP_CL_GL_SHARING:
-      return 1;
-
-   /* Tahiti and Verde only: reduction mode is unsupported due to a bug
-    * (it might work sometimes, but that's not enough)
-    */
-   case PIPE_CAP_SAMPLER_REDUCTION_MINMAX:
-   case PIPE_CAP_SAMPLER_REDUCTION_MINMAX_ARB:
-      return !(sscreen->info.family == CHIP_TAHITI || sscreen->info.family == CHIP_VERDE);
-
-   case PIPE_CAP_TEXTURE_TRANSFER_MODES:
-      return PIPE_TEXTURE_TRANSFER_BLIT | PIPE_TEXTURE_TRANSFER_COMPUTE;
-
-   case PIPE_CAP_DRAW_VERTEX_STATE:
-      return !(sscreen->debug_flags & DBG(NO_FAST_DISPLAY_LIST));
-
-   case PIPE_CAP_SHADER_SAMPLES_IDENTICAL:
-      return sscreen->info.gfx_level < GFX11 && !(sscreen->debug_flags & DBG(NO_FMASK));
-
-   case PIPE_CAP_GLSL_ZERO_INIT:
-      return 2;
-
-   case PIPE_CAP_GENERATE_MIPMAP:
-   case PIPE_CAP_SEAMLESS_CUBE_MAP:
-   case PIPE_CAP_SEAMLESS_CUBE_MAP_PER_TEXTURE:
-   case PIPE_CAP_CUBE_MAP_ARRAY:
-      return sscreen->info.has_3d_cube_border_color_mipmap;
-
-   case PIPE_CAP_POST_DEPTH_COVERAGE:
-      return sscreen->info.gfx_level >= GFX10;
-
-   case PIPE_CAP_GRAPHICS:
-      return sscreen->info.has_graphics;
-
-   case PIPE_CAP_RESOURCE_FROM_USER_MEMORY:
-      return !UTIL_ARCH_BIG_ENDIAN && sscreen->info.has_userptr;
-
-   case PIPE_CAP_DEVICE_PROTECTED_SURFACE:
-      return sscreen->info.has_tmz_support;
-
-   case PIPE_CAP_MIN_MAP_BUFFER_ALIGNMENT:
-      return SI_MAP_BUFFER_ALIGNMENT;
-
-   case PIPE_CAP_MAX_VERTEX_BUFFERS:
-      return SI_MAX_ATTRIBS;
-
-   case PIPE_CAP_CONSTANT_BUFFER_OFFSET_ALIGNMENT:
-   case PIPE_CAP_TEXTURE_BUFFER_OFFSET_ALIGNMENT:
-   case PIPE_CAP_MAX_TEXTURE_GATHER_COMPONENTS:
-   case PIPE_CAP_MAX_STREAM_OUTPUT_BUFFERS:
-   case PIPE_CAP_MAX_VERTEX_STREAMS:
-   case PIPE_CAP_SHADER_BUFFER_OFFSET_ALIGNMENT:
-   case PIPE_CAP_MAX_WINDOW_RECTANGLES:
-      return 4;
-
-   case PIPE_CAP_GLSL_FEATURE_LEVEL:
-   case PIPE_CAP_GLSL_FEATURE_LEVEL_COMPATIBILITY:
-      return 460;
-
-   case PIPE_CAP_MAX_TEXTURE_UPLOAD_MEMORY_BUDGET:
-      /* Optimal number for good TexSubImage performance on Polaris10. */
-      return 64 * 1024 * 1024;
-
-   case PIPE_CAP_GL_BEGIN_END_BUFFER_SIZE:
-      return 4096 * 1024;
-
-   case PIPE_CAP_MAX_TEXEL_BUFFER_ELEMENTS_UINT: {
-      unsigned max_texels =
-         pscreen->get_param(pscreen, PIPE_CAP_MAX_SHADER_BUFFER_SIZE_UINT);
-
-      /* FYI, BUF_RSRC_WORD2.NUM_RECORDS field limit is UINT32_MAX. */
-
-      /* Gfx8 and older use the size in bytes for bounds checking, and the max element size
-       * is 16B. Gfx9 and newer use the VGPR index for bounds checking.
-       */
-      if (sscreen->info.gfx_level <= GFX8)
-         max_texels = MIN2(max_texels, UINT32_MAX / 16);
-      else
-         /* Gallium has a limitation that it can only bind UINT32_MAX bytes, not texels.
-          * TODO: Remove this after the gallium interface is changed. */
-         max_texels = MIN2(max_texels, UINT32_MAX / 16);
-
-      return max_texels;
-   }
-
-   case PIPE_CAP_MAX_CONSTANT_BUFFER_SIZE_UINT:
-   case PIPE_CAP_MAX_SHADER_BUFFER_SIZE_UINT: {
-      /* Return 1/4th of the heap size as the maximum because the max size is not practically
-       * allocatable. Also, this can only return UINT32_MAX at most.
-       */
-      unsigned max_size = MIN2((sscreen->info.max_heap_size_kb * 1024ull) / 4, UINT32_MAX);
-
-      /* Allow max 512 MB to pass CTS with a 32-bit build. */
-      if (sizeof(void*) == 4)
-         max_size = MIN2(max_size, 512 * 1024 * 1024);
-
-      return max_size;
-   }
-
-   case PIPE_CAP_MAX_TEXTURE_MB:
-      /* Allow 1/4th of the heap size. */
-      return sscreen->info.max_heap_size_kb / 1024 / 4;
-
-   case PIPE_CAP_PREFER_BACK_BUFFER_REUSE:
-   case PIPE_CAP_UMA:
-   case PIPE_CAP_PREFER_IMM_ARRAYS_AS_CONSTBUF:
-      return 0;
-
-   case PIPE_CAP_PERFORMANCE_MONITOR:
-      return sscreen->info.gfx_level >= GFX7 && sscreen->info.gfx_level <= GFX10_3;
-
-   case PIPE_CAP_SPARSE_BUFFER_PAGE_SIZE:
-      return enable_sparse ? RADEON_SPARSE_PAGE_SIZE : 0;
-
-   case PIPE_CAP_CONTEXT_PRIORITY_MASK:
-      if (!sscreen->info.is_amdgpu)
-         return 0;
-      return PIPE_CONTEXT_PRIORITY_LOW |
-             PIPE_CONTEXT_PRIORITY_MEDIUM |
-             PIPE_CONTEXT_PRIORITY_HIGH;
-
-   case PIPE_CAP_FENCE_SIGNAL:
-      return sscreen->info.has_syncobj;
-
-   case PIPE_CAP_CONSTBUF0_FLAGS:
-      return SI_RESOURCE_FLAG_32BIT;
-
-   case PIPE_CAP_NATIVE_FENCE_FD:
-      return sscreen->info.has_fence_to_handle;
-
-   case PIPE_CAP_DRAW_PARAMETERS:
-   case PIPE_CAP_MULTI_DRAW_INDIRECT:
-   case PIPE_CAP_MULTI_DRAW_INDIRECT_PARAMS:
-      return sscreen->has_draw_indirect_multi;
-
-   case PIPE_CAP_MAX_SHADER_PATCH_VARYINGS:
-      return 30;
-
-   case PIPE_CAP_MAX_VARYINGS:
-   case PIPE_CAP_MAX_GS_INVOCATIONS:
-      return 32;
-
-   case PIPE_CAP_TEXTURE_BORDER_COLOR_QUIRK:
-      return sscreen->info.gfx_level <= GFX8 ? PIPE_QUIRK_TEXTURE_BORDER_COLOR_SWIZZLE_R600 : 0;
-
-   /* Stream output. */
-   case PIPE_CAP_MAX_STREAM_OUTPUT_SEPARATE_COMPONENTS:
-   case PIPE_CAP_MAX_STREAM_OUTPUT_INTERLEAVED_COMPONENTS:
-      return 32 * 4;
-
-   /* Geometry shader output. */
-   case PIPE_CAP_MAX_GEOMETRY_OUTPUT_VERTICES:
-      /* gfx9 has to report 256 to make piglit/gs-max-output pass.
-       * gfx8 and earlier can do 1024.
-       */
-      return 256;
-   case PIPE_CAP_MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS:
-      return 4095;
-
-   case PIPE_CAP_MAX_VERTEX_ATTRIB_STRIDE:
-      return 2048;
-
-   /* Texturing. */
-   case PIPE_CAP_MAX_TEXTURE_2D_SIZE:
-      /* TODO: Gfx12 supports 64K textures, but Gallium can't represent them at the moment. */
-      return sscreen->info.gfx_level >= GFX12 ? 32768 : 16384;
-   case PIPE_CAP_MAX_TEXTURE_CUBE_LEVELS:
-      if (!sscreen->info.has_3d_cube_border_color_mipmap)
-         return 0;
-      return sscreen->info.gfx_level >= GFX12 ? 16 : 15; /* 32K : 16K */
-   case PIPE_CAP_MAX_TEXTURE_3D_LEVELS:
-      if (!sscreen->info.has_3d_cube_border_color_mipmap)
-         return 0;
-      /* This is limited by maximums that both the texture unit and layered rendering support. */
-      return sscreen->info.gfx_level >= GFX12 ? 15 : /* 16K */
-             sscreen->info.gfx_level >= GFX10 ? 14 : 12; /* 8K : 2K */
-   case PIPE_CAP_MAX_TEXTURE_ARRAY_LAYERS:
-      /* This is limited by maximums that both the texture unit and layered rendering support. */
-      return sscreen->info.gfx_level >= GFX10 ? 8192 : 2048;
-
-   /* Sparse texture */
-   case PIPE_CAP_MAX_SPARSE_TEXTURE_SIZE:
-      return enable_sparse ?
-         si_get_param(pscreen, PIPE_CAP_MAX_TEXTURE_2D_SIZE) : 0;
-   case PIPE_CAP_MAX_SPARSE_3D_TEXTURE_SIZE:
-      return enable_sparse ?
-         (1 << (si_get_param(pscreen, PIPE_CAP_MAX_TEXTURE_3D_LEVELS) - 1)) : 0;
-   case PIPE_CAP_MAX_SPARSE_ARRAY_TEXTURE_LAYERS:
-      return enable_sparse ?
-         si_get_param(pscreen, PIPE_CAP_MAX_TEXTURE_ARRAY_LAYERS) : 0;
-   case PIPE_CAP_SPARSE_TEXTURE_FULL_ARRAY_CUBE_MIPMAPS:
-   case PIPE_CAP_QUERY_SPARSE_TEXTURE_RESIDENCY:
-   case PIPE_CAP_CLAMP_SPARSE_TEXTURE_LOD:
-      return enable_sparse;
-
-   /* Viewports and render targets. */
-   case PIPE_CAP_MAX_VIEWPORTS:
-      return SI_MAX_VIEWPORTS;
-   case PIPE_CAP_VIEWPORT_SUBPIXEL_BITS:
-   case PIPE_CAP_RASTERIZER_SUBPIXEL_BITS:
-   case PIPE_CAP_MAX_RENDER_TARGETS:
-      return 8;
-   case PIPE_CAP_FRAMEBUFFER_MSAA_CONSTRAINTS:
-      return sscreen->info.has_eqaa_surface_allocator ? 2 : 0;
-
-   case PIPE_CAP_MIN_TEXTURE_GATHER_OFFSET:
-   case PIPE_CAP_MIN_TEXEL_OFFSET:
-      return -32;
-
-   case PIPE_CAP_MAX_TEXTURE_GATHER_OFFSET:
-   case PIPE_CAP_MAX_TEXEL_OFFSET:
-      return 31;
-
-   case PIPE_CAP_ENDIANNESS:
-      return PIPE_ENDIAN_LITTLE;
-
-   case PIPE_CAP_VENDOR_ID:
-      return ATI_VENDOR_ID;
-   case PIPE_CAP_DEVICE_ID:
-      return sscreen->info.pci_id;
-   case PIPE_CAP_VIDEO_MEMORY:
-      return sscreen->info.vram_size_kb >> 10;
-   case PIPE_CAP_PCI_GROUP:
-      return sscreen->info.pci.domain;
-   case PIPE_CAP_PCI_BUS:
-      return sscreen->info.pci.bus;
-   case PIPE_CAP_PCI_DEVICE:
-      return sscreen->info.pci.dev;
-   case PIPE_CAP_PCI_FUNCTION:
-      return sscreen->info.pci.func;
-
-   case PIPE_CAP_TIMER_RESOLUTION:
-      /* Conversion to nanos from cycles per millisecond */
-      return DIV_ROUND_UP(1000000, sscreen->info.clock_crystal_freq);
-
-   case PIPE_CAP_SHADER_SUBGROUP_SIZE:
-      return 64;
-   case PIPE_CAP_SHADER_SUBGROUP_SUPPORTED_STAGES:
-      return BITFIELD_MASK(PIPE_SHADER_TYPES);
-   case PIPE_CAP_SHADER_SUBGROUP_SUPPORTED_FEATURES:
-      return BITFIELD_MASK(PIPE_SHADER_SUBGROUP_NUM_FEATURES);
-   case PIPE_CAP_SHADER_SUBGROUP_QUAD_ALL_STAGES:
-      return true;
-
-   default:
-      return u_pipe_screen_get_param_defaults(pscreen, param);
-   }
-}
-
-static float si_get_paramf(struct pipe_screen *pscreen, enum pipe_capf param)
-{
-   switch (param) {
-   case PIPE_CAPF_MIN_LINE_WIDTH:
-   case PIPE_CAPF_MIN_LINE_WIDTH_AA:
-      return 1; /* due to axis-aligned end caps at line width 1 */
-   case PIPE_CAPF_MIN_POINT_SIZE:
-   case PIPE_CAPF_MIN_POINT_SIZE_AA:
-   case PIPE_CAPF_POINT_SIZE_GRANULARITY:
-   case PIPE_CAPF_LINE_WIDTH_GRANULARITY:
-      return 1.0 / 8.0; /* due to the register field precision */
-   case PIPE_CAPF_MAX_LINE_WIDTH:
-   case PIPE_CAPF_MAX_LINE_WIDTH_AA:
-      /* This depends on the quant mode, though the precise interactions
-       * are unknown. */
-      return 2048;
-   case PIPE_CAPF_MAX_POINT_SIZE:
-   case PIPE_CAPF_MAX_POINT_SIZE_AA:
-      return SI_MAX_POINT_SIZE;
-   case PIPE_CAPF_MAX_TEXTURE_ANISOTROPY:
-      return 16.0f;
-   case PIPE_CAPF_MAX_TEXTURE_LOD_BIAS:
-      /* The hw can do 31, but this test fails if we use that:
-       *    KHR-GL46.texture_lod_bias.texture_lod_bias_all
-       */
-      return 16;
-   case PIPE_CAPF_MIN_CONSERVATIVE_RASTER_DILATE:
-   case PIPE_CAPF_MAX_CONSERVATIVE_RASTER_DILATE:
-   case PIPE_CAPF_CONSERVATIVE_RASTER_DILATE_GRANULARITY:
-      return 0.0f;
-   }
-   return 0.0f;
-}
-
-static int si_get_shader_param(struct pipe_screen *pscreen, enum pipe_shader_type shader,
-                               enum pipe_shader_cap param)
-{
-   struct si_screen *sscreen = (struct si_screen *)pscreen;
-
-   if (shader == PIPE_SHADER_MESH ||
-       shader == PIPE_SHADER_TASK)
-      return 0;
-
-   switch (param) {
-   /* Shader limits. */
-   case PIPE_SHADER_CAP_MAX_INSTRUCTIONS:
-   case PIPE_SHADER_CAP_MAX_ALU_INSTRUCTIONS:
-   case PIPE_SHADER_CAP_MAX_TEX_INSTRUCTIONS:
-   case PIPE_SHADER_CAP_MAX_TEX_INDIRECTIONS:
-   case PIPE_SHADER_CAP_MAX_CONTROL_FLOW_DEPTH:
-      return 16384;
-   case PIPE_SHADER_CAP_MAX_INPUTS:
-      return shader == PIPE_SHADER_VERTEX ? SI_MAX_ATTRIBS : 32;
-   case PIPE_SHADER_CAP_MAX_OUTPUTS:
-      return shader == PIPE_SHADER_FRAGMENT ? 8 : 32;
-   case PIPE_SHADER_CAP_MAX_TEMPS:
-      return 256; /* Max native temporaries. */
-   case PIPE_SHADER_CAP_MAX_CONST_BUFFER0_SIZE:
-      return 1 << 26; /* 64 MB */
-   case PIPE_SHADER_CAP_MAX_CONST_BUFFERS:
-      return SI_NUM_CONST_BUFFERS;
-   case PIPE_SHADER_CAP_MAX_TEXTURE_SAMPLERS:
-   case PIPE_SHADER_CAP_MAX_SAMPLER_VIEWS:
-      return SI_NUM_SAMPLERS;
-   case PIPE_SHADER_CAP_MAX_SHADER_BUFFERS:
-      return SI_NUM_SHADER_BUFFERS;
-   case PIPE_SHADER_CAP_MAX_SHADER_IMAGES:
-      return SI_NUM_IMAGES;
-
-   case PIPE_SHADER_CAP_SUPPORTED_IRS:
-      if (shader == PIPE_SHADER_COMPUTE) {
-         return (1 << PIPE_SHADER_IR_NATIVE) |
-                (1 << PIPE_SHADER_IR_NIR) |
-                (1 << PIPE_SHADER_IR_TGSI);
-      }
-      return (1 << PIPE_SHADER_IR_TGSI) |
-             (1 << PIPE_SHADER_IR_NIR);
-
-   /* Supported boolean features. */
-   case PIPE_SHADER_CAP_CONT_SUPPORTED:
-   case PIPE_SHADER_CAP_TGSI_SQRT_SUPPORTED:
-   case PIPE_SHADER_CAP_INDIRECT_TEMP_ADDR:
-   case PIPE_SHADER_CAP_INDIRECT_CONST_ADDR:
-   case PIPE_SHADER_CAP_INTEGERS:
-   case PIPE_SHADER_CAP_INT64_ATOMICS:
-   case PIPE_SHADER_CAP_TGSI_ANY_INOUT_DECL_RANGE:
-   case PIPE_SHADER_CAP_INDIRECT_INPUT_ADDR: /* lowered in finalize_nir */
-   case PIPE_SHADER_CAP_INDIRECT_OUTPUT_ADDR: /* lowered in finalize_nir */
-      return 1;
-
-   case PIPE_SHADER_CAP_FP16_CONST_BUFFERS:
-      /* We need f16c for fast FP16 conversions in glUniform. */
-      if (!util_get_cpu_caps()->has_f16c)
-         return 0;
-      FALLTHROUGH;
-   case PIPE_SHADER_CAP_FP16:
-   case PIPE_SHADER_CAP_FP16_DERIVATIVES:
-   case PIPE_SHADER_CAP_GLSL_16BIT_CONSTS:
-   case PIPE_SHADER_CAP_INT16:
-      return sscreen->nir_options->lower_mediump_io != NULL;
-
-   /* Unsupported boolean features. */
-   case PIPE_SHADER_CAP_SUBROUTINES:
-   case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTERS:
-   case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTER_BUFFERS:
-      return 0;
-   }
-   return 0;
-}
-
-static const void *si_get_compiler_options(struct pipe_screen *screen, enum pipe_shader_ir ir,
-                                           enum pipe_shader_type shader)
-{
-   struct si_screen *sscreen = (struct si_screen *)screen;
-
-   assert(ir == PIPE_SHADER_IR_NIR);
-   return sscreen->nir_options;
 }
 
 static void si_get_driver_uuid(struct pipe_screen *pscreen, char *uuid)
@@ -564,39 +78,12 @@ static const char *si_get_name(struct pipe_screen *pscreen)
    return sscreen->renderer_string;
 }
 
-static int si_get_video_param_no_video_hw(struct pipe_screen *screen, enum pipe_video_profile profile,
-                                          enum pipe_video_entrypoint entrypoint,
-                                          enum pipe_video_cap param)
-{
-   switch (param) {
-   case PIPE_VIDEO_CAP_SUPPORTED:
-      return vl_profile_supported(screen, profile, entrypoint);
-   case PIPE_VIDEO_CAP_NPOT_TEXTURES:
-      return 1;
-   case PIPE_VIDEO_CAP_MAX_WIDTH:
-   case PIPE_VIDEO_CAP_MAX_HEIGHT:
-      return vl_video_buffer_max_size(screen);
-   case PIPE_VIDEO_CAP_PREFERED_FORMAT:
-      return PIPE_FORMAT_NV12;
-   case PIPE_VIDEO_CAP_PREFERS_INTERLACED:
-      return false;
-   case PIPE_VIDEO_CAP_SUPPORTS_INTERLACED:
-      return false;
-   case PIPE_VIDEO_CAP_SUPPORTS_PROGRESSIVE:
-      return true;
-   case PIPE_VIDEO_CAP_MAX_LEVEL:
-      return vl_level_supported(screen, profile);
-   default:
-      return 0;
-   }
-}
-
 static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profile profile,
                               enum pipe_video_entrypoint entrypoint, enum pipe_video_cap param)
 {
    struct si_screen *sscreen = (struct si_screen *)screen;
    enum pipe_video_format codec = u_reduce_video_profile(profile);
-   bool fully_supported_profile = ((profile >= PIPE_VIDEO_PROFILE_MPEG4_AVC_BASELINE) &&
+   bool fully_supported_profile = ((profile >= PIPE_VIDEO_PROFILE_MPEG4_AVC_CONSTRAINED_BASELINE) &&
                                    (profile <= PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH)) ||
                                   (profile == PIPE_VIDEO_PROFILE_HEVC_MAIN) ||
                                   (profile == PIPE_VIDEO_PROFILE_AV1_MAIN);
@@ -635,24 +122,19 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
          /* VPE 1st generation does not support orientation
           * Have to determine the version and features of VPE in future.
           */
-         return PIPE_VIDEO_VPP_ORIENTATION_DEFAULT;
+         return PIPE_VIDEO_VPP_FLIP_HORIZONTAL;
       case PIPE_VIDEO_CAP_VPP_BLEND_MODES:
          /* VPE 1st generation does not support blending.
           * Have to determine the version and features of VPE in future.
           */
          return PIPE_VIDEO_VPP_BLEND_MODE_NONE;
-      case PIPE_VIDEO_CAP_PREFERED_FORMAT:
+      case PIPE_VIDEO_CAP_PREFERRED_FORMAT:
          return PIPE_FORMAT_NV12;
-      case PIPE_VIDEO_CAP_PREFERS_INTERLACED:
-         return false;
       case PIPE_VIDEO_CAP_SUPPORTS_PROGRESSIVE:
          return true;
       case PIPE_VIDEO_CAP_REQUIRES_FLUSH_ON_END_FRAME:
          /* true: VPP flush function will be called within vaEndPicture() */
          /* false: VPP flush function will be skipped */
-         return false;
-      case PIPE_VIDEO_CAP_SUPPORTS_INTERLACED:
-         /* for VPE we prefer non-interlaced buffer */
          return false;
       default:
          return 0;
@@ -665,7 +147,8 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
             sscreen->info.ip[AMD_IP_VCN_ENC].num_queues))
          return 0;
 
-      if (sscreen->info.vcn_ip_version == VCN_4_0_3)
+      if (sscreen->info.vcn_ip_version == VCN_4_0_3 ||
+	  sscreen->info.vcn_ip_version == VCN_5_0_1)
 	 return 0;
 
       switch (param) {
@@ -683,8 +166,18 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
       case PIPE_VIDEO_CAP_NPOT_TEXTURES:
          return 1;
       case PIPE_VIDEO_CAP_MIN_WIDTH:
+         if (sscreen->info.vcn_ip_version >= VCN_5_0_0) {
+            if (codec == PIPE_VIDEO_FORMAT_MPEG4_AVC)
+               return 96;
+            else if (codec == PIPE_VIDEO_FORMAT_HEVC)
+               return 384;
+            else if (codec == PIPE_VIDEO_FORMAT_AV1)
+               return 320;
+         }
          return (codec == PIPE_VIDEO_FORMAT_HEVC) ? 130 : 128;
       case PIPE_VIDEO_CAP_MIN_HEIGHT:
+         if (sscreen->info.vcn_ip_version >= VCN_5_0_0 && codec == PIPE_VIDEO_FORMAT_MPEG4_AVC)
+            return 32;
          return 128;
       case PIPE_VIDEO_CAP_MAX_WIDTH:
          if (codec != PIPE_VIDEO_FORMAT_UNKNOWN && QUERYABLE_KERNEL)
@@ -696,26 +189,22 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
             return KERNEL_ENC_CAP(codec, max_height);
          else
             return (sscreen->info.family < CHIP_TONGA) ? 1152 : 2304;
-      case PIPE_VIDEO_CAP_PREFERED_FORMAT:
+      case PIPE_VIDEO_CAP_PREFERRED_FORMAT:
          if (profile == PIPE_VIDEO_PROFILE_HEVC_MAIN_10)
             return PIPE_FORMAT_P010;
          else
             return PIPE_FORMAT_NV12;
-      case PIPE_VIDEO_CAP_PREFERS_INTERLACED:
-         return false;
-      case PIPE_VIDEO_CAP_SUPPORTS_INTERLACED:
-         return false;
       case PIPE_VIDEO_CAP_SUPPORTS_PROGRESSIVE:
          return true;
       case PIPE_VIDEO_CAP_STACKED_FRAMES:
          return (sscreen->info.family < CHIP_TONGA) ? 1 : 2;
       case PIPE_VIDEO_CAP_MAX_TEMPORAL_LAYERS:
-         return (codec == PIPE_VIDEO_FORMAT_MPEG4_AVC &&
+         return (sscreen->info.ip[AMD_IP_UVD_ENC].num_queues ||
                  sscreen->info.vcn_ip_version >= VCN_1_0_0) ? 4 : 0;
       case PIPE_VIDEO_CAP_ENC_QUALITY_LEVEL:
-         return (sscreen->info.vcn_ip_version >= VCN_1_0_0) ? 32 : 0;
+         return 32;
       case PIPE_VIDEO_CAP_ENC_SUPPORTS_MAX_FRAME_SIZE:
-         return (sscreen->info.vcn_ip_version >= VCN_1_0_0) ? 1 : 0;
+         return 1;
 
       case PIPE_VIDEO_CAP_ENC_HEVC_FEATURE_FLAGS:
          if (profile == PIPE_VIDEO_PROFILE_HEVC_MAIN ||
@@ -763,16 +252,12 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
             return 0;
 
       case PIPE_VIDEO_CAP_ENC_MAX_SLICES_PER_FRAME:
-         return (sscreen->info.vcn_ip_version >= VCN_1_0_0) ? 128 : 1;
+         return 128;
 
       case PIPE_VIDEO_CAP_ENC_SLICES_STRUCTURE:
-         if (sscreen->info.vcn_ip_version >= VCN_2_0_0) {
-            int value = (PIPE_VIDEO_CAP_SLICE_STRUCTURE_ARBITRARY_MACROBLOCKS |
-                         PIPE_VIDEO_CAP_SLICE_STRUCTURE_EQUAL_ROWS |
-                         PIPE_VIDEO_CAP_SLICE_STRUCTURE_EQUAL_MULTI_ROWS);
-            return value;
-         } else
-            return 0;
+         return PIPE_VIDEO_CAP_SLICE_STRUCTURE_ARBITRARY_MACROBLOCKS |
+                PIPE_VIDEO_CAP_SLICE_STRUCTURE_EQUAL_ROWS |
+                PIPE_VIDEO_CAP_SLICE_STRUCTURE_EQUAL_MULTI_ROWS;
 
       case PIPE_VIDEO_CAP_ENC_AV1_FEATURE:
          if (sscreen->info.vcn_ip_version >= VCN_4_0_0 && sscreen->info.vcn_ip_version != VCN_4_0_3) {
@@ -792,8 +277,9 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
             attrib.bits.support_superres = PIPE_ENC_FEATURE_NOT_SUPPORTED;
             attrib.bits.support_restoration = PIPE_ENC_FEATURE_NOT_SUPPORTED;
             attrib.bits.support_allow_intrabc = PIPE_ENC_FEATURE_NOT_SUPPORTED;
-            attrib.bits.support_cdef_channel_strength = PIPE_ENC_FEATURE_SUPPORTED;
-
+            attrib.bits.support_cdef_channel_strength = PIPE_ENC_FEATURE_NOT_SUPPORTED;
+            if (sscreen->info.vcn_ip_version >= VCN_5_0_0)
+               attrib.bits.support_cdef_channel_strength = PIPE_ENC_FEATURE_SUPPORTED;
             return attrib.value;
          } else
             return 0;
@@ -853,14 +339,9 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
             return 1;
 
       case PIPE_VIDEO_CAP_ENC_INTRA_REFRESH:
-         if (sscreen->info.vcn_ip_version >= VCN_1_0_0) {
-            int value = PIPE_VIDEO_ENC_INTRA_REFRESH_ROW |
-                        PIPE_VIDEO_ENC_INTRA_REFRESH_COLUMN |
-                        PIPE_VIDEO_ENC_INTRA_REFRESH_P_FRAME;
-            return value;
-         }
-         else
-            return 0;
+            return PIPE_VIDEO_ENC_INTRA_REFRESH_ROW |
+                   PIPE_VIDEO_ENC_INTRA_REFRESH_COLUMN |
+                   PIPE_VIDEO_ENC_INTRA_REFRESH_P_FRAME;
 
       case PIPE_VIDEO_CAP_ENC_ROI:
          if (sscreen->info.vcn_ip_version >= VCN_1_0_0) {
@@ -874,18 +355,27 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
          }
          else
             return 0;
-      case PIPE_VIDEO_CAP_ENC_SURFACE_ALIGNMENT:
-           if (profile == PIPE_VIDEO_PROFILE_HEVC_MAIN ||
-               profile == PIPE_VIDEO_PROFILE_HEVC_MAIN_10) {
-            union pipe_enc_cap_surface_alignment attrib;
-            attrib.value = 0;
 
-            attrib.bits.log2_width_alignment = RADEON_ENC_HEVC_SURFACE_LOG2_WIDTH_ALIGNMENT;
-            attrib.bits.log2_height_alignment = RADEON_ENC_HEVC_SURFACE_LOG2_HEIGHT_ALIGNMENT;
-            return attrib.value;
+      case PIPE_VIDEO_CAP_ENC_SURFACE_ALIGNMENT: {
+         union pipe_enc_cap_surface_alignment attrib = {0};
+         if (profile == PIPE_VIDEO_PROFILE_HEVC_MAIN ||
+             profile == PIPE_VIDEO_PROFILE_HEVC_MAIN_10) {
+            /* 64 x 16 */
+            attrib.bits.log2_width_alignment = 6;
+            attrib.bits.log2_height_alignment = 4;
+         } else if (profile == PIPE_VIDEO_PROFILE_AV1_MAIN) {
+            if (sscreen->info.vcn_ip_version < VCN_5_0_0) {
+               /* 64 x 16 */
+               attrib.bits.log2_width_alignment = 6;
+               attrib.bits.log2_height_alignment = 4;
+            } else {
+               /* 8 x 2 */
+               attrib.bits.log2_width_alignment = 3;
+               attrib.bits.log2_height_alignment = 1;
+            }
          }
-         else
-            return 0;
+         return attrib.value;
+      }
 
       case PIPE_VIDEO_CAP_ENC_RATE_CONTROL_QVBR:
          if (sscreen->info.vcn_ip_version >= VCN_3_0_0 &&
@@ -924,15 +414,13 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
       switch (codec) {
       case PIPE_VIDEO_FORMAT_MPEG12:
          return !(sscreen->info.vcn_ip_version >= VCN_3_0_33 || profile == PIPE_VIDEO_PROFILE_MPEG1);
-      case PIPE_VIDEO_FORMAT_MPEG4:
-         return !(sscreen->info.vcn_ip_version >= VCN_3_0_33);
       case PIPE_VIDEO_FORMAT_MPEG4_AVC:
          if ((sscreen->info.family == CHIP_POLARIS10 || sscreen->info.family == CHIP_POLARIS11) &&
              sscreen->info.uvd_fw_version < UVD_FW_1_66_16) {
             RVID_ERR("POLARIS10/11 firmware version need to be updated.\n");
             return false;
          }
-         return (profile != PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH10);
+         return fully_supported_profile;
       case PIPE_VIDEO_FORMAT_VC1:
          return !(sscreen->info.vcn_ip_version >= VCN_3_0_33);
       case PIPE_VIDEO_FORMAT_HEVC:
@@ -960,6 +448,8 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
       case PIPE_VIDEO_FORMAT_VP9:
          return sscreen->info.vcn_ip_version >= VCN_1_0_0;
       case PIPE_VIDEO_FORMAT_AV1:
+         if (profile == PIPE_VIDEO_PROFILE_AV1_PROFILE2)
+            return sscreen->info.vcn_ip_version >= VCN_5_0_0 || sscreen->info.vcn_ip_version == VCN_4_0_0;
          return sscreen->info.vcn_ip_version >= VCN_3_0_0 && sscreen->info.vcn_ip_version != VCN_3_0_33;
       default:
          return false;
@@ -968,7 +458,9 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
       return 1;
    case PIPE_VIDEO_CAP_MIN_WIDTH:
    case PIPE_VIDEO_CAP_MIN_HEIGHT:
-      return (codec == PIPE_VIDEO_FORMAT_AV1) ? 16 : 64;
+      if (codec == PIPE_VIDEO_FORMAT_VP9 || codec == PIPE_VIDEO_FORMAT_AV1)
+         return 16;
+      return 64;
    case PIPE_VIDEO_CAP_MAX_WIDTH:
       if (codec != PIPE_VIDEO_FORMAT_UNKNOWN && QUERYABLE_KERNEL)
             return KERNEL_DEC_CAP(codec, max_width);
@@ -997,7 +489,7 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
             return (sscreen->info.family < CHIP_TONGA) ? 1152 : 4096;
          }
       }
-   case PIPE_VIDEO_CAP_PREFERED_FORMAT:
+   case PIPE_VIDEO_CAP_PREFERRED_FORMAT:
       if (profile == PIPE_VIDEO_PROFILE_HEVC_MAIN_10)
          return PIPE_FORMAT_P010;
       else if (profile == PIPE_VIDEO_PROFILE_VP9_PROFILE2)
@@ -1005,22 +497,11 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
       else
          return PIPE_FORMAT_NV12;
 
-   case PIPE_VIDEO_CAP_PREFERS_INTERLACED:
-      return false;
-   case PIPE_VIDEO_CAP_SUPPORTS_INTERLACED: {
-      enum pipe_video_format format = u_reduce_video_profile(profile);
-
-      if (format >= PIPE_VIDEO_FORMAT_HEVC)
-         return false;
-
-      return true;
-   }
    case PIPE_VIDEO_CAP_SUPPORTS_PROGRESSIVE:
       return true;
    case PIPE_VIDEO_CAP_MAX_LEVEL:
       if ((profile == PIPE_VIDEO_PROFILE_MPEG2_SIMPLE ||
            profile == PIPE_VIDEO_PROFILE_MPEG2_MAIN ||
-           profile == PIPE_VIDEO_PROFILE_MPEG4_ADVANCED_SIMPLE ||
            profile == PIPE_VIDEO_PROFILE_VC1_ADVANCED) &&
           sscreen->info.dec_caps.codec_info[codec - 1].valid) {
          return sscreen->info.dec_caps.codec_info[codec - 1].max_level;
@@ -1031,17 +512,13 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
          case PIPE_VIDEO_PROFILE_MPEG2_SIMPLE:
          case PIPE_VIDEO_PROFILE_MPEG2_MAIN:
             return 3;
-         case PIPE_VIDEO_PROFILE_MPEG4_SIMPLE:
-            return 3;
-         case PIPE_VIDEO_PROFILE_MPEG4_ADVANCED_SIMPLE:
-            return 5;
          case PIPE_VIDEO_PROFILE_VC1_SIMPLE:
             return 1;
          case PIPE_VIDEO_PROFILE_VC1_MAIN:
             return 2;
          case PIPE_VIDEO_PROFILE_VC1_ADVANCED:
             return 4;
-         case PIPE_VIDEO_PROFILE_MPEG4_AVC_BASELINE:
+         case PIPE_VIDEO_PROFILE_MPEG4_AVC_CONSTRAINED_BASELINE:
          case PIPE_VIDEO_PROFILE_MPEG4_AVC_MAIN:
          case PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH:
             return (sscreen->info.family < CHIP_TONGA) ? 41 : 52;
@@ -1056,9 +533,12 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
       return true;
    case PIPE_VIDEO_CAP_ROI_CROP_DEC:
       if (codec == PIPE_VIDEO_FORMAT_JPEG &&
-          sscreen->info.vcn_ip_version == VCN_4_0_3)
+          (sscreen->info.vcn_ip_version == VCN_4_0_3 ||
+           sscreen->info.vcn_ip_version == VCN_5_0_1))
          return true;
       return false;
+   case PIPE_VIDEO_CAP_SKIP_CLEAR_SURFACE:
+      return sscreen->info.is_amdgpu && sscreen->info.drm_minor >= 59;
    default:
       return 0;
    }
@@ -1100,12 +580,15 @@ static bool si_vid_is_format_supported(struct pipe_screen *screen, enum pipe_for
       return (format == PIPE_FORMAT_P010) || (format == PIPE_FORMAT_P016) ||
              (format == PIPE_FORMAT_NV12);
 
+   if (profile == PIPE_VIDEO_PROFILE_AV1_PROFILE2 && entrypoint == PIPE_VIDEO_ENTRYPOINT_BITSTREAM)
+      return (format == PIPE_FORMAT_P010) || (format == PIPE_FORMAT_P016) ||
+             (format == PIPE_FORMAT_P012) || (format == PIPE_FORMAT_NV12);
+
    /* JPEG supports YUV400 and YUV444 */
    if (profile == PIPE_VIDEO_PROFILE_JPEG_BASELINE) {
       switch (format) {
       case PIPE_FORMAT_NV12:
       case PIPE_FORMAT_YUYV:
-      case PIPE_FORMAT_L8_UNORM:
       case PIPE_FORMAT_Y8_400_UNORM:
          return true;
       case PIPE_FORMAT_Y8_U8_V8_444_UNORM:
@@ -1117,7 +600,8 @@ static bool si_vid_is_format_supported(struct pipe_screen *screen, enum pipe_for
       case PIPE_FORMAT_R8G8B8A8_UNORM:
       case PIPE_FORMAT_A8R8G8B8_UNORM:
       case PIPE_FORMAT_R8_G8_B8_UNORM:
-         if (sscreen->info.vcn_ip_version == VCN_4_0_3)
+         if (sscreen->info.vcn_ip_version == VCN_4_0_3 ||
+             sscreen->info.vcn_ip_version == VCN_5_0_1)
             return true;
          else
             return false;
@@ -1131,7 +615,8 @@ static bool si_vid_is_format_supported(struct pipe_screen *screen, enum pipe_for
           (sscreen->info.vcn_ip_version >= VCN_2_0_0)) ||
           ((profile == PIPE_VIDEO_PROFILE_AV1_MAIN) &&
            (sscreen->info.vcn_ip_version >= VCN_4_0_0 &&
-            sscreen->info.vcn_ip_version != VCN_4_0_3))))
+            sscreen->info.vcn_ip_version != VCN_4_0_3 &&
+            sscreen->info.vcn_ip_version != VCN_5_0_1))))
       return (format == PIPE_FORMAT_P010 || format == PIPE_FORMAT_NV12);
 
 
@@ -1140,238 +625,6 @@ static bool si_vid_is_format_supported(struct pipe_screen *screen, enum pipe_for
       return format == PIPE_FORMAT_NV12;
 
    return vl_video_buffer_is_format_supported(screen, format, profile, entrypoint);
-}
-
-static bool si_vid_is_target_buffer_supported(struct pipe_screen *screen,
-                                              enum pipe_format format,
-                                              struct pipe_video_buffer *target,
-                                              enum pipe_video_profile profile,
-                                              enum pipe_video_entrypoint entrypoint)
-{
-   struct si_screen *sscreen = (struct si_screen *)screen;
-   struct si_texture *tex = (struct si_texture *)((struct vl_video_buffer *)target)->resources[0];
-   const bool is_dcc = tex->surface.meta_offset;
-   const bool is_format_conversion = format != target->buffer_format;
-
-   switch (entrypoint) {
-   case PIPE_VIDEO_ENTRYPOINT_BITSTREAM:
-      return !is_dcc && !is_format_conversion;
-
-   case PIPE_VIDEO_ENTRYPOINT_ENCODE:
-      if (is_dcc)
-         return false;
-
-      /* EFC */
-      if (is_format_conversion) {
-         const bool input_8bit =
-            target->buffer_format == PIPE_FORMAT_B8G8R8A8_UNORM ||
-            target->buffer_format == PIPE_FORMAT_B8G8R8X8_UNORM ||
-            target->buffer_format == PIPE_FORMAT_R8G8B8A8_UNORM ||
-            target->buffer_format == PIPE_FORMAT_R8G8B8X8_UNORM;
-         const bool input_10bit =
-            target->buffer_format == PIPE_FORMAT_B10G10R10A2_UNORM ||
-            target->buffer_format == PIPE_FORMAT_B10G10R10X2_UNORM ||
-            target->buffer_format == PIPE_FORMAT_R10G10B10A2_UNORM ||
-            target->buffer_format == PIPE_FORMAT_R10G10B10X2_UNORM;
-
-         if (sscreen->info.vcn_ip_version < VCN_2_0_0 ||
-             sscreen->info.vcn_ip_version == VCN_2_2_0 ||
-             sscreen->info.vcn_ip_version >= VCN_5_0_0 ||
-             sscreen->debug_flags & DBG(NO_EFC))
-            return false;
-
-         if (input_8bit)
-            return format == PIPE_FORMAT_NV12;
-         else if (input_10bit)
-            return format == PIPE_FORMAT_NV12 || format == PIPE_FORMAT_P010;
-         else
-            return false;
-      }
-
-      return true;
-
-   default:
-      return !is_format_conversion;
-   }
-}
-
-static unsigned get_max_threads_per_block(struct si_screen *screen, enum pipe_shader_ir ir_type)
-{
-   if (ir_type == PIPE_SHADER_IR_NATIVE)
-      return 256;
-
-   /* LLVM only supports 1024 threads per block. */
-   return 1024;
-}
-
-static int si_get_compute_param(struct pipe_screen *screen, enum pipe_shader_ir ir_type,
-                                enum pipe_compute_cap param, void *ret)
-{
-   struct si_screen *sscreen = (struct si_screen *)screen;
-
-   // TODO: select these params by asic
-   switch (param) {
-   case PIPE_COMPUTE_CAP_IR_TARGET: {
-      const char *gpu, *triple;
-
-      triple = "amdgcn-mesa-mesa3d";
-      gpu = ac_get_llvm_processor_name(sscreen->info.family);
-      if (ret) {
-         sprintf(ret, "%s-%s", gpu, triple);
-      }
-      /* +2 for dash and terminating NIL byte */
-      return (strlen(triple) + strlen(gpu) + 2) * sizeof(char);
-   }
-   case PIPE_COMPUTE_CAP_GRID_DIMENSION:
-      if (ret) {
-         uint64_t *grid_dimension = ret;
-         grid_dimension[0] = 3;
-      }
-      return 1 * sizeof(uint64_t);
-
-   case PIPE_COMPUTE_CAP_MAX_GRID_SIZE:
-      if (ret) {
-         uint64_t *grid_size = ret;
-         /* Use this size, so that internal counters don't overflow 64 bits. */
-         grid_size[0] = UINT32_MAX;
-         grid_size[1] = UINT16_MAX;
-         grid_size[2] = UINT16_MAX;
-      }
-      return 3 * sizeof(uint64_t);
-
-   case PIPE_COMPUTE_CAP_MAX_BLOCK_SIZE:
-      if (ret) {
-         uint64_t *block_size = ret;
-         unsigned threads_per_block = get_max_threads_per_block(sscreen, ir_type);
-         block_size[0] = threads_per_block;
-         block_size[1] = threads_per_block;
-         block_size[2] = threads_per_block;
-      }
-      return 3 * sizeof(uint64_t);
-
-   case PIPE_COMPUTE_CAP_MAX_THREADS_PER_BLOCK:
-      if (ret) {
-         uint64_t *max_threads_per_block = ret;
-         *max_threads_per_block = get_max_threads_per_block(sscreen, ir_type);
-      }
-      return sizeof(uint64_t);
-   case PIPE_COMPUTE_CAP_ADDRESS_BITS:
-      if (ret) {
-         uint32_t *address_bits = ret;
-         address_bits[0] = 64;
-      }
-      return 1 * sizeof(uint32_t);
-
-   case PIPE_COMPUTE_CAP_MAX_GLOBAL_SIZE:
-      if (ret) {
-         uint64_t *max_global_size = ret;
-         uint64_t max_mem_alloc_size;
-
-         si_get_compute_param(screen, ir_type, PIPE_COMPUTE_CAP_MAX_MEM_ALLOC_SIZE,
-                              &max_mem_alloc_size);
-
-         /* In OpenCL, the MAX_MEM_ALLOC_SIZE must be at least
-          * 1/4 of the MAX_GLOBAL_SIZE.  Since the
-          * MAX_MEM_ALLOC_SIZE is fixed for older kernels,
-          * make sure we never report more than
-          * 4 * MAX_MEM_ALLOC_SIZE.
-          */
-         *max_global_size =
-            MIN2(4 * max_mem_alloc_size, sscreen->info.max_heap_size_kb * 1024ull);
-      }
-      return sizeof(uint64_t);
-
-   case PIPE_COMPUTE_CAP_MAX_LOCAL_SIZE:
-      if (ret) {
-         uint64_t *max_local_size = ret;
-         /* Value reported by the closed source driver. */
-         if (sscreen->info.gfx_level == GFX6)
-            *max_local_size = 32 * 1024;
-         else
-            *max_local_size = 64 * 1024;
-      }
-      return sizeof(uint64_t);
-
-   case PIPE_COMPUTE_CAP_MAX_INPUT_SIZE:
-      if (ret) {
-         uint64_t *max_input_size = ret;
-         /* Value reported by the closed source driver. */
-         *max_input_size = 1024;
-      }
-      return sizeof(uint64_t);
-
-   case PIPE_COMPUTE_CAP_MAX_MEM_ALLOC_SIZE:
-      if (ret) {
-         uint64_t *max_mem_alloc_size = ret;
-
-         /* Return 1/4 of the heap size as the maximum because the max size is not practically
-          * allocatable.
-          */
-         *max_mem_alloc_size = (sscreen->info.max_heap_size_kb / 4) * 1024ull;
-      }
-      return sizeof(uint64_t);
-
-   case PIPE_COMPUTE_CAP_MAX_CLOCK_FREQUENCY:
-      if (ret) {
-         uint32_t *max_clock_frequency = ret;
-         *max_clock_frequency = sscreen->info.max_gpu_freq_mhz;
-      }
-      return sizeof(uint32_t);
-
-   case PIPE_COMPUTE_CAP_MAX_COMPUTE_UNITS:
-      if (ret) {
-         uint32_t *max_compute_units = ret;
-         *max_compute_units = sscreen->info.num_cu;
-      }
-      return sizeof(uint32_t);
-
-   case PIPE_COMPUTE_CAP_IMAGES_SUPPORTED:
-      if (ret) {
-         uint32_t *images_supported = ret;
-         *images_supported = 0;
-      }
-      return sizeof(uint32_t);
-   case PIPE_COMPUTE_CAP_MAX_PRIVATE_SIZE:
-      break; /* unused */
-   case PIPE_COMPUTE_CAP_MAX_SUBGROUPS: {
-      if (ret) {
-         uint32_t *max_subgroups = ret;
-         unsigned threads = get_max_threads_per_block(sscreen, ir_type);
-         unsigned subgroup_size;
-
-         if (sscreen->debug_flags & DBG(W64_CS) || sscreen->info.gfx_level < GFX10)
-            subgroup_size = 64;
-         else
-            subgroup_size = 32;
-
-         *max_subgroups = threads / subgroup_size;
-      }
-      return sizeof(uint32_t);
-   }
-   case PIPE_COMPUTE_CAP_SUBGROUP_SIZES:
-      if (ret) {
-         uint32_t *subgroup_size = ret;
-         if (sscreen->debug_flags & DBG(W32_CS))
-            *subgroup_size = 32;
-         else if (sscreen->debug_flags & DBG(W64_CS))
-            *subgroup_size = 64;
-         else
-            *subgroup_size = sscreen->info.gfx_level < GFX10 ? 64 : 64 | 32;
-      }
-      return sizeof(uint32_t);
-   case PIPE_COMPUTE_CAP_MAX_VARIABLE_THREADS_PER_BLOCK:
-      if (ret) {
-         uint64_t *max_variable_threads_per_block = ret;
-         if (ir_type == PIPE_SHADER_IR_NATIVE)
-            *max_variable_threads_per_block = 0;
-         else
-            *max_variable_threads_per_block = SI_MAX_VARIABLE_THREADS_PER_BLOCK;
-      }
-      return sizeof(uint64_t);
-   }
-
-   fprintf(stderr, "unknown PIPE_COMPUTE_CAP %d\n", param);
-   return 0;
 }
 
 static uint64_t si_get_timestamp(struct pipe_screen *screen)
@@ -1429,10 +682,12 @@ static void si_init_renderer_string(struct si_screen *sscreen)
 {
    char first_name[256], second_name[32] = {}, kernel_version[128] = {};
    struct utsname uname_data;
+   const char *name = ac_get_family_name(sscreen->info.family);
 
-   snprintf(first_name, sizeof(first_name), "%s",
-            sscreen->info.marketing_name ? sscreen->info.marketing_name : sscreen->info.name);
-   snprintf(second_name, sizeof(second_name), "%s, ", sscreen->info.lowercase_name);
+   snprintf(first_name, sizeof(first_name), "%s", sscreen->info.marketing_name);
+   memset(second_name, 0, sizeof(second_name));
+   for (unsigned i = 0; name[i] && i < ARRAY_SIZE(second_name) - 1; i++)
+      second_name[i] = tolower(name[i]);
 
    if (uname(&uname_data) == 0)
       snprintf(kernel_version, sizeof(kernel_version), ", %s", uname_data.release);
@@ -1444,7 +699,7 @@ static void si_init_renderer_string(struct si_screen *sscreen)
       "ACO";
 
    snprintf(sscreen->renderer_string, sizeof(sscreen->renderer_string),
-            "%s (radeonsi, %s%s, DRM %i.%i%s)", first_name, second_name, compiler_name,
+            "%s (radeonsi, %s, %s, DRM %i.%i%s)", first_name, second_name, compiler_name,
             sscreen->info.drm_major, sscreen->info.drm_minor, kernel_version);
 }
 
@@ -1483,6 +738,84 @@ si_driver_thread_add_job(struct pipe_screen *screen, void *data,
    util_queue_add_job(&sscreen->shader_compiler_queue, data, fence, execute, cleanup, job_size);
 }
 
+static bool enable_mesh_shader(struct si_screen *sscreen)
+{
+   return sscreen->use_ngg &&
+      sscreen->info.gfx_level >= GFX10_3 &&
+      sscreen->info.has_gang_submit &&
+      /* TODO: not support user queue for now */
+      !(sscreen->info.userq_ip_mask & BITFIELD_BIT(AMD_IP_GFX)) &&
+      /* don't support LLVM */
+      aco_is_gpu_supported(&sscreen->info) &&
+      !(sscreen->debug_flags & DBG(USE_LLVM));
+}
+
+static bool can_lower_mediump_io(mesa_shader_stage prev_stage, bool prev_stage_has_xfb,
+                                 mesa_shader_stage next_stage, bool config_option)
+{
+   /* This is the filter that determines when mediump IO is lowered.
+    *
+    * NOTE: LLVM fails to compile this test if VS inputs are 16-bit:
+    * dEQP-GLES31.functional.shaders.builtin_functions.integer.bitfieldinsert.uvec3_lowp_geometry
+    */
+   return (prev_stage == MESA_SHADER_VERTEX && next_stage == MESA_SHADER_FRAGMENT &&
+           !prev_stage_has_xfb && config_option) ||
+          prev_stage == MESA_SHADER_FRAGMENT;
+}
+
+static bool si_alu_to_scalar_packed_math_filter(const nir_instr *instr, const void *data)
+{
+   if (instr->type == nir_instr_type_alu) {
+      nir_alu_instr *alu = nir_instr_as_alu(instr);
+
+      if (alu->def.bit_size == 16 && alu->def.num_components == 2 &&
+          ac_nir_op_supports_packed_math_16bit(alu)) {
+         /* ACO requires that all but the first bit of swizzle must be equal. */
+         for (unsigned i = 0; i < nir_op_infos[alu->op].num_inputs; i++) {
+            if ((alu->src[i].swizzle[0] >> 1) != (alu->src[i].swizzle[1] >> 1))
+               return true;
+         }
+         return false;
+      }
+   }
+
+   return true;
+}
+
+static void lower_mediump_io(nir_shader *nir, bool config_option)
+{
+   nir_variable_mode modes = 0;
+
+   if (can_lower_mediump_io(nir->info.stage, nir->xfb_info != NULL, nir->info.next_stage,
+                            config_option))
+      modes |= nir_var_shader_out;
+
+   if (can_lower_mediump_io(nir->info.prev_stage, nir->info.prev_stage_has_xfb, nir->info.stage,
+                            config_option))
+      modes |= nir_var_shader_in;
+
+   if (modes) {
+      bool progress = false;
+
+      NIR_PASS(progress, nir, nir_lower_mediump_io, modes,
+               VARYING_BIT_PNTC | BITFIELD64_RANGE(VARYING_SLOT_VAR0, 32), true);
+
+      /* Update xfb info after mediump IO lowering. */
+      if (progress && nir->xfb_info)
+         nir_gather_xfb_info_from_intrinsics(nir);
+   }
+   NIR_PASS(_, nir, nir_clear_mediump_io_flag);
+}
+
+static void si_lower_mediump_io_default(nir_shader *nir)
+{
+   lower_mediump_io(nir, false);
+}
+
+static void si_lower_mediump_io_option(nir_shader *nir)
+{
+   lower_mediump_io(nir, true);
+}
 
 void si_init_screen_get_functions(struct si_screen *sscreen)
 {
@@ -1490,14 +823,9 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
    sscreen->b.get_vendor = si_get_vendor;
    sscreen->b.get_device_vendor = si_get_device_vendor;
    sscreen->b.get_screen_fd = si_get_screen_fd;
-   sscreen->b.get_param = si_get_param;
    sscreen->b.is_compute_copy_faster = si_is_compute_copy_faster;
    sscreen->b.driver_thread_add_job = si_driver_thread_add_job;
-   sscreen->b.get_paramf = si_get_paramf;
-   sscreen->b.get_compute_param = si_get_compute_param;
    sscreen->b.get_timestamp = si_get_timestamp;
-   sscreen->b.get_shader_param = si_get_shader_param;
-   sscreen->b.get_compiler_options = si_get_compiler_options;
    sscreen->b.get_device_uuid = si_get_device_uuid;
    sscreen->b.get_driver_uuid = si_get_driver_uuid;
    sscreen->b.query_memory_info = si_query_memory_info;
@@ -1511,10 +839,6 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
        sscreen->info.ip[AMD_IP_VPE].num_queues) {
       sscreen->b.get_video_param = si_get_video_param;
       sscreen->b.is_video_format_supported = si_vid_is_format_supported;
-      sscreen->b.is_video_target_buffer_supported = si_vid_is_target_buffer_supported;
-   } else {
-      sscreen->b.get_video_param = si_get_video_param_no_video_hw;
-      sscreen->b.is_video_format_supported = vl_video_buffer_is_format_supported;
    }
 
    si_init_renderer_string(sscreen);
@@ -1543,10 +867,11 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
       (sscreen->info.family >= CHIP_GFX940 && !sscreen->info.has_graphics) ||
       /* fma32 is too slow for gpu < gfx9, so apply the option only for gpu >= gfx9 */
       (sscreen->info.gfx_level >= GFX9 && sscreen->options.force_use_fma32);
-   bool has_mediump = sscreen->info.gfx_level >= GFX8 && sscreen->options.fp16;
+   /* GFX8 has precision issues with 16-bit PS outputs. */
+   bool has_16bit_io = sscreen->info.gfx_level >= GFX9;
 
    nir_shader_compiler_options *options = sscreen->nir_options;
-   ac_set_nir_options(&sscreen->info, !sscreen->use_aco, options);
+   ac_nir_set_options(&sscreen->info, !sscreen->use_aco, options);
 
    options->lower_ffma16 = sscreen->info.gfx_level < GFX9;
    options->lower_ffma32 = !use_fma32;
@@ -1555,11 +880,9 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
    options->fuse_ffma32 = use_fma32;
    options->fuse_ffma64 = true;
    options->lower_uniforms_to_ubo = true;
-   options->lower_layer_fs_input_to_sysval = true;
-   options->optimize_sample_mask_in = true;
    options->lower_to_scalar = true;
    options->lower_to_scalar_filter =
-      sscreen->info.has_packed_math_16bit ? si_alu_to_scalar_packed_math_filter : NULL;
+      sscreen->info.cu_info.has_packed_math_16bit ? si_alu_to_scalar_packed_math_filter : NULL;
    options->max_unroll_iterations = 128;
    options->max_unroll_iterations_aggressive = 128;
    /* For OpenGL, rounding mode is undefined. We want fast packing with v_cvt_pkrtz_f16,
@@ -1568,11 +891,18 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
     *
     * For OpenCL, rounding mode is explicit. This will only lower f2f16 to f2f16_rtz
     * when execution mode is rtz instead of rtne.
+    *
+    * GFX8 has precision issues with this option.
     */
-   options->force_f2f16_rtz = true;
-   options->io_options |= (!has_mediump ? nir_io_mediump_is_32bit : 0) | nir_io_has_intrinsics |
-                          (sscreen->options.optimize_io ? nir_io_glsl_opt_varyings : 0);
-   options->lower_mediump_io = has_mediump ? si_lower_mediump_io : NULL;
+   options->force_f2f16_rtz = sscreen->info.gfx_level >= GFX9;
+   options->io_options |= (!has_16bit_io ? nir_io_mediump_is_32bit : 0) | nir_io_has_intrinsics |
+                          (sscreen->use_ngg_culling ?
+                              nir_io_compaction_groups_tes_inputs_into_pos_and_var_groups : 0);
+   if (has_16bit_io) {
+      options->lower_mediump_io = sscreen->options.mediump ? si_lower_mediump_io_option
+                                                           : si_lower_mediump_io_default;
+   }
+
    /* HW supports indirect indexing for: | Enabled in driver
     * -------------------------------------------------------
     * TCS inputs                         | Yes
@@ -1583,9 +913,499 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
     * TCS outputs                        | Yes
     * VS/TES outputs before GS           | No
     */
-   options->support_indirect_inputs = BITFIELD_BIT(MESA_SHADER_TESS_CTRL) |
-                                      BITFIELD_BIT(MESA_SHADER_TESS_EVAL);
-   options->support_indirect_outputs = BITFIELD_BIT(MESA_SHADER_TESS_CTRL);
    options->varying_expression_max_cost = si_varying_expression_max_cost;
-   options->varying_estimate_instr_cost = ac_nir_varying_estimate_instr_cost;
+
+   unsigned max_support_shader = enable_mesh_shader(sscreen) ?
+      MESA_SHADER_MESH : MESA_SHADER_COMPUTE;
+   for (unsigned i = 0; i <= max_support_shader; i++)
+      sscreen->b.nir_options[i] = options;
+}
+
+void si_init_shader_caps(struct si_screen *sscreen)
+{
+   for (unsigned i = 0; i <= MESA_SHADER_MESH; i++) {
+      if (!sscreen->b.nir_options[i])
+         continue;
+
+      struct pipe_shader_caps *caps =
+         (struct pipe_shader_caps *)&sscreen->b.shader_caps[i];
+
+      /* Shader limits. */
+      caps->max_instructions =
+      caps->max_alu_instructions =
+      caps->max_tex_instructions =
+      caps->max_tex_indirections =
+      caps->max_control_flow_depth = 16384;
+      caps->max_inputs = i == MESA_SHADER_VERTEX ? SI_MAX_ATTRIBS : 32;
+      caps->max_outputs = i == MESA_SHADER_FRAGMENT ? 8 : 32;
+      caps->max_temps = 256; /* Max native temporaries. */
+      caps->max_const_buffer0_size = 1 << 26; /* 64 MB */
+      caps->max_const_buffers = SI_NUM_CONST_BUFFERS;
+      caps->max_texture_samplers =
+      caps->max_sampler_views = SI_NUM_SAMPLERS;
+      caps->max_shader_buffers = SI_NUM_SHADER_BUFFERS;
+      caps->max_shader_images = SI_NUM_IMAGES;
+
+      caps->supported_irs = (1 << PIPE_SHADER_IR_TGSI) | (1 << PIPE_SHADER_IR_NIR);
+
+      /* Supported boolean features. */
+      caps->cont_supported = true;
+      caps->tgsi_sqrt_supported = true;
+      caps->indirect_temp_addr = true;
+      caps->indirect_const_addr = true;
+      caps->integers = true;
+      caps->int64_atomics = true;
+      caps->tgsi_any_inout_decl_range = true;
+
+      /* We need F16C for fast FP16 conversions in glUniform.
+       * It's supported since Intel Ivy Bridge and AMD Bulldozer.
+       */
+      bool has_16bit_alu = sscreen->info.gfx_level >= GFX8 && util_get_cpu_caps()->has_f16c;
+
+      caps->fp16 = has_16bit_alu;
+      caps->fp16_derivatives = has_16bit_alu;
+      caps->fp16_const_buffers = has_16bit_alu;
+      caps->int16 = has_16bit_alu;
+      caps->glsl_16bit_consts = has_16bit_alu;
+      caps->glsl_16bit_load_dst = sscreen->info.gfx_level >= GFX9;
+   }
+}
+
+void si_init_compute_caps(struct si_screen *sscreen)
+{
+   struct pipe_compute_caps *caps =
+      (struct pipe_compute_caps *)&sscreen->b.compute_caps;
+
+   caps->grid_dimension = 3;
+
+   /* Use this size, so that internal counters don't overflow 64 bits. */
+   caps->max_grid_size[0] = UINT32_MAX;
+   caps->max_grid_size[1] = UINT16_MAX;
+   caps->max_grid_size[2] = UINT16_MAX;
+
+   caps->max_block_size[0] =
+   caps->max_block_size[1] =
+   caps->max_block_size[2] = 1024;
+
+   caps->max_threads_per_block = 1024;
+   caps->address_bits = 64;
+
+   /* Return 1/4 of the heap size as the maximum because the max size is not practically
+    * allocatable.
+    */
+   caps->max_mem_alloc_size = (sscreen->info.max_heap_size_kb / 4) * 1024ull;
+
+   /* In OpenCL, the MAX_MEM_ALLOC_SIZE must be at least
+    * 1/4 of the MAX_GLOBAL_SIZE.  Since the
+    * MAX_MEM_ALLOC_SIZE is fixed for older kernels,
+    * make sure we never report more than
+    * 4 * MAX_MEM_ALLOC_SIZE.
+    */
+   caps->max_global_size = MIN2(4 * caps->max_mem_alloc_size,
+                                sscreen->info.max_heap_size_kb * 1024ull);
+
+   /* Value reported by the closed source driver. */
+   caps->max_local_size = sscreen->info.gfx_level == GFX6 ? 32 * 1024 : 64 * 1024;
+
+   caps->max_clock_frequency = sscreen->info.max_gpu_freq_mhz;
+   caps->max_compute_units = sscreen->info.num_cu;
+
+   unsigned threads = 1024;
+   unsigned subgroup_size =
+      sscreen->shader_debug_flags & DBG(W64_CS) || sscreen->info.gfx_level < GFX10 ? 64 : 32;
+   caps->max_subgroups = threads / subgroup_size;
+
+   if (sscreen->shader_debug_flags & DBG(W32_CS))
+      caps->subgroup_sizes = 32;
+   else if (sscreen->shader_debug_flags & DBG(W64_CS))
+      caps->subgroup_sizes = 64;
+   else
+      caps->subgroup_sizes = sscreen->info.gfx_level < GFX10 ? 64 : 64 | 32;
+
+   caps->max_variable_threads_per_block =
+      sscreen->info.has_cs_regalloc_hang_bug ? 256 : SI_MAX_VARIABLE_THREADS_PER_BLOCK;
+}
+
+static void si_init_mesh_caps(struct si_screen *sscreen)
+{
+   struct pipe_mesh_caps *caps = (struct pipe_mesh_caps *)&sscreen->b.caps.mesh;
+
+   caps->max_task_work_group_total_count = 1 << 22;
+   caps->max_mesh_work_group_total_count = 1 << 22;
+   caps->max_mesh_work_group_invocations = 256;
+   caps->max_task_work_group_invocations = 1024;
+   caps->max_task_payload_size = 16384;
+   caps->max_task_shared_memory_size = 65536;
+   caps->max_mesh_shared_memory_size = 28672;
+   caps->max_task_payload_and_shared_memory_size = 65536;
+   caps->max_mesh_payload_and_shared_memory_size =
+      caps->max_task_payload_size + caps->max_mesh_shared_memory_size;
+   caps->max_mesh_output_memory_size = 32 * 1024;
+   caps->max_mesh_payload_and_output_memory_size =
+      caps->max_task_payload_size + caps->max_mesh_output_memory_size;
+   caps->max_mesh_output_vertices = 256;
+   caps->max_mesh_output_primitives = 256;
+   caps->max_mesh_output_components = 128;
+   caps->max_mesh_output_layers = 8;
+   caps->max_mesh_multiview_view_count = 1;
+   caps->mesh_output_per_vertex_granularity = 1;
+   caps->mesh_output_per_primitive_granularity = 1;
+
+   caps->max_preferred_task_work_group_invocations = 64;
+   caps->max_preferred_mesh_work_group_invocations = 128;
+   caps->mesh_prefers_local_invocation_vertex_output = true;
+   caps->mesh_prefers_local_invocation_primitive_output = true;
+   caps->mesh_prefers_compact_vertex_output = true;
+   caps->mesh_prefers_compact_primitive_output = false;
+
+   caps->max_task_work_group_count[0] =
+   caps->max_task_work_group_count[1] =
+   caps->max_task_work_group_count[2] = 65535;
+
+   caps->max_mesh_work_group_count[0] =
+   caps->max_mesh_work_group_count[1] =
+   caps->max_mesh_work_group_count[2] = 65535;
+
+   caps->max_task_work_group_size[0] =
+   caps->max_task_work_group_size[1] =
+   caps->max_task_work_group_size[2] = 1024;
+
+   caps->max_mesh_work_group_size[0] =
+   caps->max_mesh_work_group_size[1] =
+   caps->max_mesh_work_group_size[2] = 256;
+
+   caps->pipeline_statistic_queries = sscreen->info.gfx_level >= GFX11;
+}
+
+void si_init_screen_caps(struct si_screen *sscreen)
+{
+   struct pipe_caps *caps = (struct pipe_caps *)&sscreen->b.caps;
+
+   u_init_pipe_screen_caps(&sscreen->b, 1);
+
+   /* Gfx8 (Polaris11) hangs, so don't enable this on Gfx8 and older chips. */
+   bool enable_sparse =
+      sscreen->info.gfx_level >= GFX9 && sscreen->info.has_sparse;
+
+   /* Supported features (boolean caps). */
+   caps->max_dual_source_render_targets = true;
+   caps->anisotropic_filter = true;
+   caps->occlusion_query = true;
+   caps->texture_mirror_clamp = true;
+   caps->texture_shadow_lod = true;
+   caps->texture_mirror_clamp_to_edge = true;
+   caps->blend_equation_separate = true;
+   caps->texture_swizzle = true;
+   caps->depth_clip_disable = true;
+   caps->depth_clip_disable_separate = true;
+   caps->shader_stencil_export = true;
+   caps->vertex_element_instance_divisor = true;
+   caps->fs_coord_origin_upper_left = true;
+   caps->fs_coord_pixel_center_half_integer = true;
+   caps->fs_coord_pixel_center_integer = true;
+   caps->fragment_shader_texture_lod = true;
+   caps->fragment_shader_derivatives = true;
+   caps->primitive_restart = true;
+   caps->primitive_restart_fixed_index = true;
+   caps->conditional_render = true;
+   caps->texture_barrier = true;
+   caps->indep_blend_enable = true;
+   caps->indep_blend_func = true;
+   caps->vertex_color_unclamped = true;
+   caps->start_instance = true;
+   caps->npot_textures = true;
+   caps->mixed_framebuffer_sizes = true;
+   caps->mixed_color_depth_bits = true;
+   caps->vertex_color_clamped = true;
+   caps->fragment_color_clamped = true;
+   caps->vs_instanceid = true;
+   caps->compute = true;
+   caps->texture_buffer_objects = true;
+   caps->vs_layer_viewport = true;
+   caps->query_pipeline_statistics = true;
+   caps->sample_shading = true;
+   caps->draw_indirect = true;
+   caps->clip_halfz = true;
+   caps->vs_window_space_position = true;
+   caps->polygon_offset_clamp = true;
+   caps->multisample_z_resolve = true;
+   caps->quads_follow_provoking_vertex_convention = true;
+   caps->tgsi_texcoord = true;
+   caps->fs_fine_derivative = true;
+   caps->conditional_render_inverted = true;
+   caps->texture_float_linear = true;
+   caps->texture_half_float_linear = true;
+   caps->depth_bounds_test = true;
+   caps->sampler_view_target = true;
+   caps->texture_query_lod = true;
+   caps->texture_gather_sm5 = true;
+   caps->texture_query_samples = true;
+   caps->force_persample_interp = true;
+   caps->copy_between_compressed_and_plain_formats = true;
+   caps->fs_position_is_sysval = true;
+   caps->fs_face_is_integer_sysval = true;
+   caps->invalidate_buffer = true;
+   caps->surface_reinterpret_blocks = true;
+   caps->compressed_surface_reinterpret_blocks_layered = true;
+   caps->query_buffer_object = true;
+   caps->query_memory_info = true;
+   caps->shader_pack_half_float = true;
+   caps->framebuffer_no_attachment = true;
+   caps->robust_buffer_access_behavior = true;
+   caps->string_marker = true;
+   caps->cull_distance = true;
+   caps->shader_array_components = true;
+   caps->stream_output_pause_resume = true;
+   caps->stream_output_interleave_buffers = true;
+   caps->doubles = true;
+   caps->tgsi_tex_txf_lz = true;
+   caps->tes_layer_viewport = true;
+   caps->bindless_texture = true;
+   caps->query_timestamp = true;
+   caps->query_time_elapsed = true;
+   caps->nir_samplers_as_deref = true;
+   caps->memobj = true;
+   caps->load_constbuf = true;
+   caps->int64 = true;
+   caps->shader_clock = true;
+   caps->can_bind_const_buffer_as_vertex = true;
+   caps->allow_mapped_buffers_during_execution = true;
+   caps->signed_vertex_buffer_offset = true;
+   caps->shader_ballot = true;
+   caps->shader_group_vote = true;
+   caps->compute_grid_info_last_block = true;
+   caps->image_load_formatted = true;
+   caps->prefer_compute_for_multimedia = true;
+   caps->packed_uniforms = true;
+   caps->gl_spirv = true;
+   caps->alpha_to_coverage_dither_control = true;
+   caps->map_unsynchronized_thread_safe = true;
+   caps->no_clip_on_copy_tex = true;
+   caps->shader_atomic_int64 = true;
+   caps->frontend_noop = true;
+   caps->demote_to_helper_invocation = true;
+   caps->prefer_real_buffer_in_constbuf0 = true;
+   caps->compute_shader_derivatives = true;
+   caps->image_atomic_inc_wrap = true;
+   caps->image_store_formatted = true;
+   caps->allow_draw_out_of_order = true;
+   caps->query_so_overflow = true;
+   caps->glsl_tess_levels_as_inputs = true;
+   caps->device_reset_status_query = true;
+   caps->texture_multisample = true;
+   caps->allow_glthread_buffer_subdata_opt = true; /* TODO: remove if it's slow */
+   caps->null_textures = true;
+   caps->has_const_bw = true;
+   caps->cl_gl_sharing = true;
+   caps->call_finalize_nir_in_linker = true;
+
+   /* Fixup dmabuf caps for the virtio + vpipe case (when fd=-1, u_init_pipe_screen_caps
+    * fails to set this capability). */
+   if (sscreen->info.is_virtio)
+         caps->dmabuf |= DRM_PRIME_CAP_EXPORT | DRM_PRIME_CAP_IMPORT;
+
+   caps->fbfetch = 1;
+
+   /* Tahiti and Verde only: reduction mode is unsupported due to a bug
+    * (it might work sometimes, but that's not enough)
+    */
+   caps->sampler_reduction_minmax =
+   caps->sampler_reduction_minmax_arb =
+      !(sscreen->info.family == CHIP_TAHITI || sscreen->info.family == CHIP_VERDE);
+
+   caps->texture_transfer_modes =
+      PIPE_TEXTURE_TRANSFER_BLIT | PIPE_TEXTURE_TRANSFER_COMPUTE;
+
+   caps->draw_vertex_state = !(sscreen->debug_flags & DBG(NO_FAST_DISPLAY_LIST));
+
+   caps->shader_samples_identical =
+      sscreen->info.gfx_level < GFX11 && !(sscreen->debug_flags & DBG(NO_FMASK));
+
+   caps->glsl_zero_init = 2;
+
+   caps->generate_mipmap =
+   caps->seamless_cube_map =
+   caps->seamless_cube_map_per_texture =
+   caps->cube_map_array =
+      sscreen->info.has_3d_cube_border_color_mipmap;
+
+   caps->post_depth_coverage = sscreen->info.gfx_level >= GFX10;
+
+   caps->graphics = sscreen->info.has_graphics;
+
+   caps->resource_from_user_memory = !UTIL_ARCH_BIG_ENDIAN && sscreen->info.has_userptr;
+
+   caps->device_protected_surface = sscreen->info.has_tmz_support;
+
+   caps->min_map_buffer_alignment = SI_MAP_BUFFER_ALIGNMENT;
+
+   caps->max_vertex_buffers = SI_MAX_ATTRIBS;
+
+   caps->constant_buffer_offset_alignment =
+   caps->texture_buffer_offset_alignment =
+   caps->max_texture_gather_components =
+   caps->max_stream_output_buffers =
+   caps->max_vertex_streams =
+   caps->shader_buffer_offset_alignment =
+   caps->max_window_rectangles = 4;
+
+   caps->glsl_feature_level =
+   caps->glsl_feature_level_compatibility = 460;
+
+   /* Optimal number for good TexSubImage performance on Polaris10. */
+   caps->max_texture_upload_memory_budget = 64 * 1024 * 1024;
+
+   caps->gl_begin_end_buffer_size = 4096 * 1024;
+
+   /* Return 1/4th of the heap size as the maximum because the max size is not practically
+    * allocatable. Also, this can only return UINT32_MAX at most.
+    */
+   unsigned max_size = MIN2((sscreen->info.max_heap_size_kb * 1024ull) / 4, UINT32_MAX);
+
+   /* Allow max 512 MB to pass CTS with a 32-bit build. */
+   if (sizeof(void*) == 4)
+      max_size = MIN2(max_size, 512 * 1024 * 1024);
+
+   caps->max_constant_buffer_size =
+   caps->max_shader_buffer_size = max_size;
+
+   unsigned max_texels = caps->max_shader_buffer_size;
+
+   /* FYI, BUF_RSRC_WORD2.NUM_RECORDS field limit is UINT32_MAX. */
+
+   /* Gfx8 and older use the size in bytes for bounds checking, and the max element size
+    * is 16B. Gfx9 and newer use the VGPR index for bounds checking.
+    */
+   if (sscreen->info.gfx_level <= GFX8)
+      max_texels = MIN2(max_texels, UINT32_MAX / 16);
+   else
+      /* Gallium has a limitation that it can only bind UINT32_MAX bytes, not texels.
+       * TODO: Remove this after the gallium interface is changed. */
+      max_texels = MIN2(max_texels, UINT32_MAX / 16);
+
+   caps->max_texel_buffer_elements = max_texels;
+
+   /* Allow 1/4th of the heap size. */
+   caps->max_texture_mb = sscreen->info.max_heap_size_kb / 1024 / 4;
+
+   caps->prefer_back_buffer_reuse = false;
+   caps->uma = !sscreen->info.has_dedicated_vram;
+   caps->prefer_imm_arrays_as_constbuf = false;
+
+   caps->performance_monitor =
+      sscreen->info.gfx_level >= GFX7 && sscreen->info.gfx_level <= GFX10_3;
+
+   caps->sparse_buffer_page_size = enable_sparse ? RADEON_SPARSE_PAGE_SIZE : 0;
+
+   caps->context_priority_mask = sscreen->info.is_amdgpu ?
+      PIPE_CONTEXT_PRIORITY_LOW | PIPE_CONTEXT_PRIORITY_MEDIUM | PIPE_CONTEXT_PRIORITY_HIGH : 0;
+
+   caps->fence_signal = sscreen->info.has_syncobj;
+
+   caps->constbuf0_flags = SI_RESOURCE_FLAG_32BIT;
+
+   caps->native_fence_fd = sscreen->info.has_fence_to_handle;
+
+   caps->draw_parameters =
+   caps->multi_draw_indirect =
+   caps->multi_draw_indirect_params = sscreen->has_draw_indirect_multi;
+
+   caps->max_shader_patch_varyings = 30;
+
+   caps->max_varyings =
+   caps->max_gs_invocations = 32;
+
+   caps->texture_border_color_quirk =
+      sscreen->info.gfx_level <= GFX8 ? PIPE_QUIRK_TEXTURE_BORDER_COLOR_SWIZZLE_R600 : 0;
+
+   /* Stream output. */
+   caps->max_stream_output_separate_components =
+   caps->max_stream_output_interleaved_components = 32 * 4;
+
+   /* gfx9 has to report 256 to make piglit/gs-max-output pass.
+    * gfx8 and earlier can do 1024.
+    */
+   caps->max_geometry_output_vertices = 256;
+   caps->max_geometry_total_output_components = 4095;
+
+   caps->max_vertex_attrib_stride = 2048;
+
+   caps->max_texture_2d_size = sscreen->info.gfx_level >= GFX12 ? 65536 : 16384;
+   caps->max_texture_cube_levels = sscreen->info.has_3d_cube_border_color_mipmap ?
+      (sscreen->info.gfx_level >= GFX12 ? 17 : 15) /* 64K : 16K */ : 0;
+   caps->max_texture_3d_levels = sscreen->info.has_3d_cube_border_color_mipmap ?
+      /* This is limited by maximums that both the texture unit and layered rendering support. */
+      (sscreen->info.gfx_level >= GFX12 ? 15 : /* 16K */
+       (sscreen->info.gfx_level >= GFX10 ? 14 : 12)) /* 8K : 2K */ : 0;
+   /* This is limited by maximums that both the texture unit and layered rendering support. */
+   caps->max_texture_array_layers = sscreen->info.gfx_level >= GFX10 ? 8192 : 2048;
+
+   /* Sparse texture */
+   caps->max_sparse_texture_size = enable_sparse ? caps->max_texture_2d_size : 0;
+   caps->max_sparse_3d_texture_size = enable_sparse ? (1 << (caps->max_texture_3d_levels - 1)) : 0;
+   caps->max_sparse_array_texture_layers = enable_sparse ? caps->max_texture_array_layers : 0;
+   caps->sparse_texture_full_array_cube_mipmaps =
+   caps->query_sparse_texture_residency =
+   caps->clamp_sparse_texture_lod = enable_sparse;
+
+   /* Viewports and render targets. */
+   caps->max_viewports = SI_MAX_VIEWPORTS;
+   caps->viewport_subpixel_bits =
+   caps->rasterizer_subpixel_bits =
+   caps->max_render_targets = 8;
+   caps->framebuffer_msaa_constraints = sscreen->info.has_eqaa_surface_allocator ? 2 : 0;
+
+   caps->min_texture_gather_offset =
+   caps->min_texel_offset = -32;
+
+   caps->max_texture_gather_offset =
+   caps->max_texel_offset = 31;
+
+   caps->endianness = PIPE_ENDIAN_LITTLE;
+
+   caps->vendor_id = ATI_VENDOR_ID;
+   caps->device_id = sscreen->info.pci_id;
+   caps->video_memory = sscreen->info.vram_size_kb >> 10;
+   caps->pci_group = sscreen->info.pci.domain;
+   caps->pci_bus = sscreen->info.pci.bus;
+   caps->pci_device = sscreen->info.pci.dev;
+   caps->pci_function = sscreen->info.pci.func;
+
+   /* Conversion to nanos from cycles per millisecond */
+   caps->timer_resolution = DIV_ROUND_UP(1000000, sscreen->info.clock_crystal_freq);
+
+   caps->mesh_shader = enable_mesh_shader(sscreen);
+   if (caps->mesh_shader)
+      si_init_mesh_caps(sscreen);
+
+   caps->shader_subgroup_size = 64;
+   caps->shader_subgroup_supported_stages =
+      BITFIELD_MASK(caps->mesh_shader ? MESA_SHADER_MESH_STAGES : MESA_SHADER_STAGES);
+   caps->shader_subgroup_supported_features = BITFIELD_MASK(PIPE_SHADER_SUBGROUP_NUM_FEATURES);
+   caps->shader_subgroup_quad_all_stages = true;
+
+   caps->min_line_width =
+   caps->min_line_width_aa = 1; /* due to axis-aligned end caps at line width 1 */
+
+   caps->min_point_size =
+   caps->min_point_size_aa =
+   caps->point_size_granularity =
+   caps->line_width_granularity = 1.0 / 8.0; /* due to the register field precision */
+
+   /* This depends on the quant mode, though the precise interactions are unknown. */
+   caps->max_line_width =
+   caps->max_line_width_aa = 2048;
+
+   caps->max_point_size =
+   caps->max_point_size_aa = SI_MAX_POINT_SIZE;
+
+   caps->max_texture_anisotropy = 16.0f;
+
+   /* The hw can do 31, but this test fails if we use that:
+    *    KHR-GL46.texture_lod_bias.texture_lod_bias_all
+    */
+   caps->max_texture_lod_bias = 16;
+
+   if (sscreen->ws->va_range)
+      sscreen->ws->va_range(sscreen->ws, &caps->min_vma, &caps->max_vma);
 }

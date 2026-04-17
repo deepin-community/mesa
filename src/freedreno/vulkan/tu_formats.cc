@@ -12,13 +12,11 @@
 #include "vk_android.h"
 #include "vk_enum_defines.h"
 #include "vk_util.h"
+#include "vk_acceleration_structure.h"
 #include "drm-uapi/drm_fourcc.h"
 
-#include "tu_android.h"
 #include "tu_device.h"
 #include "tu_image.h"
-
-#include <vulkan/vulkan_android.h>
 
 static bool
 tu6_format_vtx_supported(enum pipe_format format)
@@ -44,28 +42,24 @@ tu6_format_color_supported(enum pipe_format format)
 }
 
 struct tu_native_format
-tu6_format_color(enum pipe_format format, enum a6xx_tile_mode tile_mode)
+tu6_format_color(enum pipe_format format, enum a6xx_tile_mode tile_mode,
+                 bool is_mutable)
 {
    struct tu_native_format fmt = {
       .fmt = fd6_color_format(format, tile_mode),
-      .swap = fd6_color_swap(format, tile_mode),
+      .swap = fd6_color_swap(format, tile_mode, is_mutable),
    };
    assert(fmt.fmt != FMT6_NONE);
    return fmt;
 }
 
-static bool
-tu6_format_texture_supported(enum pipe_format format)
-{
-   return fd6_texture_format(format, TILE6_LINEAR) != FMT6_NONE;
-}
-
 struct tu_native_format
-tu6_format_texture(enum pipe_format format, enum a6xx_tile_mode tile_mode)
+tu6_format_texture(enum pipe_format format, enum a6xx_tile_mode tile_mode,
+                   bool is_mutable)
 {
    struct tu_native_format fmt = {
-      .fmt = fd6_texture_format(format, tile_mode),
-      .swap = fd6_texture_swap(format, tile_mode),
+      .fmt = fd6_texture_format(format, tile_mode, is_mutable),
+      .swap = fd6_texture_swap(format, tile_mode, is_mutable),
    };
    assert(fmt.fmt != FMT6_NONE);
    return fmt;
@@ -103,11 +97,38 @@ tu6_mutable_format_list_ubwc_compatible(const struct fd_dev_info *info,
    return true;
 }
 
+static bool
+tu_format_linear_filtering_supported(struct tu_physical_device *physical_device,
+                                     VkFormat vk_format)
+{
+   if (physical_device->info->props.is_a702) {
+      switch (vk_format) {
+      case VK_FORMAT_D16_UNORM:
+      case VK_FORMAT_D24_UNORM_S8_UINT:
+      case VK_FORMAT_X8_D24_UNORM_PACK32:
+      case VK_FORMAT_D32_SFLOAT:
+      case VK_FORMAT_D32_SFLOAT_S8_UINT:
+      case VK_FORMAT_R16_UNORM:
+      case VK_FORMAT_R16_SNORM:
+      case VK_FORMAT_R16G16_UNORM:
+      case VK_FORMAT_R16G16_SNORM:
+      case VK_FORMAT_R16G16B16A16_UNORM:
+      case VK_FORMAT_R16G16B16A16_SNORM:
+      case VK_FORMAT_R32_SFLOAT:
+      case VK_FORMAT_R32G32_SFLOAT:
+      case VK_FORMAT_R32G32B32A32_SFLOAT:
+         return false;
+      }
+   }
+   return !vk_format_is_int(vk_format);
+}
+
 static void
 tu_physical_device_get_format_properties(
    struct tu_physical_device *physical_device,
    VkFormat vk_format,
-   VkFormatProperties3 *out_properties)
+   VkFormatProperties3 *out_properties,
+   VkSubpassResolvePerformanceQueryEXT *msrtss_out)
 {
    VkFormatFeatureFlags2 linear = 0, optimal = 0, buffer = 0;
    enum pipe_format format = vk_format_to_pipe_format(vk_format);
@@ -116,13 +137,18 @@ tu_physical_device_get_format_properties(
 
    bool supported_vtx = tu6_format_vtx_supported(format);
    bool supported_color = tu6_format_color_supported(format);
-   bool supported_tex = tu6_format_texture_supported(format);
+   bool supported_tex = fd6_texture_format_supported(physical_device->info, format,
+                                                     TILE6_LINEAR, false);
    bool is_npot = !util_is_power_of_two_or_zero(desc->block.bits);
 
    if (format == PIPE_FORMAT_NONE ||
        !(supported_vtx || supported_color || supported_tex)) {
       goto end;
    }
+
+   /* We never have to spill to memory for MSRTSS. */
+   if (msrtss_out)
+      msrtss_out->optimal = true;
 
    /* We don't support BufferToImage/ImageToBuffer for npot formats */
    if (!is_npot)
@@ -158,7 +184,7 @@ tu_physical_device_get_format_properties(
          if (ycbcr_info->n_planes > 1) {
             optimal |= VK_FORMAT_FEATURE_2_COSITED_CHROMA_SAMPLES_BIT |
                        VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_YCBCR_CONVERSION_LINEAR_FILTER_BIT;
-            if (physical_device->info->a6xx.has_separate_chroma_filter)
+            if (physical_device->info->props.has_separate_chroma_filter)
                optimal |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_YCBCR_CONVERSION_SEPARATE_RECONSTRUCTION_FILTER_BIT;
          }
       } else {
@@ -166,7 +192,7 @@ tu_physical_device_get_format_properties(
          optimal |= VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
       }
 
-      if (!vk_format_is_int(vk_format)) {
+      if (tu_format_linear_filtering_supported(physical_device, vk_format)) {
          optimal |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
 
          if (physical_device->vk.supported_extensions.EXT_filter_cubic)
@@ -199,10 +225,11 @@ tu_physical_device_get_format_properties(
 
       /* TODO: The blob also exposes these for R16G16_UINT/R16G16_SINT/
        * R32G32_SFLOAT/R32G32B32A32_SFLOAT, but we don't have any tests for those.
-       * R32_SFLOAT is also included here by the blob, but that requires
-       * implementing VK_EXT_shader_atomic_float.
+       * The WoA blob on X1 also supports VK_EXT_shader_image_atomic_int64 (for
+       * R64_UINT and R64_SINT).
        */
-      if (vk_format == VK_FORMAT_R32_UINT || vk_format == VK_FORMAT_R32_SINT) {
+      if (vk_format == VK_FORMAT_R32_UINT || vk_format == VK_FORMAT_R32_SINT ||
+          vk_format == VK_FORMAT_R32_SFLOAT) {
          optimal |= VK_FORMAT_FEATURE_2_STORAGE_IMAGE_ATOMIC_BIT;
          buffer |= VK_FORMAT_FEATURE_2_STORAGE_TEXEL_BUFFER_ATOMIC_BIT;
       }
@@ -265,6 +292,12 @@ tu_physical_device_get_format_properties(
    if (vk_format == VK_FORMAT_D32_SFLOAT_S8_UINT)
       linear = 0;
 
+   if (vk_format == VK_FORMAT_R8_UINT)
+      optimal |= VK_FORMAT_FEATURE_2_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
+
+   if (vk_acceleration_struct_vtx_format_supported(vk_format))
+      buffer |= VK_FORMAT_FEATURE_2_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT_KHR;
+
 end:
    out_properties->linearTilingFeatures = linear;
    out_properties->optimalTilingFeatures = optimal;
@@ -284,9 +317,12 @@ tu_GetPhysicalDeviceFormatProperties2(
       vk_find_struct(pFormatProperties->pNext, FORMAT_PROPERTIES_3);
    if (!props3)
       props3 = &local_props3;
+   VkSubpassResolvePerformanceQueryEXT *msrtss_out =
+      vk_find_struct(pFormatProperties->pNext,
+                     SUBPASS_RESOLVE_PERFORMANCE_QUERY_EXT);
 
    tu_physical_device_get_format_properties(
-      physical_device, format, props3);
+      physical_device, format, props3, msrtss_out);
 
    pFormatProperties->formatProperties = (VkFormatProperties) {
       .linearTilingFeatures =
@@ -316,14 +352,45 @@ tu_GetPhysicalDeviceFormatProperties2(
       /* note: ubwc_possible() argument values to be ignored except for format */
       if (pFormatProperties->formatProperties.optimalTilingFeatures &&
           tiling_possible(format) &&
-          ubwc_possible(NULL, format, VK_IMAGE_TYPE_2D, 0, 0,
-                        physical_device->info, VK_SAMPLE_COUNT_1_BIT,
+          ubwc_possible(NULL, format, VK_IMAGE_TYPE_2D, 0, 0, 0,
+                        physical_device->info, VK_SAMPLE_COUNT_1_BIT, 1,
                         false)) {
          vk_outarray_append_typed(VkDrmFormatModifierPropertiesEXT, &out, mod_props) {
             mod_props->drmFormatModifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
             mod_props->drmFormatModifierPlaneCount = tu6_plane_count(format);
             mod_props->drmFormatModifierTilingFeatures =
                pFormatProperties->formatProperties.optimalTilingFeatures;
+         }
+      }
+   }
+
+   VkDrmFormatModifierPropertiesList2EXT *list2 =
+      vk_find_struct(pFormatProperties->pNext, DRM_FORMAT_MODIFIER_PROPERTIES_LIST_2_EXT);
+   if (list2) {
+      VK_OUTARRAY_MAKE_TYPED(VkDrmFormatModifierProperties2EXT, out,
+                             list2->pDrmFormatModifierProperties,
+                             &list2->drmFormatModifierCount);
+
+      if (props3->linearTilingFeatures) {
+         vk_outarray_append_typed(VkDrmFormatModifierProperties2EXT, &out, mod_props) {
+            mod_props->drmFormatModifier = DRM_FORMAT_MOD_LINEAR;
+            mod_props->drmFormatModifierPlaneCount = tu6_plane_count(format);
+            mod_props->drmFormatModifierTilingFeatures =
+               props3->linearTilingFeatures;
+         }
+      }
+
+      /* note: ubwc_possible() argument values to be ignored except for format */
+      if (props3->optimalTilingFeatures &&
+          tiling_possible(format) &&
+          ubwc_possible(NULL, format, VK_IMAGE_TYPE_2D, 0, 0, 0,
+                        physical_device->info, VK_SAMPLE_COUNT_1_BIT, 1,
+                        false)) {
+         vk_outarray_append_typed(VkDrmFormatModifierProperties2EXT, &out, mod_props) {
+            mod_props->drmFormatModifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
+            mod_props->drmFormatModifierPlaneCount = tu6_plane_count(format);
+            mod_props->drmFormatModifierTilingFeatures =
+               props3->optimalTilingFeatures;
          }
       }
    }
@@ -358,7 +425,7 @@ tu_get_image_format_properties(
    BITMASK_ENUM(VkSampleCountFlagBits) sampleCounts = VK_SAMPLE_COUNT_1_BIT;
 
    tu_physical_device_get_format_properties(physical_device, info->format,
-                                            &format_props);
+                                            &format_props, NULL);
 
    switch (info->tiling) {
    case VK_IMAGE_TILING_LINEAR:
@@ -373,6 +440,10 @@ tu_get_image_format_properties(
        * importing/exporting with modifiers yet.
        */
       if (info->flags & VK_IMAGE_CREATE_SUBSAMPLED_BIT_EXT)
+         return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
+      /* Don't allow modifiers with sparse */
+      if (info->flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT)
          return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
       switch (drm_info->drmFormatModifier) {
@@ -393,9 +464,9 @@ tu_get_image_format_properties(
                return VK_ERROR_FORMAT_NOT_SUPPORTED;
          }
 
-         if (!ubwc_possible(NULL, info->format, info->type, info->usage,
-                            info->usage, physical_device->info, sampleCounts,
-                            false)) {
+         if (!ubwc_possible(NULL, info->format, info->type, info->flags,
+                            info->usage, info->usage, physical_device->info,
+                            sampleCounts, 1, false)) {
             return VK_ERROR_FORMAT_NOT_SUPPORTED;
          }
 
@@ -412,11 +483,36 @@ tu_get_image_format_properties(
       format_feature_flags = format_props.optimalTilingFeatures;
       break;
    default:
-      unreachable("bad VkPhysicalDeviceImageFormatInfo2");
+      UNREACHABLE("bad VkPhysicalDeviceImageFormatInfo2");
    }
 
    if (format_feature_flags == 0)
       return tu_image_unsupported_format(pImageFormatProperties);
+
+   if (info->flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) {
+      if (!physical_device->has_sparse)
+         return tu_image_unsupported_format(pImageFormatProperties);
+   }
+
+   if (info->flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT) {
+      /* Don't support multi-planar formats with sparse yet */
+      if (vk_format_get_plane_count(info->format) > 1)
+         return tu_image_unsupported_format(pImageFormatProperties);
+
+      /* Sparse isn't compatible with HIC */
+      if (info->usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT)
+         return tu_image_unsupported_format(pImageFormatProperties);
+
+      /* We can't support sparse when we force linear tiling, so disable
+       * sparse with formats or usages which could cause us to fall back to
+       * linear. We also currently don't support sparse for 3D images.
+       */
+      if (info->type != VK_IMAGE_TYPE_2D ||
+          info->tiling != VK_IMAGE_TILING_OPTIMAL ||
+          !tiling_possible(info->format) ||
+          (info->usage & VK_IMAGE_USAGE_FRAGMENT_DENSITY_MAP_BIT_EXT))
+         return tu_image_unsupported_format(pImageFormatProperties);
+   }
 
    if (info->type != VK_IMAGE_TYPE_2D &&
        vk_format_is_depth_or_stencil(info->format))
@@ -424,7 +520,7 @@ tu_get_image_format_properties(
 
    switch (info->type) {
    default:
-      unreachable("bad vkimage type\n");
+      UNREACHABLE("bad vkimage type\n");
    case VK_IMAGE_TYPE_1D:
       maxExtent.width = 16384;
       maxExtent.height = 1;
@@ -456,10 +552,11 @@ tu_get_image_format_properties(
        !(info->flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) &&
        !(info->usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
       sampleCounts |= VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
-      /* note: most operations support 8 samples (GMEM render/resolve do at least)
-       * but some do not (which ones?), just disable 8 samples completely,
-       * (no 8x msaa matches the blob driver behavior)
-       */
+
+      /* a7xx supports 8x MSAA except for 128-bit formats. */
+      if (physical_device->info->chip >= A7XX &&
+          vk_format_get_blocksizebits(info->format) <= 64)
+         sampleCounts |= VK_SAMPLE_COUNT_8_BIT;
    }
 
    /* From the Vulkan 1.3.206 spec:
@@ -505,10 +602,19 @@ tu_get_image_format_properties(
       }
    }
 
-   if (image_usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) {
+   if (image_usage & (VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT |
+                      VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT)) {
       if (!(format_feature_flags &
             (VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT |
              VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT))) {
+         return tu_image_unsupported_format(pImageFormatProperties);
+      }
+   }
+
+   if (image_usage &
+       VK_IMAGE_USAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR) {
+      if (!(format_feature_flags &
+            VK_FORMAT_FEATURE_2_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR)) {
          return tu_image_unsupported_format(pImageFormatProperties);
       }
    }
@@ -550,6 +656,8 @@ tu_get_external_image_format_properties(
     *    VK_ERROR_FORMAT_NOT_SUPPORTED.
     */
 
+   assert(handleType !=
+          VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID);
    switch (handleType) {
    case VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT:
    case VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT:
@@ -568,14 +676,6 @@ tu_get_external_image_format_properties(
                           handleType, pImageFormatInfo->type);
       }
       break;
-#if DETECT_OS_ANDROID
-   case VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID:
-      flags = VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT |
-              VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT |
-              VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
-      compat_flags = export_flags = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
-      break;
-#endif
    case VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT:
       flags = VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
       compat_flags = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
@@ -608,7 +708,6 @@ tu_GetPhysicalDeviceImageFormatProperties2(
    const VkPhysicalDeviceExternalImageFormatInfo *external_info = NULL;
    const VkPhysicalDeviceImageViewImageFormatInfoEXT *image_view_info = NULL;
    VkExternalImageFormatProperties *external_props = NULL;
-   VkAndroidHardwareBufferUsageANDROID *android_usage = NULL;
    VkFilterCubicImageViewImageFormatPropertiesEXT *cubic_props = NULL;
    VkFormatFeatureFlags format_feature_flags;
    VkSamplerYcbcrConversionImageFormatProperties *ycbcr_props = NULL;
@@ -642,9 +741,6 @@ tu_GetPhysicalDeviceImageFormatProperties2(
       case VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES:
          external_props = (VkExternalImageFormatProperties *) s;
          break;
-      case VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_USAGE_ANDROID:
-         android_usage = (VkAndroidHardwareBufferUsageANDROID *) s;
-         break;
       case VK_STRUCTURE_TYPE_FILTER_CUBIC_IMAGE_VIEW_IMAGE_FORMAT_PROPERTIES_EXT:
          cubic_props = (VkFilterCubicImageViewImageFormatPropertiesEXT *) s;
          break;
@@ -666,11 +762,31 @@ tu_GetPhysicalDeviceImageFormatProperties2(
     *    present and VkExternalImageFormatProperties will be ignored.
     */
    if (external_info && external_info->handleType != 0) {
-      result = tu_get_external_image_format_properties(
-         physical_device, base_info, external_info->handleType,
-         external_props);
-      if (result != VK_SUCCESS)
-         goto fail;
+      if (external_info->handleType ==
+          VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID) {
+         result = vk_android_get_ahb_image_properties(physicalDevice,
+                                                      base_info, base_props);
+         if (result != VK_SUCCESS)
+            goto fail;
+
+         VkImageFormatProperties *props = &base_props->imageFormatProperties;
+         if (!(props->sampleCounts & VK_SAMPLE_COUNT_1_BIT)) {
+            result = vk_errorf(physical_device, VK_ERROR_FORMAT_NOT_SUPPORTED,
+                               "sampleCounts (%x) unsupported for AHB",
+                               props->sampleCounts);
+            goto fail;
+         }
+
+         /* AHBs with mipmap usage will ignore this property */
+         props->maxMipLevels = 1;
+         props->sampleCounts = VK_SAMPLE_COUNT_1_BIT;
+      } else {
+         result = tu_get_external_image_format_properties(
+            physical_device, base_info, external_info->handleType,
+            external_props);
+         if (result != VK_SUCCESS)
+            goto fail;
+      }
    }
 
    if (cubic_props) {
@@ -686,43 +802,6 @@ tu_GetPhysicalDeviceImageFormatProperties2(
          cubic_props->filterCubic = false;
          cubic_props->filterCubicMinmax = false;
       }
-   }
-
-   if (android_usage) {
-      /* Don't expect gralloc to be able to allocate anything other than 3D: */
-      if (base_info->type != VK_IMAGE_TYPE_2D) {
-         result = vk_errorf(physical_device, VK_ERROR_FORMAT_NOT_SUPPORTED,
-                            "type (%u) unsupported for AHB", base_info->type);
-         goto fail;
-      }
-      VkImageFormatProperties *props = &base_props->imageFormatProperties;
-      if (!(props->sampleCounts & VK_SAMPLE_COUNT_1_BIT)) {
-         result = vk_errorf(physical_device, VK_ERROR_FORMAT_NOT_SUPPORTED,
-                          "sampleCounts (%x) unsupported for AHB", props->sampleCounts);
-         goto fail;
-      }
-      android_usage->androidHardwareBufferUsage =
-         vk_image_usage_to_ahb_usage(base_info->flags, base_info->usage);
-      uint32_t format = vk_image_format_to_ahb_format(base_info->format);
-      if (!format) {
-         result = vk_errorf(physical_device, VK_ERROR_FORMAT_NOT_SUPPORTED,
-                            "format (%u) unsupported for AHB", base_info->format);
-         goto fail;
-      }
-      /* We can't advertise support for anything that gralloc cannot allocate
-       * so we are stuck without any better option than attempting a test
-       * allocation:
-       */
-      if (!vk_ahb_probe_format(base_info->format, base_info->flags, base_info->usage)) {
-         result = vk_errorf(physical_device, VK_ERROR_FORMAT_NOT_SUPPORTED,
-                            "format (%x) with flags (%x) and usage (%x) unsupported for AHB",
-                            base_info->format, base_info->flags, base_info->usage);
-         goto fail;
-      }
-
-      /* AHBs with mipmap usage will ignore this property */
-      props->maxMipLevels = 1;
-      props->sampleCounts = VK_SAMPLE_COUNT_1_BIT;
    }
 
    if (ycbcr_props)
@@ -753,12 +832,13 @@ tu_GetPhysicalDeviceImageFormatProperties2(
           * format, we'd hit the force_linear_tile fallback.
           */
          (fd6_color_swap(vk_format_to_pipe_format(base_info->format),
-                                                  TILE6_LINEAR) == WZYX &&
+                                                  TILE6_LINEAR, false) == WZYX &&
          !ubwc_possible(NULL, base_info->format, base_info->type,
+                        base_info->flags,
                         (base_info->usage & ~VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT),
                         (base_info->usage & ~VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT),
-                        physical_device->info, VK_SAMPLE_COUNT_1_BIT,
-                        physical_device->info->a6xx.has_z24uint_s8uint));
+                        physical_device->info, VK_SAMPLE_COUNT_1_BIT, 1,
+                        physical_device->info->props.has_z24uint_s8uint));
    }
 
    return VK_SUCCESS;
@@ -776,15 +856,4 @@ fail:
    }
 
    return result;
-}
-
-VKAPI_ATTR void VKAPI_CALL
-tu_GetPhysicalDeviceSparseImageFormatProperties2(
-   VkPhysicalDevice physicalDevice,
-   const VkPhysicalDeviceSparseImageFormatInfo2 *pFormatInfo,
-   uint32_t *pPropertyCount,
-   VkSparseImageFormatProperties2 *pProperties)
-{
-   /* Sparse images are not yet supported. */
-   *pPropertyCount = 0;
 }

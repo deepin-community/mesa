@@ -37,6 +37,9 @@
 #include "nir_builder.h"
 #include "nir_vla.h"
 
+#define XXH_INLINE_ALL
+#include "util/xxhash.h"
+
 #define HASH(hash, data) XXH32(&data, sizeof(data), hash)
 
 static uint32_t
@@ -78,7 +81,7 @@ hash_phi_src(uint32_t hash, const nir_phi_instr *phi, const nir_phi_src *src,
    } else if (src->pred->index < phi->instr.block->index) {
       hash = HASH(hash, chased.def);
    } else {
-      nir_instr *chased_instr = chased.def->parent_instr;
+      nir_instr *chased_instr = nir_def_instr(chased.def);
       hash = HASH(hash, chased_instr->type);
 
       if (chased_instr->type == nir_instr_type_alu)
@@ -175,8 +178,8 @@ phi_srcs_equal(nir_block *block, const nir_phi_src *src1,
     * (forward-edge) sources are vectorized, chances are the back-edge will
     * also be vectorized.
     */
-   nir_instr *chased_instr1 = chased1.def->parent_instr;
-   nir_instr *chased_instr2 = chased2.def->parent_instr;
+   nir_instr *chased_instr1 = nir_def_instr(chased1.def);
+   nir_instr *chased_instr2 = nir_def_instr(chased2.def);
 
    if (chased_instr1->type != chased_instr2->type)
       return false;
@@ -343,8 +346,8 @@ rewrite_uses(nir_builder *b, struct set *instr_set, nir_def *def1,
       nir_def_rewrite_uses(def2, new_def2);
    }
 
-   nir_instr_remove(def1->parent_instr);
-   nir_instr_remove(def2->parent_instr);
+   nir_instr_remove(nir_def_instr(def1));
+   nir_instr_remove(nir_def_instr(def2));
 }
 
 static nir_instr *
@@ -409,7 +412,7 @@ instr_try_combine_phi(struct set *instr_set, nir_phi_instr *phi1, nir_phi_instr 
             swizzle[i] = new_srcs[i].comp;
          }
 
-         b.cursor = nir_after_instr_and_phis(def->parent_instr);
+         b.cursor = nir_after_instr_and_phis(nir_def_instr(def));
          new_src = nir_swizzle(&b, def, swizzle, total_components);
       } else {
          /* This is a loop back-edge so we haven't vectorized the sources yet.
@@ -450,15 +453,9 @@ instr_try_combine_alu(struct set *instr_set, nir_alu_instr *alu1, nir_alu_instr 
                 alu1->def.bit_size);
    new_alu->instr.pass_flags = alu1->instr.pass_flags;
 
-   /* If either channel is exact, we have to preserve it even if it's
-    * not optimal for other channels.
+   /* fp_math_ctrl is a set of restrictions, take the union of both.
     */
-   new_alu->exact = alu1->exact || alu2->exact;
-
-   /* fp_fast_math is a set of FLOAT_CONTROLS_*_PRESERVE_*.  Preserve anything
-    * preserved by either instruction.
-    */
-   new_alu->fp_fast_math = alu1->fp_fast_math | alu2->fp_fast_math;
+   new_alu->fp_math_ctrl = alu1->fp_math_ctrl | alu2->fp_math_ctrl;
 
    /* If all channels don't wrap, we can say that the whole vector doesn't
     * wrap.
@@ -523,20 +520,20 @@ instr_try_combine(struct set *instr_set, nir_instr *instr1, nir_instr *instr2)
                                    nir_instr_as_phi(instr2));
 
    default:
-      unreachable("Unsupported instruction type");
+      UNREACHABLE("Unsupported instruction type");
    }
 }
 
-static struct set *
-vec_instr_set_create(void)
+static void
+vec_instr_set_init(struct set *instr_set)
 {
-   return _mesa_set_create(NULL, hash_instr, instrs_equal);
+   _mesa_set_init(instr_set, NULL, hash_instr, instrs_equal);
 }
 
 static void
-vec_instr_set_destroy(struct set *instr_set)
+vec_instr_set_fini(struct set *instr_set)
 {
-   _mesa_set_destroy(instr_set, NULL);
+   _mesa_set_fini(instr_set, NULL);
 }
 
 static bool
@@ -581,25 +578,23 @@ static bool
 nir_opt_vectorize_impl(nir_function_impl *impl,
                        nir_vectorize_cb filter, void *data)
 {
-   struct set *instr_set = vec_instr_set_create();
+   struct set instr_set;
+   vec_instr_set_init(&instr_set);
 
-   nir_metadata_require(impl, nir_metadata_control_flow);
+   nir_metadata_require(impl,
+                        nir_metadata_block_index | nir_metadata_dominance);
 
    bool progress = false;
 
    nir_foreach_block(block, impl) {
       nir_foreach_instr_safe(instr, block) {
-         progress |= vec_instr_set_add_or_rewrite(instr_set, instr, filter, data);
+         progress |= vec_instr_set_add_or_rewrite(&instr_set, instr, filter, data);
       }
    }
 
-   if (progress) {
-      nir_metadata_preserve(impl, nir_metadata_control_flow);
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-   }
+   nir_progress(progress, impl, nir_metadata_control_flow);
 
-   vec_instr_set_destroy(instr_set);
+   vec_instr_set_fini(&instr_set);
    return progress;
 }
 

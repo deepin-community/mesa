@@ -187,13 +187,13 @@ vn_sizeof_VkSamplerCreateInfo_pnext(const void *val)
         case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO:
             size += vn_sizeof_simple_pointer(pnext);
             size += vn_sizeof_VkStructureType(&pnext->sType);
-            size += vn_sizeof_VkSamplerCreateInfo_pnext(pnext->pNext);
+            size += vn_sizeof_VkSamplerCreateInfo_pnext(((const VkSamplerYcbcrConversionInfo *)pnext)->pNext);
             size += vn_sizeof_VkSamplerYcbcrConversionInfo_self((const VkSamplerYcbcrConversionInfo *)pnext);
             return size;
         case VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO:
             size += vn_sizeof_simple_pointer(pnext);
             size += vn_sizeof_VkStructureType(&pnext->sType);
-            size += vn_sizeof_VkSamplerCreateInfo_pnext(pnext->pNext);
+            size += vn_sizeof_VkSamplerCreateInfo_pnext(((const VkSamplerReductionModeCreateInfo *)pnext)->pNext);
             size += vn_sizeof_VkSamplerReductionModeCreateInfo_self((const VkSamplerReductionModeCreateInfo *)pnext);
             return size;
         case VK_STRUCTURE_TYPE_SAMPLER_CUSTOM_BORDER_COLOR_CREATE_INFO_EXT:
@@ -201,7 +201,7 @@ vn_sizeof_VkSamplerCreateInfo_pnext(const void *val)
                 break;
             size += vn_sizeof_simple_pointer(pnext);
             size += vn_sizeof_VkStructureType(&pnext->sType);
-            size += vn_sizeof_VkSamplerCreateInfo_pnext(pnext->pNext);
+            size += vn_sizeof_VkSamplerCreateInfo_pnext(((const VkSamplerCustomBorderColorCreateInfoEXT *)pnext)->pNext);
             size += vn_sizeof_VkSamplerCustomBorderColorCreateInfoEXT_self((const VkSamplerCustomBorderColorCreateInfoEXT *)pnext);
             return size;
         case VK_STRUCTURE_TYPE_SAMPLER_BORDER_COLOR_COMPONENT_MAPPING_CREATE_INFO_EXT:
@@ -209,7 +209,7 @@ vn_sizeof_VkSamplerCreateInfo_pnext(const void *val)
                 break;
             size += vn_sizeof_simple_pointer(pnext);
             size += vn_sizeof_VkStructureType(&pnext->sType);
-            size += vn_sizeof_VkSamplerCreateInfo_pnext(pnext->pNext);
+            size += vn_sizeof_VkSamplerCreateInfo_pnext(((const VkSamplerBorderColorComponentMappingCreateInfoEXT *)pnext)->pNext);
             size += vn_sizeof_VkSamplerBorderColorComponentMappingCreateInfoEXT_self((const VkSamplerBorderColorComponentMappingCreateInfoEXT *)pnext);
             return size;
         default:
@@ -268,13 +268,13 @@ vn_encode_VkSamplerCreateInfo_pnext(struct vn_cs_encoder *enc, const void *val)
         case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO:
             vn_encode_simple_pointer(enc, pnext);
             vn_encode_VkStructureType(enc, &pnext->sType);
-            vn_encode_VkSamplerCreateInfo_pnext(enc, pnext->pNext);
+            vn_encode_VkSamplerCreateInfo_pnext(enc, ((const VkSamplerYcbcrConversionInfo *)pnext)->pNext);
             vn_encode_VkSamplerYcbcrConversionInfo_self(enc, (const VkSamplerYcbcrConversionInfo *)pnext);
             return;
         case VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO:
             vn_encode_simple_pointer(enc, pnext);
             vn_encode_VkStructureType(enc, &pnext->sType);
-            vn_encode_VkSamplerCreateInfo_pnext(enc, pnext->pNext);
+            vn_encode_VkSamplerCreateInfo_pnext(enc, ((const VkSamplerReductionModeCreateInfo *)pnext)->pNext);
             vn_encode_VkSamplerReductionModeCreateInfo_self(enc, (const VkSamplerReductionModeCreateInfo *)pnext);
             return;
         case VK_STRUCTURE_TYPE_SAMPLER_CUSTOM_BORDER_COLOR_CREATE_INFO_EXT:
@@ -282,7 +282,7 @@ vn_encode_VkSamplerCreateInfo_pnext(struct vn_cs_encoder *enc, const void *val)
                 break;
             vn_encode_simple_pointer(enc, pnext);
             vn_encode_VkStructureType(enc, &pnext->sType);
-            vn_encode_VkSamplerCreateInfo_pnext(enc, pnext->pNext);
+            vn_encode_VkSamplerCreateInfo_pnext(enc, ((const VkSamplerCustomBorderColorCreateInfoEXT *)pnext)->pNext);
             vn_encode_VkSamplerCustomBorderColorCreateInfoEXT_self(enc, (const VkSamplerCustomBorderColorCreateInfoEXT *)pnext);
             return;
         case VK_STRUCTURE_TYPE_SAMPLER_BORDER_COLOR_COMPONENT_MAPPING_CREATE_INFO_EXT:
@@ -290,7 +290,7 @@ vn_encode_VkSamplerCreateInfo_pnext(struct vn_cs_encoder *enc, const void *val)
                 break;
             vn_encode_simple_pointer(enc, pnext);
             vn_encode_VkStructureType(enc, &pnext->sType);
-            vn_encode_VkSamplerCreateInfo_pnext(enc, pnext->pNext);
+            vn_encode_VkSamplerCreateInfo_pnext(enc, ((const VkSamplerBorderColorComponentMappingCreateInfoEXT *)pnext)->pNext);
             vn_encode_VkSamplerBorderColorComponentMappingCreateInfoEXT_self(enc, (const VkSamplerBorderColorComponentMappingCreateInfoEXT *)pnext);
             return;
         default:
@@ -520,19 +520,6 @@ static inline void vn_async_vkCreateSampler(struct vn_ring *vn_ring, VkDevice de
 {
     struct vn_ring_submit_command submit;
     vn_submit_vkCreateSampler(vn_ring, 0, device, pCreateInfo, pAllocator, pSampler, &submit);
-}
-
-static inline void vn_call_vkDestroySampler(struct vn_ring *vn_ring, VkDevice device, VkSampler sampler, const VkAllocationCallbacks* pAllocator)
-{
-    VN_TRACE_FUNC();
-
-    struct vn_ring_submit_command submit;
-    vn_submit_vkDestroySampler(vn_ring, VK_COMMAND_GENERATE_REPLY_BIT_EXT, device, sampler, pAllocator, &submit);
-    struct vn_cs_decoder *dec = vn_ring_get_command_reply(vn_ring, &submit);
-    if (dec) {
-        vn_decode_vkDestroySampler_reply(dec, device, sampler, pAllocator);
-        vn_ring_free_command_reply(vn_ring, &submit);
-    }
 }
 
 static inline void vn_async_vkDestroySampler(struct vn_ring *vn_ring, VkDevice device, VkSampler sampler, const VkAllocationCallbacks* pAllocator)

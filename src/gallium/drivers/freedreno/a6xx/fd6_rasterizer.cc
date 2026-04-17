@@ -7,8 +7,6 @@
  *    Rob Clark <robclark@freedesktop.org>
  */
 
-#define FD_BO_NO_HARDPIN 1
-
 #include "pipe/p_state.h"
 #include "util/u_memory.h"
 #include "util/u_string.h"
@@ -25,8 +23,6 @@ __fd6_setup_rasterizer_stateobj(struct fd_context *ctx,
                                 const struct pipe_rasterizer_state *cso,
                                 bool primitive_restart)
 {
-   unsigned ndwords = (CHIP >= A7XX) ? 66 : 26;
-   struct fd_ringbuffer *ring = fd_ringbuffer_new_object(ctx->pipe, ndwords * 4);
    float psize_min, psize_max;
 
    if (cso->point_size_per_vertex) {
@@ -38,48 +34,48 @@ __fd6_setup_rasterizer_stateobj(struct fd_context *ctx,
       psize_max = cso->point_size;
    }
 
-   OUT_REG(ring,
-           A6XX_GRAS_CL_CNTL(
+   unsigned nreg = (CHIP >= A7XX) ? 76 : 15;
+   if (CHIP >= A8XX)
+      nreg++;
+
+   fd_crb crb(ctx->pipe, nreg);
+
+   crb.add(GRAS_CL_CNTL(CHIP,
                  .znear_clip_disable = !cso->depth_clip_near,
                  .zfar_clip_disable = !cso->depth_clip_far,
                  .z_clamp_enable = cso->depth_clamp || CHIP >= A7XX,
                  .zero_gb_scale_z = cso->clip_halfz,
                  .vp_clip_code_ignore = 1,
-           ),
+           )
    );
 
-   OUT_REG(ring,
-           A6XX_GRAS_SU_CNTL(
+   crb.add(GRAS_SU_CNTL(CHIP,
                  .cull_front = cso->cull_face & PIPE_FACE_FRONT,
                  .cull_back = cso->cull_face & PIPE_FACE_BACK,
                  .front_cw = !cso->front_ccw,
                  .linehalfwidth = cso->line_width / 2.0f,
                  .poly_offset = cso->offset_tri,
                  .line_mode = cso->multisample ? RECTANGULAR : BRESENHAM,
-           ),
+           )
    );
 
-   OUT_REG(ring,
-           A6XX_GRAS_SU_POINT_MINMAX(.min = psize_min, .max = psize_max, ),
-           A6XX_GRAS_SU_POINT_SIZE(cso->point_size));
+   crb.add(GRAS_SU_POINT_MINMAX(CHIP, .min = psize_min, .max = psize_max, ));
+   crb.add(GRAS_SU_POINT_SIZE(CHIP, cso->point_size));
+   crb.add(GRAS_SU_POLY_OFFSET_SCALE(CHIP, cso->offset_scale));
+   crb.add(GRAS_SU_POLY_OFFSET_OFFSET(CHIP, cso->offset_units));
+   crb.add(GRAS_SU_POLY_OFFSET_OFFSET_CLAMP(CHIP, cso->offset_clamp));
 
-   OUT_REG(ring, A6XX_GRAS_SU_POLY_OFFSET_SCALE(cso->offset_scale),
-           A6XX_GRAS_SU_POLY_OFFSET_OFFSET(cso->offset_units),
-           A6XX_GRAS_SU_POLY_OFFSET_OFFSET_CLAMP(cso->offset_clamp));
-
-   OUT_REG(ring,
-           A6XX_PC_PRIMITIVE_CNTL_0(
+   crb.add(PC_CNTL(CHIP,
                  .primitive_restart = primitive_restart,
                  .provoking_vtx_last = !cso->flatshade_first,
-           ),
+           )
    );
 
    if (CHIP >= A7XX) {
-      OUT_REG(ring,
-              A7XX_VPC_PRIMITIVE_CNTL_0(
+      crb.add(VPC_PC_CNTL(CHIP,
                     .primitive_restart = primitive_restart,
                     .provoking_vtx_last = !cso->flatshade_first,
-              ),
+              )
       );
    }
 
@@ -96,11 +92,15 @@ __fd6_setup_rasterizer_stateobj(struct fd_context *ctx,
       break;
    }
 
-   OUT_REG(ring, A6XX_VPC_POLYGON_MODE(mode));
-   OUT_REG(ring, PC_POLYGON_MODE(CHIP, mode));
+   crb.add(VPC_RAST_CNTL(CHIP, mode));
+   crb.add(PC_DGEN_RAST_CNTL(CHIP, mode));
 
-   if (CHIP == A7XX) {
-      OUT_REG(ring, A7XX_VPC_POLYGON_MODE2(mode));
+   if (CHIP >= A8XX)
+      crb.add(GRAS_RAST_CNTL(CHIP, mode));
+
+   if (CHIP >= A7XX ||
+       (CHIP == A6XX && ctx->screen->info->props.is_a702)) {
+      crb.add(VPC_PS_RAST_CNTL(CHIP, mode));
    }
 
    /* With a7xx the hw doesn't do the clamping for us.  When depth clamp
@@ -114,26 +114,30 @@ __fd6_setup_rasterizer_stateobj(struct fd_context *ctx,
       /* We must assume the max: */
       const unsigned num_viewports = 16;
 
-      OUT_PKT4(ring, REG_A6XX_GRAS_CL_Z_CLAMP(0), num_viewports * 2);
       for (unsigned i = 0; i < num_viewports; i++) {
-         OUT_RING(ring, fui(0.0f));
-         OUT_RING(ring, fui(1.0f));
+         crb.add(GRAS_CL_VIEWPORT_ZCLAMP_MIN(CHIP, i, 0.0f));
+         crb.add(GRAS_CL_VIEWPORT_ZCLAMP_MAX(CHIP, i, 1.0f));
+
+         if (CHIP >= A8XX) {
+            crb.add(RB_VIEWPORT_ZCLAMP_MIN_REG(CHIP, i, 0.0f));
+            crb.add(RB_VIEWPORT_ZCLAMP_MAX_REG(CHIP, i, 1.0f));
+         }
       }
 
-      OUT_REG(ring,
-         A6XX_RB_Z_CLAMP_MIN(0.0f),
-         A6XX_RB_Z_CLAMP_MAX(1.0),
-      );
+      if (CHIP <= A7XX) {
+         crb.add(RB_VIEWPORT_ZCLAMP_MIN(CHIP, 0.0f));
+         crb.add(RB_VIEWPORT_ZCLAMP_MAX(CHIP, 1.0f));
+      }
    }
 
-   if (CHIP == A6XX && ctx->screen->info->a6xx.has_shading_rate) {
-      OUT_REG(ring, A6XX_RB_UNKNOWN_8A00());
-      OUT_REG(ring, A6XX_RB_UNKNOWN_8A10());
-      OUT_REG(ring, A6XX_RB_UNKNOWN_8A20());
-      OUT_REG(ring, A6XX_RB_UNKNOWN_8A30());
+   if (CHIP == A6XX && ctx->screen->info->props.has_legacy_pipeline_shading_rate) {
+      crb.add(RB_UNKNOWN_8A00(CHIP));
+      crb.add(RB_UNKNOWN_8A10(CHIP));
+      crb.add(RB_UNKNOWN_8A20(CHIP));
+      crb.add(RB_UNKNOWN_8A30(CHIP));
    }
 
-   return ring;
+   return crb;
 }
 FD_GENX(__fd6_setup_rasterizer_stateobj);
 

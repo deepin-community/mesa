@@ -47,6 +47,8 @@ elk_compiler_create(void *mem_ctx, const struct intel_device_info *devinfo)
 
    compiler->precise_trig = debug_get_bool_option("INTEL_PRECISE_TRIG", false);
 
+   compiler->has_negative_rhw_bug = devinfo->verx10 == 40;
+
    /* Default to the sampler since that's what we've done since forever */
    compiler->indirect_ubos_use_sampler = true;
 
@@ -122,6 +124,10 @@ elk_compiler_create(void *mem_ctx, const struct intel_device_info *devinfo)
       nir_options->lower_doubles_options = fp64_options;
 
       nir_options->unify_interfaces = i < MESA_SHADER_FRAGMENT;
+      nir_options->support_indirect_inputs = BITFIELD_BIT(MESA_SHADER_TESS_CTRL) |
+                                             BITFIELD_BIT(MESA_SHADER_TESS_EVAL) |
+                                             BITFIELD_BIT(MESA_SHADER_FRAGMENT),
+      nir_options->support_indirect_outputs = (uint8_t)BITFIELD_MASK(MESA_SHADER_STAGES),
 
       nir_options->force_indirect_unrolling |=
          elk_nir_no_indirect_mask(compiler, i);
@@ -151,13 +157,21 @@ elk_get_compiler_config_value(const struct elk_compiler *compiler)
    insert_u64_bit(&config, compiler->precise_trig);
    bits++;
 
-   uint64_t mask = DEBUG_DISK_CACHE_MASK;
-   bits += util_bitcount64(mask);
+   enum intel_debug_flag debug_bits[] = {
+      DEBUG_NO_DUAL_OBJECT_GS,
+      DEBUG_SPILL_FS,
+      DEBUG_SPILL_VEC4,
+      DEBUG_NO_COMPACTION,
+      DEBUG_DO32,
+      DEBUG_SOFT64,
+      DEBUG_NO_SEND_GATHER,
+   };
+   for (uint32_t i = 0; i < ARRAY_SIZE(debug_bits); i++) {
+      insert_u64_bit(&config, INTEL_DEBUG(debug_bits[i]));
+      bits++;
+   }
 
-   u_foreach_bit64(bit, mask)
-      insert_u64_bit(&config, INTEL_DEBUG(1ULL << bit));
-
-   mask = SIMD_DISK_CACHE_MASK;
+   uint64_t mask = SIMD_DISK_CACHE_MASK;
    bits += util_bitcount64(mask);
 
    u_foreach_bit64(bit, mask)
@@ -172,7 +186,7 @@ elk_get_compiler_config_value(const struct elk_compiler *compiler)
 }
 
 unsigned
-elk_prog_data_size(gl_shader_stage stage)
+elk_prog_data_size(mesa_shader_stage stage)
 {
    static const size_t stage_sizes[] = {
       [MESA_SHADER_VERTEX]       = sizeof(struct elk_vs_prog_data),
@@ -187,7 +201,7 @@ elk_prog_data_size(gl_shader_stage stage)
 }
 
 unsigned
-elk_prog_key_size(gl_shader_stage stage)
+elk_prog_key_size(mesa_shader_stage stage)
 {
    static const size_t stage_sizes[] = {
       [MESA_SHADER_VERTEX]       = sizeof(struct elk_vs_prog_key),
@@ -205,7 +219,7 @@ void
 elk_write_shader_relocs(const struct elk_isa_info *isa,
                         void *program,
                         const struct elk_stage_prog_data *prog_data,
-                        struct elk_shader_reloc_value *values,
+                        struct intel_shader_reloc_value *values,
                         unsigned num_values)
 {
    for (unsigned i = 0; i < prog_data->num_relocs; i++) {
@@ -215,14 +229,14 @@ elk_write_shader_relocs(const struct elk_isa_info *isa,
          if (prog_data->relocs[i].id == values[j].id) {
             uint32_t value = values[j].value + prog_data->relocs[i].delta;
             switch (prog_data->relocs[i].type) {
-            case ELK_SHADER_RELOC_TYPE_U32:
+            case INTEL_SHADER_RELOC_TYPE_U32:
                *(uint32_t *)dst = value;
                break;
-            case ELK_SHADER_RELOC_TYPE_MOV_IMM:
+            case INTEL_SHADER_RELOC_TYPE_MOV_IMM:
                elk_update_reloc_imm(isa, dst, value);
                break;
             default:
-               unreachable("Invalid relocation type");
+               UNREACHABLE("Invalid relocation type");
             }
             break;
          }

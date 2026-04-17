@@ -194,7 +194,7 @@ vn_render_pass_create(struct vn_device *dev,
 
 /* render pass commands */
 
-VkResult
+VKAPI_ATTR VkResult VKAPI_CALL
 vn_CreateRenderPass(VkDevice device,
                     const VkRenderPassCreateInfo *pCreateInfo,
                     const VkAllocationCallbacks *pAllocator,
@@ -202,7 +202,7 @@ vn_CreateRenderPass(VkDevice device,
 {
    struct vn_device *dev = vn_device_from_handle(device);
    const VkAllocationCallbacks *alloc =
-      pAllocator ? pAllocator : &dev->base.base.alloc;
+      pAllocator ? pAllocator : &dev->base.vk.alloc;
 
    uint32_t acquire_count;
    uint32_t release_count;
@@ -249,7 +249,7 @@ vn_CreateRenderPass(VkDevice device,
    return VK_SUCCESS;
 }
 
-VkResult
+VKAPI_ATTR VkResult VKAPI_CALL
 vn_CreateRenderPass2(VkDevice device,
                      const VkRenderPassCreateInfo2 *pCreateInfo,
                      const VkAllocationCallbacks *pAllocator,
@@ -257,7 +257,7 @@ vn_CreateRenderPass2(VkDevice device,
 {
    struct vn_device *dev = vn_device_from_handle(device);
    const VkAllocationCallbacks *alloc =
-      pAllocator ? pAllocator : &dev->base.base.alloc;
+      pAllocator ? pAllocator : &dev->base.vk.alloc;
 
    uint32_t acquire_count;
    uint32_t release_count;
@@ -299,7 +299,7 @@ vn_CreateRenderPass2(VkDevice device,
    return VK_SUCCESS;
 }
 
-void
+VKAPI_ATTR void VKAPI_CALL
 vn_DestroyRenderPass(VkDevice device,
                      VkRenderPass renderPass,
                      const VkAllocationCallbacks *pAllocator)
@@ -307,7 +307,7 @@ vn_DestroyRenderPass(VkDevice device,
    struct vn_device *dev = vn_device_from_handle(device);
    struct vn_render_pass *pass = vn_render_pass_from_handle(renderPass);
    const VkAllocationCallbacks *alloc =
-      pAllocator ? pAllocator : &dev->base.base.alloc;
+      pAllocator ? pAllocator : &dev->base.vk.alloc;
 
    if (!pass)
       return;
@@ -318,7 +318,7 @@ vn_DestroyRenderPass(VkDevice device,
    vk_free(alloc, pass);
 }
 
-void
+VKAPI_ATTR void VKAPI_CALL
 vn_GetRenderAreaGranularity(VkDevice device,
                             VkRenderPass renderPass,
                             VkExtent2D *pGranularity)
@@ -334,21 +334,21 @@ vn_GetRenderAreaGranularity(VkDevice device,
    *pGranularity = pass->granularity;
 }
 
-void
-vn_GetRenderingAreaGranularityKHR(VkDevice device,
-                                  const VkRenderingAreaInfoKHR *pRenderingAreaInfo,
-                                  VkExtent2D *pGranularity)
+VKAPI_ATTR void VKAPI_CALL
+vn_GetRenderingAreaGranularity(VkDevice device,
+                               const VkRenderingAreaInfo *pRenderingAreaInfo,
+                               VkExtent2D *pGranularity)
 {
    struct vn_device *dev = vn_device_from_handle(device);
 
    /* TODO per-device cache */
-   vn_call_vkGetRenderingAreaGranularityKHR(dev->primary_ring, device,
-                                            pRenderingAreaInfo, pGranularity);
+   vn_call_vkGetRenderingAreaGranularity(dev->primary_ring, device,
+                                         pRenderingAreaInfo, pGranularity);
 }
 
 /* framebuffer commands */
 
-VkResult
+VKAPI_ATTR VkResult VKAPI_CALL
 vn_CreateFramebuffer(VkDevice device,
                      const VkFramebufferCreateInfo *pCreateInfo,
                      const VkAllocationCallbacks *pAllocator,
@@ -356,7 +356,7 @@ vn_CreateFramebuffer(VkDevice device,
 {
    struct vn_device *dev = vn_device_from_handle(device);
    const VkAllocationCallbacks *alloc =
-      pAllocator ? pAllocator : &dev->base.base.alloc;
+      pAllocator ? pAllocator : &dev->base.vk.alloc;
 
    /* Two render passes differ only in attachment image layouts are considered
     * compatible.  We must not use pCreateInfo->renderPass here.
@@ -386,7 +386,7 @@ vn_CreateFramebuffer(VkDevice device,
    return VK_SUCCESS;
 }
 
-void
+VKAPI_ATTR void VKAPI_CALL
 vn_DestroyFramebuffer(VkDevice device,
                       VkFramebuffer framebuffer,
                       const VkAllocationCallbacks *pAllocator)
@@ -394,7 +394,7 @@ vn_DestroyFramebuffer(VkDevice device,
    struct vn_device *dev = vn_device_from_handle(device);
    struct vn_framebuffer *fb = vn_framebuffer_from_handle(framebuffer);
    const VkAllocationCallbacks *alloc =
-      pAllocator ? pAllocator : &dev->base.base.alloc;
+      pAllocator ? pAllocator : &dev->base.vk.alloc;
 
    if (!fb)
       return;

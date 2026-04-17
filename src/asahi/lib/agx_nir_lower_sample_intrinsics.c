@@ -87,7 +87,7 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          lowered = nir_iand(b, lowered, nir_u2uN(b, bit, old->bit_size));
       }
 
-      nir_def_rewrite_uses_after(old, lowered, lowered->parent_instr);
+      nir_def_rewrite_uses_after(old, lowered);
       return true;
    }
 
@@ -121,7 +121,7 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          b, intr->def.bit_size, nir_load_sample_id(b),
          .interp_mode = nir_intrinsic_interp_mode(intr));
 
-      nir_def_rewrite_uses_after(old, lowered, lowered->parent_instr);
+      nir_def_rewrite_uses_after(old, lowered);
       return true;
    }
 
@@ -175,7 +175,7 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       if (*ignore_sample_mask_without_msaa)
          mask = select_if_msaa_else_0(b, mask);
 
-      nir_discard_agx(b, mask);
+      nir_demote_samples(b, mask);
       nir_instr_remove(&intr->instr);
 
       b->shader->info.fs.uses_discard = true;
@@ -196,8 +196,8 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
  * The load_sample_id intrinsics themselves are lowered later, with different
  * lowerings for monolithic vs epilogs.
  *
- * Note that fragment I/O (like store_local_pixel_agx and discard_agx) does not
- * get lowered here, because that lowering is different for monolithic vs FS
+ * Note that fragment I/O (like store_local_pixel_agx and demote_samples) does
+ * not get lowered here, because that lowering is different for monolithic vs FS
  * epilogs even though there's no dependency on sample count.
  */
 bool

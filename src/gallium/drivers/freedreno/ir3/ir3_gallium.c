@@ -68,7 +68,7 @@ dump_shader_info(struct ir3_shader_variant *v,
       "%u dwords, %u last-baryf, %u last-helper, %u half, %u full, %u constlen, "
       "%u cat0, %u cat1, %u cat2, %u cat3, %u cat4, %u cat5, %u cat6, %u cat7, "
       "%u stp, %u ldp, %u sstall, %u (ss), %u systall, %u (sy), %d waves, "
-      "%d loops\n",
+      "%d loops, %u preamble-inst, %d early-preamble\n",
       ir3_shader_stage(v), v->info.instrs_count, v->info.nops_count,
       v->info.instrs_count - v->info.nops_count, v->info.mov_count,
       v->info.cov_count, v->info.sizedwords, v->info.last_baryf,
@@ -79,7 +79,8 @@ dump_shader_info(struct ir3_shader_variant *v,
       v->info.instrs_per_cat[4], v->info.instrs_per_cat[5],
       v->info.instrs_per_cat[6], v->info.instrs_per_cat[7],
       v->info.stp_count, v->info.ldp_count, v->info.sstall,
-      v->info.ss, v->info.systall, v->info.sy, v->info.max_waves, v->loops);
+      v->info.ss, v->info.systall, v->info.sy, v->info.max_waves, v->loops,
+      v->info.preamble_instrs_count, v->info.early_preamble);
 }
 
 static void
@@ -264,19 +265,13 @@ ir3_shader_compute_state_create(struct pipe_context *pctx,
 {
    struct fd_context *ctx = fd_context(pctx);
 
-   /* req_input_mem will only be non-zero for cl kernels (ie. clover).
-    * This isn't a perfect test because I guess it is possible (but
-    * uncommon) for none for the kernel parameters to be a global,
-    * but ctx->set_global_bindings() can't fail, so this is the next
-    * best place to fail if we need a newer version of kernel driver:
-    */
-   if ((cso->req_input_mem > 0) &&
-       fd_device_version(ctx->dev) < FD_VERSION_BO_IOVA) {
-      return NULL;
-   }
-
    enum ir3_wavesize_option api_wavesize = IR3_SINGLE_OR_DOUBLE;
    enum ir3_wavesize_option real_wavesize = IR3_SINGLE_OR_DOUBLE;
+
+   if (ctx->screen->gen >= 6 && !ctx->screen->info->props.supports_double_threadsize) {
+      api_wavesize = IR3_SINGLE_ONLY;
+      real_wavesize = IR3_SINGLE_ONLY;
+   }
 
    const struct ir3_shader_options ir3_options = {
       /* TODO: force to single on a6xx with legacy ballot extension that uses
@@ -292,16 +287,6 @@ ir3_shader_compute_state_create(struct pipe_context *pctx,
    if (cso->ir_type == PIPE_SHADER_IR_NIR) {
       /* we take ownership of the reference: */
       nir = (nir_shader *)cso->prog;
-   } else if (cso->ir_type == PIPE_SHADER_IR_NIR_SERIALIZED) {
-      const nir_shader_compiler_options *options =
-            ir3_get_compiler_options(compiler);
-      const struct pipe_binary_program_header *hdr = cso->prog;
-      struct blob_reader reader;
-
-      blob_reader_init(&reader, hdr->blob, hdr->num_bytes);
-      nir = nir_deserialize(NULL, options, &reader);
-
-      ir3_finalize_nir(compiler, &ir3_options.nir_options, nir);
    } else {
       assert(cso->ir_type == PIPE_SHADER_IR_TGSI);
       if (ir3_shader_debug & IR3_DBG_DISASM) {
@@ -313,14 +298,8 @@ ir3_shader_compute_state_create(struct pipe_context *pctx,
    if (ctx->screen->gen >= 6)
       ir3_nir_lower_io_to_bindless(nir);
 
-   if (ctx->screen->gen >= 6 && !ctx->screen->info->a6xx.supports_double_threadsize) {
-      api_wavesize = IR3_SINGLE_ONLY;
-      real_wavesize = IR3_SINGLE_ONLY;
-   }
-
    struct ir3_shader *shader =
       ir3_shader_from_nir(compiler, nir, &ir3_options, NULL);
-   shader->cs.req_input_mem = align(cso->req_input_mem, 4) / 4;     /* byte->dword */
    shader->cs.req_local_mem = cso->static_shared_mem;
 
    struct ir3_shader_state *hwcso = calloc(1, sizeof(*hwcso));
@@ -373,6 +352,14 @@ ir3_shader_state_create(struct pipe_context *pctx,
    if (ctx->screen->gen >= 6)
       ir3_nir_lower_io_to_bindless(nir);
 
+   enum ir3_wavesize_option api_wavesize = IR3_SINGLE_OR_DOUBLE;
+   enum ir3_wavesize_option real_wavesize = IR3_SINGLE_OR_DOUBLE;
+
+   if (ctx->screen->gen >= 6 && !ctx->screen->info->props.supports_double_threadsize) {
+      api_wavesize = IR3_SINGLE_ONLY;
+      real_wavesize = IR3_SINGLE_ONLY;
+   }
+
    /*
     * Create ir3_shader:
     *
@@ -387,8 +374,8 @@ ir3_shader_state_create(struct pipe_context *pctx,
                               /* TODO: force to single on a6xx with legacy
                                * ballot extension that uses 64-bit masks
                                */
-                              .api_wavesize = IR3_SINGLE_OR_DOUBLE,
-                              .real_wavesize = IR3_SINGLE_OR_DOUBLE,
+                              .api_wavesize = api_wavesize,
+                              .real_wavesize = real_wavesize,
                           },
                           &stream_output);
 
@@ -485,12 +472,12 @@ ir3_fixup_shader_state(struct pipe_context *pctx, struct ir3_shader_key *key)
 
    if (!ir3_shader_key_equal(ctx->last.key, key)) {
       if (ir3_shader_key_changes_fs(ctx->last.key, key)) {
-         fd_context_dirty_shader(ctx, PIPE_SHADER_FRAGMENT,
+         fd_context_dirty_shader(ctx, MESA_SHADER_FRAGMENT,
                                  FD_DIRTY_SHADER_PROG);
       }
 
       if (ir3_shader_key_changes_vs(ctx->last.key, key)) {
-         fd_context_dirty_shader(ctx, PIPE_SHADER_VERTEX, FD_DIRTY_SHADER_PROG);
+         fd_context_dirty_shader(ctx, MESA_SHADER_VERTEX, FD_DIRTY_SHADER_PROG);
       }
 
       /* NOTE: currently only a6xx has gs/tess, but needs no
@@ -501,8 +488,9 @@ ir3_fixup_shader_state(struct pipe_context *pctx, struct ir3_shader_key *key)
    }
 }
 
-static char *
-ir3_screen_finalize_nir(struct pipe_screen *pscreen, void *nir)
+static void
+ir3_screen_finalize_nir(struct pipe_screen *pscreen, struct nir_shader *nir,
+                        bool optimize)
 {
    struct fd_screen *screen = fd_screen(pscreen);
 
@@ -510,10 +498,8 @@ ir3_screen_finalize_nir(struct pipe_screen *pscreen, void *nir)
 
    MESA_TRACE_FUNC();
 
-   ir3_nir_lower_io_to_temporaries(nir);
+   ir3_nir_lower_io_vars_to_temporaries(nir);
    ir3_finalize_nir(screen->compiler, &options, nir);
-
-   return NULL;
 }
 
 static void
@@ -532,7 +518,7 @@ ir3_set_max_shader_compiler_threads(struct pipe_screen *pscreen,
 static bool
 ir3_is_parallel_shader_compilation_finished(struct pipe_screen *pscreen,
                                             void *shader,
-                                            enum pipe_shader_type shader_type)
+                                            mesa_shader_stage shader_type)
 {
    struct ir3_shader_state *hwcso = (struct ir3_shader_state *)shader;
 
@@ -565,10 +551,11 @@ ir3_screen_init(struct pipe_screen *pscreen)
 
    struct ir3_compiler_options options = {
       .bindless_fb_read_descriptor =
-         ir3_shader_descriptor_set(PIPE_SHADER_FRAGMENT),
+         ir3_shader_descriptor_set(MESA_SHADER_FRAGMENT),
       .bindless_fb_read_slot = IR3_BINDLESS_IMAGE_OFFSET +
                                IR3_BINDLESS_IMAGE_COUNT - 1 - screen->max_rts,
       .dual_color_blend_by_location = screen->driconf.dual_color_blend_by_location,
+      .uche_trap_base = screen->uche_trap_base,
    };
 
    if (screen->gen >= 6) {
@@ -669,7 +656,7 @@ ir3_get_private_mem(struct fd_context *ctx, const struct ir3_shader_variant *so)
       if (ctx->pvtmem[so->pvtmem_per_wave].bo)
          fd_bo_del(ctx->pvtmem[so->pvtmem_per_wave].bo);
 
-      uint32_t per_sp_size = ALIGN(per_fiber_size * fibers_per_sp, 1 << 12);
+      uint32_t per_sp_size = align(per_fiber_size * fibers_per_sp, 1 << 12);
       uint32_t total_size = per_sp_size * num_sp_cores;
 
       ctx->pvtmem[so->pvtmem_per_wave].per_fiber_size = per_fiber_size;

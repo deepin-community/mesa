@@ -12,6 +12,7 @@
 #include "util/u_process.h"
 #include "util/u_math.h"
 
+#include "ac_shader_util.h"
 #include "ac_spm.h"
 #include "ac_sqtt.h"
 #include "ac_gpu_info.h"
@@ -22,7 +23,7 @@
 
 #define SQTT_FILE_MAGIC_NUMBER  0x50303042
 #define SQTT_FILE_VERSION_MAJOR 1
-#define SQTT_FILE_VERSION_MINOR 5
+#define SQTT_FILE_VERSION_MINOR 6
 
 #define SQTT_GPU_NAME_MAX_SIZE 256
 #define SQTT_MAX_NUM_SE        32
@@ -36,6 +37,7 @@ enum sqtt_version
    SQTT_VERSION_2_3 = 0x6, /* GFX9 */
    SQTT_VERSION_2_4 = 0x7, /* GFX10+ */
    SQTT_VERSION_3_2 = 0xb, /* GFX11+ */
+   SQTT_VERSION_3_3 = 0xc, /* GFX12+ */
 };
 
 /**
@@ -56,6 +58,10 @@ enum sqtt_file_chunk_type
    SQTT_FILE_CHUNK_TYPE_CODE_OBJECT_LOADER_EVENTS,
    SQTT_FILE_CHUNK_TYPE_PSO_CORRELATION,
    SQTT_FILE_CHUNK_TYPE_INSTRUMENTATION_TABLE,
+
+   SQTT_FILE_CHUNK_TYPE_FIRST_TOOLS_TYPE = 128,
+   SQTT_FILE_CHUNK_TYPE_DERIVED_SPM_DB = SQTT_FILE_CHUNK_TYPE_FIRST_TOOLS_TYPE,
+
    SQTT_FILE_CHUNK_TYPE_COUNT
 };
 
@@ -263,6 +269,8 @@ enum sqtt_gfxip_level
    SQTT_GFXIP_LEVEL_GFXIP_10_1 = 0x7,
    SQTT_GFXIP_LEVEL_GFXIP_10_3 = 0x9,
    SQTT_GFXIP_LEVEL_GFXIP_11_0 = 0xc,
+   SQTT_GFXIP_LEVEL_GFXIP_11_5 = 0xd,
+   SQTT_GFXIP_LEVEL_GFXIP_12 = 0x10,
 };
 
 enum sqtt_memory_type
@@ -353,10 +361,13 @@ static enum sqtt_gfxip_level ac_gfx_level_to_sqtt_gfxip_level(enum amd_gfx_level
    case GFX10_3:
       return SQTT_GFXIP_LEVEL_GFXIP_10_3;
    case GFX11:
-   case GFX11_5:
       return SQTT_GFXIP_LEVEL_GFXIP_11_0;
+   case GFX11_5:
+      return SQTT_GFXIP_LEVEL_GFXIP_11_5;
+   case GFX12:
+      return SQTT_GFXIP_LEVEL_GFXIP_12;
    default:
-      unreachable("Invalid gfx level");
+      UNREACHABLE("Invalid gfx level");
    }
 }
 
@@ -388,11 +399,13 @@ static enum sqtt_memory_type ac_vram_type_to_sqtt_memory_type(uint32_t vram_type
    case AMD_VRAM_TYPE_LPDDR5:
       return SQTT_MEMORY_TYPE_LPDDR5;
    default:
-      unreachable("Invalid vram type");
+      UNREACHABLE("Invalid vram type");
    }
 }
 
 static void ac_sqtt_fill_asic_info(const struct radeon_info *rad_info,
+                                   uint32_t trace_shader_core_clock,
+                                   uint32_t trace_memory_clock,
                                    struct sqtt_file_chunk_asic_info *chunk)
 {
    bool has_wave32 = rad_info->gfx_level >= GFX10;
@@ -415,8 +428,8 @@ static void ac_sqtt_fill_asic_info(const struct radeon_info *rad_info,
    if (rad_info->gfx_level >= GFX9)
       chunk->flags |= SQTT_FILE_CHUNK_ASIC_INFO_FLAG_PS1_EVENT_TOKENS_ENABLED;
 
-   chunk->trace_shader_core_clock = rad_info->max_gpu_freq_mhz * 1000000ull;
-   chunk->trace_memory_clock = rad_info->memory_freq_mhz * 1000000ull;
+   chunk->trace_shader_core_clock = trace_shader_core_clock * 1000000ull;
+   chunk->trace_memory_clock = trace_memory_clock * 1000000ull;
 
    /* RGP gets very confused if these clocks are 0. The numbers here are for profile_peak on
     * VGH since that is the chips where we've seen the need for this workaround. */
@@ -427,17 +440,17 @@ static void ac_sqtt_fill_asic_info(const struct radeon_info *rad_info,
 
    chunk->device_id = rad_info->pci_id;
    chunk->device_revision_id = rad_info->pci_rev_id;
-   chunk->vgprs_per_simd = rad_info->num_physical_wave64_vgprs_per_simd * (has_wave32 ? 2 : 1);
-   chunk->sgprs_per_simd = rad_info->num_physical_sgprs_per_simd;
+   chunk->vgprs_per_simd = rad_info->cu_info.num_physical_wave64_vgprs_per_simd * (has_wave32 ? 2 : 1);
+   chunk->sgprs_per_simd = rad_info->cu_info.num_physical_sgprs_per_simd;
    chunk->shader_engines = rad_info->max_se;
    chunk->compute_unit_per_shader_engine = rad_info->min_good_cu_per_sa * rad_info->max_sa_per_se;
-   chunk->simd_per_compute_unit = rad_info->num_simd_per_compute_unit;
-   chunk->wavefronts_per_simd = rad_info->max_waves_per_simd;
+   chunk->simd_per_compute_unit = rad_info->cu_info.num_simd_per_compute_unit;
+   chunk->wavefronts_per_simd = rad_info->cu_info.max_waves_per_simd;
 
-   chunk->minimum_vgpr_alloc = rad_info->min_wave64_vgpr_alloc;
-   chunk->vgpr_alloc_granularity = rad_info->wave64_vgpr_alloc_granularity * (has_wave32 ? 2 : 1);
-   chunk->minimum_sgpr_alloc = rad_info->min_sgpr_alloc;
-   chunk->sgpr_alloc_granularity = rad_info->sgpr_alloc_granularity;
+   chunk->minimum_vgpr_alloc = rad_info->cu_info.min_wave64_vgpr_alloc;
+   chunk->vgpr_alloc_granularity = rad_info->cu_info.wave64_vgpr_alloc_granularity * (has_wave32 ? 2 : 1);
+   chunk->minimum_sgpr_alloc = rad_info->cu_info.min_sgpr_alloc;
+   chunk->sgpr_alloc_granularity = rad_info->cu_info.sgpr_alloc_granularity;
 
    chunk->hardware_contexts = 8;
    chunk->gpu_type =
@@ -455,12 +468,8 @@ static void ac_sqtt_fill_asic_info(const struct radeon_info *rad_info,
    chunk->l2_cache_size = rad_info->l2_cache_size;
    chunk->l1_cache_size = rad_info->tcp_cache_size;
    chunk->lds_size = rad_info->lds_size_per_workgroup;
-   if (rad_info->gfx_level >= GFX10) {
-      /* RGP expects the LDS size in CU mode. */
-      chunk->lds_size /= 2;
-   }
 
-   strncpy(chunk->gpu_name, rad_info->name, SQTT_GPU_NAME_MAX_SIZE - 1);
+   strncpy(chunk->gpu_name, ac_get_family_name(rad_info->family), SQTT_GPU_NAME_MAX_SIZE - 1);
 
    chunk->alu_per_clock = 0.0;
    chunk->texture_per_clock = 0.0;
@@ -474,7 +483,7 @@ static void ac_sqtt_fill_asic_info(const struct radeon_info *rad_info,
    chunk->max_memory_clock = rad_info->memory_freq_mhz * 1000000;
    chunk->memory_ops_per_clock = ac_memory_ops_per_clock(rad_info->vram_type);
    chunk->memory_chip_type = ac_vram_type_to_sqtt_memory_type(rad_info->vram_type);
-   chunk->lds_granularity = rad_info->lds_encode_granularity;
+   chunk->lds_granularity = ac_shader_get_lds_alloc_granularity(rad_info->gfx_level);
 
    for (unsigned se = 0; se < AMD_MAX_SE; se++) {
       for (unsigned sa = 0; sa < AMD_MAX_SA_PER_SE; sa++) {
@@ -703,8 +712,10 @@ static enum sqtt_version ac_gfx_level_to_sqtt_version(enum amd_gfx_level gfx_lev
    case GFX11:
    case GFX11_5:
       return SQTT_VERSION_3_2;
+   case GFX12:
+      return SQTT_VERSION_3_3;
    default:
-      unreachable("Invalid gfx level");
+      UNREACHABLE("Invalid gfx level");
    }
 }
 
@@ -722,7 +733,7 @@ static void ac_sqtt_fill_sqtt_desc(const struct radeon_info *info,
       ac_gfx_level_to_sqtt_version(info->gfx_level);
    chunk->shader_engine_index = shader_engine_index;
    chunk->v1.instrumentation_spec_version = 1;
-   chunk->v1.instrumentation_api_version = 0;
+   chunk->v1.instrumentation_api_version = 5;
    chunk->v1.compute_unit_index = compute_unit_index;
 }
 
@@ -846,6 +857,8 @@ enum elf_gfxip_level
    EF_AMDGPU_MACH_AMDGCN_GFX1010 = 0x033,
    EF_AMDGPU_MACH_AMDGCN_GFX1030 = 0x036,
    EF_AMDGPU_MACH_AMDGCN_GFX1100 = 0x041,
+   EF_AMDGPU_MACH_AMDGCN_GFX1150 = 0x043,
+   EF_AMDGPU_MACH_AMDGCN_GFX1200 = 0x04e,
 };
 
 static enum elf_gfxip_level ac_gfx_level_to_elf_gfxip_level(enum amd_gfx_level gfx_level)
@@ -860,10 +873,13 @@ static enum elf_gfxip_level ac_gfx_level_to_elf_gfxip_level(enum amd_gfx_level g
    case GFX10_3:
       return EF_AMDGPU_MACH_AMDGCN_GFX1030;
    case GFX11:
-   case GFX11_5:
       return EF_AMDGPU_MACH_AMDGCN_GFX1100;
+   case GFX11_5:
+      return EF_AMDGPU_MACH_AMDGCN_GFX1150;
+   case GFX12:
+      return EF_AMDGPU_MACH_AMDGCN_GFX1200;
    default:
-      unreachable("Invalid gfx level");
+      UNREACHABLE("Invalid gfx level");
    }
 }
 
@@ -927,7 +943,7 @@ static void ac_sqtt_dump_spm(const struct ac_spm_trace *spm_trace,
    spm_data_ptr += 32;
 
    /* SPM timestamps. */
-   uint32_t sample_size_in_qwords = sample_size_in_bytes / sizeof(uint64_t);
+   uint64_t sample_size_in_qwords = sample_size_in_bytes / sizeof(uint64_t);
    uint64_t *timestamp_ptr = (uint64_t *)spm_data_ptr;
 
    for (uint32_t s = 0; s < num_samples; s++) {
@@ -982,10 +998,201 @@ static void ac_sqtt_dump_spm(const struct ac_spm_trace *spm_trace,
    fseek(output, file_offset, SEEK_SET);
 }
 
+/**
+ * SQTT Derived SPM DB info.
+ */
+struct sqtt_derived_spm_group_info {
+   uint32_t size_in_bytes;
+   uint32_t offset;
+   uint32_t group_name_length;
+   uint32_t group_description_length;
+   uint32_t num_counters;
+};
+
+struct sqtt_derived_spm_counter_info {
+   uint32_t size_in_bytes;
+   uint32_t offset;
+   uint32_t counter_name_length;
+   uint32_t counter_description_length;
+   uint32_t num_components;
+   uint8_t  usage_type;
+};
+
+struct sqtt_derived_spm_component_info {
+   uint32_t size_in_bytes;
+   uint32_t offset;
+   uint32_t component_name_length;
+   uint32_t component_description_length;
+   uint32_t usage_type;
+};
+
+struct sqtt_file_chunk_derived_spm_db {
+   struct sqtt_file_chunk_header header;
+   uint32_t offset;
+   uint32_t flags;
+   uint32_t num_timestamps;
+   uint32_t num_groups;
+   uint32_t num_counters;
+   uint32_t num_components;
+   uint32_t sampling_interval;
+};
+
+static_assert(sizeof(struct sqtt_file_chunk_derived_spm_db) == 44,
+              "sqtt_file_chunk_derived_spm_db doesn't match RGP spec");
+
+static void ac_sqtt_fill_derived_spm_db(const struct ac_spm_derived_trace *spm_derived_trace,
+                                        struct sqtt_file_chunk_derived_spm_db *chunk,
+                                        size_t file_offset,
+                                        uint32_t chunk_size)
+{
+   chunk->header.chunk_id.type = SQTT_FILE_CHUNK_TYPE_DERIVED_SPM_DB;
+   chunk->header.chunk_id.index = 0;
+   chunk->header.major_version = 0;
+   chunk->header.minor_version = 0;
+   chunk->header.size_in_bytes = chunk_size;
+
+   chunk->offset = sizeof(*chunk);
+   chunk->flags = 0;
+   chunk->num_timestamps = spm_derived_trace->num_timestamps;
+   chunk->num_groups = spm_derived_trace->num_groups;
+   chunk->num_counters = spm_derived_trace->num_counters;
+   chunk->num_components = spm_derived_trace->num_components;
+   chunk->sampling_interval = spm_derived_trace->sample_interval;
+}
+
+static void ac_sqtt_dump_derived_spm(const struct ac_spm_derived_trace *spm_derived_trace,
+                                     size_t file_offset,
+                                     FILE *output)
+{
+   struct sqtt_file_chunk_derived_spm_db derived_spm_db;
+   size_t file_derived_spm_db_offset = file_offset;
+
+   fseek(output, sizeof(struct sqtt_file_chunk_derived_spm_db), SEEK_CUR);
+   file_offset += sizeof(struct sqtt_file_chunk_derived_spm_db);
+
+   /* Dump timestamps. */
+   for (uint32_t i = 0; i < spm_derived_trace->num_timestamps; i++) {
+      uint64_t timestamp = spm_derived_trace->timestamps[i];
+
+      file_offset += sizeof(timestamp);
+      fwrite(&timestamp, sizeof(timestamp), 1, output);
+   }
+
+   /* Dump SPM groups. */
+   for (uint32_t i = 0; i < spm_derived_trace->num_groups; i++) {
+      const struct ac_spm_derived_group *group = &spm_derived_trace->groups[i];
+      const struct ac_spm_derived_group_descr *group_descr = group->descr;
+      struct sqtt_derived_spm_group_info group_info = {0};
+
+      const uint32_t num_counters = group_descr->num_counters;
+      const uint32_t name_length = strlen(group_descr->name);
+
+      group_info.size_in_bytes = sizeof(group_info) + name_length +
+                                 num_counters * sizeof(uint32_t);
+      group_info.offset = sizeof(group_info);
+      group_info.group_name_length = name_length;
+      group_info.num_counters = num_counters;
+
+      file_offset += sizeof(group_info) + group_info.group_name_length;
+      fwrite(&group_info, sizeof(group_info), 1, output);
+      fwrite(group_descr->name, group_info.group_name_length, 1, output);
+
+      for (uint32_t j = 0; j < group_descr->num_counters; j++) {
+         uint32_t counter_id = group->counter_ids[j];
+
+         file_offset += sizeof(uint32_t);
+         fwrite(&counter_id, sizeof(uint32_t), 1, output);
+      }
+   }
+
+   /* Dump SPM counters. */
+   for (uint32_t i = 0; i < spm_derived_trace->num_counters; i++) {
+      const struct ac_spm_derived_counter *counter = &spm_derived_trace->counters[i];
+      const struct ac_spm_derived_counter_descr *counter_descr = counter->descr;
+      struct sqtt_derived_spm_counter_info counter_info = {0};
+
+      const uint32_t num_components = counter_descr->num_components;
+      const uint32_t name_length = strlen(counter_descr->name);
+      const uint32_t description_length = strlen(counter_descr->desc);
+
+      counter_info.size_in_bytes = sizeof(counter_info) + name_length +
+                                   description_length + num_components * sizeof(uint32_t);
+      counter_info.offset = sizeof(counter_info);
+      counter_info.counter_name_length = name_length;
+      counter_info.counter_description_length = description_length;
+      counter_info.num_components = num_components;
+      counter_info.usage_type = counter_descr->usage;
+
+      file_offset += sizeof(counter_info) + counter_info.counter_name_length +
+                     counter_info.counter_description_length;
+      fwrite(&counter_info, sizeof(counter_info), 1, output);
+      fwrite(counter_descr->name, counter_info.counter_name_length, 1, output);
+      fwrite(counter_descr->desc, counter_info.counter_description_length, 1, output);
+
+      for (uint32_t j = 0; j < counter_descr->num_components; j++) {
+         uint32_t component_id = counter->component_ids[j];
+
+         file_offset += sizeof(uint32_t);
+         fwrite(&component_id, sizeof(uint32_t), 1, output);
+      }
+   }
+
+   /* Dump SPM components. */
+   for (uint32_t i = 0; i < spm_derived_trace->num_components; i++) {
+      const struct ac_spm_derived_component *component = &spm_derived_trace->components[i];
+      const struct ac_spm_derived_component_descr *component_descr = component->descr;
+      struct sqtt_derived_spm_component_info component_info = {0};
+
+      const uint32_t name_length = strlen(component_descr->name);
+
+      component_info.size_in_bytes = sizeof(component_info) + name_length;
+      component_info.offset = sizeof(component_info);
+      component_info.component_name_length = name_length;
+      component_info.usage_type = component_descr->usage;
+
+      file_offset += sizeof(component_info) + component_info.component_name_length +
+                     component_info.component_description_length;
+      fwrite(&component_info, sizeof(component_info), 1, output);
+      fwrite(component_descr->name, component_info.component_name_length, 1, output);
+   }
+
+   /* Dump counter values. */
+   for (uint32_t i = 0; i < spm_derived_trace->num_counters; i++) {
+      const struct ac_spm_derived_counter *counter = &spm_derived_trace->counters[i];
+
+      assert(util_dynarray_num_elements(&counter->values, double) == spm_derived_trace->num_timestamps);
+      util_dynarray_foreach(&counter->values, double, value) {
+         file_offset += sizeof(double);
+         fwrite(value, sizeof(double), 1, output);
+      }
+   }
+
+   /* Dump component values. */
+   for (uint32_t i = 0; i < spm_derived_trace->num_components; i++) {
+      const struct ac_spm_derived_component *component = &spm_derived_trace->components[i];
+
+      assert(util_dynarray_num_elements(&component->values, double) == spm_derived_trace->num_timestamps);
+      util_dynarray_foreach(&component->values, double, value) {
+         file_offset += sizeof(double);
+         fwrite(value, sizeof(double), 1, output);
+      }
+   }
+
+   /* SQTT Derived SPM chunk. */
+   ac_sqtt_fill_derived_spm_db(spm_derived_trace, &derived_spm_db,
+                               file_derived_spm_db_offset,
+                               file_offset - file_derived_spm_db_offset);
+   fseek(output, file_derived_spm_db_offset, SEEK_SET);
+   fwrite(&derived_spm_db, sizeof(struct sqtt_file_chunk_derived_spm_db), 1, output);
+   fseek(output, file_offset, SEEK_SET);
+}
+
 #if defined(USE_LIBELF)
 static void
 ac_sqtt_dump_data(const struct radeon_info *rad_info, struct ac_sqtt_trace *sqtt_trace,
-                  const struct ac_spm_trace *spm_trace, FILE *output)
+                  const struct ac_spm_trace *spm_trace,
+                  const struct ac_spm_derived_trace *spm_derived_trace,
+                  FILE *output)
 {
    struct sqtt_file_chunk_asic_info asic_info = {0};
    struct sqtt_file_chunk_cpu_info cpu_info = {0};
@@ -1010,7 +1217,8 @@ ac_sqtt_dump_data(const struct radeon_info *rad_info, struct ac_sqtt_trace *sqtt
    fwrite(&cpu_info, sizeof(cpu_info), 1, output);
 
    /* SQTT asic chunk. */
-   ac_sqtt_fill_asic_info(rad_info, &asic_info);
+   ac_sqtt_fill_asic_info(rad_info, sqtt_trace->trace_shader_core_clock,
+                          sqtt_trace->trace_memory_clock, &asic_info);
    file_offset += sizeof(asic_info);
    fwrite(&asic_info, sizeof(asic_info), 1, output);
 
@@ -1036,7 +1244,7 @@ ac_sqtt_dump_data(const struct radeon_info *rad_info, struct ac_sqtt_trace *sqtt
                                       sizeof(struct sqtt_code_object_database_record),
                                       record, &elf_size_calc, flags);
          /* Align to 4 bytes per the RGP file spec. */
-         code_object_record.size = ALIGN(elf_size_calc, 4);
+         code_object_record.size = align(elf_size_calc, 4);
          fseek(output, file_offset, SEEK_SET);
          fwrite(&code_object_record, sizeof(struct sqtt_code_object_database_record),
                 1, output);
@@ -1183,17 +1391,30 @@ ac_sqtt_dump_data(const struct radeon_info *rad_info, struct ac_sqtt_trace *sqtt
       }
    }
 
-   if (spm_trace) {
+   if (spm_derived_trace) {
+      ac_sqtt_dump_derived_spm(spm_derived_trace, file_offset, output);
+   } else if (spm_trace) {
       ac_sqtt_dump_spm(spm_trace, file_offset, output);
    }
 }
 #endif
+
+static bool
+ac_use_derived_spm_trace(const struct radeon_info *info,
+                         const struct ac_spm_trace *spm_trace)
+{
+   if (!spm_trace)
+      return false;
+
+   return info->gfx_level >= GFX10;
+}
 
 int
 ac_dump_rgp_capture(const struct radeon_info *info, struct ac_sqtt_trace *sqtt_trace,
                     const struct ac_spm_trace *spm_trace)
 {
 #if !defined(USE_LIBELF)
+   fprintf(stderr, "RGP capture can't be saved: libelf was not enabled during build\n");
    return -1;
 #else
    char filename[2048];
@@ -1212,7 +1433,13 @@ ac_dump_rgp_capture(const struct radeon_info *info, struct ac_sqtt_trace *sqtt_t
    if (!f)
       return -1;
 
-   ac_sqtt_dump_data(info, sqtt_trace, spm_trace, f);
+   struct ac_spm_derived_trace *spm_derived_trace =
+      ac_use_derived_spm_trace(info, spm_trace) ? ac_spm_get_derived_trace(info, spm_trace) : NULL;
+
+   ac_sqtt_dump_data(info, sqtt_trace, spm_trace, spm_derived_trace, f);
+
+   if (spm_derived_trace)
+      ac_spm_destroy_derived_trace(spm_derived_trace);
 
    fprintf(stderr, "RGP capture saved to '%s'\n", filename);
 

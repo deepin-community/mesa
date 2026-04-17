@@ -1,8 +1,14 @@
-#include <CL/cl_icd.h>
-#include <GL/gl.h>
-#include <EGL/egl.h>
+/*
+ * Copyright 2020 Red Hat.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+#include "CL/cl_icd.h"
+#include "GL/gl.h"
+#include "EGL/egl.h"
 #ifdef HAVE_X11_PLATFORM
-#include <GL/glx.h>
+#include "GL/glx.h"
 #endif
 #include "GL/mesa_glinterop.h"
 

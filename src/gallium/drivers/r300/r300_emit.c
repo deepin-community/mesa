@@ -27,7 +27,7 @@ void r300_emit_blend_state(struct r300_context* r300,
     struct pipe_surface *cb;
     CS_LOCALS(r300);
 
-    cb = fb->nr_cbufs ? r300_get_nonnull_cb(fb, 0) : NULL;
+    cb = fb->nr_cbufs ? r300_get_nonnull_cb(r300, fb, 0) : NULL;
 
     if (cb) {
         if (cb->format == PIPE_FORMAT_R16G16B16A16_FLOAT) {
@@ -73,7 +73,7 @@ void r300_emit_dsa_state(struct r300_context* r300, unsigned size, void* state)
     /* Choose the alpha ref value between 8-bit (FG_ALPHA_FUNC.AM_VAL) and
      * 16-bit (FG_ALPHA_VALUE). */
     if (is_r500 && (alpha_func & R300_FG_ALPHA_FUNC_ENABLE)) {
-        struct pipe_surface *cb = fb->nr_cbufs ? r300_get_nonnull_cb(fb, 0) : NULL;
+        struct pipe_surface *cb = fb->nr_cbufs ? r300_get_nonnull_cb(r300, fb, 0) : NULL;
 
         if (cb &&
             (cb->format == PIPE_FORMAT_R16G16B16A16_FLOAT ||
@@ -93,7 +93,7 @@ void r300_emit_dsa_state(struct r300_context* r300, unsigned size, void* state)
 
     BEGIN_CS(size);
     OUT_CS_REG(R300_FG_ALPHA_FUNC, alpha_func);
-    OUT_CS_TABLE(fb->zsbuf ? &dsa->cb_begin : dsa->cb_zb_no_readwrite, size-2);
+    OUT_CS_TABLE(fb->zsbuf.texture ? &dsa->cb_begin : dsa->cb_zb_no_readwrite, size-2);
     END_CS;
 }
 
@@ -336,7 +336,7 @@ void r300_emit_gpu_flush(struct r300_context *r300, unsigned size, void *state)
     CS_LOCALS(r300);
 
     if (r300->cbzb_clear) {
-        struct r300_surface *surf = r300_surface(fb->cbufs[0]);
+        struct r300_surface *surf = r300_surface(r300->fb_cbufs[0]);
 
         height = surf->cbzb_height;
         width = surf->cbzb_width;
@@ -416,7 +416,7 @@ void r300_emit_fb_state(struct r300_context* r300, unsigned size, void* state)
 
     /* Set up colorbuffers. */
     for (i = 0; i < fb->nr_cbufs; i++) {
-        surf = r300_surface(r300_get_nonnull_cb(fb, i));
+        surf = r300_surface(r300_get_nonnull_cb(r300, fb, i));
 
         OUT_CS_REG(R300_RB3D_COLOROFFSET0 + (4 * i), surf->offset);
         OUT_CS_RELOC(surf);
@@ -438,7 +438,7 @@ void r300_emit_fb_state(struct r300_context* r300, unsigned size, void* state)
 
     /* Set up the ZB part of the CBZB clear. */
     if (r300->cbzb_clear) {
-        surf = r300_surface(fb->cbufs[0]);
+        surf = r300_surface(r300->fb_cbufs[0]);
 
         OUT_CS_REG(R300_ZB_FORMAT, surf->cbzb_format);
 
@@ -453,8 +453,8 @@ void r300_emit_fb_state(struct r300_context* r300, unsigned size, void* state)
             surf->cbzb_pitch);
     }
     /* Set up a zbuffer. */
-    else if (fb->zsbuf) {
-        surf = r300_surface(fb->zsbuf);
+    else if (fb->zsbuf.texture) {
+        surf = r300_surface(r300->fb_zsbuf);
 
         OUT_CS_REG(R300_ZB_FORMAT, surf->format);
 
@@ -597,7 +597,7 @@ void r300_emit_fb_state_pipelined(struct r300_context *r300,
      * (must be written after unpipelined regs) */
     OUT_CS_REG_SEQ(R300_US_OUT_FMT_0, 4);
     for (i = 0; i < num_cbufs; i++) {
-        OUT_CS(r300_surface(r300_get_nonnull_cb(fb, i))->format);
+        OUT_CS(r300_surface(r300_get_nonnull_cb(r300, fb, i))->format);
     }
     for (; i < 1; i++) {
         OUT_CS(R300_US_OUT_FMT_C4_8 |
@@ -859,24 +859,50 @@ void r300_emit_sample_mask(struct r300_context *r300,
     END_CS;
 }
 
+void r300_emit_guardband_state(struct r300_context *r300,
+                               unsigned size, void *state)
+{
+    struct r300_guardband_state *guard = (struct r300_guardband_state *)state;
+    CS_LOCALS(r300);
+
+    if (!guard)
+        return;
+
+    BEGIN_CS(size);
+    OUT_CS_REG_SEQ(R300_VAP_GB_VERT_CLIP_ADJ, 4);
+    OUT_CS_32F(guard->vert_clip);
+    OUT_CS_32F(guard->vert_disc);
+    OUT_CS_32F(guard->horz_clip);
+    OUT_CS_32F(guard->horz_disc);
+    END_CS;
+}
+
 void r300_emit_scissor_state(struct r300_context* r300,
                              unsigned size, void* state)
 {
     struct pipe_scissor_state* scissor = (struct pipe_scissor_state*)state;
+    struct pipe_scissor_state final = r300->viewport_scissor;
     CS_LOCALS(r300);
+
+    if (r300->scissor_enabled && scissor) {
+        final.minx = MAX2(final.minx, scissor->minx);
+        final.miny = MAX2(final.miny, scissor->miny);
+        final.maxx = MIN2(final.maxx, scissor->maxx);
+        final.maxy = MIN2(final.maxy, scissor->maxy);
+    }
 
     BEGIN_CS(size);
     OUT_CS_REG_SEQ(R300_SC_CLIPRECT_TL_0, 2);
     if (r300->screen->caps.is_r500) {
-        OUT_CS((scissor->minx << R300_CLIPRECT_X_SHIFT) |
-               (scissor->miny << R300_CLIPRECT_Y_SHIFT));
-        OUT_CS(((scissor->maxx - 1) << R300_CLIPRECT_X_SHIFT) |
-               ((scissor->maxy - 1) << R300_CLIPRECT_Y_SHIFT));
+        OUT_CS((final.minx << R300_CLIPRECT_X_SHIFT) |
+               (final.miny << R300_CLIPRECT_Y_SHIFT));
+        OUT_CS(((final.maxx - 1) << R300_CLIPRECT_X_SHIFT) |
+               ((final.maxy - 1) << R300_CLIPRECT_Y_SHIFT));
     } else {
-        OUT_CS(((scissor->minx + 1440) << R300_CLIPRECT_X_SHIFT) |
-               ((scissor->miny + 1440) << R300_CLIPRECT_Y_SHIFT));
-        OUT_CS(((scissor->maxx + 1440-1) << R300_CLIPRECT_X_SHIFT) |
-               ((scissor->maxy + 1440-1) << R300_CLIPRECT_Y_SHIFT));
+        OUT_CS(((final.minx + 1440) << R300_CLIPRECT_X_SHIFT) |
+               ((final.miny + 1440) << R300_CLIPRECT_Y_SHIFT));
+        OUT_CS(((final.maxx + 1440-1) << R300_CLIPRECT_X_SHIFT) |
+               ((final.maxy + 1440-1) << R300_CLIPRECT_Y_SHIFT));
     }
     END_CS;
 }
@@ -1218,17 +1244,26 @@ void r300_emit_hiz_clear(struct r300_context *r300, unsigned size, void *state)
 {
     struct pipe_framebuffer_state *fb =
         (struct pipe_framebuffer_state*)r300->fb_state.state;
-    struct r300_resource* tex;
+    struct r300_resource *tex = r300_resource(fb->zsbuf.texture);
+    unsigned remaining = tex->tex.hiz_dwords[fb->zsbuf.level];
+    unsigned start = 0;
     CS_LOCALS(r300);
 
-    tex = r300_resource(fb->zsbuf->texture);
+    /* 3D_CLEAR_HIZ COUNT is 14-bit (max 0x3fff), so large surfaces must be
+     * split into multiple packets. */
+    while (remaining) {
+        unsigned count = MIN2(remaining, R300_CLEAR_HIZ_COUNT_MAX);
 
-    BEGIN_CS(size);
-    OUT_CS_PKT3(R300_PACKET3_3D_CLEAR_HIZ, 2);
-    OUT_CS(0);
-    OUT_CS(tex->tex.hiz_dwords[fb->zsbuf->u.tex.level]);
-    OUT_CS(r300->hiz_clear_value);
-    END_CS;
+        BEGIN_CS(4);
+        OUT_CS_PKT3(R300_PACKET3_3D_CLEAR_HIZ, 2);
+        OUT_CS(start);
+        OUT_CS(count);
+        OUT_CS(r300->hiz_clear_value);
+        END_CS;
+
+        start += count;
+        remaining -= count;
+    }
 
     /* Mark the current zbuffer's hiz ram as in use. */
     r300->hiz_in_use = true;
@@ -1243,12 +1278,12 @@ void r300_emit_zmask_clear(struct r300_context *r300, unsigned size, void *state
     struct r300_resource *tex;
     CS_LOCALS(r300);
 
-    tex = r300_resource(fb->zsbuf->texture);
+    tex = r300_resource(fb->zsbuf.texture);
 
     BEGIN_CS(size);
     OUT_CS_PKT3(R300_PACKET3_3D_CLEAR_ZMASK, 2);
     OUT_CS(0);
-    OUT_CS(tex->tex.zmask_dwords[fb->zsbuf->u.tex.level]);
+    OUT_CS(tex->tex.zmask_dwords[fb->zsbuf.level]);
     OUT_CS(0);
     END_CS;
 
@@ -1264,7 +1299,7 @@ void r300_emit_cmask_clear(struct r300_context *r300, unsigned size, void *state
     struct r300_resource *tex;
     CS_LOCALS(r300);
 
-    tex = r300_resource(fb->cbufs[0]->texture);
+    tex = r300_resource(fb->cbufs[0].texture);
 
     BEGIN_CS(size);
     OUT_CS_PKT3(R300_PACKET3_3D_CLEAR_CMASK, 2);
@@ -1315,27 +1350,27 @@ validate:
     if (r300->fb_state.dirty) {
         /* Color buffers... */
         for (i = 0; i < fb->nr_cbufs; i++) {
-            if (!fb->cbufs[i])
+            if (!fb->cbufs[i].texture)
                 continue;
-            tex = r300_resource(fb->cbufs[i]->texture);
+            tex = r300_resource(fb->cbufs[i].texture);
             assert(tex && tex->buf && "cbuf is marked, but NULL!");
             r300->rws->cs_add_buffer(&r300->cs, tex->buf,
                                     RADEON_USAGE_READWRITE | RADEON_USAGE_SYNCHRONIZED |
                                     (tex->b.nr_samples > 1 ?
                                         RADEON_PRIO_COLOR_BUFFER_MSAA :
                                         RADEON_PRIO_COLOR_BUFFER),
-                                    r300_surface(fb->cbufs[i])->domain);
+                                    r300_surface(r300->fb_cbufs[i])->domain);
         }
         /* ...depth buffer... */
-        if (fb->zsbuf) {
-            tex = r300_resource(fb->zsbuf->texture);
+        if (fb->zsbuf.texture) {
+            tex = r300_resource(fb->zsbuf.texture);
             assert(tex && tex->buf && "zsbuf is marked, but NULL!");
             r300->rws->cs_add_buffer(&r300->cs, tex->buf,
                                     RADEON_USAGE_READWRITE | RADEON_USAGE_SYNCHRONIZED |
                                     (tex->b.nr_samples > 1 ?
                                         RADEON_PRIO_DEPTH_BUFFER_MSAA :
                                         RADEON_PRIO_DEPTH_BUFFER),
-                                    r300_surface(fb->zsbuf)->domain);
+                                    r300_surface(r300->fb_zsbuf)->domain);
         }
     }
     /* The AA resolve buffer. */

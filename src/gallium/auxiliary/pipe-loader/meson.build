@@ -39,6 +39,12 @@ endif
 if with_gallium_asahi
   renderonly_drivers_c_args += '-DGALLIUM_ASAHI'
 endif
+if with_gallium_rocket
+  renderonly_drivers_c_args += '-DGALLIUM_ROCKET'
+endif
+if with_gallium_ethosu
+  renderonly_drivers_c_args += '-DGALLIUM_ETHOSU'
+endif
 
 libpipe_loader_static = static_library(
   'pipe_loader_static',
@@ -47,26 +53,7 @@ libpipe_loader_static = static_library(
     inc_util, inc_loader, inc_gallium, inc_include, inc_src, inc_gallium_aux,
     inc_gallium_winsys, inc_gallium_drivers,
   ],
-  c_args : [libpipe_loader_defines, '-DGALLIUM_STATIC_TARGETS=1', renderonly_drivers_c_args],
-  gnu_symbol_visibility : 'hidden',
-  link_with : [libpipe_loader_links],
-  dependencies : [dep_libdrm, idep_xmlconfig, idep_mesautil],
-  build_by_default : false,
-)
-
-libpipe_loader_dynamic = static_library(
-  'pipe_loader_dynamic',
-  files_pipe_loader,
-  include_directories : [
-    inc_util, inc_loader, inc_gallium, inc_include, inc_src, inc_gallium_aux,
-    inc_gallium_winsys, inc_gallium_drivers,
-  ],
-  c_args : [
-    libpipe_loader_defines,
-    '-DPIPE_SEARCH_DIR="@0@"'.format(
-      join_paths(get_option('prefix'), get_option('libdir'), 'gallium-pipe')
-    )
-  ],
+  c_args : [libpipe_loader_defines, renderonly_drivers_c_args],
   gnu_symbol_visibility : 'hidden',
   link_with : [libpipe_loader_links],
   dependencies : [dep_libdrm, idep_xmlconfig, idep_mesautil],

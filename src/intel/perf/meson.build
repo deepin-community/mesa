@@ -12,6 +12,7 @@ intel_hw_metrics = [
   'arlgt1', 'arlgt2',
   'lnl',
   'bmg',
+  'ptl',
 ]
 
 intel_hw_metrics_xml_files = []
@@ -52,6 +53,12 @@ libintel_perf = static_library(
   cpp_args : [sse2_arg],
   gnu_symbol_visibility : 'hidden',
   dependencies : [idep_intel_dev],
+)
+
+idep_intel_perf = declare_dependency(
+  link_with : libintel_perf,
+  dependencies : [idep_intel_dev, idep_libintel_common],
+  sources : intel_perf_sources
 )
 
 if with_intel_tools

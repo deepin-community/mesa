@@ -107,6 +107,9 @@ void ac_dump_reg(FILE *file, enum amd_gfx_level gfx_level, enum radeon_family fa
 void ac_parse_ib_chunk(struct ac_ib_parser *ib);
 void ac_parse_ib(struct ac_ib_parser *ib, const char *name);
 
+void ac_dump_texture_descriptor(FILE *output, enum amd_gfx_level gfx_level,
+                                enum radeon_family family, uint32_t desc[8]);
+
 #ifdef __cplusplus
 }
 #endif

@@ -55,11 +55,12 @@
 #include "vk_deferred_operation.h"
 #include "vk_drm_syncobj.h"
 #include "common/i915/intel_defines.h"
+#include "common/i915/intel_gem.h"
 #include "common/intel_debug_identifier.h"
 #include "common/intel_uuid.h"
 #include "perf/intel_perf.h"
 
-#include "genxml/gen7_pack.h"
+#include "genxml/gen70_pack.h"
 #include "genxml/genX_bits.h"
 
 static const driOptionDescription anv_dri_options[] = {
@@ -67,7 +68,6 @@ static const driOptionDescription anv_dri_options[] = {
       DRI_CONF_ADAPTIVE_SYNC(true)
       DRI_CONF_VK_X11_OVERRIDE_MIN_IMAGE_COUNT(0)
       DRI_CONF_VK_X11_STRICT_IMAGE_COUNT(false)
-      DRI_CONF_VK_KHR_PRESENT_WAIT(false)
       DRI_CONF_VK_XWAYLAND_WAIT_READY(true)
       DRI_CONF_ANV_ASSUME_FULL_SUBGROUPS(0)
       DRI_CONF_ANV_SAMPLE_MASK_OUT_OPENGL_BEHAVIOUR(false)
@@ -230,6 +230,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_maintenance2                      = true,
       .KHR_maintenance3                      = true,
       .KHR_maintenance4                      = true,
+      .KHR_maintenance5                      = true,
       .KHR_multiview                         = true,
       .KHR_performance_query =
          !anv_use_relocations(device) && device->perf &&
@@ -237,19 +238,13 @@ get_device_extensions(const struct anv_physical_device *device,
           INTEL_DEBUG(DEBUG_NO_OACONFIG)) &&
          device->use_call_secondary,
       .KHR_pipeline_executable_properties    = true,
-      /* Hide these behind dri configs for now since we cannot implement it reliably on
-       * all surfaces yet. There is no surface capability query for present wait/id,
-       * but the feature is useful enough to hide behind an opt-in mechanism for now.
-       * If the instance only enables surface extensions that unconditionally support present wait,
-       * we can also expose the extension that way. */
-      .KHR_present_id =
-         driQueryOptionb(&device->instance->dri_options, "vk_khr_present_wait") ||
-         wsi_common_vk_instance_supports_present_wait(&device->instance->vk),
-      .KHR_present_wait =
-         driQueryOptionb(&device->instance->dri_options, "vk_khr_present_wait") ||
-         wsi_common_vk_instance_supports_present_wait(&device->instance->vk),
+#ifdef ANV_USE_WSI_PLATFORM
+      .KHR_present_id                        = true,
+      .KHR_present_wait                      = true,
+#endif
       .KHR_push_descriptor                   = true,
       .KHR_relaxed_block_layout              = true,
+      .KHR_robustness2                       = true,
       .KHR_sampler_mirror_clamp_to_edge      = true,
       .KHR_sampler_ycbcr_conversion          = true,
       .KHR_separate_depth_stencil_layouts    = true,
@@ -576,7 +571,7 @@ get_features(const struct anv_physical_device *pdevice,
       .provokingVertexLast = true,
       .transformFeedbackPreservesProvokingVertex = true,
 
-      /* VK_EXT_robustness2 */
+      /* VK_KHR_robustness2 */
       .robustBufferAccess2 = true,
       .robustImageAccess2 = true,
       .nullDescriptor = true,
@@ -656,17 +651,22 @@ get_features(const struct anv_physical_device *pdevice,
       /* VK_EXT_depth_clip_control */
       .depthClipControl = true,
 
+#ifdef ANV_USE_WSI_PLATFORM
       /* VK_KHR_present_id */
-      .presentId = pdevice->vk.supported_extensions.KHR_present_id,
+      .presentId = true,
 
       /* VK_KHR_present_wait */
-      .presentWait = pdevice->vk.supported_extensions.KHR_present_wait,
+      .presentWait = true,
+#endif
 
       /* VK_KHR_shader_expect_assume */
       .shaderExpectAssume = true,
 
       /* VK_KHR_shader_relaxed_extended_instruction */
       .shaderRelaxedExtendedInstruction = true,
+
+      /* VK_KHR_maintenance5 */
+      .maintenance5 = true,
    };
 
    /* We can't do image stores in vec4 shaders */
@@ -949,6 +949,10 @@ get_properties(const struct anv_physical_device *pdevice,
 {
    const struct intel_device_info *devinfo = &pdevice->info;
 
+   uint64_t page_size;
+   if (!os_get_page_size(&page_size))
+      page_size = 4096;         /* fallback */
+
    const uint32_t max_ssbos = pdevice->has_a64_buffer_access ? UINT16_MAX : 64;
    const uint32_t max_textures = 128;
    const uint32_t max_samplers =
@@ -971,7 +975,8 @@ get_properties(const struct anv_physical_device *pdevice,
 #if DETECT_OS_ANDROID
       .apiVersion = ANV_API_VERSION,
 #else
-      .apiVersion = pdevice->use_softpin ? ANV_API_VERSION_1_3 : ANV_API_VERSION_1_2,
+      .apiVersion = (pdevice->use_softpin || pdevice->instance->report_vk_1_3) ?
+         ANV_API_VERSION_1_3 : ANV_API_VERSION_1_2,
 #endif /* DETECT_OS_ANDROID */
       .driverVersion = vk_get_driver_version(),
       .vendorID = 0x8086,
@@ -1063,7 +1068,7 @@ get_properties(const struct anv_physical_device *pdevice,
       .maxViewportDimensions                    = { (1 << 14), (1 << 14) },
       .viewportBoundsRange                      = { INT16_MIN, INT16_MAX },
       .viewportSubPixelBits                     = 13, /* We take a float? */
-      .minMemoryMapAlignment                    = 4096, /* A page */
+      .minMemoryMapAlignment                    = page_size,
       /* The dataport requires texel alignment so we need to assume a worst
        * case of R32G32B32A32 which is 16 bytes.
        */
@@ -1155,7 +1160,7 @@ get_properties(const struct anv_physical_device *pdevice,
    /* VK_EXT_external_memory_host */
    {
       /* Userptr needs page aligned memory. */
-      props->minImportedHostPointerAlignment = 4096;
+      props->minImportedHostPointerAlignment = page_size;
    }
 
    /* VK_EXT_line_rasterization */
@@ -1203,7 +1208,7 @@ get_properties(const struct anv_physical_device *pdevice,
       props->transformFeedbackPreservesTriangleFanProvokingVertex = false;
    }
 
-   /* VK_EXT_robustness2 */
+   /* VK_KHR_robustness2 */
    {
       props->robustStorageBufferAccessSizeAlignment =
          ANV_SSBO_BOUNDS_CHECK_ALIGNMENT;
@@ -1214,7 +1219,7 @@ get_properties(const struct anv_physical_device *pdevice,
    /* VK_EXT_sample_locations */
    {
       props->sampleLocationSampleCounts =
-         isl_device_get_sample_counts(&pdevice->isl_dev);
+         ~VK_SAMPLE_COUNT_1_BIT & isl_device_get_sample_counts(&pdevice->isl_dev);
 
       /* See also anv_GetPhysicalDeviceMultisamplePropertiesEXT */
       props->maxSampleLocationGridSize.width = 1;
@@ -1258,6 +1263,15 @@ get_properties(const struct anv_physical_device *pdevice,
    }
 #endif /* DETECT_OS_ANDROID */
 
+   /* VK_KHR_maintenance5 */
+   {
+      props->earlyFragmentMultisampleCoverageAfterSampleCounting = false;
+      props->earlyFragmentSampleMaskTestBeforeSampleCounting = false;
+      props->depthStencilSwizzleOneSupport = true;
+      props->polygonModePointSize = true;
+      props->nonStrictSinglePixelWideLinesUseParallelogram = false;
+      props->nonStrictWideLinesUseParallelogram = false;
+   }
 }
 
 static uint64_t
@@ -1391,15 +1405,15 @@ anv_physical_device_init_uuids(struct anv_physical_device *device)
    }
 
    unsigned build_id_len = build_id_length(note);
-   if (build_id_len < 20) {
+   if (build_id_len < BUILD_ID_EXPECTED_HASH_LENGTH) {
       return vk_errorf(device, VK_ERROR_INITIALIZATION_FAILED,
                        "build-id too short.  It needs to be a SHA");
    }
 
-   memcpy(device->driver_build_sha1, build_id_data(note), 20);
+   copy_build_id_to_sha1(device->driver_build_sha1, note);
 
    struct mesa_sha1 sha1_ctx;
-   uint8_t sha1[20];
+   uint8_t sha1[SHA1_DIGEST_LENGTH];
    STATIC_ASSERT(VK_UUID_SIZE <= sizeof(sha1));
 
    /* The pipeline cache UUID is used for determining when a pipeline cache is
@@ -1433,7 +1447,7 @@ anv_physical_device_init_disk_cache(struct anv_physical_device *device)
                                device->info.pci_device_id);
    assert(len == sizeof(renderer) - 2);
 
-   char timestamp[41];
+   char timestamp[SHA1_DIGEST_STRING_LENGTH];
    _mesa_sha1_format(timestamp, device->driver_build_sha1);
 
    const uint64_t driver_flags =
@@ -1455,33 +1469,13 @@ anv_physical_device_free_disk_cache(struct anv_physical_device *device)
 #endif
 }
 
-/* The ANV_QUEUE_OVERRIDE environment variable is a comma separated list of
- * queue overrides.
- *
- * To override the number queues:
- *  * "gc" is for graphics queues with compute support
- *  * "g" is for graphics queues with no compute support
- *  * "c" is for compute queues with no graphics support
- *
- * For example, ANV_QUEUE_OVERRIDE=gc=2,c=1 would override the number of
- * advertised queues to be 2 queues with graphics+compute support, and 1 queue
- * with compute-only support.
- *
- * ANV_QUEUE_OVERRIDE=c=1 would override the number of advertised queues to
- * include 1 queue with compute-only support, but it will not change the
- * number of graphics+compute queues.
- *
- * ANV_QUEUE_OVERRIDE=gc=0,c=1 would override the number of advertised queues
- * to include 1 queue with compute-only support, and it would override the
- * number of graphics+compute queues to be 0.
- */
 static void
 anv_override_engine_counts(int *gc_count, int *g_count, int *c_count)
 {
    int gc_override = -1;
    int g_override = -1;
    int c_override = -1;
-   const char *env_ = os_get_option("ANV_QUEUE_OVERRIDE");
+   const char *env_ = os_get_option("HASVK_QUEUE_OVERRIDE");
 
    if (env_ == NULL)
       return;
@@ -1705,10 +1699,29 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
       goto fail_base;
    }
 
-   if (intel_gem_get_param(fd, I915_PARAM_HAS_EXEC_ASYNC, &val))
-      device->has_exec_async = val;
-   if (intel_gem_get_param(fd, I915_PARAM_HAS_EXEC_CAPTURE, &val))
-      device->has_exec_capture = val;
+   if (!intel_gem_get_param(fd, I915_PARAM_HAS_EXEC_ASYNC, &val) || !val) {
+      result = vk_errorf(device, VK_ERROR_INITIALIZATION_FAILED,
+                         "kernel missing exec async support");
+      goto fail_base;
+   }
+
+   if (!intel_gem_get_param(fd, I915_PARAM_HAS_EXEC_CAPTURE, &val) || !val) {
+      result = vk_errorf(device, VK_ERROR_INITIALIZATION_FAILED,
+                         "kernel missing exec capture support");
+      goto fail_base;
+   }
+
+   if (!intel_gem_get_param(fd, I915_PARAM_HAS_EXEC_TIMELINE_FENCES, &val) || !val) {
+      result = vk_errorf(device, VK_ERROR_INITIALIZATION_FAILED,
+                         "kernel missing exec timeline fence support");
+      goto fail_base;
+   }
+
+   if (!i915_gem_supports_dma_buf_sync_file(fd)) {
+      result = vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
+                         "kernel missing dma-buf sync file import/export");
+      goto fail_fd;
+   }
 
    /* Start with medium; sorted low to high */
    const int priorities[] = {
@@ -1739,38 +1752,22 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
    assert(device->supports_48bit_addresses == !device->use_relocations);
    device->use_softpin = !device->use_relocations;
 
-   if (intel_gem_get_param(fd, I915_PARAM_HAS_EXEC_TIMELINE_FENCES, &val))
-      device->has_exec_timeline = val;
-   if (debug_get_bool_option("ANV_QUEUE_THREAD_DISABLE", false))
-      device->has_exec_timeline = false;
-
-   unsigned st_idx = 0;
-
    device->sync_syncobj_type = vk_drm_syncobj_get_type(fd);
-   if (!device->has_exec_timeline)
-      device->sync_syncobj_type.features &= ~VK_SYNC_FEATURE_TIMELINE;
-   device->sync_types[st_idx++] = &device->sync_syncobj_type;
+   assert(device->sync_syncobj_type.features & VK_SYNC_FEATURE_CPU_WAIT);
+   assert(device->sync_syncobj_type.features & VK_SYNC_FEATURE_TIMELINE);
 
-   if (!(device->sync_syncobj_type.features & VK_SYNC_FEATURE_CPU_WAIT))
-      device->sync_types[st_idx++] = &anv_bo_sync_type;
-
-   if (!(device->sync_syncobj_type.features & VK_SYNC_FEATURE_TIMELINE)) {
-      device->sync_timeline_type = vk_sync_timeline_get_type(&anv_bo_sync_type);
-      device->sync_types[st_idx++] = &device->sync_timeline_type.sync;
-   }
-
-   device->sync_types[st_idx++] = NULL;
-   assert(st_idx <= ARRAY_SIZE(device->sync_types));
+   device->sync_types[0] = &device->sync_syncobj_type;
+   device->sync_types[1] = NULL;
    device->vk.supported_sync_types = device->sync_types;
 
    device->vk.pipeline_cache_import_ops = anv_cache_import_ops;
 
    device->always_use_bindless =
-      debug_get_bool_option("ANV_ALWAYS_BINDLESS", false);
+      debug_get_bool_option("HASVK_ALWAYS_BINDLESS", false);
 
    device->use_call_secondary =
       device->use_softpin &&
-      !debug_get_bool_option("ANV_DISABLE_SECONDARY_CMD_BUFFER_CALLS", false);
+      !debug_get_bool_option("HASVK_DISABLE_SECONDARY_CMD_BUFFER_CALLS", false);
 
    /* We first got the A64 messages on broadwell and we can only use them if
     * we can pass addresses directly into the shader which requires softpin.
@@ -2021,7 +2018,7 @@ vk_priority_to_gen(int priority)
    case VK_QUEUE_GLOBAL_PRIORITY_REALTIME_KHR:
       return INTEL_CONTEXT_REALTIME_PRIORITY;
    default:
-      unreachable("Invalid priority");
+      UNREACHABLE("Invalid priority");
    }
 }
 
@@ -2266,7 +2263,7 @@ anv_device_init_trivial_batch(struct anv_device *device)
 
 #ifdef SUPPORT_INTEL_INTEGRATED_GPUS
    if (device->physical->memory.need_flush)
-      intel_flush_range(batch.start, batch.next - batch.start);
+      util_flush_range(batch.start, batch.next - batch.start);
 #endif
 
    return VK_SUCCESS;
@@ -2331,6 +2328,20 @@ decode_get_bo(void *v_batch, bool ppgtt, uint64_t address)
 }
 
 static VkResult anv_device_check_status(struct vk_device *vk_device);
+
+static VkResult anv_device_get_timestamp(struct vk_device *vk_device, uint64_t *timestamp)
+{
+   struct anv_device *device = container_of(vk_device, struct anv_device, vk);
+
+   if (!intel_gem_read_render_timestamp(device->fd,
+                                        device->info->kmd_type,
+                                        timestamp)) {
+      return vk_device_set_lost(&device->vk,
+                                "Failed to read the TIMESTAMP register: %m");
+   }
+
+   return VK_SUCCESS;
+}
 
 static VkResult
 anv_device_setup_context(struct anv_device *device,
@@ -2487,7 +2498,8 @@ VkResult anv_CreateDevice(
 
    device->vk.command_buffer_ops = &anv_cmd_buffer_ops;
    device->vk.check_status = anv_device_check_status;
-   device->vk.create_sync_for_memory = anv_create_sync_for_memory;
+   device->vk.get_timestamp = anv_device_get_timestamp;
+   device->vk.copy_sync_payloads = vk_drm_syncobj_copy_payloads;
    vk_device_set_drm_fd(&device->vk, device->fd);
 
    uint32_t num_queues = 0;
@@ -2564,26 +2576,9 @@ VkResult anv_CreateDevice(
       goto fail_vmas;
    }
 
-   pthread_condattr_t condattr;
-   if (pthread_condattr_init(&condattr) != 0) {
-      result = vk_error(device, VK_ERROR_INITIALIZATION_FAILED);
-      goto fail_mutex;
-   }
-   if (pthread_condattr_setclock(&condattr, CLOCK_MONOTONIC) != 0) {
-      pthread_condattr_destroy(&condattr);
-      result = vk_error(device, VK_ERROR_INITIALIZATION_FAILED);
-      goto fail_mutex;
-   }
-   if (pthread_cond_init(&device->queue_submit, &condattr) != 0) {
-      pthread_condattr_destroy(&condattr);
-      result = vk_error(device, VK_ERROR_INITIALIZATION_FAILED);
-      goto fail_mutex;
-   }
-   pthread_condattr_destroy(&condattr);
-
    result = anv_bo_cache_init(&device->bo_cache, device);
    if (result != VK_SUCCESS)
-      goto fail_queue_cond;
+      goto fail_mutex;
 
    anv_bo_pool_init(&device->batch_bo_pool, device, "batch");
 
@@ -2745,8 +2740,6 @@ VkResult anv_CreateDevice(
  fail_batch_bo_pool:
    anv_bo_pool_finish(&device->batch_bo_pool);
    anv_bo_cache_finish(&device->bo_cache);
- fail_queue_cond:
-   pthread_cond_destroy(&device->queue_submit);
  fail_mutex:
    pthread_mutex_destroy(&device->mutex);
  fail_vmas:
@@ -2819,7 +2812,6 @@ void anv_DestroyDevice(
       util_vma_heap_finish(&device->vma_lo);
    }
 
-   pthread_cond_destroy(&device->queue_submit);
    pthread_mutex_destroy(&device->mutex);
 
    for (uint32_t i = 0; i < device->queue_count; i++)
@@ -3158,6 +3150,8 @@ VkResult anv_AllocateMemory(
    if (dedicated_info && dedicated_info->image != VK_NULL_HANDLE) {
       ANV_FROM_HANDLE(anv_image, image, dedicated_info->image);
 
+      mem->dedicated_image = image;
+
       /* Some legacy (non-modifiers) consumers need the tiling to be set on
        * the BO.  In this case, we have a dedicated allocation.
        */
@@ -3428,9 +3422,9 @@ VkResult anv_FlushMappedMemoryRanges(
          continue;
 
 #ifdef SUPPORT_INTEL_INTEGRATED_GPUS
-      intel_flush_range(mem->map + map_offset,
-                        MIN2(pMemoryRanges[i].size,
-                             mem->map_size - map_offset));
+      util_flush_range(mem->map + map_offset,
+                       MIN2(pMemoryRanges[i].size,
+                            mem->map_size - map_offset));
 #endif
    }
 
@@ -3457,7 +3451,7 @@ VkResult anv_InvalidateMappedMemoryRanges(
          continue;
 
 #ifdef SUPPORT_INTEL_INTEGRATED_GPUS
-      intel_invalidate_range(mem->map + map_offset,
+      util_flush_inval_range(mem->map + map_offset,
                              MIN2(pMemoryRanges[i].size,
                                   mem->map_size - map_offset));
 #endif
@@ -3798,31 +3792,6 @@ void anv_DestroySampler(
    vk_object_free(&device->vk, pAllocator, sampler);
 }
 
-static const VkTimeDomainEXT anv_time_domains[] = {
-   VK_TIME_DOMAIN_DEVICE_EXT,
-   VK_TIME_DOMAIN_CLOCK_MONOTONIC_EXT,
-#ifdef CLOCK_MONOTONIC_RAW
-   VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_EXT,
-#endif
-};
-
-VkResult anv_GetPhysicalDeviceCalibrateableTimeDomainsEXT(
-   VkPhysicalDevice                             physicalDevice,
-   uint32_t                                     *pTimeDomainCount,
-   VkTimeDomainEXT                              *pTimeDomains)
-{
-   int d;
-   VK_OUTARRAY_MAKE_TYPED(VkTimeDomainEXT, out, pTimeDomains, pTimeDomainCount);
-
-   for (d = 0; d < ARRAY_SIZE(anv_time_domains); d++) {
-      vk_outarray_append_typed(VkTimeDomainEXT, &out, i) {
-         *i = anv_time_domains[d];
-      }
-   }
-
-   return vk_outarray_status(&out);
-}
-
 static uint64_t
 anv_clock_gettime(clockid_t clock_id)
 {
@@ -3840,101 +3809,6 @@ anv_clock_gettime(clockid_t clock_id)
    return (uint64_t) current.tv_sec * 1000000000ULL + current.tv_nsec;
 }
 
-VkResult anv_GetCalibratedTimestampsEXT(
-   VkDevice                                     _device,
-   uint32_t                                     timestampCount,
-   const VkCalibratedTimestampInfoEXT           *pTimestampInfos,
-   uint64_t                                     *pTimestamps,
-   uint64_t                                     *pMaxDeviation)
-{
-   ANV_FROM_HANDLE(anv_device, device, _device);
-   uint64_t timestamp_frequency = device->info->timestamp_frequency;
-   int d;
-   uint64_t begin, end;
-   uint64_t max_clock_period = 0;
-
-#ifdef CLOCK_MONOTONIC_RAW
-   begin = anv_clock_gettime(CLOCK_MONOTONIC_RAW);
-#else
-   begin = anv_clock_gettime(CLOCK_MONOTONIC);
-#endif
-
-   for (d = 0; d < timestampCount; d++) {
-      switch (pTimestampInfos[d].timeDomain) {
-      case VK_TIME_DOMAIN_DEVICE_EXT:
-         if (!intel_gem_read_render_timestamp(device->fd,
-                                              device->info->kmd_type,
-                                              &pTimestamps[d])) {
-            return vk_device_set_lost(&device->vk, "Failed to read the "
-                                      "TIMESTAMP register: %m");
-         }
-         uint64_t device_period = DIV_ROUND_UP(1000000000, timestamp_frequency);
-         max_clock_period = MAX2(max_clock_period, device_period);
-         break;
-      case VK_TIME_DOMAIN_CLOCK_MONOTONIC_EXT:
-         pTimestamps[d] = anv_clock_gettime(CLOCK_MONOTONIC);
-         max_clock_period = MAX2(max_clock_period, 1);
-         break;
-
-#ifdef CLOCK_MONOTONIC_RAW
-      case VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_EXT:
-         pTimestamps[d] = begin;
-         break;
-#endif
-      default:
-         pTimestamps[d] = 0;
-         break;
-      }
-   }
-
-#ifdef CLOCK_MONOTONIC_RAW
-   end = anv_clock_gettime(CLOCK_MONOTONIC_RAW);
-#else
-   end = anv_clock_gettime(CLOCK_MONOTONIC);
-#endif
-
-    /*
-     * The maximum deviation is the sum of the interval over which we
-     * perform the sampling and the maximum period of any sampled
-     * clock. That's because the maximum skew between any two sampled
-     * clock edges is when the sampled clock with the largest period is
-     * sampled at the end of that period but right at the beginning of the
-     * sampling interval and some other clock is sampled right at the
-     * beginning of its sampling period and right at the end of the
-     * sampling interval. Let's assume the GPU has the longest clock
-     * period and that the application is sampling GPU and monotonic:
-     *
-     *                               s                 e
-     *			 w x y z 0 1 2 3 4 5 6 7 8 9 a b c d e f
-     *	Raw              -_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-
-     *
-     *                               g
-     *		  0         1         2         3
-     *	GPU       -----_____-----_____-----_____-----_____
-     *
-     *                                                m
-     *					    x y z 0 1 2 3 4 5 6 7 8 9 a b c
-     *	Monotonic                           -_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-
-     *
-     *	Interval                     <----------------->
-     *	Deviation           <-------------------------->
-     *
-     *		s  = read(raw)       2
-     *		g  = read(GPU)       1
-     *		m  = read(monotonic) 2
-     *		e  = read(raw)       b
-     *
-     * We round the sample interval up by one tick to cover sampling error
-     * in the interval clock
-     */
-
-   uint64_t sample_interval = end - begin + 1;
-
-   *pMaxDeviation = sample_interval + max_clock_period;
-
-   return VK_SUCCESS;
-}
-
 void anv_GetPhysicalDeviceMultisamplePropertiesEXT(
     VkPhysicalDevice                            physicalDevice,
     VkSampleCountFlagBits                       samples,
@@ -3945,8 +3819,11 @@ void anv_GetPhysicalDeviceMultisamplePropertiesEXT(
    assert(pMultisampleProperties->sType ==
           VK_STRUCTURE_TYPE_MULTISAMPLE_PROPERTIES_EXT);
 
+   VkSampleCountFlags sample_counts =
+      ~VK_SAMPLE_COUNT_1_BIT & isl_device_get_sample_counts(&physical_device->isl_dev);
+
    VkExtent2D grid_size;
-   if (samples & isl_device_get_sample_counts(&physical_device->isl_dev)) {
+   if (samples & sample_counts) {
       grid_size.width = 1;
       grid_size.height = 1;
    } else {

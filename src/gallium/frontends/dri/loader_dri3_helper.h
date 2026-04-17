@@ -71,7 +71,6 @@ struct loader_dri3_buffer {
    bool         reallocate;     /* Buffer should be reallocated and not reused */
 
    uint32_t     num_planes;
-   uint32_t     size;
    int          strides[4];
    int          offsets[4];
    uint64_t     modifier;
@@ -256,14 +255,13 @@ loader_dri3_create_image(xcb_connection_t *c,
                          struct dri_screen *dri_screen,
                          void *loaderPrivate);
 
-#ifdef HAVE_X11_DRM
 PUBLIC struct dri_image *
 loader_dri3_create_image_from_buffers(xcb_connection_t *c,
                                       xcb_dri3_buffers_from_pixmap_reply_t *bp_reply,
                                       unsigned int fourcc,
                                       struct dri_screen *dri_screen,
                                       void *loaderPrivate);
-#endif
+
 PUBLIC int
 loader_dri3_get_buffers(struct dri_drawable *driDrawable,
                         unsigned int format,

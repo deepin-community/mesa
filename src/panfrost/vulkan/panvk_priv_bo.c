@@ -12,11 +12,12 @@
 #include "panvk_priv_bo.h"
 
 #include "kmod/pan_kmod.h"
+#include "pan_props.h"
 
 #include "genxml/decode.h"
 
 VkResult
-panvk_priv_bo_create(struct panvk_device *dev, size_t size, uint32_t flags,
+panvk_priv_bo_create(struct panvk_device *dev, uint64_t size, uint32_t flags,
                      VkSystemAllocationScope scope, struct panvk_priv_bo **out)
 {
    VkResult result;
@@ -59,10 +60,8 @@ panvk_priv_bo_create(struct panvk_device *dev, size_t size, uint32_t flags,
    };
 
    if (!(dev->kmod.vm->flags & PAN_KMOD_VM_FLAG_AUTO_VA)) {
-      simple_mtx_lock(&dev->as.lock);
-      op.va.start = util_vma_heap_alloc(
-         &dev->as.heap, op.va.size, op.va.size > 0x200000 ? 0x200000 : 0x1000);
-      simple_mtx_unlock(&dev->as.lock);
+      op.va.start = panvk_as_alloc(dev, op.va.size,
+         pan_choose_gpu_va_alignment(dev->kmod.vm, op.va.size));
       if (!op.va.start) {
          result = panvk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
          goto err_munmap_bo;
@@ -90,9 +89,7 @@ panvk_priv_bo_create(struct panvk_device *dev, size_t size, uint32_t flags,
 
 err_return_va:
    if (!(dev->kmod.vm->flags & PAN_KMOD_VM_FLAG_AUTO_VA)) {
-      simple_mtx_lock(&dev->as.lock);
-      util_vma_heap_free(&dev->as.heap, op.va.start, op.va.size);
-      simple_mtx_unlock(&dev->as.lock);
+      panvk_as_free(dev, op.va.start, op.va.size);
    }
 
 err_munmap_bo:
@@ -107,6 +104,24 @@ err_put_bo:
 err_free_priv_bo:
    vk_free(&dev->vk.alloc, priv_bo);
    return result;
+}
+
+void
+panvk_priv_bo_flush(struct panvk_priv_bo *priv_bo, size_t offset, size_t size)
+{
+   assert(priv_bo->addr.host != NULL);
+   pan_kmod_queue_bo_map_sync(priv_bo->bo, offset, priv_bo->addr.host + offset,
+                              size, PAN_KMOD_BO_SYNC_CPU_CACHE_FLUSH);
+}
+
+void
+panvk_priv_bo_invalidate(struct panvk_priv_bo *priv_bo, size_t offset,
+                         size_t size)
+{
+   assert(priv_bo->addr.host != NULL);
+   pan_kmod_queue_bo_map_sync(priv_bo->bo, offset, priv_bo->addr.host + offset,
+                              size,
+                              PAN_KMOD_BO_SYNC_CPU_CACHE_FLUSH_AND_INVALIDATE);
 }
 
 static void
@@ -131,9 +146,7 @@ panvk_priv_bo_destroy(struct panvk_priv_bo *priv_bo)
    assert(!ret);
 
    if (!(dev->kmod.vm->flags & PAN_KMOD_VM_FLAG_AUTO_VA)) {
-      simple_mtx_lock(&dev->as.lock);
-      util_vma_heap_free(&dev->as.heap, op.va.start, op.va.size);
-      simple_mtx_unlock(&dev->as.lock);
+      panvk_as_free(dev, op.va.start, op.va.size);
    }
 
    if (priv_bo->addr.host) {

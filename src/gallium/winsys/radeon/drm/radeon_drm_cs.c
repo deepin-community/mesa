@@ -52,8 +52,7 @@ static void radeon_fence_reference(struct radeon_winsys *ws,
                                    struct pipe_fence_handle *src);
 
 static struct radeon_winsys_ctx *radeon_drm_ctx_create(struct radeon_winsys *ws,
-                                                       enum radeon_ctx_priority priority,
-                                                       bool allow_context_lost)
+                                                       unsigned flags)
 {
    struct radeon_ctx *ctx = CALLOC_STRUCT(radeon_ctx);
    if (!ctx)
@@ -168,14 +167,6 @@ static void radeon_destroy_cs_context(struct radeon_winsys *rws, struct radeon_c
    FREE(csc->relocs);
 }
 
-
-static enum amd_ip_type radeon_drm_cs_get_ip_type(struct radeon_cmdbuf *rcs)
-{
-   struct radeon_drm_cs *cs = radeon_drm_cs(rcs);
-   return cs->ip_type;
-}
-
-
 static bool
 radeon_drm_cs_create(struct radeon_cmdbuf *rcs,
                      struct radeon_winsys_ctx *ctx,
@@ -219,13 +210,6 @@ radeon_drm_cs_create(struct radeon_cmdbuf *rcs,
 
    p_atomic_inc(&ws->num_cs);
    return true;
-}
-
-static void radeon_drm_cs_set_preamble(struct radeon_cmdbuf *cs, const uint32_t *preamble_ib,
-                                       unsigned preamble_num_dw, bool preamble_changed)
-{
-   /* The radeon kernel driver doesn't support preambles. */
-   radeon_emit_array(cs, preamble_ib, preamble_num_dw);
 }
 
 int radeon_lookup_buffer(struct radeon_winsys *rws, struct radeon_cs_context *csc,
@@ -846,7 +830,7 @@ static struct pipe_fence_handle *radeon_drm_cs_get_next_fence(struct radeon_cmdb
 }
 
 static void
-radeon_drm_cs_add_fence_dependency(struct radeon_cmdbuf *cs,
+radeon_drm_cs_add_fence_dependency(struct radeon_cmdbuf *rcs,
                                    struct pipe_fence_handle *fence)
 {
    /* TODO: Handle the following unlikely multi-threaded scenario:

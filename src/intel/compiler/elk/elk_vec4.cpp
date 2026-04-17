@@ -387,7 +387,7 @@ vec4_instruction::implied_mrf_writes() const
    case ELK_SHADER_OPCODE_GET_BUFFER_SIZE:
       return header_size;
    default:
-      unreachable("not reached");
+      UNREACHABLE("not reached");
    }
 }
 
@@ -648,7 +648,7 @@ vec4_visitor::opt_algebraic()
             if (inst->dst.type != inst->src[0].type &&
                 inst->dst.type != ELK_REGISTER_TYPE_DF &&
                 inst->src[0].type != ELK_REGISTER_TYPE_F)
-               assert(!"unimplemented: saturate mixed types");
+               UNREACHABLE("unimplemented: saturate mixed types");
 
             if (elk_saturate_immediate(inst->src[0].type,
                                        &inst->src[0].as_elk_reg())) {
@@ -701,7 +701,7 @@ vec4_visitor::opt_algebraic()
 	       inst->src[0] = elk_imm_ud(0u);
 	       break;
 	    default:
-	       unreachable("not reached");
+	       UNREACHABLE("not reached");
 	    }
 	    inst->src[1] = src_reg();
 	    progress = true;
@@ -1264,10 +1264,8 @@ void
 vec4_visitor::split_virtual_grfs()
 {
    int num_vars = this->alloc.count;
-   int new_virtual_grf[num_vars];
-   bool split_grf[num_vars];
-
-   memset(new_virtual_grf, 0, sizeof(new_virtual_grf));
+   int *new_virtual_grf = rzalloc_array(NULL, int, num_vars);
+   bool *split_grf = ralloc_array(NULL, bool, num_vars);
 
    /* Try to split anything > 0 sized. */
    for (int i = 0; i < num_vars; i++) {
@@ -1319,6 +1317,10 @@ vec4_visitor::split_virtual_grfs()
          }
       }
    }
+
+   ralloc_free(new_virtual_grf);
+   ralloc_free(split_grf);
+
    invalidate_analysis(DEPENDENCY_INSTRUCTION_DETAIL | DEPENDENCY_VARIABLES);
 }
 
@@ -1386,7 +1388,7 @@ vec4_visitor::dump_instruction_to_file(const elk_backend_instruction *be_inst, F
    case IMM:
    case ATTR:
    case UNIFORM:
-      unreachable("not reached");
+      UNREACHABLE("not reached");
    }
    if (inst->dst.offset ||
        (inst->dst.file == VGRF &&
@@ -1478,7 +1480,7 @@ vec4_visitor::dump_instruction_to_file(const elk_backend_instruction *be_inst, F
          fprintf(file, "(null)");
          break;
       case MRF:
-         unreachable("not reached");
+         UNREACHABLE("not reached");
       }
 
       if (inst->src[i].offset ||
@@ -1783,7 +1785,7 @@ vec4_visitor::convert_to_hw_regs()
 
          case MRF:
          case ATTR:
-            unreachable("not reached");
+            UNREACHABLE("not reached");
          }
 
          apply_logical_swizzle(&reg, inst, i);
@@ -1849,7 +1851,7 @@ vec4_visitor::convert_to_hw_regs()
       case IMM:
       case ATTR:
       case UNIFORM:
-         unreachable("not reached");
+         UNREACHABLE("not reached");
       }
 
       dst = reg;
@@ -2080,7 +2082,7 @@ scalarize_predicate(elk_predicate predicate, unsigned writemask)
    case WRITEMASK_W:
       return ELK_PREDICATE_ALIGN16_REPLICATE_W;
    default:
-      unreachable("invalid writemask");
+      UNREACHABLE("invalid writemask");
    }
 }
 
@@ -2490,14 +2492,16 @@ vec4_visitor::run()
    if (INTEL_DEBUG(DEBUG_SPILL_VEC4)) {
       /* Debug of register spilling: Go spill everything. */
       const int grf_count = alloc.count;
-      float spill_costs[alloc.count];
-      bool no_spill[alloc.count];
+      float *spill_costs = ralloc_array(NULL, float, alloc.count);
+      bool *no_spill = ralloc_array(NULL, bool, alloc.count);
       evaluate_spill_costs(spill_costs, no_spill);
       for (int i = 0; i < grf_count; i++) {
          if (no_spill[i])
             continue;
          spill_reg(i);
       }
+      ralloc_free(spill_costs);
+      ralloc_free(no_spill);
 
       /* We want to run this after spilling because 64-bit (un)spills need to
        * emit code to shuffle 64-bit data for the 32-bit scratch read/write

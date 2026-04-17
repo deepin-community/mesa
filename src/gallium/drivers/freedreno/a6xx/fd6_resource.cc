@@ -7,8 +7,6 @@
  *    Rob Clark <robclark@freedesktop.org>
  */
 
-#define FD_BO_NO_HARDPIN 1
-
 #include "drm-uapi/drm_fourcc.h"
 
 #include "a6xx/fd6_blitter.h"
@@ -17,7 +15,7 @@
 #include "common/freedreno_lrz.h"
 #include "common/freedreno_ubwc.h"
 
-#include "a6xx.xml.h"
+#include "fd6_hw.h"
 
 /* A subset of the valid tiled formats can be compressed.  We do
  * already require tiled in order to be compressed, but just because
@@ -28,10 +26,16 @@ ok_ubwc_format(struct pipe_screen *pscreen, enum pipe_format pfmt, unsigned nr_s
 {
    const struct fd_dev_info *info = fd_screen(pscreen)->info;
 
+   /*
+    * TODO: no UBWC on a702?
+    */
+   if (info->props.is_a702)
+      return false;
+
    switch (pfmt) {
    case PIPE_FORMAT_Z24X8_UNORM:
       /* MSAA+UBWC does not work without FMT6_Z24_UINT_S8_UINT: */
-      return info->a6xx.has_z24uint_s8uint || (nr_samples <= 1);
+      return info->props.has_z24uint_s8uint || (nr_samples <= 1);
 
    case PIPE_FORMAT_X24S8_UINT:
    case PIPE_FORMAT_Z24_UNORM_S8_UINT:
@@ -40,7 +44,7 @@ ok_ubwc_format(struct pipe_screen *pscreen, enum pipe_format pfmt, unsigned nr_s
        * fd_resource_uncompress() at the point of stencil sampling because
        * that itself uses stencil sampling in the fd_blitter_blit path.
        */
-      return info->a6xx.has_z24uint_s8uint;
+      return info->props.has_z24uint_s8uint;
 
    case PIPE_FORMAT_R8_G8B8_420_UNORM:
       /* The difference between NV12 and R8_G8B8_420_UNORM is only where the
@@ -61,7 +65,7 @@ ok_ubwc_format(struct pipe_screen *pscreen, enum pipe_format pfmt, unsigned nr_s
     * all 1's prior to a740.  Disable UBWC for snorm.
     */
    if (util_format_is_snorm(pfmt) &&
-       !info->a7xx.ubwc_unorm_snorm_int_compatible)
+       !info->props.ubwc_unorm_snorm_int_compatible)
       return false;
 
    /* A690 seem to have broken UBWC for depth/stencil, it requires
@@ -69,7 +73,7 @@ ok_ubwc_format(struct pipe_screen *pscreen, enum pipe_format pfmt, unsigned nr_s
     * ordinary draw calls writing read/depth. WSL blob seem to use ubwc
     * sometimes for depth/stencil.
     */
-   if (info->a6xx.broken_ds_ubwc_quirk &&
+   if (info->props.broken_ds_ubwc_quirk &&
        util_format_is_depth_or_stencil(pfmt))
       return false;
 
@@ -103,7 +107,7 @@ ok_ubwc_format(struct pipe_screen *pscreen, enum pipe_format pfmt, unsigned nr_s
    case FMT6_Z24_UNORM_S8_UINT_AS_R8G8B8A8:
       return true;
    case FMT6_8_UNORM:
-      return info->a6xx.has_8bpp_ubwc;
+      return info->props.has_8bpp_ubwc;
    default:
       return false;
    }
@@ -112,15 +116,7 @@ ok_ubwc_format(struct pipe_screen *pscreen, enum pipe_format pfmt, unsigned nr_s
 static bool
 can_do_ubwc(struct pipe_resource *prsc)
 {
-   /* limit things to simple single level 2d for now: */
-   if ((prsc->depth0 != 1) || (prsc->array_size != 1) ||
-       (prsc->last_level != 0))
-      return false;
-   if (prsc->target != PIPE_TEXTURE_2D)
-      return false;
-   if (!ok_ubwc_format(prsc->screen, prsc->format, prsc->nr_samples))
-      return false;
-   return true;
+   return ok_ubwc_format(prsc->screen, prsc->format, prsc->nr_samples);
 }
 
 static bool
@@ -152,7 +148,7 @@ valid_ubwc_format_cast(struct fd_resource *rsc, enum pipe_format format)
    /* If we support z24s8 ubwc then allow casts between the various
     * permutations of z24s8:
     */
-   if (info->a6xx.has_z24uint_s8uint && is_z24s8(format) && is_z24s8(orig_format))
+   if (info->props.has_z24uint_s8uint && is_z24s8(format) && is_z24s8(orig_format))
       return true;
 
    enum fd6_ubwc_compat_type type = fd6_ubwc_compat_mode(info, orig_format);
@@ -236,123 +232,108 @@ static void
 setup_lrz(struct fd_resource *rsc)
 {
    struct fd_screen *screen = fd_screen(rsc->b.b.screen);
-   unsigned width0 = rsc->b.b.width0;
-   unsigned height0 = rsc->b.b.height0;
+   uint32_t nr_layers = rsc->b.b.array_size;
+   assert(nr_layers);
 
-   /* LRZ buffer is super-sampled: */
-   switch (rsc->b.b.nr_samples) {
-   case 4:
-      width0 *= 2;
-      FALLTHROUGH;
-   case 2:
-      height0 *= 2;
-   }
+   fdl6_lrz_layout_init<CHIP>(&rsc->lrz_layout, &rsc->layout, 0, 0,
+                              screen->info, 0, nr_layers);
 
-   unsigned lrz_pitch = align(DIV_ROUND_UP(width0, 8), 32);
-   unsigned lrz_height = align(DIV_ROUND_UP(height0, 8), 16);
+   if (!rsc->lrz_layout.lrz_total_size)
+      return;
 
-   rsc->lrz_height = lrz_height;
-   rsc->lrz_width = lrz_pitch;
-   rsc->lrz_pitch = lrz_pitch;
-
-   unsigned lrz_size = lrz_pitch * lrz_height * 2;
-
-   unsigned nblocksx = DIV_ROUND_UP(DIV_ROUND_UP(width0, 8), 16);
-   unsigned nblocksy = DIV_ROUND_UP(DIV_ROUND_UP(height0, 8), 4);
-
-   /* Fast-clear buffer is 1bit/block */
-   unsigned lrz_fc_size = DIV_ROUND_UP(nblocksx * nblocksy, 8);
-
-   /* Fast-clear buffer cannot be larger than 512 bytes on A6XX and 1024 bytes
-    * on A7XX (HW limitation)
-    */
-   bool has_lrz_fc = screen->info->a6xx.enable_lrz_fast_clear &&
-                     lrz_fc_size <= fd_lrzfc_layout<CHIP>::FC_SIZE;
-
-   /* Allocate a LRZ fast-clear buffer even if we aren't using FC, if the
-    * hw is re-using this buffer for direction tracking
-    */
-   if (has_lrz_fc || screen->info->a6xx.has_lrz_dir_tracking) {
-      rsc->lrz_fc_offset = lrz_size;
-      lrz_size += sizeof(fd_lrzfc_layout<CHIP>);
-   }
-
-   rsc->lrz = fd_bo_new(screen->dev, lrz_size, FD_BO_NOMAP, "lrz");
+   rsc->lrz = fd_bo_new(screen->dev, rsc->lrz_layout.lrz_total_size,
+                        FD_BO_NOMAP, "lrz");
 }
 
 template <chip CHIP>
 static uint32_t
-fd6_setup_slices(struct fd_resource *rsc)
+fd6_layout_resource(struct fd_resource *rsc, enum fd_layout_type type)
 {
    struct pipe_resource *prsc = &rsc->b.b;
+   struct fd_screen *screen = fd_screen(prsc->screen);
+   bool ubwc = false;
+   unsigned tile_mode = TILE6_LINEAR;
+
+   if (type >= FD_LAYOUT_TILED)
+      tile_mode = fd6_tile_mode(prsc);
+   if (type == FD_LAYOUT_UBWC)
+      ubwc = true;
+
+   if (ubwc && !ok_ubwc_format(prsc->screen, prsc->format, prsc->nr_samples))
+      ubwc = false;
+
+   struct fdl_image_params params = fd_image_params(prsc, ubwc, tile_mode);
+
+   fdl6_layout_image(&rsc->layout, screen->info, &params, NULL);
 
    if (!FD_DBG(NOLRZ) && has_depth(prsc->format) && !is_z32(prsc->format))
       setup_lrz<CHIP>(rsc);
 
-   if (rsc->layout.ubwc && !ok_ubwc_format(prsc->screen, prsc->format, prsc->nr_samples))
-      rsc->layout.ubwc = false;
-
-   fdl6_layout(&rsc->layout, prsc->format, fd_resource_nr_samples(prsc),
-               prsc->width0, prsc->height0, prsc->depth0, prsc->last_level + 1,
-               prsc->array_size, prsc->target == PIPE_TEXTURE_3D, NULL);
-
    return rsc->layout.size;
 }
 
-static int
-fill_ubwc_buffer_sizes(struct fd_resource *rsc)
+static bool
+layout_resource_for_handle(struct fd_resource *rsc, struct winsys_handle *handle,
+                           bool ubwc, unsigned tile_mode)
 {
    struct pipe_resource *prsc = &rsc->b.b;
+   struct fd_screen *screen = fd_screen(prsc->screen);
    struct fdl_explicit_layout l = {
-      .offset = rsc->layout.slices[0].offset,
-      .pitch = rsc->layout.pitch0,
+      .offset = handle->offset,
+      .pitch = handle->stride,
    };
 
-   if (!can_do_ubwc(prsc))
-      return -1;
+   if (ubwc && !can_do_ubwc(prsc)) {
+      if (FD_DBG(LAYOUT))
+         mesa_loge("cannot do ubwc for: %" PRSC_FMT, PRSC_ARGS(prsc));
+      return false;
+   }
 
-   rsc->layout.ubwc = true;
-   rsc->layout.tile_mode = TILE6_3;
+   struct fdl_image_params params = fd_image_params(prsc, ubwc, tile_mode);
 
-   if (!fdl6_layout(&rsc->layout, prsc->format, fd_resource_nr_samples(prsc),
-                    prsc->width0, prsc->height0, prsc->depth0,
-                    prsc->last_level + 1, prsc->array_size, false, &l))
-      return -1;
+   if (!fdl6_layout_image(&rsc->layout, screen->info, &params, &l)) {
+      if (FD_DBG(LAYOUT))
+         mesa_loge("layout failed for: %" PRSC_FMT, PRSC_ARGS(prsc));
+      return false;
+   }
 
-   if (rsc->layout.size > fd_bo_size(rsc->bo))
-      return -1;
+   if (rsc->layout.size > fd_bo_size(rsc->bo)) {
+      if (FD_DBG(LAYOUT))
+         mesa_loge("invalid size (%" PRIu64 " vs %u) for: %" PRSC_FMT, rsc->layout.size,
+                   fd_bo_size(rsc->bo), PRSC_ARGS(prsc));
+      return false;
+   }
 
-   return 0;
+   return true;
 }
 
-static int
-fd6_layout_resource_for_modifier(struct fd_resource *rsc, uint64_t modifier)
+static bool
+fd6_layout_resource_for_handle(struct fd_resource *rsc, struct winsys_handle *handle)
 {
+   uint64_t modifier = handle->modifier;
+
+   if (modifier == DRM_FORMAT_MOD_INVALID) {
+      struct fdl_metadata metadata;
+      if (!fd_bo_get_metadata(rsc->bo, &metadata, sizeof(metadata)))
+         modifier = metadata.modifier;
+   }
+
    switch (modifier) {
    case DRM_FORMAT_MOD_QCOM_COMPRESSED:
-      return fill_ubwc_buffer_sizes(rsc);
+      return layout_resource_for_handle(rsc, handle, true, TILE6_3);
    case DRM_FORMAT_MOD_LINEAR:
-      if (can_do_ubwc(&rsc->b.b)) {
-         perf_debug("%" PRSC_FMT
-                    ": not UBWC: imported with DRM_FORMAT_MOD_LINEAR!",
-                    PRSC_ARGS(&rsc->b.b));
-      }
-      return 0;
-   case DRM_FORMAT_MOD_QCOM_TILED3:
-      rsc->layout.tile_mode = fd6_tile_mode(&rsc->b.b);
-      FALLTHROUGH;
    case DRM_FORMAT_MOD_INVALID:
-      /* For now, without buffer metadata, we must assume that buffers
-       * imported with INVALID modifier are linear
-       */
       if (can_do_ubwc(&rsc->b.b)) {
-         perf_debug("%" PRSC_FMT
-                    ": not UBWC: imported with DRM_FORMAT_MOD_INVALID!",
-                    PRSC_ARGS(&rsc->b.b));
+         const char *mod_name =
+               (modifier == DRM_FORMAT_MOD_LINEAR) ? "LINEAR" : "INVALID";
+         perf_debug("%" PRSC_FMT ": not UBWC: imported with DRM_FORMAT_MOD_%s!",
+                    PRSC_ARGS(&rsc->b.b), mod_name);
       }
-      return 0;
+      return layout_resource_for_handle(rsc, handle, false, TILE6_LINEAR);
+   case DRM_FORMAT_MOD_QCOM_TILED3:
+      return layout_resource_for_handle(rsc, handle, false, TILE6_3);
    default:
-      return -1;
+      return false;
    }
 }
 
@@ -382,8 +363,8 @@ fd6_resource_screen_init(struct pipe_screen *pscreen)
 {
    struct fd_screen *screen = fd_screen(pscreen);
 
-   screen->setup_slices = fd6_setup_slices<CHIP>;
-   screen->layout_resource_for_modifier = fd6_layout_resource_for_modifier;
+   screen->layout_resource = fd6_layout_resource<CHIP>;
+   screen->layout_resource_for_handle = fd6_layout_resource_for_handle;
    screen->is_format_supported = fd6_is_format_supported;
 }
 FD_GENX(fd6_resource_screen_init);

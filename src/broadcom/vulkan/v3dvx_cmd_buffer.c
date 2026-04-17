@@ -22,9 +22,9 @@
  */
 
 #include "v3dv_private.h"
-#include "broadcom/common/v3d_macros.h"
+#include "v3dv_format_table.h"
+#include "v3dvx_format_table.h"
 #include "broadcom/common/v3d_util.h"
-#include "broadcom/cle/v3dx_pack.h"
 #include "broadcom/compiler/v3d_compiler.h"
 
 #include "util/half_float.h"
@@ -63,7 +63,8 @@ v3dX(job_emit_enable_double_buffer)(struct v3dv_job *job)
    config.maximum_bpp_of_all_render_targets = tiling->internal_bpp;
 #endif
 #if V3D_VERSION >= 71
-      unreachable("HW generation 71 not supported yet.");
+   config.log2_tile_width = log2_tile_size(tiling->tile_width);
+   config.log2_tile_height = log2_tile_size(tiling->tile_height);
 #endif
 
    uint8_t *rewrite_addr = (uint8_t *)job->bcl_tile_binning_mode_ptr;
@@ -828,19 +829,27 @@ set_rcl_early_z_config(struct v3dv_job *job,
  * seems to be the equivalent for no-clamp on 4.2), but not pq or hlg. In
  * summary right now we are just porting what we were doing on 4.2
  */
-uint32_t
-v3dX(clamp_for_format_and_type)(uint32_t rt_type,
+
+#if V3D_VERSION == 42
+enum V3DX(Render_Target_Clamp)
+v3dX(clamp_for_format_and_type)(enum V3DX(Internal_Type) rt_type,
                                 VkFormat vk_format)
 {
-#if V3D_VERSION == 42
    if (vk_format_is_int(vk_format))
       return V3D_RENDER_TARGET_CLAMP_INT;
    else if (vk_format_is_srgb(vk_format))
       return V3D_RENDER_TARGET_CLAMP_NORM;
    else
       return V3D_RENDER_TARGET_CLAMP_NONE;
+   UNREACHABLE("Wrong V3D_VERSION");
+}
 #endif
+
 #if V3D_VERSION >= 71
+enum V3DX(Render_Target_Type_Clamp)
+v3dX(clamp_for_format_and_type)(enum V3DX(Internal_Type) rt_type,
+                                VkFormat vk_format)
+{
    switch (rt_type) {
    case V3D_INTERNAL_TYPE_8I:
       return V3D_RENDER_TARGET_TYPE_CLAMP_8I_CLAMPED;
@@ -849,7 +858,9 @@ v3dX(clamp_for_format_and_type)(uint32_t rt_type,
    case V3D_INTERNAL_TYPE_8:
       return V3D_RENDER_TARGET_TYPE_CLAMP_8;
    case V3D_INTERNAL_TYPE_16I:
-      return V3D_RENDER_TARGET_TYPE_CLAMP_16I_CLAMPED;
+      return vk_format_is_snorm(vk_format) ?
+         V3D_RENDER_TARGET_TYPE_CLAMP_16I:
+         V3D_RENDER_TARGET_TYPE_CLAMP_16I_CLAMPED;
    case V3D_INTERNAL_TYPE_16UI:
       return V3D_RENDER_TARGET_TYPE_CLAMP_16UI_CLAMPED;
    case V3D_INTERNAL_TYPE_16F:
@@ -863,12 +874,13 @@ v3dX(clamp_for_format_and_type)(uint32_t rt_type,
    case V3D_INTERNAL_TYPE_32F:
       return V3D_RENDER_TARGET_TYPE_CLAMP_32F;
    default:
-      unreachable("Unknown internal render target type");
+      UNREACHABLE("Unknown internal render target type");
    }
-
    return V3D_RENDER_TARGET_TYPE_CLAMP_INVALID;
-#endif
+
+   UNREACHABLE("Wrong V3D_VERSION");
 }
+#endif
 
 static void
 cmd_buffer_render_pass_setup_render_target(struct v3dv_cmd_buffer *cmd_buffer,
@@ -1513,8 +1525,8 @@ v3dX(cmd_buffer_emit_depth_bias)(struct v3dv_cmd_buffer *cmd_buffer)
    v3dv_return_if_oom(cmd_buffer, NULL);
 
    cl_emit(&job->bcl, DEPTH_OFFSET, bias) {
-      bias.depth_offset_factor = dyn->rs.depth_bias.slope;
-      bias.depth_offset_units = dyn->rs.depth_bias.constant;
+      bias.depth_offset_factor = dyn->rs.depth_bias.slope_factor;
+      bias.depth_offset_units = dyn->rs.depth_bias.constant_factor;
 #if V3D_VERSION <= 42
       if (pipeline->rendering_info.depth_attachment_format == VK_FORMAT_D16_UNORM)
          bias.depth_offset_units *= 256.0f;
@@ -1615,6 +1627,10 @@ v3dX(cmd_buffer_emit_blend)(struct v3dv_cmd_buffer *cmd_buffer)
 
    struct v3dv_pipeline *pipeline = cmd_buffer->state.gfx.pipeline;
    assert(pipeline);
+
+   /* When using software blend we don't want to enable any blend hardware */
+   if (pipeline->blend.use_software)
+      return;
 
    const struct v3d_device_info *devinfo = &cmd_buffer->device->devinfo;
    const uint32_t max_color_rts = V3D_MAX_RENDER_TARGETS(devinfo->ver);
@@ -2029,7 +2045,15 @@ v3dX(cmd_buffer_emit_configuration_bits)(struct v3dv_cmd_buffer *cmd_buffer)
       if (!dyn->rs.rasterizer_discard_enable) {
          assert(BITSET_TEST(dyn->set, MESA_VK_DYNAMIC_RS_CULL_MODE));
          assert(BITSET_TEST(dyn->set, MESA_VK_DYNAMIC_RS_FRONT_FACE));
-         config.enable_forward_facing_primitive = !(dyn->rs.cull_mode & VK_CULL_MODE_FRONT_BIT);
+         const enum mesa_prim reduced_prim =
+            u_reduced_prim(vk_topology_to_mesa(dyn->ia.primitive_topology));
+         /* When drawing points and lines, they will be discarded if forward
+          * facing primitive is not enabled.
+          */
+         config.enable_forward_facing_primitive =
+            reduced_prim == MESA_PRIM_LINES ||
+            reduced_prim == MESA_PRIM_POINTS ||
+            !(dyn->rs.cull_mode & VK_CULL_MODE_FRONT_BIT);
          config.enable_reverse_facing_primitive = !(dyn->rs.cull_mode & VK_CULL_MODE_BACK_BIT);
          /* Seems like the hardware is backwards regarding this setting... */
          config.clockwise_primitives = dyn->rs.front_face == VK_FRONT_FACE_COUNTER_CLOCKWISE;
@@ -2242,22 +2266,25 @@ v3dX(cmd_buffer_execute_inside_pass)(struct v3dv_cmd_buffer *primary,
              * primary's job list right after it.
              */
             v3dv_cmd_buffer_finish_job(primary);
-            v3dv_job_clone_in_cmd_buffer(secondary_job, primary);
+            struct v3dv_job *job =
+               v3dv_job_clone_in_cmd_buffer(secondary_job, primary);
+            if (!job)
+               return;
+
             if (pending_barrier.dst_mask) {
-               /* FIXME: do the same we do for primaries and only choose the
-                * relevant src masks.
-                */
-               secondary_job->serialize = pending_barrier.src_mask_graphics |
-                                          pending_barrier.src_mask_transfer |
-                                          pending_barrier.src_mask_compute;
-               if (pending_barrier.bcl_buffer_access ||
-                   pending_barrier.bcl_image_access) {
-                  secondary_job->needs_bcl_sync = true;
+               const uint8_t prev_dst_mask = pending_barrier.dst_mask;
+               v3dv_job_apply_barrier_state(job, &pending_barrier);
+
+               if ((prev_dst_mask & V3DV_BARRIER_GRAPHICS_BIT) &&
+                   !(pending_barrier.dst_mask & V3DV_BARRIER_GRAPHICS_BIT) &&
+                   (pending_barrier.bcl_buffer_access ||
+                    pending_barrier.bcl_image_access)) {
+                  job->needs_bcl_sync = true;
+                  pending_barrier.bcl_buffer_access = 0;
+                  pending_barrier.bcl_image_access = 0;
                }
             }
          }
-
-         memset(&pending_barrier, 0, sizeof(pending_barrier));
       }
 
       /* If the secondary has recorded any vkCmdEndQuery commands, we need to
@@ -2276,10 +2303,8 @@ v3dX(cmd_buffer_execute_inside_pass)(struct v3dv_cmd_buffer *primary,
       pending_barrier = secondary->state.barrier;
    }
 
-   if (pending_barrier.dst_mask) {
-      v3dv_cmd_buffer_merge_barrier_state(&primary->state.barrier,
-                                          &pending_barrier);
-   }
+   if (pending_barrier.dst_mask)
+      v3dv_merge_barrier_state(&primary->state.barrier, &pending_barrier);
 }
 
 static void
@@ -2328,7 +2353,7 @@ v3d_gs_output_primitive(enum mesa_prim prim_type)
     case MESA_PRIM_TRIANGLE_STRIP:
         return GEOMETRY_SHADER_TRI_STRIP;
     default:
-        unreachable("Unsupported primitive type");
+        UNREACHABLE("Unsupported primitive type");
     }
 }
 
@@ -2350,7 +2375,7 @@ emit_tes_gs_common_params(struct v3dv_job *job,
    }
 }
 
-static uint8_t
+static enum V3DX(Pack_Mode)
 simd_width_to_gs_pack_mode(uint32_t width)
 {
    switch (width) {
@@ -2363,7 +2388,7 @@ simd_width_to_gs_pack_mode(uint32_t width)
    case 1:
       return V3D_PACK_MODE_1_WAY;
    default:
-      unreachable("Invalid SIMD width");
+      UNREACHABLE("Invalid SIMD width");
    };
 }
 

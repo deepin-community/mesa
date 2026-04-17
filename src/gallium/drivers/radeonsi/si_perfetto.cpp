@@ -9,7 +9,6 @@
 
 #include "util/hash_table.h"
 #include "util/u_process.h"
-#include "util/hash_table.h"
 
 #include "si_pipe.h"
 #include "si_perfetto.h"
@@ -50,12 +49,8 @@ static const struct {
    }
 };
 
-struct SIRenderpassIncrementalState {
-   bool was_cleared = true;
-};
-
 struct SIRenderpassTraits : public perfetto::DefaultDataSourceTraits {
-   using IncrementalStateType = SIRenderpassIncrementalState;
+   using IncrementalStateType = MesaRenderpassIncrementalState;
 };
 
 class SIRenderpassDataSource : public MesaRenderpassDataSource<SIRenderpassDataSource, 
@@ -69,13 +64,12 @@ using perfetto::protos::pbzero::InternedGpuRenderStageSpecification_RenderStageC
 
 static void sync_timestamp(SIRenderpassDataSource::TraceContext &ctx, struct si_ds_device *device)
 {
-   uint64_t cpu_ts = perfetto::base::GetBootTimeNs().count();
-   uint64_t gpu_ts;
+   uint64_t cpu_ts, gpu_ts;
 
-   struct si_context *sctx = container_of(device, struct si_context, ds);   
+   struct si_context *sctx = container_of(device, struct si_context, ds);
    gpu_ts = sctx->screen->b.get_timestamp(&sctx->screen->b);
 
-
+   uint32_t cpu_clock_id = perfetto::protos::pbzero::BUILTIN_CLOCK_BOOTTIME;
    cpu_ts = perfetto::base::GetBootTimeNs().count();
 
    if (cpu_ts < device->next_clock_sync_ns)
@@ -86,10 +80,10 @@ static void sync_timestamp(SIRenderpassDataSource::TraceContext &ctx, struct si_
    device->sync_gpu_ts = gpu_ts;
    device->next_clock_sync_ns = cpu_ts + 1000000000ull;
    MesaRenderpassDataSource<SIRenderpassDataSource, SIRenderpassTraits>::
-      EmitClockSync(ctx, cpu_ts, gpu_ts, device->gpu_clock_id);
+      EmitClockSync(ctx, cpu_ts, gpu_ts, cpu_clock_id, device->gpu_clock_id);
 }
 
-static void send_descriptors(SIRenderpassDataSource::TraceContext &ctx, 
+static void send_descriptors(SIRenderpassDataSource::TraceContext &ctx,
                              struct si_ds_device *device)
 {
    PERFETTO_LOG("Sending renderstage descriptors");
@@ -212,8 +206,8 @@ static void end_event(struct si_ds_queue *queue, uint64_t ts_ns, enum si_ds_queu
        * stage_iid if not already seen. Otherwise, it's a driver event and we
        * have use the internal stage_iid.
        */
-      uint64_t stage_iid = app_event ? 
-                           tctx.GetDataSourceLocked()->debug_marker_stage(tctx, app_event) : 
+      uint64_t stage_iid = app_event ?
+                           tctx.GetDataSourceLocked()->debug_marker_stage(tctx, app_event) :
                            stage->stage_iid;
 
       auto packet = tctx.NewTracePacket();
@@ -269,7 +263,7 @@ void si_ds_end_##event_name(struct si_ds_device *device, uint64_t ts_ns, uint16_
                             const struct trace_si_end_##event_name *payload,                      \
                             const void *indirect_data)                                            \
 {                                                                                                 \
-   const struct si_ds_flush_data *flush =  (const struct si_ds_flush_data *) flush_data;          \
+   const struct si_ds_flush_data *flush = (const struct si_ds_flush_data *) flush_data;           \
    end_event(flush->queue, ts_ns, stage, flush->submission_id, NULL, payload,                     \
              (trace_payload_as_extra_func)&trace_payload_as_extra_si_end_##event_name);           \
 }                                                                                                 \
@@ -311,6 +305,10 @@ void si_ds_end_submit(struct si_ds_queue *queue, uint64_t start_ts)
       submit->set_duration_ns(end_ts - start_ts);
       submit->set_vk_queue((uintptr_t) queue);
       submit->set_submission_id(submission_id);
+      submit->set_pid(getpid());
+#if defined(__linux__)
+      submit->set_tid(syscall(SYS_gettid));
+#endif
    });
 }
 
@@ -319,9 +317,13 @@ void si_ds_end_submit(struct si_ds_queue *queue, uint64_t start_ts)
 static void si_driver_ds_init_once(void)
 {
 #ifdef HAVE_PERFETTO
-   util_perfetto_init();
    perfetto::DataSourceDescriptor dsd;
+#if DETECT_OS_ANDROID
+   // Android tooling expects this data source name
+   dsd.set_name("gpu.renderstages");
+#else
    dsd.set_name("gpu.renderstages.amd");
+#endif
    SIRenderpassDataSource::Register(dsd);
 #endif
 }

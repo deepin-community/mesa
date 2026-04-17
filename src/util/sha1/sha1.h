@@ -1,48 +1,47 @@
-/*	$OpenBSD: sha1.h,v 1.24 2012/12/05 23:19:57 deraadt Exp $	*/
-
-/*
- * SHA-1 in C
- * By Steve Reid <steve@edmweb.com>
- * 100% Public Domain
+/* Copyright 2025 Advanced Micro Devices, Inc.
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef _SHA1_H
 #define _SHA1_H
 
-#include <stddef.h>
-#include <stdint.h>
+/* This is not SHA1. This is BLAKE3 exposed as SHA1 functions due to
+ * transitional and historic reasons.
+ *
+ * TODO: Remove this and use _mesa_blake3_* functions everywhere.
+ * All remnants of SHA1 should be removed from Mesa except build_id.
+ */
 
-#define	SHA1_BLOCK_LENGTH		64
-#define	SHA1_DIGEST_LENGTH		20
-#define	SHA1_DIGEST_STRING_LENGTH	(SHA1_DIGEST_LENGTH * 2 + 1)
+#include "util/mesa-blake3.h"
+
+#define	SHA1_DIGEST_LENGTH		BLAKE3_KEY_LEN
+#define	SHA1_DIGEST_STRING_LENGTH	BLAKE3_HEX_LEN
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef struct _SHA1_CTX {
-    uint32_t state[5];
-    uint64_t count;
-    uint8_t buffer[SHA1_BLOCK_LENGTH];
+    blake3_hasher hasher;
 } SHA1_CTX;
 
-void SHA1Init(SHA1_CTX *);
-void SHA1Update(SHA1_CTX *, const uint8_t *, size_t);
-void SHA1Final(uint8_t [SHA1_DIGEST_LENGTH], SHA1_CTX *);
+static inline void
+SHA1Init(SHA1_CTX *context)
+{
+    _mesa_blake3_init(&context->hasher);
+}
 
-#define HTONDIGEST(x) do {                                              \
-        x[0] = htonl(x[0]);                                             \
-        x[1] = htonl(x[1]);                                             \
-        x[2] = htonl(x[2]);                                             \
-        x[3] = htonl(x[3]);                                             \
-        x[4] = htonl(x[4]); } while (0)
+static inline void
+SHA1Update(SHA1_CTX *context, const uint8_t *data, size_t len)
+{
+    _mesa_blake3_update(&context->hasher, data, len);
+}
 
-#define NTOHDIGEST(x) do {                                              \
-        x[0] = ntohl(x[0]);                                             \
-        x[1] = ntohl(x[1]);                                             \
-        x[2] = ntohl(x[2]);                                             \
-        x[3] = ntohl(x[3]);                                             \
-        x[4] = ntohl(x[4]); } while (0)
+static inline void
+SHA1Final(uint8_t digest[SHA1_DIGEST_LENGTH], SHA1_CTX *context)
+{
+    _mesa_blake3_final(&context->hasher, digest);
+}
 
 #ifdef __cplusplus
 }

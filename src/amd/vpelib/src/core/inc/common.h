@@ -53,9 +53,14 @@ extern "C" {
 #define max(x, y) (((x) > (y)) ? (x) : (y))
 #endif
 
+#ifndef int_divide_with_ceil
+#define int_divide_with_ceil(x, y) ((x + (y-1))/y)
+#endif
+
 bool vpe_find_color_space_from_table(
     const struct vpe_color_space *table, int table_size, const struct vpe_color_space *cs);
 
+bool vpe_is_subsampled_format(enum vpe_surface_pixel_format format);
 bool vpe_is_dual_plane_format(enum vpe_surface_pixel_format format);
 
 // RGB checkers
@@ -63,6 +68,9 @@ bool vpe_is_32bit_packed_rgb(enum vpe_surface_pixel_format format);
 bool vpe_is_rgb8(enum vpe_surface_pixel_format format);
 bool vpe_is_rgb10(enum vpe_surface_pixel_format format);
 bool vpe_is_fp16(enum vpe_surface_pixel_format format);
+
+bool vpe_is_yuv8(enum vpe_surface_pixel_format format);
+bool vpe_is_yuv10(enum vpe_surface_pixel_format format);
 
 // yuv 4:2:0 check
 bool vpe_is_yuv420_8(enum vpe_surface_pixel_format format);
@@ -76,6 +84,10 @@ bool vpe_is_yuv444_10(enum vpe_surface_pixel_format format);
 bool vpe_is_yuv444(enum vpe_surface_pixel_format format);
 
 bool vpe_is_yuv(enum vpe_surface_pixel_format format);
+
+bool vpe_is_8bit(enum vpe_surface_pixel_format format);
+
+bool vpe_is_10bit(enum vpe_surface_pixel_format format);
 
 enum color_depth vpe_get_color_depth(enum vpe_surface_pixel_format format);
 

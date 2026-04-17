@@ -23,6 +23,7 @@
 
 #include <inttypes.h>
 #include "util/format/u_format.h"
+#include "util/u_inlines.h"
 #include "util/u_math.h"
 #include "util/u_memory.h"
 #include "util/ralloc.h"
@@ -42,10 +43,6 @@ static struct v3d_compiled_shader *
 v3d_get_compiled_shader(struct v3d_context *v3d,
                         struct v3d_key *key, size_t key_size,
                         struct v3d_uncompiled_shader *uncompiled);
-
-static void
-v3d_setup_shared_precompile_key(struct v3d_uncompiled_shader *uncompiled,
-                                struct v3d_key *key);
 
 static gl_varying_slot
 v3d_get_slot_for_driver_location(nir_shader *s, uint32_t driver_location)
@@ -238,14 +235,11 @@ v3d_shader_precompile(struct v3d_context *v3d,
 
                 key.logicop_func = PIPE_LOGICOP_COPY;
 
-                v3d_setup_shared_precompile_key(so, &key.base);
                 v3d_get_compiled_shader(v3d, &key.base, sizeof(key), so);
         } else if (s->info.stage == MESA_SHADER_GEOMETRY) {
                 struct v3d_gs_key key = {
                         .base.is_last_geometry_stage = true,
                 };
-
-                v3d_setup_shared_precompile_key(so, &key.base);
 
                 precompile_all_outputs(s,
                                        key.used_outputs,
@@ -268,8 +262,6 @@ v3d_shader_precompile(struct v3d_context *v3d,
                         .base.is_last_geometry_stage = true,
                 };
 
-                v3d_setup_shared_precompile_key(so, &key.base);
-
                 precompile_all_outputs(s,
                                        key.used_outputs,
                                        &key.num_used_outputs);
@@ -288,7 +280,6 @@ v3d_shader_precompile(struct v3d_context *v3d,
         } else {
                 assert(s->info.stage == MESA_SHADER_COMPUTE);
                 struct v3d_key key = { 0 };
-                v3d_setup_shared_precompile_key(so, &key);
                 v3d_get_compiled_shader(v3d, &key, sizeof(key), so);
         }
 }
@@ -307,12 +298,8 @@ lower_uniform_offset_to_bytes_cb(nir_builder *b, nir_intrinsic_instr *intr,
 }
 
 static bool
-lower_textures_cb(nir_builder *b, nir_instr *instr, void *_state)
+lower_textures_cb(nir_builder *b, nir_tex_instr *tex, void *_state)
 {
-        if (instr->type != nir_instr_type_tex)
-                return false;
-
-        nir_tex_instr *tex = nir_instr_as_tex(instr);
         if (nir_tex_instr_need_sampler(tex))
                 return false;
 
@@ -334,8 +321,8 @@ v3d_nir_lower_uniform_offset_to_bytes(nir_shader *s)
 static bool
 v3d_nir_lower_textures(nir_shader *s)
 {
-        return nir_shader_instructions_pass(s, lower_textures_cb,
-                                            nir_metadata_control_flow, NULL);
+        return nir_shader_tex_pass(s, lower_textures_cb,
+                                   nir_metadata_control_flow, NULL);
 }
 
 static void *
@@ -371,6 +358,14 @@ v3d_uncompiled_shader_create(struct pipe_context *pctx,
         if (s->info.stage == MESA_SHADER_KERNEL)
                 s->info.stage = MESA_SHADER_COMPUTE;
 
+        if (s->info.stage == MESA_SHADER_FRAGMENT &&
+            s->info.outputs_written & BITFIELD_BIT(FRAG_RESULT_COLOR)) {
+                /* We only support one attachment when doing dual source blending. */
+                unsigned max_rb = s->info.fs.color_is_dual_source ?
+                        1 : V3D_MAX_DRAW_BUFFERS;
+                NIR_PASS(_, s, nir_lower_fragcolor, max_rb);
+        }
+
         if (s->info.stage != MESA_SHADER_VERTEX &&
             s->info.stage != MESA_SHADER_GEOMETRY) {
                 NIR_PASS(_, s, nir_lower_io,
@@ -402,7 +397,7 @@ v3d_uncompiled_shader_create(struct pipe_context *pctx,
 
         NIR_PASS(_, s, nir_lower_frexp);
 
-        /* Since we can't expose PIPE_CAP_PACKED_UNIFORMS the state tracker
+        /* Since we can't expose pipe_caps.packed_uniforms the state tracker
          * will produce uniform intrinsics with offsets in vec4 units but
          * our compiler expects to work in units of bytes.
          */
@@ -426,7 +421,7 @@ v3d_uncompiled_shader_create(struct pipe_context *pctx,
 
         if (V3D_DBG(NIR) || v3d_debug_flag_for_shader_stage(s->info.stage)) {
                 fprintf(stderr, "%s prog %d NIR:\n",
-                        gl_shader_stage_name(s->info.stage),
+                        mesa_shader_stage_name(s->info.stage),
                         so->program_id);
                 nir_print_shader(s, stderr);
                 fprintf(stderr, "\n");
@@ -465,7 +460,7 @@ v3d_shader_state_create(struct pipe_context *pctx,
 /* Key ued with the RAM cache */
 struct v3d_cache_key {
         struct v3d_key *key;
-        unsigned char sha1[20];
+        unsigned char sha1[SHA1_DIGEST_LENGTH];
 };
 
 struct v3d_compiled_shader *
@@ -496,13 +491,13 @@ v3d_get_compiled_shader(struct v3d_context *v3d,
 
                 int program_id = uncompiled->program_id;
                 uint64_t *qpu_insts;
-                uint32_t shader_size;
 
                 qpu_insts = v3d_compile(v3d->screen->compiler, key,
                                         &shader->prog_data.base, s,
                                         v3d_shader_debug_output,
                                         v3d,
-                                        program_id, variant_id, &shader_size);
+                                        program_id, variant_id,
+                                        &shader->qpu_size);
 
                 /* qpu_insts being NULL can happen if the register allocation
                  * failed. At this point we can't really trigger an OpenGL API
@@ -513,14 +508,14 @@ v3d_get_compiled_shader(struct v3d_context *v3d,
                 assert(qpu_insts);
                 ralloc_steal(shader, shader->prog_data.base);
 
-                if (shader_size) {
-                        u_upload_data(v3d->state_uploader, 0, shader_size, 8,
+                if (shader->qpu_size) {
+                        u_upload_data_ref(v3d->state_uploader, 0, shader->qpu_size, 8,
                                       qpu_insts, &shader->offset, &shader->resource);
                 }
 
 #ifdef ENABLE_SHADER_CACHE
                 v3d_disk_cache_store(v3d, key, uncompiled,
-                                     shader, qpu_insts, shader_size);
+                                     shader, qpu_insts, shader->qpu_size);
 #endif
 
                 free(qpu_insts);
@@ -570,71 +565,22 @@ v3d_setup_shared_key(struct v3d_context *v3d, struct v3d_key *key,
 {
         const struct v3d_device_info *devinfo = &v3d->screen->devinfo;
 
-        key->num_tex_used = texstate->num_textures;
-        key->num_samplers_used = texstate->num_textures;
-        assert(key->num_tex_used == key->num_samplers_used);
         for (int i = 0; i < texstate->num_textures; i++) {
                 struct pipe_sampler_view *sampler = texstate->textures[i];
 
                 if (!sampler)
                         continue;
 
-                key->sampler[i].return_size =
+                uint8_t return_size =
                         v3d_get_tex_return_size(devinfo, sampler->format);
+                assert(return_size == 16 || return_size == 32);
 
-                /* For 16-bit, we set up the sampler to always return 2
-                 * channels (meaning no recompiles for most statechanges),
-                 * while for 32 we actually scale the returns with channels.
-                 */
-                if (key->sampler[i].return_size == 16) {
-                        key->sampler[i].return_channels = 2;
-                } else {
-                        key->sampler[i].return_channels = 4;
-                }
-
-                /* We let the sampler state handle the swizzle.
-                 */
-                key->tex[i].swizzle[0] = PIPE_SWIZZLE_X;
-                key->tex[i].swizzle[1] = PIPE_SWIZZLE_Y;
-                key->tex[i].swizzle[2] = PIPE_SWIZZLE_Z;
-                key->tex[i].swizzle[3] = PIPE_SWIZZLE_W;
-        }
-}
-
-static void
-v3d_setup_shared_precompile_key(struct v3d_uncompiled_shader *uncompiled,
-                                struct v3d_key *key)
-{
-        nir_shader *s = uncompiled->base.ir.nir;
-
-        /* The shader may have gaps in the texture bindings, so figure out
-         * the largest binding in use and setup the number of textures and
-         * samplers from there instead of just the texture count from shader
-         * info.
-         */
-        key->num_tex_used = 0;
-        key->num_samplers_used = 0;
-        for (int i = V3D_MAX_TEXTURE_SAMPLERS - 1; i >= 0; i--) {
-                if (s->info.textures_used[0] & (1 << i)) {
-                        key->num_tex_used = i + 1;
-                        key->num_samplers_used = i + 1;
-                        break;
-                }
+                if (return_size == 32)
+                        key->sampler_is_32b |= (1 << i);
         }
 
-        /* Note that below we access they key's texture and sampler fields
-         * using the same index. On OpenGL they are the same (they are
-         * combined)
-         */
-        for (int i = 0; i < s->info.num_textures; i++) {
-                key->sampler[i].return_size = 16;
-                key->sampler[i].return_channels = 2;
-
-                key->tex[i].swizzle[0] = PIPE_SWIZZLE_X;
-                key->tex[i].swizzle[1] = PIPE_SWIZZLE_Y;
-                key->tex[i].swizzle[2] = PIPE_SWIZZLE_Z;
-                key->tex[i].swizzle[3] = PIPE_SWIZZLE_W;
-        }
+        key->robust_uniform_access = v3d->robust_buffer;
+        key->robust_storage_access = v3d->robust_buffer;
 }
 
 static void
@@ -658,8 +604,8 @@ v3d_update_compiled_fs(struct v3d_context *v3d, uint8_t prim_mode)
         }
 
         memset(key, 0, sizeof(*key));
-        v3d_setup_shared_key(v3d, &key->base, &v3d->tex[PIPE_SHADER_FRAGMENT]);
-        key->base.ucp_enables = v3d->rasterizer->base.clip_plane_enable;
+        v3d_setup_shared_key(v3d, &key->base, &v3d->tex[MESA_SHADER_FRAGMENT]);
+        key->ucp_enables = v3d->rasterizer->base.clip_plane_enable;
         key->is_points = (prim_mode == MESA_PRIM_POINTS);
         key->is_lines = (prim_mode >= MESA_PRIM_LINES &&
                          prim_mode <= MESA_PRIM_LINE_STRIP);
@@ -679,13 +625,16 @@ v3d_update_compiled_fs(struct v3d_context *v3d, uint8_t prim_mode)
 
         key->swap_color_rb = v3d->swap_color_rb;
         key->can_earlyz_with_discard = s->info.fs.uses_discard &&
-                (!v3d->zsa || !job->zsbuf || !v3d->zsa->base.depth_enabled ||
-                 !v3d->zsa->base.depth_writemask) &&
+                !s->info.fs.uses_fbfetch_output &&
+                (!v3d->zsa || !job->zsbuf.texture ||
+                 !util_writes_depth_stencil(&v3d->zsa->base)) &&
                 !(v3d->active_queries && v3d->current_oq);
 
+        key->software_blend = v3d->framebuffer_soft_blend || v3d->blend->use_software;
+
         for (int i = 0; i < v3d->framebuffer.nr_cbufs; i++) {
-                struct pipe_surface *cbuf = v3d->framebuffer.cbufs[i];
-                if (!cbuf)
+                const struct pipe_surface *cbuf = &v3d->framebuffer.cbufs[i];
+                if (!cbuf->texture)
                         continue;
 
                 /* gl_FragColor's propagation to however many bound color
@@ -694,16 +643,38 @@ v3d_update_compiled_fs(struct v3d_context *v3d, uint8_t prim_mode)
                  */
                 key->cbufs |= 1 << i;
 
-                /* If logic operations are enabled then we might emit color
-                 * reads and we need to know the color buffer format and
-                 * swizzle for that.
+                /* When emitting color reads (in the case of logic ops and
+                 * load_output) we need to know the color buffer format and
+                 * swizzle.
                  */
-                if (key->logicop_func != PIPE_LOGICOP_COPY) {
+                if (key->logicop_func != PIPE_LOGICOP_COPY ||
+                    key->software_blend) {
+
                         key->color_fmt[i].format = cbuf->format;
                         memcpy(key->color_fmt[i].swizzle,
                                v3d_get_format_swizzle(&v3d->screen->devinfo,
                                                        cbuf->format),
                                sizeof(key->color_fmt[i].swizzle));
+                }
+
+                if (key->software_blend) {
+                        struct pipe_rt_blend_state *blend = &v3d->blend->base.rt[i];
+
+                        if (blend->blend_enable) {
+                                key->blend[i].rgb_func = blend->rgb_func;
+                                key->blend[i].rgb_src_factor = blend->rgb_src_factor;
+                                key->blend[i].rgb_dst_factor = blend->rgb_dst_factor;
+                                key->blend[i].alpha_func = blend->alpha_func;
+                                key->blend[i].alpha_src_factor = blend->alpha_src_factor;
+                                key->blend[i].alpha_dst_factor = blend->alpha_dst_factor;
+                        } else {
+                                key->blend[i].rgb_func = PIPE_BLEND_ADD;
+                                key->blend[i].rgb_src_factor = PIPE_BLENDFACTOR_ONE;
+                                key->blend[i].rgb_dst_factor = PIPE_BLENDFACTOR_ZERO;
+                                key->blend[i].alpha_func = PIPE_BLEND_ADD;
+                                key->blend[i].alpha_src_factor = PIPE_BLENDFACTOR_ONE;
+                                key->blend[i].alpha_dst_factor = PIPE_BLENDFACTOR_ZERO;
+                        }
                 }
 
                 const struct util_format_description *desc =
@@ -714,12 +685,23 @@ v3d_update_compiled_fs(struct v3d_context *v3d, uint8_t prim_mode)
                         key->f32_color_rb |= 1 << i;
                 }
 
-                if (s->info.fs.untyped_color_outputs) {
-                        if (util_format_is_pure_uint(cbuf->format))
-                                key->uint_color_rb |= 1 << i;
-                        else if (util_format_is_pure_sint(cbuf->format))
-                                key->int_color_rb |= 1 << i;
+                if (desc->is_unorm && desc->channel[0].size == 16) {
+                        /* We write as integer */
+                        key->f32_color_rb |= 1 << i;
+                        key->norm_16 |= 1 << i;
                 }
+
+                if (desc->is_snorm) {
+                        if (desc->channel[0].size == 16)
+                                key->norm_16 |= 1 << i;
+                        key->snorm |= 1 << i;
+                        key->f32_color_rb |= 1 << i;
+                }
+
+                if (util_format_is_pure_uint(cbuf->format))
+                        key->f32_color_rb |= 1 << i;
+                else if (util_format_is_pure_sint(cbuf->format))
+                        key->f32_color_rb |= 1 << i;
         }
 
         if (key->is_points) {
@@ -752,6 +734,10 @@ v3d_update_compiled_fs(struct v3d_context *v3d, uint8_t prim_mode)
                     old_fs->prog_data.fs->centroid_flags) {
                         v3d->dirty |= V3D_DIRTY_CENTROID_FLAGS;
                 }
+                if (v3d->prog.fs->prog_data.fs->disable_ez !=
+                    old_fs->prog_data.fs->disable_ez) {
+                   v3d->dirty |= V3D_DIRTY_ZSA;
+                }
         }
 
         if (old_fs && memcmp(v3d->prog.fs->prog_data.fs->input_slots,
@@ -782,8 +768,7 @@ v3d_update_compiled_gs(struct v3d_context *v3d, uint8_t prim_mode)
         }
 
         memset(key, 0, sizeof(*key));
-        v3d_setup_shared_key(v3d, &key->base, &v3d->tex[PIPE_SHADER_GEOMETRY]);
-        key->base.ucp_enables = v3d->rasterizer->base.clip_plane_enable;
+        v3d_setup_shared_key(v3d, &key->base, &v3d->tex[MESA_SHADER_GEOMETRY]);
         key->base.is_last_geometry_stage = true;
         key->num_used_outputs = v3d->prog.fs->prog_data.fs->num_inputs;
         STATIC_ASSERT(sizeof(key->used_outputs) ==
@@ -855,8 +840,7 @@ v3d_update_compiled_vs(struct v3d_context *v3d, uint8_t prim_mode)
         }
 
         memset(key, 0, sizeof(*key));
-        v3d_setup_shared_key(v3d, &key->base, &v3d->tex[PIPE_SHADER_VERTEX]);
-        key->base.ucp_enables = v3d->rasterizer->base.clip_plane_enable;
+        v3d_setup_shared_key(v3d, &key->base, &v3d->tex[MESA_SHADER_VERTEX]);
         key->base.is_last_geometry_stage = !v3d->prog.bind_gs;
 
         if (!v3d->prog.bind_gs) {
@@ -969,7 +953,7 @@ v3d_update_compiled_cs(struct v3d_context *v3d)
         }
 
         memset(key, 0, sizeof(*key));
-        v3d_setup_shared_key(v3d, key, &v3d->tex[PIPE_SHADER_COMPUTE]);
+        v3d_setup_shared_key(v3d, key, &v3d->tex[MESA_SHADER_COMPUTE]);
 
         struct v3d_compiled_shader *cs =
                 v3d_get_compiled_shader(v3d, key, sizeof(*key),
@@ -986,12 +970,12 @@ cache_hash(const void *_key, uint32_t key_size)
         const struct v3d_cache_key *key = (struct v3d_cache_key *) _key;
 
         struct mesa_sha1 ctx;
-        unsigned char sha1[20];
+        unsigned char sha1[SHA1_DIGEST_LENGTH];
         _mesa_sha1_init(&ctx);
         _mesa_sha1_update(&ctx, key->key, key_size);
-        _mesa_sha1_update(&ctx, key->sha1, 20);
+        _mesa_sha1_update(&ctx, key->sha1, SHA1_DIGEST_LENGTH);
         _mesa_sha1_final(&ctx, sha1);
-        return _mesa_hash_data(sha1, 20);
+        return _mesa_hash_data(sha1, SHA1_DIGEST_LENGTH);
 }
 
 static inline bool

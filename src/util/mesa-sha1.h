@@ -49,7 +49,7 @@ _mesa_sha1_update(struct mesa_sha1 *ctx, const void *data, size_t size)
 }
 
 static inline void
-_mesa_sha1_final(struct mesa_sha1 *ctx, unsigned char result[20])
+_mesa_sha1_final(struct mesa_sha1 *ctx, unsigned char result[SHA1_DIGEST_LENGTH])
 {
    SHA1Final(result, ctx);
 }
@@ -61,7 +61,7 @@ void
 _mesa_sha1_hex_to_sha1(unsigned char *buf, const char *hex);
 
 void
-_mesa_sha1_compute(const void *data, size_t size, unsigned char result[20]);
+_mesa_sha1_compute(const void *data, size_t size, unsigned char result[SHA1_DIGEST_LENGTH]);
 
 void
 _mesa_sha1_print(FILE *f, const uint8_t sha1[SHA1_DIGEST_LENGTH]);

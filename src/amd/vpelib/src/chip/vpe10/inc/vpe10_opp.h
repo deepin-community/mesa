@@ -58,38 +58,38 @@ extern "C" {
         SFRB(VPFMT_CLAMP_UPPER_B, VPFMT_CLAMP_COMPONENT_B, post_fix),                              \
         SFRB(VPFMT_DYNAMIC_EXP_EN, VPFMT_DYNAMIC_EXP_CNTL, post_fix),                              \
         SFRB(VPFMT_DYNAMIC_EXP_MODE, VPFMT_DYNAMIC_EXP_CNTL, post_fix),                            \
-        SFRB(VPFMT_SPATIAL_DITHER_FRAME_COUNTER_MAX, VPFMT_CONTROL, post_fix),                     \
-        SFRB(VPFMT_SPATIAL_DITHER_FRAME_COUNTER_BIT_SWAP, VPFMT_CONTROL, post_fix),                \
         SFRB(VPFMT_CBCR_BIT_REDUCTION_BYPASS, VPFMT_CONTROL, post_fix),                            \
         SFRB(VPFMT_DOUBLE_BUFFER_REG_UPDATE_PENDING, VPFMT_CONTROL, post_fix),                     \
         SFRB(VPFMT_TRUNCATE_EN, VPFMT_BIT_DEPTH_CONTROL, post_fix),                                \
         SFRB(VPFMT_TRUNCATE_MODE, VPFMT_BIT_DEPTH_CONTROL, post_fix),                              \
         SFRB(VPFMT_TRUNCATE_DEPTH, VPFMT_BIT_DEPTH_CONTROL, post_fix),                             \
+        SFRB(VPFMT_OFFSET_R_CR, VPFMT_DITHER_RAND_R_SEED, post_fix),                               \
+        SFRB(VPFMT_OFFSET_G_Y, VPFMT_DITHER_RAND_G_SEED, post_fix),                                \
+        SFRB(VPFMT_OFFSET_B_CB, VPFMT_DITHER_RAND_B_SEED, post_fix),                               \
+        SFRB(VPFMT_CLAMP_DATA_EN, VPFMT_CLAMP_CNTL, post_fix),                                     \
+        SFRB(VPFMT_CLAMP_COLOR_FORMAT, VPFMT_CLAMP_CNTL, post_fix),                                \
+        SFRB(VPOPP_PIPE_CLOCK_ON, VPOPP_PIPE_CONTROL, post_fix),                                   \
+        SFRB(VPOPP_PIPE_DIGITAL_BYPASS_EN, VPOPP_PIPE_CONTROL, post_fix),                          \
+        SFRB(VPOPP_VPECLK_R_GATE_DIS, VPOPP_TOP_CLK_CONTROL, post_fix),                            \
+        SFRB(VPOPP_VPECLK_G_GATE_DIS, VPOPP_TOP_CLK_CONTROL, post_fix)
+
+#define OPP_FIELD_LIST_VPE10(post_fix)                                                             \
+    OPP_FIELD_LIST_VPE10_COMMON(post_fix),                                                         \
         SFRB(VPFMT_SPATIAL_DITHER_EN, VPFMT_BIT_DEPTH_CONTROL, post_fix),                          \
         SFRB(VPFMT_SPATIAL_DITHER_MODE, VPFMT_BIT_DEPTH_CONTROL, post_fix),                        \
         SFRB(VPFMT_SPATIAL_DITHER_DEPTH, VPFMT_BIT_DEPTH_CONTROL, post_fix),                       \
         SFRB(VPFMT_FRAME_RANDOM_ENABLE, VPFMT_BIT_DEPTH_CONTROL, post_fix),                        \
         SFRB(VPFMT_RGB_RANDOM_ENABLE, VPFMT_BIT_DEPTH_CONTROL, post_fix),                          \
         SFRB(VPFMT_HIGHPASS_RANDOM_ENABLE, VPFMT_BIT_DEPTH_CONTROL, post_fix),                     \
+        SFRB(VPFMT_SPATIAL_DITHER_FRAME_COUNTER_MAX, VPFMT_CONTROL, post_fix),                     \
+        SFRB(VPFMT_SPATIAL_DITHER_FRAME_COUNTER_BIT_SWAP, VPFMT_CONTROL, post_fix),                \
         SFRB(VPFMT_RAND_R_SEED, VPFMT_DITHER_RAND_R_SEED, post_fix),                               \
-        SFRB(VPFMT_OFFSET_R_CR, VPFMT_DITHER_RAND_R_SEED, post_fix),                               \
         SFRB(VPFMT_RAND_G_SEED, VPFMT_DITHER_RAND_G_SEED, post_fix),                               \
-        SFRB(VPFMT_OFFSET_G_Y, VPFMT_DITHER_RAND_G_SEED, post_fix),                                \
         SFRB(VPFMT_RAND_B_SEED, VPFMT_DITHER_RAND_B_SEED, post_fix),                               \
-        SFRB(VPFMT_OFFSET_B_CB, VPFMT_DITHER_RAND_B_SEED, post_fix),                               \
-        SFRB(VPFMT_CLAMP_DATA_EN, VPFMT_CLAMP_CNTL, post_fix),                                     \
-        SFRB(VPFMT_CLAMP_COLOR_FORMAT, VPFMT_CLAMP_CNTL, post_fix),                                \
-        SFRB(VPOPP_PIPE_CLOCK_ON, VPOPP_PIPE_CONTROL, post_fix),                                   \
-        SFRB(VPOPP_PIPE_DIGITAL_BYPASS_EN, VPOPP_PIPE_CONTROL, post_fix),                          \
-        SFRB(VPOPP_PIPE_ALPHA, VPOPP_PIPE_CONTROL, post_fix),                                      \
-        SFRB(VPOPP_VPECLK_R_GATE_DIS, VPOPP_TOP_CLK_CONTROL, post_fix),                            \
-        SFRB(VPOPP_VPECLK_G_GATE_DIS, VPOPP_TOP_CLK_CONTROL, post_fix)
-
-#define OPP_FIELD_LIST_VPE10(post_fix)                                                             \
-    OPP_FIELD_LIST_VPE10_COMMON(post_fix),                                                         \
         SFRB(VPOPP_PIPE_CRC_EN, VPOPP_PIPE_CRC_CONTROL, post_fix),                                 \
         SFRB(VPOPP_PIPE_CRC_CONT_EN, VPOPP_PIPE_CRC_CONTROL, post_fix),                            \
-        SFRB(VPOPP_PIPE_CRC_PIXEL_SELECT, VPOPP_PIPE_CRC_CONTROL, post_fix)
+        SFRB(VPOPP_PIPE_CRC_PIXEL_SELECT, VPOPP_PIPE_CRC_CONTROL, post_fix),                       \
+        SFRB(VPOPP_PIPE_ALPHA, VPOPP_PIPE_CONTROL, post_fix)
 
 #define OPP_REG_VARIABLE_LIST_VPE10_COMMON                                                         \
     reg_id_val VPFMT_CLAMP_COMPONENT_R;                                                            \
@@ -119,38 +119,38 @@ extern "C" {
     type VPFMT_CLAMP_UPPER_B;                                                                      \
     type VPFMT_DYNAMIC_EXP_EN;                                                                     \
     type VPFMT_DYNAMIC_EXP_MODE;                                                                   \
-    type VPFMT_SPATIAL_DITHER_FRAME_COUNTER_MAX;                                                   \
-    type VPFMT_SPATIAL_DITHER_FRAME_COUNTER_BIT_SWAP;                                              \
     type VPFMT_CBCR_BIT_REDUCTION_BYPASS;                                                          \
     type VPFMT_DOUBLE_BUFFER_REG_UPDATE_PENDING;                                                   \
     type VPFMT_TRUNCATE_EN;                                                                        \
     type VPFMT_TRUNCATE_MODE;                                                                      \
     type VPFMT_TRUNCATE_DEPTH;                                                                     \
+    type VPFMT_OFFSET_R_CR;                                                                        \
+    type VPFMT_OFFSET_G_Y;                                                                         \
+    type VPFMT_OFFSET_B_CB;                                                                        \
+    type VPFMT_CLAMP_DATA_EN;                                                                      \
+    type VPFMT_CLAMP_COLOR_FORMAT;                                                                 \
+    type VPOPP_PIPE_CLOCK_ON;                                                                      \
+    type VPOPP_PIPE_DIGITAL_BYPASS_EN;                                                             \
+    type VPOPP_VPECLK_R_GATE_DIS;                                                                  \
+    type VPOPP_VPECLK_G_GATE_DIS;
+
+#define OPP_FIELD_VARIABLE_LIST_VPE10(type)                                                        \
+    OPP_FIELD_VARIABLE_LIST_VPE10_COMMON(type)                                                     \
     type VPFMT_SPATIAL_DITHER_EN;                                                                  \
     type VPFMT_SPATIAL_DITHER_MODE;                                                                \
     type VPFMT_SPATIAL_DITHER_DEPTH;                                                               \
     type VPFMT_FRAME_RANDOM_ENABLE;                                                                \
     type VPFMT_RGB_RANDOM_ENABLE;                                                                  \
     type VPFMT_HIGHPASS_RANDOM_ENABLE;                                                             \
+    type VPFMT_SPATIAL_DITHER_FRAME_COUNTER_MAX;                                                   \
+    type VPFMT_SPATIAL_DITHER_FRAME_COUNTER_BIT_SWAP;                                              \
     type VPFMT_RAND_R_SEED;                                                                        \
-    type VPFMT_OFFSET_R_CR;                                                                        \
     type VPFMT_RAND_G_SEED;                                                                        \
-    type VPFMT_OFFSET_G_Y;                                                                         \
     type VPFMT_RAND_B_SEED;                                                                        \
-    type VPFMT_OFFSET_B_CB;                                                                        \
-    type VPFMT_CLAMP_DATA_EN;                                                                      \
-    type VPFMT_CLAMP_COLOR_FORMAT;                                                                 \
-    type VPOPP_PIPE_CLOCK_ON;                                                                      \
-    type VPOPP_PIPE_DIGITAL_BYPASS_EN;                                                             \
-    type VPOPP_PIPE_ALPHA;                                                                         \
-    type VPOPP_VPECLK_R_GATE_DIS;                                                                  \
-    type VPOPP_VPECLK_G_GATE_DIS;
-
-#define OPP_FIELD_VARIABLE_LIST_VPE10(type)                                                        \
-    OPP_FIELD_VARIABLE_LIST_VPE10_COMMON(type)                                                     \
     type VPOPP_PIPE_CRC_EN;                                                                        \
     type VPOPP_PIPE_CRC_CONT_EN;                                                                   \
-    type VPOPP_PIPE_CRC_PIXEL_SELECT;
+    type VPOPP_PIPE_CRC_PIXEL_SELECT;                                                              \
+    type VPOPP_PIPE_ALPHA;
 
 struct vpe10_opp_registers {
     OPP_REG_VARIABLE_LIST_VPE10

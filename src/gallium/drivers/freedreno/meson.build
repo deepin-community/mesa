@@ -223,45 +223,35 @@ freedreno_tracepoints = custom_target(
 files_libfreedreno += freedreno_tracepoints
 
 freedreno_includes = [
-  inc_mesa, inc_mapi,
   inc_src, inc_include, inc_gallium, inc_gallium_aux,
   inc_freedreno, include_directories('ir3'),
 ]
 
 freedreno_c_args = [no_override_init_args]
 freedreno_c_args += cc.get_supported_arguments([
-  '-Wno-packed-bitfield-compat',
   '-Wno-array-bounds',
+  '-Wno-packed-bitfield-compat',
 ])
 
 freedreno_cpp_args = []
 freedreno_cpp_args += cpp.get_supported_arguments([
+  '-DFD_BO_NO_HARDPIN=1',
   '-fno-exceptions',
   '-fno-rtti',
-  '-Wno-packed-bitfield-compat',
-  '-Wno-c99-designator',
-  '-Wno-reorder-init-list',
-  '-Wno-address-of-temporary',
-  '-Wno-c++11-narrowing',
-  '-Wno-narrowing',
-  '-Wno-sign-compare',
-  '-Wno-missing-field-initializers',
-  '-Wno-reorder',
-  '-Wno-array-bounds',
-  '-Wno-overflow',
-  '-Wno-c++11-narrowing',
-  '-Wno-vla-cxx-extension',
   '-Wno-address-of-packed-member',
+  '-Wno-address-of-temporary',
+  '-Wno-array-bounds',
+  '-Wno-c++11-narrowing',
+  '-Wno-c99-designator',
+  '-Wno-missing-field-initializers',
+  '-Wno-narrowing',
+  '-Wno-overflow',
+  '-Wno-packed-bitfield-compat',
+  '-Wno-reorder',
+  '-Wno-reorder-init-list',
+  '-Wno-sign-compare',
+  '-Wno-vla-cxx-extension',
 ])
-
-# HACK compiler.get_supported_arguments()/has_argument() do not seem
-# to be reliable for cross builds (!?!) so just jam in some args we
-# need and hope for the best
-if meson.is_cross_build()
-  freedreno_cpp_args += '-Wno-array-bounds'
-  freedreno_cpp_args += '-Wno-c++11-narrowing'
-  freedreno_cpp_args += '-Wno-c99-designator'
-endif
 
 libfreedreno_dependencies = [
   dep_libdrm,
@@ -307,32 +297,12 @@ driver_freedreno = declare_dependency(
   ],
 )
 
-ir3_compiler = executable(
-  'ir3_compiler',
-  ['ir3/ir3_cmdline.c', freedreno_xml_header_files],
-  include_directories : freedreno_includes,
-  dependencies : [
-    idep_nir,
-    idep_vtn,
-    idep_mesautil,
-  ],
-  link_with : [
-    libfreedreno,
-    libfreedreno_drm,
-    libfreedreno_ir3,
-    libfreedreno_layout,
-    libgallium,
-    libglsl_standalone,
-  ],
-  build_by_default : with_tools.contains('freedreno'),
-  install : false,
-)
-
 gmemtool = executable(
   'gmemtool',
   [
     'gmemtool.c',
-    freedreno_tracepoints[1]
+    freedreno_tracepoints[1],
+    freedreno_xml_header_files,
   ],
   include_directories : freedreno_includes,
   dependencies : [

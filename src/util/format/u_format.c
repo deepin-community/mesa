@@ -37,6 +37,7 @@
 #include "util/format/u_format.h"
 #include "util/format/u_format_s3tc.h"
 #include "util/u_math.h"
+#include "util/perf/cpu_trace.h"
 
 /**
  * Copy 2D rect from one place to another.
@@ -56,6 +57,8 @@ util_copy_rect(void * dst_in,
                unsigned src_x,
                unsigned src_y)
 {
+   MESA_TRACE_SCOPE("%s width=%u height=%u", __func__, width, height);
+
    uint8_t *dst = dst_in;
    const uint8_t *src = src_in;
    unsigned i;
@@ -360,6 +363,18 @@ util_format_is_subsampled_422(enum pipe_format format)
       desc->block.width == 2 &&
       desc->block.height == 1 &&
       desc->block.bits == 32;
+}
+
+bool
+util_format_is_float16(enum pipe_format format)
+{
+   const struct util_format_description *desc =
+      util_format_description(format);
+   const int c = util_format_get_first_non_void_channel(format);
+   if (c < 0)
+      return false;
+
+   return desc->channel[c].type == UTIL_FORMAT_TYPE_FLOAT && desc->channel[c].size == 16;
 }
 
 /**
@@ -1017,101 +1032,6 @@ void util_format_unswizzle_4f(float *dst, const float *src,
    }
 }
 
-enum pipe_format
-util_format_snorm_to_sint(enum pipe_format format)
-{
-   switch (format) {
-   case PIPE_FORMAT_R32_SNORM:
-      return PIPE_FORMAT_R32_SINT;
-   case PIPE_FORMAT_R32G32_SNORM:
-      return PIPE_FORMAT_R32G32_SINT;
-   case PIPE_FORMAT_R32G32B32_SNORM:
-      return PIPE_FORMAT_R32G32B32_SINT;
-   case PIPE_FORMAT_R32G32B32A32_SNORM:
-      return PIPE_FORMAT_R32G32B32A32_SINT;
-
-   case PIPE_FORMAT_R16_SNORM:
-      return PIPE_FORMAT_R16_SINT;
-   case PIPE_FORMAT_R16G16_SNORM:
-      return PIPE_FORMAT_R16G16_SINT;
-   case PIPE_FORMAT_R16G16B16_SNORM:
-      return PIPE_FORMAT_R16G16B16_SINT;
-   case PIPE_FORMAT_R16G16B16A16_SNORM:
-      return PIPE_FORMAT_R16G16B16A16_SINT;
-
-   case PIPE_FORMAT_R8_SNORM:
-      return PIPE_FORMAT_R8_SINT;
-   case PIPE_FORMAT_R8G8_SNORM:
-      return PIPE_FORMAT_R8G8_SINT;
-   case PIPE_FORMAT_R8G8B8_SNORM:
-      return PIPE_FORMAT_R8G8B8_SINT;
-   case PIPE_FORMAT_B8G8R8_SNORM:
-      return PIPE_FORMAT_B8G8R8_SINT;
-   case PIPE_FORMAT_R8G8B8A8_SNORM:
-      return PIPE_FORMAT_R8G8B8A8_SINT;
-   case PIPE_FORMAT_B8G8R8A8_SNORM:
-      return PIPE_FORMAT_B8G8R8A8_SINT;
-
-   case PIPE_FORMAT_R10G10B10A2_SNORM:
-      return PIPE_FORMAT_R10G10B10A2_SINT;
-   case PIPE_FORMAT_B10G10R10A2_SNORM:
-      return PIPE_FORMAT_B10G10R10A2_SINT;
-
-   case PIPE_FORMAT_R10G10B10X2_SNORM:
-      return PIPE_FORMAT_R10G10B10X2_SINT;
-
-   case PIPE_FORMAT_A8_SNORM:
-      return PIPE_FORMAT_A8_SINT;
-   case PIPE_FORMAT_L8_SNORM:
-      return PIPE_FORMAT_L8_SINT;
-   case PIPE_FORMAT_L8A8_SNORM:
-      return PIPE_FORMAT_L8A8_SINT;
-   case PIPE_FORMAT_I8_SNORM:
-      return PIPE_FORMAT_I8_SINT;
-
-   case PIPE_FORMAT_A16_SNORM:
-      return PIPE_FORMAT_A16_SINT;
-   case PIPE_FORMAT_L16_SNORM:
-      return PIPE_FORMAT_L16_SINT;
-   case PIPE_FORMAT_L16A16_SNORM:
-      return PIPE_FORMAT_L16A16_SINT;
-   case PIPE_FORMAT_I16_SNORM:
-      return PIPE_FORMAT_I16_SINT;
-
-   case PIPE_FORMAT_R8G8B8X8_SNORM:
-      return PIPE_FORMAT_R8G8B8X8_SINT;
-   case PIPE_FORMAT_R16G16B16X16_SNORM:
-      return PIPE_FORMAT_R16G16B16X16_SINT;
-
-   case PIPE_FORMAT_R8A8_SNORM:
-      return PIPE_FORMAT_R8A8_SINT;
-   case PIPE_FORMAT_R16A16_SNORM:
-      return PIPE_FORMAT_R16A16_SINT;
-
-   case PIPE_FORMAT_G8R8_SNORM:
-      return PIPE_FORMAT_G8R8_SINT;
-   case PIPE_FORMAT_G16R16_SNORM:
-      return PIPE_FORMAT_G16R16_SINT;
-
-   case PIPE_FORMAT_A8B8G8R8_SNORM:
-      return PIPE_FORMAT_A8B8G8R8_SINT;
-   case PIPE_FORMAT_X8B8G8R8_SNORM:
-      return PIPE_FORMAT_X8B8G8R8_SINT;
-
-   case PIPE_FORMAT_B8G8R8X8_SNORM:
-      return PIPE_FORMAT_B8G8R8X8_SINT;
-   case PIPE_FORMAT_A8R8G8B8_SNORM:
-      return PIPE_FORMAT_A8R8G8B8_SINT;
-   case PIPE_FORMAT_X8R8G8B8_SNORM:
-      return PIPE_FORMAT_X8R8G8B8_SINT;
-   case PIPE_FORMAT_B10G10R10X2_SNORM:
-      return PIPE_FORMAT_B10G10R10X2_SINT;
-
-   default:
-      return format;
-   }
-}
-
 /**
  * If the format is RGB, return BGR. If the format is BGR, return RGB.
  * This may fail by returning PIPE_FORMAT_NONE.
@@ -1240,72 +1160,6 @@ util_format_unpack_description(enum pipe_format format)
    call_once(&flag, util_format_unpack_table_init);
 
    return util_format_unpack_table[format];
-}
-
-enum pipe_format
-util_format_snorm_to_unorm(enum pipe_format format)
-{
-#define CASE(x) case PIPE_FORMAT_##x##_SNORM: return PIPE_FORMAT_##x##_UNORM
-
-   switch (format) {
-   CASE(R8G8B8A8);
-   CASE(R8G8B8X8);
-   CASE(B8G8R8A8);
-   CASE(B8G8R8X8);
-   CASE(A8R8G8B8);
-   CASE(X8R8G8B8);
-   CASE(A8B8G8R8);
-   CASE(X8B8G8R8);
-
-   CASE(R10G10B10A2);
-   CASE(R10G10B10X2);
-   CASE(B10G10R10A2);
-   CASE(B10G10R10X2);
-
-   CASE(R8);
-   CASE(R8G8);
-   CASE(G8R8);
-   CASE(R8G8B8);
-   CASE(B8G8R8);
-
-   CASE(R16);
-   CASE(R16G16);
-   CASE(G16R16);
-   CASE(R16G16B16);
-
-   CASE(R16G16B16A16);
-   CASE(R16G16B16X16);
-
-   CASE(R32);
-   CASE(R32G32);
-   CASE(R32G32B32);
-   CASE(R32G32B32A32);
-
-   CASE(RGTC1);
-   CASE(RGTC2);
-   CASE(ETC2_R11);
-   CASE(ETC2_RG11);
-
-   CASE(A8);
-   CASE(A16);
-   CASE(L8);
-   CASE(L16);
-   CASE(I8);
-   CASE(I16);
-
-   CASE(L8A8);
-   CASE(L16A16);
-   CASE(R8A8);
-   CASE(R16A16);
-
-   CASE(LATC1);
-   CASE(LATC2);
-
-   default:
-      return format;
-   }
-
-#undef CASE
 }
 
 enum pipe_format
@@ -1534,7 +1388,7 @@ uint32_t
 util_format_get_tilesize(enum pipe_format format, uint32_t dimensions, uint32_t samples, uint32_t axis)
 {
    if (dimensions == 1)
-      return axis == 0 ? 64 * 1024 : 1;
+      return axis == 0 ? 64 * 1024 / util_next_power_of_two(util_format_get_blocksize(format)) : 1;
 
    uint32_t kind = 0;
    if (dimensions == 2)

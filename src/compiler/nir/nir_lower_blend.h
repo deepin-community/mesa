@@ -25,7 +25,7 @@
 #ifndef NIR_BLEND_H
 #define NIR_BLEND_H
 
-#include "compiler/nir/nir.h"
+#include "compiler/nir/nir_defines.h"
 #include "util/blend.h"
 #include "util/format/u_formats.h"
 
@@ -40,6 +40,8 @@ typedef struct {
 } nir_lower_blend_channel;
 
 typedef struct {
+   enum pipe_format format;
+
    nir_lower_blend_channel rgb;
    nir_lower_blend_channel alpha;
 
@@ -49,7 +51,6 @@ typedef struct {
 
 typedef struct {
    nir_lower_blend_rt rt[8];
-   enum pipe_format format[8];
 
    bool logicop_enable;
    enum pipe_logicop logicop_func;
@@ -58,6 +59,17 @@ typedef struct {
     * load_blend_const_color_rgba */
    bool scalar_blend_const;
 } nir_lower_blend_options;
+
+nir_def *
+nir_color_logicop(nir_builder *b, nir_def *src, nir_def *dst,
+                  enum pipe_logicop func, enum pipe_format format);
+
+nir_def *
+nir_color_blend(nir_builder *b, nir_def *src0, nir_def *src1, nir_def *dst,
+                const nir_lower_blend_rt *rt, bool scalar_blend_const);
+
+nir_def *
+nir_color_mask(nir_builder *b, nir_def *src, nir_def *dst, unsigned mask);
 
 bool nir_lower_blend(nir_shader *shader,
                      const nir_lower_blend_options *options);

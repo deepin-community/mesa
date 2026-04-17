@@ -11,7 +11,7 @@
 #include "vk_pipeline_cache.h"
 
 #include "nak.h"
-#include "nir.h"
+#include "nir_defines.h"
 
 #include "vk_shader.h"
 
@@ -39,7 +39,7 @@ struct vk_shader_module;
 #define NVK_SHADER_STAGE_GRAPHICS_BITS \
    (NVK_SHADER_STAGE_VTGM_BITS | VK_SHADER_STAGE_FRAGMENT_BIT)
 
-static inline gl_shader_stage
+static inline mesa_shader_stage
 nvk_last_vtgm_shader_stage(VkShaderStageFlags stages)
 {
    stages &= ~VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -48,7 +48,7 @@ nvk_last_vtgm_shader_stage(VkShaderStageFlags stages)
 }
 
 static inline uint32_t
-nvk_cbuf_binding_for_stage(gl_shader_stage stage)
+nvk_cbuf_binding_for_stage(mesa_shader_stage stage)
 {
    return stage;
 }
@@ -80,8 +80,8 @@ struct nvk_cbuf_map {
 };
 
 uint16_t
-nvk_max_shader_push_dw(struct nvk_physical_device *pdev,
-                       gl_shader_stage stage, bool last_vtgm);
+nvk_max_shader_push_dw(const struct nvk_physical_device *pdev,
+                       mesa_shader_stage stage, bool last_vtgm);
 
 struct nvk_shader {
    struct vk_shader vk;
@@ -124,8 +124,6 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(nvk_shader, vk.base, VkShaderEXT,
 
 extern const struct vk_device_shader_ops nvk_device_shader_ops;
 
-VkShaderStageFlags nvk_nak_stages(const struct nv_device_info *info);
-
 uint64_t
 nvk_physical_device_compiler_flags(const struct nvk_physical_device *pdev);
 
@@ -150,25 +148,7 @@ nvk_compile_nir_shader(struct nvk_device *dev, nir_shader *nir,
                        const VkAllocationCallbacks *alloc,
                        struct nvk_shader **shader_out);
 
-uint32_t mesa_to_nv9097_shader_type(gl_shader_stage stage);
-uint32_t nvk_pipeline_bind_group(gl_shader_stage stage);
-
-/* Codegen wrappers.
- *
- * TODO: Delete these once NAK supports everything.
- */
-uint64_t nvk_cg_get_prog_debug(void);
-uint64_t nvk_cg_get_prog_optimize(void);
-
-const nir_shader_compiler_options *
-nvk_cg_nir_options(const struct nvk_physical_device *pdev,
-                   gl_shader_stage stage);
-
-void nvk_cg_preprocess_nir(nir_shader *nir);
-void nvk_cg_optimize_nir(nir_shader *nir);
-
-VkResult nvk_cg_compile_nir(struct nvk_physical_device *pdev, nir_shader *nir,
-                            const struct nak_fs_key *fs_key,
-                            struct nvk_shader *shader);
+uint32_t mesa_to_nv9097_shader_type(mesa_shader_stage stage);
+uint32_t nvk_pipeline_bind_group(mesa_shader_stage stage);
 
 #endif

@@ -65,8 +65,7 @@ util_idalloc_init(struct util_idalloc *buf, unsigned initial_num_ids)
 void
 util_idalloc_fini(struct util_idalloc *buf)
 {
-   if (buf->data)
-      free(buf->data);
+   free(buf->data);
 }
 
 unsigned
@@ -287,8 +286,8 @@ util_idalloc_sparse_alloc_range(struct util_idalloc_sparse *buf, unsigned num)
             return max_ids * i + base;
 
          /* Back off the allocation and try again with the next segment. */
-         for (unsigned i = 0; i < num; i++)
-            util_idalloc_free(&buf->segment[i], base + i);
+         for (unsigned j = 0; j < num; j++)
+            util_idalloc_free(&buf->segment[i], base + j);
       }
    }
 

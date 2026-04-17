@@ -53,6 +53,14 @@ radeon_winsys(struct pipe_screen *screen) {
     return r300_screen(screen)->rws;
 }
 
+static inline unsigned
+r300_hyperz_pipe_count(const struct r300_screen *screen)
+{
+   if (screen->caps.family == CHIP_RV530)
+      return screen->info.r300_num_z_pipes;
+   return screen->info.r300_num_gb_pipes;
+}
+
 /* Debug functionality. */
 
 /**
@@ -94,6 +102,7 @@ radeon_winsys(struct pipe_screen *screen) {
 #define DBG_NO_TCL      (1 << 25)
 #define DBG_IEEEMATH    (1 << 26)
 #define DBG_FFMATH      (1 << 27)
+#define DBG_DUMMYSH     (1 << 28)
 /*@}*/
 static inline bool SCREEN_DBG_ON(struct r300_screen * screen, unsigned flags)
 {

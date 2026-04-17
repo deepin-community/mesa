@@ -54,7 +54,7 @@ static uint32_t
 i915_gem_create(struct iris_bufmgr *bufmgr,
                 const struct intel_memory_class_instance **regions,
                 uint16_t regions_count, uint64_t size,
-                enum iris_heap heap, unsigned alloc_flags)
+                enum iris_heap heap, enum bo_alloc_flags alloc_flags)
 {
    const struct intel_device_info *devinfo =
       iris_bufmgr_get_device_info(bufmgr);
@@ -123,7 +123,8 @@ i915_gem_create(struct iris_bufmgr *bufmgr,
    /* Set PAT param */
    struct drm_i915_gem_create_ext_set_pat set_pat_param = { 0 };
    if (devinfo->has_set_pat_uapi) {
-      set_pat_param.pat_index = iris_heap_to_pat_entry(devinfo, heap)->index;
+      set_pat_param.pat_index = iris_heap_to_pat_entry(devinfo, heap,
+                                                       alloc_flags & BO_ALLOC_SCANOUT)->index;
       intel_i915_gem_add_ext(&create.extensions,
                              I915_GEM_CREATE_EXT_SET_PAT,
                              &set_pat_param.base);
@@ -292,7 +293,8 @@ i915_batch_check_for_reset(struct iris_batch *batch)
 static int
 i915_batch_submit(struct iris_batch *batch)
 {
-   struct iris_bufmgr *bufmgr = batch->screen->bufmgr;
+   struct iris_screen *screen = batch->screen;
+   struct iris_bufmgr *bufmgr = screen->bufmgr;
    simple_mtx_t *bo_deps_lock = iris_bufmgr_get_bo_deps_lock(bufmgr);
 
    iris_bo_unmap(batch->bo);
@@ -317,7 +319,7 @@ i915_batch_submit(struct iris_batch *batch)
       } else {
          uint32_t flags = EXEC_OBJECT_SUPPORTS_48B_ADDRESS | EXEC_OBJECT_PINNED;
          flags |= bo->real.capture ? EXEC_OBJECT_CAPTURE : 0;
-         flags |= bo == batch->screen->workaround_bo ? EXEC_OBJECT_ASYNC : 0;
+         flags |= bo == screen->workaround_bo ? EXEC_OBJECT_ASYNC : 0;
          flags |= iris_bo_is_external(bo) ? 0 : EXEC_OBJECT_ASYNC;
          flags |= written ? EXEC_OBJECT_WRITE : 0;
 
@@ -370,7 +372,7 @@ i915_batch_submit(struct iris_batch *batch)
       .buffer_count = validation_count,
       .batch_start_offset = 0,
       /* This must be QWord aligned. */
-      .batch_len = ALIGN(batch->primary_batch_size, 8),
+      .batch_len = align(batch->primary_batch_size, 8),
       .flags = batch->i915.exec_flags |
                I915_EXEC_NO_RELOC |
                I915_EXEC_BATCH_FIRST |
@@ -385,15 +387,9 @@ i915_batch_submit(struct iris_batch *batch)
          (uintptr_t)util_dynarray_begin(&batch->exec_fences);
    }
 
-   int ret = 0;
-   if (!batch->screen->devinfo->no_hw) {
-      do {
-         ret = intel_ioctl(batch->screen->fd, DRM_IOCTL_I915_GEM_EXECBUFFER2, &execbuf);
-      } while (ret && errno == ENOMEM);
-
-      if (ret)
-    ret = -errno;
-   }
+   int ret = i915_gem_execbuf_ioctl(screen->fd, screen->devinfo, &execbuf);
+   if (ret)
+      ret = -errno;
 
    simple_mtx_unlock(bo_deps_lock);
 
@@ -414,7 +410,7 @@ i915_batch_submit(struct iris_batch *batch)
 }
 
 static bool
-i915_gem_vm_bind(struct iris_bo *bo)
+i915_gem_vm_bind(struct iris_bo *bo, enum bo_alloc_flags flags)
 {
    /*
     * i915 does not support VM_BIND yet. The binding operation happens at

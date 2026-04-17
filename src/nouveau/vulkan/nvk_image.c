@@ -11,19 +11,35 @@
 #include "nvk_physical_device.h"
 #include "nvkmd/nvkmd.h"
 
+#include "util/detect_os.h"
+#include "vk_android.h"
 #include "vk_enum_to_str.h"
 #include "vk_format.h"
 #include "nil.h"
 #include "vk_enum_defines.h"
-#include "vk_format.h"
 
 #include "clb097.h"
 #include "clb197.h"
-#include "clc097.h"
+#include "clc197.h"
 #include "clc597.h"
+#include "clcd97.h"
+
+static bool
+nvk_use_separate_zs(const struct nvk_physical_device *pdev, VkFormat vk_format)
+{
+   /* Separate depth/stencil doesn't exist pre-Blackwell */
+   if (pdev->info.cls_eng3d < BLACKWELL_A)
+      return false;
+
+   const VkImageAspectFlags format_aspects = vk_format_aspects(vk_format);
+
+   /* Just depth or just stencil is still a single plane */
+   return format_aspects == (VK_IMAGE_ASPECT_DEPTH_BIT |
+                             VK_IMAGE_ASPECT_STENCIL_BIT);
+}
 
 static VkFormatFeatureFlags2
-nvk_get_image_plane_format_features(struct nvk_physical_device *pdev,
+nvk_get_image_plane_format_features(const struct nvk_physical_device *pdev,
                                     VkFormat vk_format, VkImageTiling tiling,
                                     uint64_t drm_format_mod)
 {
@@ -74,14 +90,14 @@ nvk_get_image_plane_format_features(struct nvk_physical_device *pdev,
       features |= VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT;
    }
 
-   if (nil_format_supports_storage(&pdev->info, p_format)) {
+   if (nvk_format_supports_storage(pdev, p_format)) {
       features |= VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT |
                   VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT;
       if (pdev->info.cls_eng3d >= MAXWELL_A)
          features |= VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT;
    }
 
-   if (nvk_format_supports_atomics(&pdev->info, p_format))
+   if (nvk_format_supports_atomics(pdev, p_format))
       features |= VK_FORMAT_FEATURE_2_STORAGE_IMAGE_ATOMIC_BIT;
 
    if (p_format == PIPE_FORMAT_R8_UINT && tiling == VK_IMAGE_TILING_OPTIMAL)
@@ -92,13 +108,23 @@ nvk_get_image_plane_format_features(struct nvk_physical_device *pdev,
       features |= VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT;
       if (!vk_format_is_depth_or_stencil(vk_format))
          features |= VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT;
+
+      /* The copy engine handles depth and stencil just fine */
+      if (vk_format_has_depth(vk_format)) {
+         features |= VK_FORMAT_FEATURE_2_DEPTH_COPY_ON_COMPUTE_QUEUE_BIT_KHR |
+                     VK_FORMAT_FEATURE_2_DEPTH_COPY_ON_TRANSFER_QUEUE_BIT_KHR;
+      }
+      if (vk_format_has_stencil(vk_format)) {
+         features |= VK_FORMAT_FEATURE_2_STENCIL_COPY_ON_COMPUTE_QUEUE_BIT_KHR |
+                     VK_FORMAT_FEATURE_2_STENCIL_COPY_ON_TRANSFER_QUEUE_BIT_KHR;
+      }
    }
 
    return features;
 }
 
 VkFormatFeatureFlags2
-nvk_get_image_format_features(struct nvk_physical_device *pdev,
+nvk_get_image_format_features(const struct nvk_physical_device *pdev,
                               VkFormat vk_format, VkImageTiling tiling,
                               uint64_t drm_format_mod)
 {
@@ -162,7 +188,7 @@ nvk_get_image_format_features(struct nvk_physical_device *pdev,
 }
 
 void
-nvk_get_drm_format_modifier_properties_list(struct nvk_physical_device *pdev,
+nvk_get_drm_format_modifier_properties_list(const struct nvk_physical_device *pdev,
                                             VkFormat vk_format,
                                             VkBaseOutStructure *ext)
 {
@@ -249,7 +275,7 @@ nvk_get_drm_format_modifier_properties_list(struct nvk_physical_device *pdev,
    }
 
    default:
-      unreachable("Invalid structure type");
+      UNREACHABLE("Invalid structure type");
    }
 }
 
@@ -289,11 +315,16 @@ nvk_image_max_dimension(const struct nv_device_info *info,
    switch (image_type) {
    case VK_IMAGE_TYPE_1D:
    case VK_IMAGE_TYPE_2D:
-      return info->cls_eng3d >= PASCAL_A ? 0x8000 : 0x4000;
+      /* The render and texture units can support up to 16K all the way back
+       * to Kepler but the copy engine can't.  We can work around this by
+       * doing offset shenanigans in the copy code but that not currently
+       * implemented.
+       */
+      return info->cls_eng3d >= PASCAL_B ? 0x8000 : 0x4000;
    case VK_IMAGE_TYPE_3D:
       return 0x4000;
    default:
-      unreachable("Invalid image type");
+      UNREACHABLE("Invalid image type");
    }
 }
 
@@ -410,6 +441,33 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
        pImageFormatInfo->type != VK_IMAGE_TYPE_2D)
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
+   if ((pImageFormatInfo->usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
+                                   VK_IMAGE_USAGE_VIDEO_DECODE_SRC_BIT_KHR |
+                                   VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR |
+                                   VK_IMAGE_USAGE_VIDEO_ENCODE_DST_BIT_KHR |
+                                   VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR |
+                                   VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR)) &&
+       (pImageFormatInfo->flags & (VK_IMAGE_CREATE_SPARSE_ALIASED_BIT |
+                                   VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT)))
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
+   /* With disjoint, the client is allowed to create another image with a format
+    * equal to the plane format and alias them. That only works if creating a
+    * single plane image is equivalent to the given YCbCr plane. However, due
+    * to video engine limitations, we have to create video YCbCr planes with
+    * knowledge of all planes for block size calculations, so this won't work
+    * since it wouldn't know the other planes.
+    * See comment in nvk_image_init() below for more details.
+    */
+   if ((pImageFormatInfo->usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
+                                   VK_IMAGE_USAGE_VIDEO_DECODE_SRC_BIT_KHR |
+                                   VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR |
+                                   VK_IMAGE_USAGE_VIDEO_ENCODE_DST_BIT_KHR |
+                                   VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR |
+                                   VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR)) &&
+       (pImageFormatInfo->flags & VK_IMAGE_CREATE_DISJOINT_BIT))
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
    const uint32_t max_dim =
       nvk_image_max_dimension(&pdev->info, VK_IMAGE_TYPE_1D);
    VkExtent3D maxExtent;
@@ -428,7 +486,7 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
       maxArraySize = 1;
       break;
    default:
-      unreachable("Invalid image type");
+      UNREACHABLE("Invalid image type");
    }
    if (pImageFormatInfo->tiling == VK_IMAGE_TILING_LINEAR)
       maxArraySize = 1;
@@ -491,7 +549,7 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
          tiling_has_explicit_layout = false;
          break;
       default:
-         unreachable("Unsupported VkImageTiling");
+         UNREACHABLE("Unsupported VkImageTiling");
       }
 
       switch (external_info->handleType) {
@@ -509,12 +567,12 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
          break;
 
       case VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT:
-         if (!tiling_has_explicit_layout) {
-            return vk_errorf(pdev, VK_ERROR_FORMAT_NOT_SUPPORTED,
-                             "VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT "
-                             "requires VK_IMAGE_TILING_LINEAR or "
-                             "VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT");
-         }
+         /* VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT requires
+          * VK_IMAGE_TILING_LINEAR or VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT
+          */
+         if (!tiling_has_explicit_layout)
+            return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
          ext_mem_props = &nvk_dma_buf_mem_props;
          break;
 
@@ -532,8 +590,9 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
       }
    }
 
-   const unsigned plane_count =
-      vk_format_get_plane_count(pImageFormatInfo->format);
+   unsigned plane_count = vk_format_get_plane_count(pImageFormatInfo->format);
+   if (nvk_use_separate_zs(pdev, pImageFormatInfo->format))
+      plane_count = 2;
 
    /* From the Vulkan 1.3.259 spec, VkImageCreateInfo:
     *
@@ -558,9 +617,12 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
        (pImageFormatInfo->flags & VK_IMAGE_CREATE_DISJOINT_BIT))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
-   if (ycbcr_info &&
-       ((pImageFormatInfo->flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) ||
-       (pImageFormatInfo->flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT)))
+   /* We don't support sparse residency for multi-plane images.  While we
+    * could probably support sparse for VK_FORMAT_B8G8R8G8_422_UNORM, we
+    * disable it because the standard block sizes are funky.
+    */
+   if ((plane_count > 1 || ycbcr_info != NULL) &&
+       (pImageFormatInfo->flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
    if ((pImageFormatInfo->flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) &&
@@ -620,7 +682,7 @@ vk_image_type_to_nil_dim(VkImageType type)
    case VK_IMAGE_TYPE_2D:  return NIL_IMAGE_DIM_2D;
    case VK_IMAGE_TYPE_3D:  return NIL_IMAGE_DIM_3D;
    default:
-      unreachable("Invalid image type");
+      UNREACHABLE("Invalid image type");
    }
 }
 
@@ -706,33 +768,78 @@ nvk_GetPhysicalDeviceSparseImageFormatProperties2(
    }
 }
 
+/* To use compression and larger page sizes, we need to signal to the kernel
+ * that the memory requested is going to be VRAM resident. However, this
+ * comes with an issue where said memory can't be evicted to host RAM under
+ * pressure, so we work around this by going with a dedicated allocation for
+ * color, Z/S, and storage image targets which are the main types that would
+ * benefit from compression as they're heavy on writes. Additionally, they
+ * also aren't the majority of memory used, so they can be safely pinned in
+ * VRAM without worrying about eviction under high pressure.
+ *
+ * There are some additional restrictions we need to keep in mind, however:
+ * 1. We can only enable this for Turing onwards because prior architectures
+ *    relied on firmware to manage the compression tags, and it's impossible to
+ *    do this on nouveau. Additionally, since compression needs kernel changes,
+ *    we can only enable it if the detected kernel supports it.
+ *
+ * 2. Given our approach depends on dedicated allocations, we can't enable
+ *    compression for sparse images as dedicated allocations are not compatible
+ *    with sparse.
+ *
+ * 3. In similar vein, we currently don't do multiplanar dedicated allocations
+ *    so we can't do compression for multi-plane YCbCr images.
+ *
+ * 4. Host copies are a complete no-go for compression as the host doesn't know
+ *    about the modified data layout nor the compression tags.
+ *
+ * 5. The API for VK_EXT_image_drm_format_modifier requires that we report the
+ *    supported modifiers in GetPhysicalDeviceFormatProperties2(). However,
+ *    since we can only know whether an image is compressed or not at bind time
+ *    we can't actually expose any of the compressed modifiers in case the app
+ *    chooses a compressed modifier for a non-compressed image. So for now, we
+ *    have to disable compression for TILING_DRM_FORMAT_MODIFIER_EXT images.
+ *
+ * This helper enforces these restrictions and also makes sure to enable
+ * compression for storage, color, and Z/S targets only so as to avoid pinning
+ * too many things to VRAM.
+ */
+static bool
+nvk_image_can_compress(const struct nvkmd_pdev *nvkmd_pdev,
+                       const struct nvk_image *image)
+{
+   if (nvkmd_pdev->kmd_info.has_compression) {
+      if (image->plane_count > 1 ||
+          image->vk.usage & (VK_IMAGE_USAGE_HOST_TRANSFER_BIT) ||
+          image->vk.create_flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
+                                    VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT))
+         return false;
+      else if (image->vk.usage & (VK_IMAGE_USAGE_STORAGE_BIT |
+                                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
+               image->vk.tiling == VK_IMAGE_TILING_OPTIMAL)
+         return true;
+      else
+         return false;
+   } else
+      return false;
+}
+
 static VkResult
 nvk_image_init(struct nvk_device *dev,
                struct nvk_image *image,
                const VkImageCreateInfo *pCreateInfo)
 {
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    vk_image_init(&dev->vk, &image->vk, pCreateInfo);
 
-   if ((image->vk.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                           VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) &&
-       image->vk.samples > 1) {
-      image->vk.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
-      image->vk.stencil_usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
-   }
-
-   if (image->vk.usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
-      image->vk.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
-   if (image->vk.usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT)
-      image->vk.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-
    nil_image_usage_flags usage = 0;
-   if (pCreateInfo->tiling == VK_IMAGE_TILING_LINEAR)
+   if (image->vk.tiling == VK_IMAGE_TILING_LINEAR)
       usage |= NIL_IMAGE_USAGE_LINEAR_BIT;
-   if (pCreateInfo->flags & VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT)
+   if (image->vk.create_flags & VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT)
       usage |= NIL_IMAGE_USAGE_2D_VIEW_BIT;
-   if (pCreateInfo->flags & VK_IMAGE_CREATE_2D_VIEW_COMPATIBLE_BIT_EXT)
+   if (image->vk.create_flags & VK_IMAGE_CREATE_2D_VIEW_COMPATIBLE_BIT_EXT)
       usage |= NIL_IMAGE_USAGE_2D_VIEW_BIT;
 
    /* In order to be able to clear 3D depth/stencil images, we need to bind
@@ -740,12 +847,17 @@ nvk_image_init(struct nvk_device *dev,
     */
    if ((image->vk.aspects & (VK_IMAGE_ASPECT_DEPTH_BIT |
                              VK_IMAGE_ASPECT_STENCIL_BIT)) &&
-       pCreateInfo->imageType == VK_IMAGE_TYPE_3D)
+       image->vk.image_type == VK_IMAGE_TYPE_3D)
       usage |= NIL_IMAGE_USAGE_2D_VIEW_BIT;
 
-   image->plane_count = vk_format_get_plane_count(pCreateInfo->format);
+   image->plane_count = vk_format_get_plane_count(image->vk.format);
    image->disjoint = image->plane_count > 1 &&
-                     (pCreateInfo->flags & VK_IMAGE_CREATE_DISJOINT_BIT);
+                     (image->vk.create_flags & VK_IMAGE_CREATE_DISJOINT_BIT);
+
+   if (nvk_use_separate_zs(pdev, image->vk.format)) {
+      image->separate_zs = true;
+      image->plane_count = 2;
+   }
 
    if (image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT) {
       /* Sparse multiplane is not supported */
@@ -753,7 +865,48 @@ nvk_image_init(struct nvk_device *dev,
       usage |= NIL_IMAGE_USAGE_SPARSE_RESIDENCY_BIT;
    }
 
+   if (image->vk.usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
+                          VK_IMAGE_USAGE_VIDEO_DECODE_SRC_BIT_KHR |
+                          VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR |
+                          VK_IMAGE_USAGE_VIDEO_ENCODE_DST_BIT_KHR |
+                          VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR |
+                          VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR))
+      usage |= NIL_IMAGE_USAGE_VIDEO_BIT;
+
+   /* We set compression on VkImage creation in order to be able to signal to
+    * NIL that the image will be compressed which would let NIL choose the
+    * appropriate PTE kinds, and also to mark the VkImage as compressed so that
+    * in GetImageMemoryRequirements() we are able to detect it and specify that
+    * we prefer a dedicated allocation for it.
+    */
+   image->can_compress = nvk_image_can_compress(dev->nvkmd->pdev, image);
+   if (!image->can_compress)
+      usage |= NIL_IMAGE_USAGE_UNCOMPRESSED_BIT;
+
    uint32_t explicit_row_stride_B = 0;
+
+   /* This section is removed by the optimizer for non-ANDROID builds */
+   if (vk_image_is_android_native_buffer(&image->vk)) {
+      VkImageDrmFormatModifierExplicitCreateInfoEXT eci;
+      VkSubresourceLayout a_plane_layouts[4];
+      VkResult result = vk_android_get_anb_layout(
+         pCreateInfo, &eci, a_plane_layouts, 4);
+      if (result != VK_SUCCESS)
+         return result;
+
+      image->vk.drm_format_mod = eci.drmFormatModifier;
+      explicit_row_stride_B = eci.pPlaneLayouts[0].rowPitch;
+   }
+
+   uint32_t max_alignment_B = 0;
+   const VkImageAlignmentControlCreateInfoMESA *alignment =
+      vk_find_struct_const(pCreateInfo->pNext,
+                           IMAGE_ALIGNMENT_CONTROL_CREATE_INFO_MESA);
+   if (alignment && alignment->maximumRequestedAlignment) {
+      assert(util_is_power_of_two_or_zero(alignment->maximumRequestedAlignment));
+      max_alignment_B = alignment->maximumRequestedAlignment;
+   }
+
    if (image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
       /* Modifiers are not supported with YCbCr */
       assert(image->plane_count == 1);
@@ -775,7 +928,7 @@ nvk_image_init(struct nvk_device *dev,
                                  IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT);
 
          enum pipe_format p_format =
-            nvk_format_to_pipe_format(pCreateInfo->format);
+            nvk_format_to_pipe_format(image->vk.format);
          image->vk.drm_format_mod =
             nil_select_best_drm_format_mod(&pdev->info, nil_format(p_format),
                                            mod_list_info->drmFormatModifierCount,
@@ -788,72 +941,114 @@ nvk_image_init(struct nvk_device *dev,
          assert(image->plane_count == 1);
 
          struct nil_image_init_info tiled_shadow_nil_info = {
-            .dim = vk_image_type_to_nil_dim(pCreateInfo->imageType),
+            .dim = vk_image_type_to_nil_dim(image->vk.image_type),
             .format = nil_format(nvk_format_to_pipe_format(image->vk.format)),
             .modifier = DRM_FORMAT_MOD_INVALID,
             .extent_px = {
-               .width = pCreateInfo->extent.width,
-               .height = pCreateInfo->extent.height,
-               .depth = pCreateInfo->extent.depth,
-               .array_len = pCreateInfo->arrayLayers,
+               .width = image->vk.extent.width,
+               .height = image->vk.extent.height,
+               .depth = image->vk.extent.depth,
+               .array_len = image->vk.array_layers,
             },
-            .levels = pCreateInfo->mipLevels,
-            .samples = pCreateInfo->samples,
+            .levels = image->vk.mip_levels,
+            .samples = image->vk.samples,
             .usage = usage & ~NIL_IMAGE_USAGE_LINEAR_BIT,
-            .explicit_row_stride_B = 0,
          };
-         image->linear_tiled_shadow.nil =
-            nil_image_new(&pdev->info, &tiled_shadow_nil_info);
+         bool ok = nil_image_init(&pdev->info,
+                                  &image->linear_tiled_shadow.nil,
+                                  &tiled_shadow_nil_info);
+         if (!ok)
+            return vk_errorf(dev, VK_ERROR_UNKNOWN,
+                             "Invalid image creation parameters");
       }
    }
 
+   /* The video decode engine needs the block size to be the same across chroma
+    * and luma planes, so in order to work around this limitation we gather all
+    * the info for NIL early, which would give it enough information to get and
+    * use the smallest block size for all planes.
+    */
    const struct vk_format_ycbcr_info *ycbcr_info =
-      vk_format_get_ycbcr_info(pCreateInfo->format);
+      vk_format_get_ycbcr_info(image->vk.format);
+   struct nil_image_init_info nil_info[NVK_MAX_IMAGE_PLANES];
    for (uint8_t plane = 0; plane < image->plane_count; plane++) {
       VkFormat format = ycbcr_info ?
-         ycbcr_info->planes[plane].format : pCreateInfo->format;
+         ycbcr_info->planes[plane].format : image->vk.format;
       const uint8_t width_scale = ycbcr_info ?
          ycbcr_info->planes[plane].denominator_scales[0] : 1;
       const uint8_t height_scale = ycbcr_info ?
          ycbcr_info->planes[plane].denominator_scales[1] : 1;
-      struct nil_image_init_info nil_info = {
-         .dim = vk_image_type_to_nil_dim(pCreateInfo->imageType),
+
+      if (image->separate_zs) {
+         if (plane == 0)
+            format = vk_format_depth_only(format);
+         else if (plane == 1)
+            format = vk_format_stencil_only(format);
+      }
+
+      nil_info[plane] = (struct nil_image_init_info) {
+         .dim = vk_image_type_to_nil_dim(image->vk.image_type),
          .format = nil_format(nvk_format_to_pipe_format(format)),
          .modifier = image->vk.drm_format_mod,
          .extent_px = {
-            .width = pCreateInfo->extent.width / width_scale,
-            .height = pCreateInfo->extent.height / height_scale,
-            .depth = pCreateInfo->extent.depth,
-            .array_len = pCreateInfo->arrayLayers,
+            .width = image->vk.extent.width / width_scale,
+            .height = image->vk.extent.height / height_scale,
+            .depth = image->vk.extent.depth,
+            .array_len = image->vk.array_layers,
          },
-         .levels = pCreateInfo->mipLevels,
-         .samples = pCreateInfo->samples,
+         .levels = image->vk.mip_levels,
+         .samples = image->vk.samples,
          .usage = usage,
          .explicit_row_stride_B = explicit_row_stride_B,
+         .max_alignment_B = max_alignment_B,
       };
-
-      image->planes[plane].nil = nil_image_new(&pdev->info, &nil_info);
    }
 
-   if (image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+   if (usage & NIL_IMAGE_USAGE_VIDEO_BIT) {
+      assert(!image->disjoint);
+      for (uint8_t plane = 0; plane < image->plane_count; plane++) {
+         bool ok = nil_image_init_planar(&pdev->info,
+                                         &image->planes[plane].nil,
+                                         nil_info, plane,
+                                         image->plane_count);
+         if (!ok)
+            return vk_errorf(dev, VK_ERROR_UNKNOWN,
+                             "Invalid image creation parameters");
+      }
+   } else {
+      for (uint8_t plane = 0; plane < image->plane_count; plane++) {
+         bool ok = nil_image_init(&pdev->info,
+                                  &image->planes[plane].nil,
+                                  &nil_info[plane]);
+         if (!ok)
+            return vk_errorf(dev, VK_ERROR_UNKNOWN,
+                             "Invalid image creation parameters");
+      }
+   }
+
+   const enum pipe_format plane0_format = image->planes[0].nil.format.p_format;
+   if (plane0_format == PIPE_FORMAT_Z32_FLOAT_S8X24_UINT) {
       struct nil_image_init_info stencil_nil_info = {
-         .dim = vk_image_type_to_nil_dim(pCreateInfo->imageType),
+         .dim = vk_image_type_to_nil_dim(image->vk.image_type),
          .format = nil_format(PIPE_FORMAT_R32_UINT),
          .modifier = DRM_FORMAT_MOD_INVALID,
          .extent_px = {
-            .width = pCreateInfo->extent.width,
-            .height = pCreateInfo->extent.height,
-            .depth = pCreateInfo->extent.depth,
-            .array_len = pCreateInfo->arrayLayers,
+            .width = image->vk.extent.width,
+            .height = image->vk.extent.height,
+            .depth = image->vk.extent.depth,
+            .array_len = image->vk.array_layers,
          },
-         .levels = pCreateInfo->mipLevels,
-         .samples = pCreateInfo->samples,
+         .levels = image->vk.mip_levels,
+         .samples = image->vk.samples,
          .usage = usage,
-         .explicit_row_stride_B = 0,
       };
 
-      image->stencil_copy_temp.nil =
-         nil_image_new(&pdev->info, &stencil_nil_info);
+      bool ok = nil_image_init(&pdev->info,
+                               &image->stencil_copy_temp.nil,
+                               &stencil_nil_info);
+      if (!ok)
+         return vk_errorf(dev, VK_ERROR_UNKNOWN,
+                          "Invalid image creation parameters");
    }
 
    return VK_SUCCESS;
@@ -865,7 +1060,7 @@ nvk_image_plane_size_align_B(struct nvk_device *dev,
                              const struct nvk_image_plane *plane,
                              uint64_t *size_B_out, uint64_t *align_B_out)
 {
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    const bool sparse_bound =
       image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT;
 
@@ -950,24 +1145,15 @@ nvk_CreateImage(VkDevice _device,
                 VkImage *pImage)
 {
    VK_FROM_HANDLE(nvk_device, dev, _device);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   UNUSED const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    struct nvk_image *image;
    VkResult result;
 
-#ifdef NVK_USE_WSI_PLATFORM
-   /* Ignore swapchain creation info on Android. Since we don't have an
-    * implementation in Mesa, we're guaranteed to access an Android object
-    * incorrectly.
-    */
-   const VkImageSwapchainCreateInfoKHR *swapchain_info =
-      vk_find_struct_const(pCreateInfo->pNext, IMAGE_SWAPCHAIN_CREATE_INFO_KHR);
-   if (swapchain_info && swapchain_info->swapchain != VK_NULL_HANDLE) {
+   if (wsi_common_is_swapchain_image(pCreateInfo)) {
       return wsi_common_create_swapchain_image(&pdev->wsi_device,
                                                pCreateInfo,
-                                               swapchain_info->swapchain,
                                                pImage);
    }
-#endif
 
    image = vk_zalloc2(&dev->vk.alloc, pAllocator, sizeof(*image), 8,
                       VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
@@ -980,21 +1166,18 @@ nvk_CreateImage(VkDevice _device,
       return result;
    }
 
-   for (uint8_t plane = 0; plane < image->plane_count; plane++) {
-      result = nvk_image_plane_alloc_va(dev, image, &image->planes[plane]);
-      if (result != VK_SUCCESS) {
-         nvk_image_finish(dev, image, pAllocator);
-         vk_free2(&dev->vk.alloc, pAllocator, image);
-         return result;
+   if (image->vk.create_flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
+                                 VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT)) {
+      for (uint8_t plane = 0; plane < image->plane_count; plane++) {
+         result = nvk_image_plane_alloc_va(dev, image, &image->planes[plane]);
+         if (result != VK_SUCCESS)
+            goto fail;
       }
-   }
 
-   if (image->stencil_copy_temp.nil.size_B > 0) {
-      result = nvk_image_plane_alloc_va(dev, image, &image->stencil_copy_temp);
-      if (result != VK_SUCCESS) {
-         nvk_image_finish(dev, image, pAllocator);
-         vk_free2(&dev->vk.alloc, pAllocator, image);
-         return result;
+      if (image->stencil_copy_temp.nil.size_B > 0) {
+         result = nvk_image_plane_alloc_va(dev, image, &image->stencil_copy_temp);
+         if (result != VK_SUCCESS)
+            goto fail;
       }
    }
 
@@ -1005,17 +1188,28 @@ nvk_CreateImage(VkDevice _device,
                                          shadow->nil.pte_kind, shadow->nil.tile_mode,
                                          NVKMD_MEM_LOCAL,
                                          &image->linear_tiled_shadow_mem);
-      if (result != VK_SUCCESS) {
-         nvk_image_finish(dev, image, pAllocator);
-         vk_free2(&dev->vk.alloc, pAllocator, image);
-         return result;
-      }
+      if (result != VK_SUCCESS)
+         goto fail;
+
       shadow->addr = image->linear_tiled_shadow_mem->va->addr;
+   }
+
+   /* This section is removed by the optimizer for non-ANDROID builds */
+   if (vk_image_is_android_native_buffer(&image->vk)) {
+      result = vk_android_import_anb(&dev->vk, pCreateInfo, pAllocator,
+                                     &image->vk);
+      if (result != VK_SUCCESS)
+         goto fail;
    }
 
    *pImage = nvk_image_to_handle(image);
 
    return VK_SUCCESS;
+
+fail:
+   nvk_image_finish(dev, image, pAllocator);
+   vk_free2(&dev->vk.alloc, pAllocator, image);
+   return result;
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -1055,22 +1249,20 @@ nvk_get_image_memory_requirements(struct nvk_device *dev,
                                   VkImageAspectFlags aspects,
                                   VkMemoryRequirements2 *pMemoryRequirements)
 {
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    uint32_t memory_types = (1 << pdev->mem_type_count) - 1;
 
    /* Remove non host visible heaps from the types for host image copy in case
-    * of potential issues. This should be removed when we get ReBAR.
+    * of potential issues when we do not have ReBAR.
     */
-   if (image->vk.usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT) {
-      struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   if (pdev->info.bar_size_B < pdev->info.vram_size_B &&
+       image->vk.usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT) {
       for (uint32_t i = 0; i < pdev->mem_type_count; i++) {
          if (!(pdev->mem_types[i].propertyFlags &
              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
             memory_types &= ~BITFIELD_BIT(i);
       }
    }
-
-   // TODO hope for the best?
 
    uint64_t size_B = 0;
    uint32_t align_B = 0;
@@ -1098,10 +1290,23 @@ nvk_get_image_memory_requirements(struct nvk_device *dev,
       switch (ext->sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
          VkMemoryDedicatedRequirements *dedicated = (void *)ext;
-         dedicated->prefersDedicatedAllocation =
-            image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
-         dedicated->requiresDedicatedAllocation =
-            image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+         if (image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
+            dedicated->prefersDedicatedAllocation = true;
+            dedicated->requiresDedicatedAllocation = true;
+         } else if (image->can_compress) {
+            /* We need dedicated allocations as compressed images have to be
+             * pinned to VRAM due to nouveau, and we can't have a separate
+             * memory type that's pinned and non evictable due to the Vulkan API
+             * disallowing equivalent image properties returning different
+             * memory types. We aren't allowed to require dedicated allocations
+             * but we can signal that we prefer them.
+             */
+            dedicated->prefersDedicatedAllocation = true;
+            dedicated->requiresDedicatedAllocation = false;
+         } else {
+            dedicated->prefersDedicatedAllocation = false;
+            dedicated->requiresDedicatedAllocation = false;
+         }
          break;
       }
       default:
@@ -1341,14 +1546,23 @@ nvk_image_plane_bind(struct nvk_device *dev,
                                 &plane_size_B, &plane_align_B);
    *offset_B = align64(*offset_B, plane_align_B);
 
-   if (plane->va != NULL) {
-      VkResult result = nvkmd_va_bind_mem(plane->va, &image->vk.base, 0,
-                                          mem->mem, *offset_B,
-                                          plane->va->size_B);
-      if (result != VK_SUCCESS)
-         return result;
+   const bool not_shared = !(mem->mem->flags & NVKMD_MEM_SHARED);
+
+   if (plane->nil.pte_kind != 0) {
+      if (mem->dedicated_image == image && image->can_compress && not_shared) {
+         image->is_compressed = true;
+         plane->addr = mem->mem->va->addr + *offset_B;
+      } else {
+         VkResult result = nvk_image_plane_alloc_va(dev, image, plane);
+         if (result != VK_SUCCESS)
+            return result;
+         result = nvkmd_va_bind_mem(plane->va, &image->vk.base, 0,
+                                    mem->mem, *offset_B,
+                                    plane->va->size_B);
+         if (result != VK_SUCCESS)
+            return result;
+      }
    } else {
-      assert(plane->nil.pte_kind == 0);
       plane->addr = mem->mem->va->addr + *offset_B;
    }
 
@@ -1368,32 +1582,32 @@ nvk_bind_image_memory(struct nvk_device *dev,
 {
    VK_FROM_HANDLE(nvk_device_memory, mem, info->memory);
    VK_FROM_HANDLE(nvk_image, image, info->image);
+   uint64_t offset_B = info->memoryOffset;
    VkResult result;
 
-   /* Ignore this struct on Android, we cannot access swapchain structures there. */
-#ifdef NVK_USE_WSI_PLATFORM
-   const VkBindImageMemorySwapchainInfoKHR *swapchain_info =
-      vk_find_struct_const(info->pNext, BIND_IMAGE_MEMORY_SWAPCHAIN_INFO_KHR);
-
-   if (swapchain_info && swapchain_info->swapchain != VK_NULL_HANDLE) {
-      VkImage _wsi_image = wsi_common_get_image(swapchain_info->swapchain,
-                                                swapchain_info->imageIndex);
-      VK_FROM_HANDLE(nvk_image, wsi_img, _wsi_image);
-
-      assert(image->plane_count == 1);
-      assert(wsi_img->plane_count == 1);
-
-      struct nvk_image_plane *plane = &image->planes[0];
-      struct nvk_image_plane *swapchain_plane = &wsi_img->planes[0];
-
-      /* Copy memory binding information from swapchain image to the current image's plane. */
-      plane->addr = swapchain_plane->addr;
-
+#if DETECT_OS_ANDROID
+   const VkNativeBufferANDROID *anb_info =
+      vk_find_struct_const(info->pNext, NATIVE_BUFFER_ANDROID);
+   if (anb_info != NULL && anb_info->handle != NULL) {
+      /* We do the actual bind the end of CreateImage() */
+      assert(mem == NULL);
       return VK_SUCCESS;
    }
 #endif
 
-   uint64_t offset_B = info->memoryOffset;
+   /* Ignore this struct on Android, we cannot access swapchain structures there. */
+#ifdef NVK_USE_WSI_PLATFORM
+   if (mem == NULL) {
+      const VkBindImageMemorySwapchainInfoKHR *swapchain_info =
+         vk_find_struct_const(info->pNext, BIND_IMAGE_MEMORY_SWAPCHAIN_INFO_KHR);
+      assert(swapchain_info && swapchain_info->swapchain != VK_NULL_HANDLE);
+      mem = nvk_device_memory_from_handle(
+         wsi_common_get_memory(swapchain_info->swapchain, swapchain_info->imageIndex));
+      offset_B = 0;
+   }
+#endif
+
+   assert(mem != NULL);
    if (image->disjoint) {
       const VkBindImagePlaneMemoryInfo *plane_info =
          vk_find_struct_const(info->pNext, BIND_IMAGE_PLANE_MEMORY_INFO);
@@ -1436,7 +1650,7 @@ nvk_BindImageMemory2(VkDevice device,
       const VkBindMemoryStatusKHR *status =
          vk_find_struct_const(pBindInfos[i].pNext, BIND_MEMORY_STATUS_KHR);
       if (status != NULL && status->pResult != NULL)
-         *status->pResult = VK_SUCCESS;
+         *status->pResult = result;
 
       if (first_error_or_success == VK_SUCCESS)
          first_error_or_success = result;

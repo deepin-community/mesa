@@ -2,25 +2,25 @@
 # SPDX-License-Identifier: MIT
 
 gen_xml_files = [
-  'gen4.xml',
+  'gen40.xml',
   'gen45.xml',
-  'gen5.xml',
-  'gen6.xml',
-  'gen7.xml',
+  'gen50.xml',
+  'gen60.xml',
+  'gen70.xml',
   'gen75.xml',
-  'gen8.xml',
-  'gen9.xml',
-  'gen11.xml',
-  'gen12.xml',
+  'gen80.xml',
+  'gen90.xml',
+  'gen110.xml',
+  'gen120.xml',
   'gen125.xml',
-  'gen20.xml',
-  'gen30.xml',
+  'gen200.xml',
+  'gen300.xml',
 ]
 
 gen_xml_rt_files = [
   'gen125_rt.xml',
-  'gen20_rt.xml',
-  'gen30_rt.xml',
+  'gen200_rt.xml',
+  'gen300_rt.xml',
 ]
 
 gen_pack_header_deps = files('intel_genxml.py', 'util.py')
@@ -54,9 +54,12 @@ genX_bits_included_symbols = [
   '3DSTATE_SO_BUFFER::Stream Offset',
   '3DSTATE_CPSIZE_CONTROL_BUFFER::Surface Base Address',
   '3DSTATE_CPSIZE_CONTROL_BUFFER::Surface Pitch',
+  'COMPUTE_WALKER::body',
+  'EXECUTE_INDIRECT_DISPATCH::body',
   # structures
   'RENDER_SURFACE_STATE::Surface Base Address',
   'RENDER_SURFACE_STATE::Surface Pitch',
+  'RENDER_SURFACE_STATE::Surface QPitch',
   'RENDER_SURFACE_STATE::Auxiliary Surface Base Address',
   'RENDER_SURFACE_STATE::Auxiliary Surface Pitch',
   'RENDER_SURFACE_STATE::Clear Value Address',
@@ -67,8 +70,10 @@ genX_bits_included_symbols = [
   'RENDER_SURFACE_STATE::Width',
   'RENDER_SURFACE_STATE::Height',
   'RENDER_SURFACE_STATE::Depth',
+  'RENDER_SURFACE_STATE::Surface Format',
   'RENDER_SURFACE_STATE::Surface Type',
   'RENDER_SURFACE_STATE::Render Target View Extent',
+  'RENDER_SURFACE_STATE::Tile Mode',
   'CLEAR_COLOR',
   'VERTEX_BUFFER_STATE::Buffer Starting Address',
   'CPS_STATE',
@@ -96,7 +101,20 @@ foreach f : gen_xml_files + gen_xml_rt_files
     _name,
     input : ['gen_pack_header.py', f],
     output : _name,
-    command : [prog_python, '@INPUT@', '--engines=render,blitter,video'],
+    command : [prog_python, '@INPUT@', '--engines=render,blitter,compute'],
+    capture : true,
+    depend_files: gen_pack_header_deps
+  )
+endforeach
+
+gen_xml_video_pack = []
+foreach f : gen_xml_files
+  _name = '@0@_video_pack.h'.format(f.split('.')[0])
+  gen_xml_pack += custom_target(
+    _name,
+    input : ['gen_pack_header.py', f],
+    output : _name,
+    command : [prog_python, '@INPUT@', '--engines=video'],
     capture : true,
     depend_files: gen_pack_header_deps
   )
@@ -104,6 +122,8 @@ endforeach
 
 genX_cl_included_symbols = [
   # instructions
+  '3DSTATE_DS',
+  '3DSTATE_HS',
   '3DSTATE_INDEX_BUFFER',
   '3DSTATE_VERTEX_BUFFERS',
   '3DPRIMITIVE',
@@ -121,7 +141,7 @@ foreach f : gen_xml_files + gen_xml_rt_files
     _name,
     input : ['gen_pack_header.py', f],
     output : _name,
-    command : [prog_python, '@INPUT@', '--engines=render,blitter,video',
+    command : [prog_python, '@INPUT@', '--engines=render,blitter,compute',
                '--opencl', '--repack',
                '--include-symbols', ','.join(genX_cl_included_symbols)],
     capture : true,
@@ -134,10 +154,12 @@ gen_pack_header_py = files('gen_pack_header.py')
 idep_genxml = declare_dependency(
   include_directories : include_directories('.'),
   dependencies : idep_mesautil,
-  sources : [gen_xml_pack, gen_cl_xml_pack, genX_bits_h, genX_xml_h]
+  sources : [gen_xml_pack, gen_xml_video_pack, gen_cl_xml_pack, genX_bits_h, genX_xml_h]
 )
 
-foreach f : gen_xml_files + gen_xml_rt_files
+gen_xml_test_files = ['../decoder/tests/gentest.xml']
+
+foreach f : gen_xml_files + gen_xml_rt_files + gen_xml_test_files
   test(
     'genxml sort @0@'.format(f),
     prog_python,

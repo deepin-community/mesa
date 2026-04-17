@@ -34,10 +34,9 @@ devenv.set('LIBVA_DRIVERS_PATH', meson.current_build_dir())
 if host_machine.system() == 'windows'
   link_with_libva_gallium += [libwsgdi]
 
-  libva_init_version = dep_va.version().split('.')
   vaon12_def_input = configure_file(
     configuration: {
-      '__vaDriverInit_X_Y': '__vaDriverInit_@0@_@1@'.format(libva_init_version[0], libva_init_version[1]) + '@4'
+      '__vaDriverInit_X_Y': '__vaDriverInit_@0@_@1@'.format(libva_version[0], libva_version[1]) + '@4'
     },
     input: 'vaon12.def.in',
     output: 'vaon12.def.in',
@@ -56,7 +55,7 @@ if host_machine.system() == 'windows'
     link_args : [va_link_args, ld_args_gc_sections, ld_args_build_id],
     vs_module_defs : vaon12_def,
     include_directories : [
-      inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux, inc_util, inc_gallium_winsys, inc_gallium_drivers, inc_gallium_winsys_sw
+      inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_util, inc_gallium_winsys, inc_gallium_drivers, inc_gallium_winsys_sw
     ],
     link_whole : [libva_st],
     link_with : link_with_libva_gallium,
@@ -73,7 +72,7 @@ else
     gnu_symbol_visibility : 'hidden',
     link_args : [va_link_args, ld_args_gc_sections, ld_args_build_id],
     include_directories : [
-      inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux, inc_util, inc_gallium_winsys, inc_gallium_drivers,
+      inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_util, inc_gallium_winsys, inc_gallium_drivers,
     ],
     link_whole : [libva_st],
     link_with : link_with_libva_gallium,
@@ -84,7 +83,7 @@ else
     link_depends : va_link_depends,
     install : true,
     install_dir : va_drivers_path,
-    name_suffix : 'so',
+    name_suffix : libname_suffix,
   )
 
   foreach d : [[with_gallium_r600, 'r600'],
@@ -99,7 +98,7 @@ else
 
   if va_drivers.length() > 0
     meson.add_install_script(
-      install_megadrivers_py.full_path(),
+      install_megadrivers,
       libva_gallium.full_path(),
       va_drivers_path,
       va_drivers,

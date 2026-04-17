@@ -1,6 +1,7 @@
 api@clbuildprogram,Fail
 api@clcompileprogram,Fail
 api@clgetcommandqueueinfo,Fail
+api@clgetdeviceinfo,Fail
 api@clgetextensionfunctionaddressforplatform,Fail
 api@clgetkernelarginfo,Fail
 api@cllinkprogram,Fail
@@ -12,6 +13,9 @@ program@execute@vstore@vstore-uchar-private,Crash
 program@execute@vstore@vstore-ushort-private,Crash
 program@execute@vstore@vstore_half-float-private,Crash
 
+# (file=input,line=0,column=0,index=0): Unresolved external reference to "_Z21convert_char4_sat_rteDv4_i".
+program@execute@vector-conversion,Fail
+
 # Piglit CL bug
 program@execute@builtin@builtin-float-nextafter-1.0.generated,Fail
 program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float1,Fail
@@ -20,7 +24,7 @@ program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float2,F
 program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float4,Fail
 program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float8,Fail
 
-# RUSTICL_FEATURES="fp16,fp64" bugs
+# RUSTICL_FEATURES="fp64" bugs
 program@execute@amdgcn-f32-inline-immediates,Crash
 program@execute@amdgcn-f64-inline-immediates,Crash
 program@execute@fdiv-modifiers-f64,Crash

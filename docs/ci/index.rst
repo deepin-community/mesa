@@ -23,8 +23,15 @@ The CI runs a number of tests, from trivial build-testing to complex GPU renderi
 A typical run takes between 20 and 30 minutes, although it can go up very quickly
 if the GitLab runners are overwhelmed, which happens sometimes. When it does happen,
 not much can be done besides waiting it out, or cancel it.
-You can do your part by only running the jobs you care about by using `our
-tool <#running-specific-ci-jobs>`__.
+
+It is a good practice to check the ``Marge`` 
+`queue <https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests?assignee_username=marge-bot>`__ 
+to evaluate if it is the right moment to trigger some testing jobs. ``Marge`` 
+is configured to pick the MRs by assignment time, and this sort option is not 
+available in the Web UI. The `marge_queue <#marge-queue>`__ CLI tool 
+provides the list sorted by assignment time. The recommended way to manage the 
+trigger of those jobs is using our :abbr:`crnm (bin/ci/ci_run_n_monitor.sh)` 
+`cli tool <#running-specific-ci-jobs>`__.
 
 Due to limited resources, we currently do not run the CI automatically
 on every push; instead, we only run it automatically once the MR has
@@ -37,12 +44,16 @@ If the GitLab CI doesn't seem to be running on your fork (or MRs, as they run
 in the context of your fork), you should check the "Settings" of your fork.
 Under "CI / CD" → "General pipelines", make sure "Custom CI config path" is
 empty (or set to the default ``.gitlab-ci.yml``), and that the
-"Public pipelines" box is checked.
+"Project-based pipeline visibility" box is checked.
 
-If you're having issues with the GitLab CI, your best bet is to ask
+If a specific CI farm is failing for reasons unrelated to your changes, make an
+MR to disable the farm following the `farm management <#farm-management>`__
+instructions.
+
+If you're having other issues with the GitLab CI, your best bet is to ask
 about it on ``#freedesktop`` on OFTC and tag `Daniel Stone
 <https://gitlab.freedesktop.org/daniels>`__ (``daniels`` on IRC) or
-`Emma Anholt <https://gitlab.freedesktop.org/anholt>`__ (``anholt`` on
+`Eric Engestrom <https://gitlab.freedesktop.org/eric>`__ (``eric_engestrom`` on
 IRC).
 
 The three GitLab CI systems currently integrated are:
@@ -68,7 +79,12 @@ When the farm starts failing for any reason (power, network, out-of-space), it n
 
    git mv .ci-farms{,-disabled}/$farm_name
 
-After farm restore functionality can be enabled by pushing a new merge request, which contains
+Find the GitLab handle of the farm's admin in ``.gitlab-ci/farm-rules.yml`` and
+ping them on the MR. MRs to disable farms do not need to go through review, and
+can be assigned to ``Marge`` directly.
+
+After farm restore functionality can be enabled by pushing a new merge request,
+which contains
 
 .. code-block:: sh
 
@@ -215,7 +231,7 @@ faster personal machine as a runner.  You can find the gitlab-runner
 package in Debian, or use GitLab's own builds.
 
 To do so, follow `GitLab's instructions
-<https://docs.gitlab.com/ee/ci/runners/runners_scope.html#create-a-project-runner-with-a-runner-authentication-token>`__
+<https://docs.gitlab.com/ci/runners/runners_scope/#create-a-project-runner-with-a-runner-authentication-token>`__
 to register your personal GitLab runner in your Mesa fork.  Then, tell
 Mesa how many jobs it should serve (``concurrent=``) and how many
 cores those jobs should use (``FDO_CI_CONCURRENT=``) by editing these
@@ -301,6 +317,8 @@ and cancel the rest to avoid wasting resources.
 
 See ``bin/ci/ci_run_n_monitor.py --help`` for all the options.
 
+**Target jobs**
+
 The ``--target`` argument takes a regex that you can use to select the
 jobs names you want to run, e.g. ``--target 'zink.*'`` will run all the
 Zink jobs, leaving the other drivers' jobs free for others to use.
@@ -310,6 +328,40 @@ changed **since the last push**, so you might not get the jobs you expect.
 You can work around that by adding a dummy change in a file core to what you're
 working on and then making a new push with that change, and removing that change
 before you create the MR.
+
+**GitLab token**
+
+The ``--token`` argument is used to provide a GitLab token with rights to
+interact with the pipeline. Using the argument, one can provide the value or
+the name of the file having the value. If the argument is not provided, then
+it checks if the value of ``$XDG_CONFIG_HOME`` has a valid directory (if not,
+then uses ``$HOME/.config``), and there is a file called ``gitlab-token`` that
+contains a token. The token required to work with this tool needs ``api``
+scope permissions.
+
+.. note::
+    To create that token, refer to
+    `create-a-personal-access-token <https://docs.gitlab.com/user/profile/personal_access_tokens/#create-a-personal-access-token>`_
+    and select the ``api`` scope. The token will only be shown once after creation,
+    so make sure you store it securely.
+
+Marge queue
+-----------
+
+You can use ``bin/ci/marge_queue.sh`` to check how long the Marge queue is. As
+mentioned, the merge flow is to assign MR to the ``Marge`` bot, to serialize
+the verification and merge. Looking at the
+`merge requests assigned to Marge <https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests?assignee_username=marge-bot>`__
+you can evaluate the size of the queue, since the ``marge_queue`` tool provides
+sorted and summarized information about those MR in queue.
+
+The tool requires a GitLab token as described in the
+`crnm <#running-specific-ci-jobs>`__ section. It outputs the current queue
+sorted by the ``assigned at`` to ``Marge``. It can also be used as an active
+wait for another action in a pipe, using the ``--wait`` until the queue is
+empty. The return code corresponds to the number of MRs in the queue, so when
+it returns ``0``, one can, for example, start the ``crnm`` tool on a certain
+pipeline.
 
 Conformance Tests
 -----------------
@@ -334,6 +386,17 @@ instructions on how to uprev Linux Kernel in the GitLab CI ecosystem.
 
   kernel
 
+Structured tagging
+------------------
+
+Some build scripts can be tagged with a deterministic tag to allow for
+testing and validation of the build output. This section lists the
+documentation pages for the structured tagging feature.
+
+.. toctree::
+  :maxdepth: 1
+
+  structured-tagging
 
 Reusing CI scripts for other projects
 --------------------------------------

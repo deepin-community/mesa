@@ -3,28 +3,34 @@
 
 import logging
 import re
+import sys
 import traceback
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
 from collections import OrderedDict
 from copy import deepcopy
 from dataclasses import dataclass, field
 from itertools import accumulate
+from os import get_terminal_size, getenv
 from pathlib import Path
 from subprocess import check_output
 from textwrap import dedent
-from typing import Any, Iterable, Optional, Pattern, TypedDict, Union
+from typing import Any, Iterable, Optional, TypedDict, Union
 
 import yaml
 from filecache import DAY, filecache
-from gitlab_common import get_token_from_default_dir
+from gitlab_common import get_token_from_default_dir, is_gitlab_job
 from gql import Client, gql
 from gql.transport.requests import RequestsHTTPTransport
 from graphql import DocumentNode
+from rich.console import Console
+
+DEFAULT_TERMINAL_SIZE: int = 80  # columns
 
 
 class DagNode(TypedDict):
     needs: set[str]
     stage: str
+    tags: set[str]
     # `name` is redundant but is here for retro-compatibility
     name: str
 
@@ -34,6 +40,12 @@ Dag = dict[str, DagNode]
 
 
 StageSeq = OrderedDict[str, set[str]]
+
+if is_gitlab_job():
+    console = Console(highlight=False, no_color=False, color_system="truecolor", width=120)
+else:
+    console = Console(highlight=False)
+print = console.print
 
 
 def get_project_root_dir():
@@ -97,7 +109,6 @@ class GitlabGQL:
             logging.error(traceback_str)
             self.invalidate_query_cache()
             logging.error("Cache invalidated, retrying without cache")
-        finally:
             return run_uncached()
 
     def _query(
@@ -250,6 +261,7 @@ def extract_stages_and_job_needs(
         stage_sequence[job["stage"]["name"]].add(job["name"])
         dag_job: DagNode = {
             "name": job["name"],
+            "tags": set(job["tags"] or []),  # jobs with no tags defined return None here
             "stage": job["stage"]["name"],
             "needs": set([j["node"]["name"] for j in job["needs"]["edges"]]),
         }
@@ -325,24 +337,52 @@ def create_job_needs_dag(gl_gql: GitlabGQL, params, disable_cache: bool = True) 
     return final_dag
 
 
-def filter_dag(
-    dag: Dag, job_name_regex: Pattern, include_stage_regex: Pattern, exclude_stage_regex: Pattern
-) -> Dag:
-    filtered_jobs: Dag = Dag({})
-    for (job, data) in dag.items():
-        if not job_name_regex.fullmatch(job):
-            continue
-        if not include_stage_regex.fullmatch(data["stage"]):
-            continue
-        if exclude_stage_regex.fullmatch(data["stage"]):
-            continue
-        filtered_jobs[job] = data
-    return filtered_jobs
+def filter_dag(dag: Dag, job_filter: callable) -> Dag:
+    return Dag({
+        job: data
+        for job, data in dag.items()
+        if job_filter(
+            job_name=job,
+            job_stage=data["stage"],
+            job_tags=data["tags"],
+        )
+    })
 
 
-def print_dag(dag: Dag) -> None:
+def print_dag(dag: Dag, indentation: int = 0, color: str = "") -> None:
     for job, data in sorted(dag.items()):
-        print(f"{job}:\n\t{' '.join(data['needs'])}\n")
+        print(f"{color}{' '*indentation}{job}:")
+        print_formatted_list(list(data['needs']), indentation=indentation+8, color=color)
+
+
+def print_formatted_list(elements: list[str], indentation: int = 0, color: str = "") -> None:
+    """
+    When a list of elements is going to be printed, if it is longer than one line, reformat it to be multiple
+    lines with a 'ls' command style.
+    :param elements: list of elements to be printed
+    :param indentation: number of spaces to be injected in front of each line
+    """
+    if len(elements) == 0:
+        return
+    elements.sort()
+    try:
+        h_size = get_terminal_size().columns if sys.stdin.isatty() else DEFAULT_TERMINAL_SIZE
+    except OSError:
+        h_size = DEFAULT_TERMINAL_SIZE
+    if indentation + sum(len(element) for element in elements) + (len(elements)*2) < h_size:  # fits in one line
+        print(f"{color}{' '*indentation}{', '.join([element for element in elements])}")
+        return
+    column_separator_size = 2
+    column_width: int = len(max(elements, key=len)) + column_separator_size
+    n_columns: int = max((h_size - indentation) // column_width, 1)
+    step = (len(elements) // n_columns) + 1
+    rows = [elements[i::step] for i in range(step)]
+    for line in rows:
+        print(' '*indentation, end='')
+        for column in range(len(line)):
+            if line[column] is not None:
+                print(f"{color}{line[column]:<{column_width}}", end='')
+        print()
 
 
 def fetch_merged_yaml(gl_gql: GitlabGQL, params) -> dict[str, Any]:
@@ -499,6 +539,18 @@ def parse_args() -> Namespace:
         default="^$",
         help="Regex pattern for the stage name to be excluded",
     )
+    parser.add_argument(
+        "--job-tags",
+        metavar="job-tags",
+        help="Job tags to require when searching for target jobs. If multiple "
+             "values are passed, eg. `--job-tags 'foo.*' 'bar'`, the job will "
+             "need to have a tag matching `foo.*` *and* a tag matching `bar` "
+             "to qualify. Passing `--job-tags '.*'` makes sure the job has "
+             "a tag defined, while not passing `--job-tags` also allows "
+             "untagged jobs.",
+        default=[],
+        nargs='+',
+    )
     mutex_group_print = parser.add_mutually_exclusive_group()
     mutex_group_print.add_argument(
         "--print-dag",
@@ -540,7 +592,34 @@ def main():
             gl_gql, {"projectPath": args.project_path, "iid": iid}, disable_cache=True
         )
 
-        dag = filter_dag(dag, re.compile(args.regex), re.compile(args.include_stage), re.compile(args.exclude_stage))
+        job_name_regex = re.compile(args.regex)
+        include_stage_regex = re.compile(args.include_stage)
+        exclude_stage_regex = re.compile(args.exclude_stage)
+        job_tags_regexes = [re.compile(job_tag) for job_tag in args.job_tags]
+
+        def job_filter(
+            job_name: str,
+            job_stage: str,
+            job_tags: set[str],
+        ) -> bool:
+            """
+            Apply user-specified filters to a job, and return whether the
+            filters allow that job (True) or not (False).
+            """
+            if not job_name_regex.fullmatch(job_name):
+                return False
+            if not include_stage_regex.fullmatch(job_stage):
+                return False
+            if exclude_stage_regex.fullmatch(job_stage):
+                return False
+            if not all(
+                any(job_tags_regex.fullmatch(tag) for tag in job_tags)
+                for job_tags_regex in job_tags_regexes
+            ):
+                return False
+            return True
+
+        dag = filter_dag(dag, job_filter)
 
         print_dag(dag)
 

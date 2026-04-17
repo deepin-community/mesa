@@ -302,7 +302,7 @@ get_query_resolve(const nir_shader_compiler_options *options, const d3d12_comput
          stride = sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS) / sizeof(UINT64);
          break;
       default:
-         unreachable("Unhandled query resolve");
+         UNREACHABLE("Unhandled query resolve");
       }
 
       if (!key->query_resolve.is_resolve_in_place && key->query_resolve.num_subqueries == 1)
@@ -316,9 +316,7 @@ get_query_resolve(const nir_shader_compiler_options *options, const d3d12_comput
       nir_loop *loop = nir_push_loop(&b);
 
       nir_def *loop_counter_value = nir_load_var(&b, loop_counter);
-      nir_if *nif = nir_push_if(&b, nir_ieq(&b, loop_counter_value, num_results));
-      nir_jump(&b, nir_jump_break);
-      nir_pop_if(&b, nif);
+      nir_break_if(&b, nir_ieq(&b, loop_counter_value, num_results));
 
       /* For each field in the query result, accumulate */
       nir_def *array_index = nir_iadd(&b, nir_imul_imm(&b, loop_counter_value, stride), base_array_index);
@@ -382,7 +380,7 @@ get_query_resolve(const nir_shader_compiler_options *options, const d3d12_comput
    b.shader->info.num_ssbos = key->query_resolve.num_subqueries + !key->query_resolve.is_resolve_in_place;
    b.shader->info.num_ubos = 0;
 
-   NIR_PASS_V(b.shader, nir_lower_convert_alu_types, NULL);
+   NIR_PASS(_, b.shader, nir_lower_convert_alu_types, NULL);
 
    return b.shader;
 }
@@ -402,7 +400,7 @@ create_compute_transform(const nir_shader_compiler_options *options, const d3d12
    case d3d12_compute_transform_type::query_resolve:
       return get_query_resolve(options, key);
    default:
-      unreachable("Invalid transform");
+      UNREACHABLE("Invalid transform");
    }
 }
 
@@ -488,12 +486,12 @@ d3d12_save_compute_transform_state(struct d3d12_context *ctx, d3d12_compute_tran
    memset(save, 0, sizeof(*save));
    save->cs = ctx->compute_state;
 
-   pipe_resource_reference(&save->cbuf0.buffer, ctx->cbufs[PIPE_SHADER_COMPUTE][1].buffer);
-   save->cbuf0 = ctx->cbufs[PIPE_SHADER_COMPUTE][1];
+   pipe_resource_reference(&save->cbuf0.buffer, ctx->cbufs[MESA_SHADER_COMPUTE][1].buffer);
+   save->cbuf0 = ctx->cbufs[MESA_SHADER_COMPUTE][1];
 
    for (unsigned i = 0; i < ARRAY_SIZE(save->ssbos); ++i) {
-      pipe_resource_reference(&save->ssbos[i].buffer, ctx->ssbo_views[PIPE_SHADER_COMPUTE][i].buffer);
-      save->ssbos[i] = ctx->ssbo_views[PIPE_SHADER_COMPUTE][i];
+      pipe_resource_reference(&save->ssbos[i].buffer, ctx->ssbo_views[MESA_SHADER_COMPUTE][i].buffer);
+      save->ssbos[i] = ctx->ssbo_views[MESA_SHADER_COMPUTE][i];
    }
 
    save->queries_disabled = ctx->queries_disabled;
@@ -507,8 +505,8 @@ d3d12_restore_compute_transform_state(struct d3d12_context *ctx, d3d12_compute_t
 
    ctx->base.bind_compute_state(&ctx->base, save->cs);
 
-   ctx->base.set_constant_buffer(&ctx->base, PIPE_SHADER_COMPUTE, 1, true, &save->cbuf0);
-   ctx->base.set_shader_buffers(&ctx->base, PIPE_SHADER_COMPUTE, 0, ARRAY_SIZE(save->ssbos), save->ssbos, (1u << ARRAY_SIZE(save->ssbos)) - 1);
+   ctx->base.set_constant_buffer(&ctx->base, MESA_SHADER_COMPUTE, 1, &save->cbuf0);
+   ctx->base.set_shader_buffers(&ctx->base, MESA_SHADER_COMPUTE, 0, ARRAY_SIZE(save->ssbos), save->ssbos, (1u << ARRAY_SIZE(save->ssbos)) - 1);
 
    if (ctx->current_predication)
       d3d12_enable_predication(ctx);

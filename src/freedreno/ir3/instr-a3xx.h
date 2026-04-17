@@ -82,6 +82,7 @@ typedef enum {
    /* category 1: */
    OPC_MOV             = _OPC(1, 0),
    OPC_MOVP            = _OPC(1, 1),
+   OPC_MOVS            = _OPC(1, 2),
    /* swz, gat, sct */
    OPC_MOVMSK          = _OPC(1, 3),
 
@@ -98,6 +99,10 @@ typedef enum {
    OPC_MOV_GPR         = _OPC(1, 42),
    OPC_MOV_RELGPR      = _OPC(1, 43),
    OPC_MOV_RELCONST    = _OPC(1, 44),
+   OPC_MOVS_IMMED      = _OPC(1, 45),
+   OPC_MOVS_A0         = _OPC(1, 46),
+   OPC_MOVA_R_IMMED    = _OPC(1, 47),
+   OPC_MOVA_R_GPR      = _OPC(1, 48),
 
    /* Macros that expand to an if statement + move */
    OPC_BALLOT_MACRO    = _OPC(1, 50),
@@ -107,6 +112,7 @@ typedef enum {
    OPC_READ_COND_MACRO = _OPC(1, 54),
    OPC_READ_FIRST_MACRO = _OPC(1, 55),
    OPC_SHPS_MACRO       = _OPC(1, 56),
+   OPC_READ_GETLAST_MACRO = _OPC(1, 57),
 
    /* Macros that expand to a loop */
    OPC_SCAN_MACRO      = _OPC(1, 58),
@@ -147,6 +153,10 @@ typedef enum {
    /* 32 - invalid */
    OPC_CMPV_U          = _OPC(2, 33),
    OPC_CMPV_S          = _OPC(2, 34),
+   OPC_MUL_F_MUL2      = _OPC(2, 35),
+   OPC_ADD_F_MUL2      = _OPC(2, 36),
+   OPC_MUL_F_DIV2      = _OPC(2, 37),
+   OPC_ADD_F_DIV2      = _OPC(2, 38),
    /* 35-47 - invalid */
    OPC_MUL_U24         = _OPC(2, 48), /* 24b mul into 32b result */
    OPC_MUL_S24         = _OPC(2, 49), /* 24b mul into 32b result with sign extension */
@@ -192,6 +202,10 @@ typedef enum {
    OPC_DP4ACC          = _OPC(3, 22),
    OPC_WMM             = _OPC(3, 23),
    OPC_WMM_ACCU        = _OPC(3, 24),
+   OPC_MAD_F16_MUL2    = _OPC(3, 25),
+   OPC_MAD_F32_MUL2    = _OPC(3, 26),
+   OPC_MAD_F16_DIV2    = _OPC(3, 27),
+   OPC_MAD_F32_DIV2    = _OPC(3, 28),
 
    /* category 4: */
    OPC_RCP             = _OPC(4, 0),
@@ -346,6 +360,9 @@ typedef enum {
     * It loads into const file and should not be optimized in any way.
     */
    OPC_PUSH_CONSTS_LOAD_MACRO = _OPC(6, 84),
+
+   OPC_RAY_INTERSECTION = _OPC(6, 90),
+   OPC_RESBASE          = _OPC(6, 91),
 
    /* category 7: */
    OPC_BAR             = _OPC(7, 0),
@@ -641,6 +658,18 @@ is_madsh(opc_t opc)
 }
 
 static inline bool
+is_sad(opc_t opc)
+{
+   switch (opc) {
+   case OPC_SAD_S16:
+   case OPC_SAD_S32:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static inline bool
 is_local_atomic(opc_t opc)
 {
    switch (opc) {
@@ -791,6 +820,21 @@ is_cat3_float(opc_t opc)
    case OPC_MAD_F32:
    case OPC_SEL_F16:
    case OPC_SEL_F32:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static inline bool
+is_cat3_alt(opc_t opc)
+{
+   switch (opc) {
+   case OPC_SHLM:
+   case OPC_SHRM:
+   case OPC_SHLG:
+   case OPC_SHRG:
+   case OPC_ANDG:
       return true;
    default:
       return false;

@@ -87,7 +87,7 @@ anv_descriptor_data_for_type(const struct anv_physical_device *device,
       break;
 
    default:
-      unreachable("Unsupported descriptor type");
+      UNREACHABLE("Unsupported descriptor type");
    }
 
    /* On gfx8 and above when we have softpin enabled, we also need to push
@@ -665,7 +665,7 @@ anv_descriptor_set_layout_descriptor_buffer_size(const struct anv_descriptor_set
    const struct anv_descriptor_set_binding_layout *dynamic_binding =
       set_layout_dynamic_binding(set_layout);
    if (dynamic_binding == NULL)
-      return ALIGN(set_layout->descriptor_buffer_size, ANV_UBO_ALIGNMENT);
+      return align(set_layout->descriptor_buffer_size, ANV_UBO_ALIGNMENT);
 
    assert(var_desc_count <= dynamic_binding->array_size);
    uint32_t shrink = dynamic_binding->array_size - var_desc_count;
@@ -681,7 +681,7 @@ anv_descriptor_set_layout_descriptor_buffer_size(const struct anv_descriptor_set
                  shrink * dynamic_binding->descriptor_stride;
    }
 
-   return ALIGN(set_size, ANV_UBO_ALIGNMENT);
+   return align(set_size, ANV_UBO_ALIGNMENT);
 }
 
 void anv_DestroyDescriptorSetLayout(
@@ -904,7 +904,7 @@ VkResult anv_CreateDescriptorPool(
       descriptor_bo_size +=
          ANV_UBO_ALIGNMENT * inline_info->maxInlineUniformBlockBindings;
    }
-   descriptor_bo_size = ALIGN(descriptor_bo_size, 4096);
+   descriptor_bo_size = align(descriptor_bo_size, 4096);
 
    const size_t pool_size =
       pCreateInfo->maxSets * sizeof(struct anv_descriptor_set) +
@@ -1384,7 +1384,7 @@ anv_descriptor_set_write_image_view(struct anv_device *device,
       break;
 
    default:
-      unreachable("invalid descriptor type");
+      UNREACHABLE("invalid descriptor type");
    }
 
    *desc = (struct anv_descriptor) {
@@ -1604,8 +1604,7 @@ anv_descriptor_set_write_buffer(struct anv_device *device,
       memcpy(desc_map, &desc_data, sizeof(desc_data));
    }
 
-   if (type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
-       type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)
+   if (vk_descriptor_type_is_dynamic(type))
       return;
 
    assert(data & ANV_DESCRIPTOR_BUFFER_VIEW);

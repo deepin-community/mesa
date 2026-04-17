@@ -44,7 +44,6 @@ dzn_flags = [ ]
 dzn_cpp_flags = [ ]
 
 if with_platform_windows
-  dzn_flags += '-DVK_USE_PLATFORM_WIN32_KHR'
   libdzn_files += files('dzn_dxgi.c')
 endif
 
@@ -74,25 +73,24 @@ libvulkan_dzn = shared_library(
   install : true,
 )
 
-icd_file_name = 'libvulkan_dzn.so'
-icd_lib_path = join_paths(get_option('prefix'), get_option('libdir'))
-if with_platform_windows
-  icd_lib_path = import('fs').relative_to(get_option('bindir'), with_vulkan_icd_dir)
-  icd_file_name = 'vulkan_dzn.dll'
-endif
+icd_file_name = libname_prefix + 'vulkan_dzn.' + libname_suffix
 
 
 icd_command = [
    prog_python, '@INPUT0@',
    '--api-version', '1.1', '--xml', '@INPUT1@',
-   '--lib-path', join_paths(icd_lib_path, icd_file_name),
+   '--sizeof-pointer', sizeof_pointer,
+   '--icd-lib-path', vulkan_icd_lib_path,
+   '--icd-filename', icd_file_name,
    '--out', '@OUTPUT@',
 ]
 
 icd_dev_command = [
    prog_python, '@INPUT0@',
    '--api-version', '1.1', '--xml', '@INPUT1@',
-   '--lib-path', join_paths(meson.current_build_dir(), icd_file_name),
+   '--sizeof-pointer', sizeof_pointer,
+   '--icd-lib-path', meson.current_build_dir(),
+   '--icd-filename', icd_file_name,
    '--out', '@OUTPUT@',
 ]
 
@@ -104,7 +102,7 @@ endif
 dzn_icd = custom_target(
   'dzn_icd',
   input : [vk_icd_gen, vk_api_xml],
-  output : 'dzn_icd.@0@.json'.format(host_machine.cpu()),
+  output : 'dzn_icd.' + vulkan_manifest_suffix,
   command : icd_command,
   build_by_default : true,
   install_dir : with_vulkan_icd_dir,
@@ -122,5 +120,3 @@ _dev_icd = custom_target(
 )
 
 devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
-# Deprecated: replaced by VK_DRIVER_FILES above
-devenv.append('VK_ICD_FILENAMES', _dev_icd.full_path())

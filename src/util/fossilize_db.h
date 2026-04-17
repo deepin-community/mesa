@@ -45,12 +45,13 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "sha1/sha1.h"
 #include "simple_mtx.h"
 
 /* Max number of DBs our implementation can read from at once */
 #define FOZ_MAX_DBS 9 /* Default DB + 8 Read only DBs */
 
-#define FOSSILIZE_BLOB_HASH_LENGTH 40
+#define FOSSILIZE_BLOB_HASH_LENGTH 40 /* SHA1 hexadecimal string length */
 
 enum {
    FOSSILIZE_COMPRESSION_NONE = 1,
@@ -71,7 +72,7 @@ struct foz_payload_header {
 
 struct foz_db_entry {
    uint8_t file_idx;
-   uint8_t key[20];
+   uint8_t key[SHA1_DIGEST_LENGTH];
    uint64_t offset;
    struct foz_payload_header header;
 };

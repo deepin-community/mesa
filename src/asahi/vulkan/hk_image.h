@@ -52,13 +52,16 @@ hk_get_image_format_features(struct hk_physical_device *pdevice,
 struct hk_image_plane {
    struct ail_layout layout;
    uint64_t addr;
-
-   /** Size of the reserved VMA range for sparse images, zero otherwise. */
-   uint64_t vma_size_B;
+   struct agx_va *va;
 
    /* For host image copy */
    void *map;
    uint32_t rem;
+
+   /* If the image has sparse residency, its residency is tracked in this
+    * secondary page table. Otherwise, this map is NULL.
+    */
+   struct agx_bo *sparse_map;
 };
 
 struct hk_image {
@@ -89,7 +92,7 @@ hk_image_base_address(const struct hk_image *image, uint8_t plane)
 }
 
 static inline enum pipe_format
-hk_format_to_pipe_format(enum VkFormat vkformat)
+hk_format_to_pipe_format(VkFormat vkformat)
 {
    switch (vkformat) {
    case VK_FORMAT_R10X6_UNORM_PACK16:
@@ -129,3 +132,11 @@ hk_image_aspects_to_plane(const struct hk_image *image,
       return 2;
    }
 }
+
+struct agx_device;
+bool hk_can_compress_format(const struct agx_device *dev, VkFormat format);
+
+struct hk_cmd_buffer;
+void hk_clear_image(struct hk_cmd_buffer *cmd, struct hk_image *image,
+                    enum pipe_format view_format, const uint32_t *clear_value,
+                    const VkImageSubresourceRange *range, bool whole_3d);

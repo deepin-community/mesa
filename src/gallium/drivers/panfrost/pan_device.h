@@ -1,31 +1,10 @@
-/**************************************************************************
- *
+/*
  * Copyright 2018-2019 Alyssa Rosenzweig
  * Copyright 2018-2019 Collabora, Ltd.
  * Copyright © 2015 Intel Corporation
  * All Rights Reserved.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the
- * "Software"), to deal in the Software without restriction, including
- * without limitation the rights to use, copy, modify, merge, publish,
- * distribute, sub license, and/or sell copies of the Software, and to
- * permit persons to whom the Software is furnished to do so, subject to
- * the following conditions:
- *
- * The above copyright notice and this permission notice (including the
- * next paragraph) shall be included in all copies or substantial portions
- * of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
- * IN NO EVENT SHALL VMWARE AND/OR ITS SUPPLIERS BE LIABLE FOR
- * ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
- * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
- * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- *
- **************************************************************************/
+ * SPDX-License-Identifier: MIT
+ */
 
 #ifndef PAN_DEVICE_H
 #define PAN_DEVICE_H
@@ -38,10 +17,9 @@
 #include "util/timespec.h"
 #include "util/u_dynarray.h"
 
-#include "panfrost/util/pan_ir.h"
-#include "pan_blend.h"
+#include "panfrost/compiler/pan_compiler.h"
+#include "pan_blend_cso.h"
 #include "pan_fb_preload.h"
-#include "pan_indirect_dispatch.h"
 #include "pan_pool.h"
 #include "pan_props.h"
 #include "pan_util.h"
@@ -63,13 +41,12 @@ extern "C" {
 /* Driver limits */
 #define PAN_MAX_CONST_BUFFERS 16
 
-/* Mali hardware can texture up to 65536 x 65536 x 65536 and render up to 16384
- * x 16384, but 8192 x 8192 should be enough for anyone.  The OpenGL game
- * "Cathedral" requires a texture of width 8192 to start.
+/* TODO: Mali hardware can texture up to 64k textures, but the
+ * Gallium interface limits us to 32k at the moment
+ * Also dEQP-GLES31.functional.fbo.no_attachments.maximums.all crashes with
+ * 32k textures.
  */
-#define PAN_MAX_MIP_LEVELS 14
-
-#define PAN_MAX_TEXEL_BUFFER_ELEMENTS 65536
+#define PAN_MAX_MIP_LEVELS 15
 
 /* How many power-of-two levels in the BO cache do we want? 2^12
  * minimum chosen as it is the page size that all allocations are
@@ -81,6 +58,8 @@ extern "C" {
 /* Fencepost problem, hence the off-by-one */
 #define NR_BO_CACHE_BUCKETS (MAX_BO_CACHE_BUCKET - MIN_BO_CACHE_BUCKET + 1)
 
+struct panfrost_precomp_cache;
+
 struct panfrost_device {
    /* For ralloc */
    void *memctx;
@@ -89,9 +68,6 @@ struct panfrost_device {
    struct {
       /* The pan_kmod_dev object backing this device. */
       struct pan_kmod_dev *dev;
-
-      /* Cached pan_kmod_dev_props properties queried at device create time. */
-      struct pan_kmod_dev_props props;
 
       /* VM attached to this device. */
       struct pan_kmod_vm *vm;
@@ -113,15 +89,17 @@ struct panfrost_device {
 
    /* Maximum tilebuffer size in bytes for optimal performance. */
    unsigned optimal_tib_size;
+   unsigned optimal_z_tib_size;
 
    unsigned thread_tls_alloc;
-   struct panfrost_tiler_features tiler_features;
-   const struct panfrost_model *model;
+   struct pan_tiler_features tiler_features;
+   const struct pan_model *model;
    bool has_afbc;
    bool has_afrc;
+   bool relaxed_afbc_yuv_imports;
 
    /* Table of formats, indexed by a PIPE format */
-   const struct panfrost_format *formats;
+   const struct pan_format *formats;
    const struct pan_blendable_format *blendable_formats;
 
    /* Bitmask of supported compressed texture formats */
@@ -129,6 +107,9 @@ struct panfrost_device {
 
    /* debug flags, see pan_util.h how to interpret */
    unsigned debug;
+
+   /* The GPU fault injection rate. If zero, no faults are injected. */
+   unsigned fault_injection_rate;
 
    struct renderonly *ro;
 
@@ -154,7 +135,6 @@ struct panfrost_device {
 
    struct pan_fb_preload_cache fb_preload_cache;
    struct pan_blend_shader_cache blend_shaders;
-   struct pan_indirect_dispatch_meta indirect_dispatch;
 
    /* Tiler heap shared across all tiler jobs, allocated against the
     * device since there's only a single tiler. Since this is invisible to
@@ -177,6 +157,8 @@ struct panfrost_device {
     * unconditionally on Bifrost, and useful for sharing with Midgard */
 
    struct panfrost_bo *sample_positions;
+
+   struct panfrost_precomp_cache *precomp_cache;
 };
 
 static inline int
@@ -188,13 +170,19 @@ panfrost_device_fd(const struct panfrost_device *dev)
 static inline uint32_t
 panfrost_device_gpu_id(const struct panfrost_device *dev)
 {
-   return dev->kmod.props.gpu_prod_id;
+   return dev->kmod.dev->props.gpu_id;
+}
+
+static inline uint32_t
+panfrost_device_gpu_prod_id(const struct panfrost_device *dev)
+{
+   return dev->kmod.dev->props.gpu_id >> 16;
 }
 
 static inline uint32_t
 panfrost_device_gpu_rev(const struct panfrost_device *dev)
 {
-   return dev->kmod.props.gpu_revision;
+   return dev->kmod.dev->props.gpu_id & BITFIELD_MASK(16);
 }
 
 static inline int
@@ -209,7 +197,7 @@ panfrost_device_kmod_version_minor(const struct panfrost_device *dev)
    return dev->kmod.dev->driver.version.minor;
 }
 
-void panfrost_open_device(void *memctx, int fd, struct panfrost_device *dev);
+int panfrost_open_device(void *memctx, int fd, struct panfrost_device *dev);
 
 void panfrost_close_device(struct panfrost_device *dev);
 
@@ -231,7 +219,21 @@ pan_is_bifrost(const struct panfrost_device *dev)
 static inline uint64_t
 pan_gpu_time_to_ns(struct panfrost_device *dev, uint64_t gpu_time)
 {
-   return (gpu_time * NSEC_PER_SEC) / dev->kmod.props.timestamp_frequency;
+   assert(dev->kmod.dev->props.timestamp_frequency > 0);
+   return (gpu_time * NSEC_PER_SEC) / dev->kmod.dev->props.timestamp_frequency;
+}
+
+static inline uint32_t
+pan_get_max_texel_buffer_elements(unsigned arch)
+{
+   if (arch >= 11)
+      /* TODO 1<<27 can be made larger for v11+ with a refactor of the buffer
+       * path away from using image logic. */
+      return 1 << 27;
+   else if (arch >= 6)
+      return 1 << 27;
+   else
+      return 65536;
 }
 
 #if defined(__cplusplus)

@@ -217,6 +217,7 @@ exp_ops = {}
 #                 (n operands, splicer)
 exp_ops["AND"]  = (2, splice_bitwise_and)
 exp_ops["OR"]   = (2, splice_bitwise_or)
+exp_ops["UGT"]  = (2, splice_ugt)
 exp_ops["UGTE"] = (2, splice_ugte)
 exp_ops["ULT"]  = (2, splice_ult)
 exp_ops["&&"]   = (2, splice_logical_and)
@@ -249,6 +250,13 @@ hw_vars["$SkuRevisionId"] = "perf->devinfo->revision"
 hw_vars["$QueryMode"] = "perf->sys_vars.query_mode"
 hw_vars["$ComputeEngineTotalCount"] = "perf->devinfo->engine_class_supported_count[INTEL_ENGINE_CLASS_COMPUTE]"
 hw_vars["$CopyEngineTotalCount"] = "perf->devinfo->engine_class_supported_count[INTEL_ENGINE_CLASS_COPY]"
+hw_vars["$L3BankTotalCount"] = "perf->sys_vars.n_l3_banks"
+hw_vars["$L3BankMaxCount"] = "perf->sys_vars.n_l3_banks"
+hw_vars["$L3NodeTotalCount"] = "perf->sys_vars.n_l3_nodes"
+hw_vars["$SqidiTotalCount"] = "perf->sys_vars.n_sq_idis"
+hw_vars["$DepthPipeTotalCount"] = "perf->sys_vars.n_depth_pipes"
+hw_vars["$GeometryPipeTotalCount"] = "perf->sys_vars.n_geom_pipes"
+hw_vars["$ColorPipeTotalCount"] = "perf->sys_vars.n_color_pipes"
 
 def resolve_variable(name, set, allow_counters):
     if name in hw_vars:
@@ -259,6 +267,14 @@ def resolve_variable(name, set, allow_counters):
     m = re.search(r'\$GtSlice([0-9]+)XeCore([0-9]+)$', name)
     if m:
         return 'intel_device_info_subslice_available(perf->devinfo, {0}, {1})'.format(m.group(1), m.group(2))
+    m = re.search(r'\$GtXeCore([0-9]+)$', name)
+    if m:
+        n = m.group(1)
+        return (
+            'intel_device_info_subslice_available(perf->devinfo, '
+            '{n} / perf->devinfo->subslice_slice_stride, '
+            '{n} % perf->devinfo->subslice_slice_stride)'
+        ).format(n=n)
     if allow_counters and name in set.counter_vars:
         return set.read_funcs[name[1:]] + "(perf, query, results)"
     return None

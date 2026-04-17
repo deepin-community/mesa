@@ -197,7 +197,7 @@ d3d12_bo_unreference(struct d3d12_bo *bo)
       typedef struct d3d12_context d3d12_context_type;
       list_for_each_entry(d3d12_context_type, ctx, &bo->screen->context_list, context_list_entry)
          if (ctx->id == D3D12_CONTEXT_NO_ID)
-            util_dynarray_append(&ctx->recently_destroyed_bos, uint64_t, bo->unique_id);
+            util_dynarray_append_typed(&ctx->recently_destroyed_bos, uint64_t, bo->unique_id);
 
       mtx_unlock(&bo->screen->submit_mutex);
 
@@ -226,12 +226,12 @@ d3d12_bo_map(struct d3d12_bo *bo, D3D12_RANGE *range)
    base_bo = d3d12_bo_get_base(bo, &offset);
 
    if (!range || range->Begin >= range->End) {
-      offset_range.Begin = offset;
-      offset_range.End = offset + d3d12_bo_get_size(bo);
+      offset_range.Begin = static_cast<size_t>(offset);
+      offset_range.End = static_cast<size_t>(offset + d3d12_bo_get_size(bo));
       range = &offset_range;
    } else {
-      offset_range.Begin = range->Begin + offset;
-      offset_range.End = range->End + offset;
+      offset_range.Begin = static_cast<size_t>(range->Begin + offset);
+      offset_range.End = static_cast<size_t>(range->End + offset);
       range = &offset_range;
    }
 
@@ -251,12 +251,12 @@ d3d12_bo_unmap(struct d3d12_bo *bo, D3D12_RANGE *range)
    base_bo = d3d12_bo_get_base(bo, &offset);
 
    if (!range || range->Begin >= range->End) {
-      offset_range.Begin = offset;
-      offset_range.End = offset + d3d12_bo_get_size(bo);
+      offset_range.Begin = static_cast<size_t>(offset);
+      offset_range.End = static_cast<size_t>(offset + d3d12_bo_get_size(bo));
       range = &offset_range;
    } else {
-      offset_range.Begin = range->Begin + offset;
-      offset_range.End = range->End + offset;
+      offset_range.Begin = static_cast<size_t>(range->Begin + offset);
+      offset_range.End = static_cast<size_t>(range->End + offset);
       range = &offset_range;
    }
 
@@ -333,12 +333,12 @@ d3d12_bufmgr_create_buffer(struct pb_manager *pmgr,
       return NULL;
 
    pipe_reference_init(&buf->base.base.reference, 1);
-   buf->base.base.alignment_log2 = util_logbase2(pb_desc->alignment);
-   buf->base.base.usage = pb_desc->usage;
+   buf->base.base.alignment_log2 = static_cast<uint8_t>(util_logbase2(pb_desc->alignment));
+   buf->base.base.usage = static_cast<uint16_t>(pb_desc->usage);
    buf->base.vtbl = &d3d12_buffer_vtbl;
    buf->base.base.size = size;
    buf->range.Begin = 0;
-   buf->range.End = size;
+   buf->range.End = static_cast<size_t>(size);
 
    buf->bo = d3d12_bo_new(mgr->screen, size, pb_desc);
    if (!buf->bo) {

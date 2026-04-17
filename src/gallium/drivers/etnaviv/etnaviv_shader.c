@@ -140,6 +140,17 @@ etna_link_shaders(struct etna_context *ctx, struct compiled_shader_state *cs,
                       link.varyings[idx].pa_attributes);
    }
 
+   if (ctx->screen->specs.has_unified_uniforms) {
+      /* check if combined shader constants fit into unified const memory */
+      if ((vs->uniforms.count + fs->uniforms.count) / 4 >
+          ctx->screen->info->gpu.num_constants) {
+         DBG("Number of combined uniforms (%d) exceeds maximum %d",
+             (vs->uniforms.count + fs->uniforms.count) / 4,
+             ctx->screen->info->gpu.num_constants);
+         return false;
+      }
+   }
+
    /* set last_varying_2x flag if the last varying has 1 or 2 components */
    bool last_varying_2x = false;
    if (link.num_varyings > 0 && link.varyings[link.num_varyings - 1].num_components <= 2)
@@ -152,6 +163,7 @@ etna_link_shaders(struct etna_context *ctx, struct compiled_shader_state *cs,
    STATIC_ASSERT(VIVS_PA_SHADER_ATTRIBUTES__LEN >= ETNA_NUM_VARYINGS);
    for (int idx = 0; idx < link.num_varyings; ++idx)
       cs->PA_SHADER_ATTRIBUTES[idx] = link.varyings[idx].pa_attributes;
+   cs->pa_shader_attributes_states = link.num_varyings;
 
    cs->VS_END_PC = vs->code_size / 4;
    cs->VS_OUTPUT_COUNT = 1 + link.num_varyings; /* position + varyings */
@@ -232,22 +244,36 @@ etna_link_shaders(struct etna_context *ctx, struct compiled_shader_state *cs,
    uint32_t total_components = 0;
    DEFINE_ETNA_BITARRAY(num_components, ETNA_NUM_VARYINGS, 4) = {0};
    DEFINE_ETNA_BITARRAY(component_use, 4 * ETNA_NUM_VARYINGS, 2) = {0};
+   DEFINE_ETNA_BITARRAY(halti5_varying_semantic, 4 * 32, 4) = {0};
    for (int idx = 0; idx < link.num_varyings; ++idx) {
       const struct etna_varying *varying = &link.varyings[idx];
 
       etna_bitarray_set(num_components, 4, idx, varying->num_components);
       for (int comp = 0; comp < varying->num_components; ++comp) {
-         etna_bitarray_set(component_use, 2, total_components, varying->use[comp]);
+         if (ctx->screen->info->halti >= 5)
+            etna_bitarray_set(halti5_varying_semantic, 4, total_components, varying->semantic);
+         else
+            etna_bitarray_set(component_use, 2, total_components, varying->use[comp]);
          total_components += 1;
+      }
+   }
+
+   /* if shader has flat varyings, switch to flat shading */
+   for (int idx = 0; idx < link.num_varyings; ++idx) {
+      if (link.varyings[idx].semantic == VARYING_INTERPOLATION_MODE_FLAT) {
+         cs->PA_CONFIG &= ~VIVS_PA_CONFIG_SHADE_MODEL_SMOOTH;
+         cs->PA_CONFIG |= VIVS_PA_CONFIG_SHADE_MODEL_FLAT;
+         break;
       }
    }
 
    cs->GL_VARYING_TOTAL_COMPONENTS =
       VIVS_GL_VARYING_TOTAL_COMPONENTS_NUM(align(total_components, 2));
-   cs->GL_VARYING_NUM_COMPONENTS[0] = num_components[0];
-   cs->GL_VARYING_NUM_COMPONENTS[1] = num_components[1];
-   cs->GL_VARYING_COMPONENT_USE[0] = component_use[0];
-   cs->GL_VARYING_COMPONENT_USE[1] = component_use[1];
+   memcpy(cs->GL_VARYING_NUM_COMPONENTS, num_components, sizeof(uint32_t) * 2);
+   memcpy(cs->GL_VARYING_COMPONENT_USE, component_use, sizeof(uint32_t) * 4);
+   memcpy(cs->GL_HALTI5_SHADER_ATTRIBUTES, halti5_varying_semantic,
+          sizeof(uint32_t) * VIVS_GL_HALTI5_SHADER_ATTRIBUTES__LEN);
+   cs->halti5_shader_attributes_states = DIV_ROUND_UP(total_components, 8);
 
    cs->GL_HALTI5_SH_SPECIALS =
       0x7f7f0000 | /* unknown bits, probably other PS inputs */
@@ -267,7 +293,13 @@ etna_link_shaders(struct etna_context *ctx, struct compiled_shader_state *cs,
    cs->ps_inst_mem_size = fs->code_size;
    cs->PS_INST_MEM = fs->code;
 
-   if (vs->needs_icache || fs->needs_icache) {
+   if (vs->needs_icache || fs->needs_icache ||
+       (ctx->screen->specs.has_unified_instmem &&
+        ((cs->vs_inst_mem_size + cs->ps_inst_mem_size) / 4 >
+         ctx->screen->specs.max_instructions))) {
+      if (!ctx->screen->specs.has_icache)
+         return false;
+
       /* If either of the shaders needs ICACHE, we use it for both. It is
        * either switched on or off for the entire shader processor.
        */
@@ -378,7 +410,7 @@ etna_shader_stage(struct etna_shader *shader)
    case MESA_SHADER_FRAGMENT:   return "FRAG";
    case MESA_SHADER_COMPUTE:    return "CL";
    default:
-      unreachable("invalid type");
+      UNREACHABLE("invalid type");
       return NULL;
    }
 }
@@ -590,7 +622,7 @@ etna_set_max_shader_compiler_threads(struct pipe_screen *pscreen,
 static bool
 etna_is_parallel_shader_compilation_finished(struct pipe_screen *pscreen,
                                              void *hwcso,
-                                             enum pipe_shader_type shader_type)
+                                             mesa_shader_stage shader_type)
 {
    struct etna_shader *shader = (struct etna_shader *)hwcso;
 
@@ -620,6 +652,9 @@ etna_shader_screen_init(struct pipe_screen *pscreen)
    screen->compiler = etna_compiler_create(pscreen->get_name(pscreen), screen->info);
    if (!screen->compiler)
       return false;
+
+   for (unsigned i = 0; i <= MESA_SHADER_COMPUTE; i++)
+      pscreen->nir_options[i] = etna_compiler_get_options(screen->compiler);
 
    pscreen->set_max_shader_compiler_threads = etna_set_max_shader_compiler_threads;
    pscreen->is_parallel_shader_compilation_finished = etna_is_parallel_shader_compilation_finished;

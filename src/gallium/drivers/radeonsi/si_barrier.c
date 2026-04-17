@@ -5,6 +5,7 @@
  */
 
 #include "si_build_pm4.h"
+#include "si_query.h"
 
 static struct si_resource *si_get_wait_mem_scratch_bo(struct si_context *ctx,
                                                       struct radeon_cmdbuf *cs, bool is_secure)
@@ -40,7 +41,7 @@ static unsigned get_reduced_barrier_flags(struct si_context *ctx)
    if (!flags)
       return 0;
 
-   if (!ctx->has_graphics) {
+   if (!ctx->is_gfx_queue) {
       /* Only process compute flags. */
       flags &= SI_BARRIER_INV_ICACHE | SI_BARRIER_INV_SMEM | SI_BARRIER_INV_VMEM |
                SI_BARRIER_INV_L2 | SI_BARRIER_WB_L2 | SI_BARRIER_INV_L2_METADATA |
@@ -118,18 +119,28 @@ static void si_handle_common_barrier_events(struct si_context *ctx, struct radeo
 {
    radeon_begin(cs);
 
+   bool pipeline_stats_changed = false;
    if (flags & SI_BARRIER_EVENT_PIPELINESTAT_START && ctx->pipeline_stats_enabled != 1) {
       radeon_event_write(V_028A90_PIPELINESTAT_START);
       ctx->pipeline_stats_enabled = 1;
+      pipeline_stats_changed = true;
    } else if (flags & SI_BARRIER_EVENT_PIPELINESTAT_STOP && ctx->pipeline_stats_enabled != 0) {
       radeon_event_write(V_028A90_PIPELINESTAT_STOP);
       ctx->pipeline_stats_enabled = 0;
+      pipeline_stats_changed = true;
    }
 
    if (flags & SI_BARRIER_EVENT_VGT_FLUSH)
       radeon_event_write(V_028A90_VGT_FLUSH);
 
    radeon_end();
+
+   if (si_need_emit_task_shader_query(ctx, cs) && pipeline_stats_changed) {
+      radeon_begin(cs->gang_cs);
+      radeon_set_sh_reg(R_00B828_COMPUTE_PIPELINESTAT_ENABLE,
+                        S_00B828_PIPELINESTAT_ENABLE(ctx->pipeline_stats_enabled));
+      radeon_end();
+   }
 }
 
 static void gfx10_emit_barrier(struct si_context *ctx, struct radeon_cmdbuf *cs)
@@ -150,9 +161,11 @@ static void gfx10_emit_barrier(struct si_context *ctx, struct radeon_cmdbuf *cs)
    if (flags & SI_BARRIER_INV_ICACHE)
       gcr_cntl |= S_586_GLI_INV(V_586_GLI_ALL);
    if (flags & SI_BARRIER_INV_SMEM)
-      gcr_cntl |= S_586_GL1_INV(1) | S_586_GLK_INV(1);
+      gcr_cntl |= S_586_GLK_INV(1);
    if (flags & SI_BARRIER_INV_VMEM)
-      gcr_cntl |= S_586_GL1_INV(1) | S_586_GLV_INV(1);
+      gcr_cntl |= S_586_GLV_INV(1);
+   if (ctx->gfx_level < GFX12 && flags & (SI_BARRIER_INV_SMEM | SI_BARRIER_INV_VMEM))
+      gcr_cntl |= S_586_GL1_INV(1);
 
    /* The L2 cache ops are:
     * - INV: - invalidate lines that reflect memory (were loaded from memory)
@@ -239,12 +252,16 @@ static void gfx10_emit_barrier(struct si_context *ctx, struct radeon_cmdbuf *cs)
          unsigned gl2_wb = G_586_GL2_WB(gcr_cntl);
          unsigned gcr_seq = G_586_SEQ(gcr_cntl);
 
-         gcr_cntl &= C_586_GLM_WB & C_586_GLM_INV & C_586_GLV_INV & C_586_GL1_INV & C_586_GL2_INV &
-                     C_586_GL2_WB; /* keep SEQ */
+         gcr_cntl &= C_586_GLV_INV & C_586_GL2_INV & C_586_GL2_WB; /* keep SEQ */
+
+         if (ctx->gfx_level < GFX12)
+            gcr_cntl &= C_586_GLM_WB & C_586_GLM_INV & C_586_GL1_INV;
 
          si_cp_release_mem(ctx, cs, cb_db_event,
-                           S_490_GLM_WB(glm_wb) | S_490_GLM_INV(glm_inv) | S_490_GLV_INV(glv_inv) |
-                           S_490_GL1_INV(gl1_inv) | S_490_GL2_INV(gl2_inv) | S_490_GL2_WB(gl2_wb) |
+                           (ctx->gfx_level >= GFX12 ? 0 : S_490_GLM_WB(glm_wb) | S_490_GLM_INV(glm_inv) |
+                                                          S_490_GL1_INV(gl1_inv)) |
+                           S_490_GLV_INV(glv_inv) |
+                           S_490_GL2_INV(gl2_inv) | S_490_GL2_WB(gl2_wb) |
                            S_490_SEQ(gcr_seq),
                            EOP_DST_SEL_MEM, EOP_INT_SEL_SEND_DATA_AFTER_WR_CONFIRM,
                            EOP_DATA_SEL_VALUE_32BIT, wait_mem_scratch, va, ctx->wait_mem_number,
@@ -277,12 +294,16 @@ static void gfx10_emit_barrier(struct si_context *ctx, struct radeon_cmdbuf *cs)
    }
 
    /* Ignore fields that only modify the behavior of other fields. */
-   if (gcr_cntl & C_586_GL1_RANGE & C_586_GL2_RANGE & C_586_SEQ) {
+   if (gcr_cntl & C_586_GL2_RANGE & C_586_SEQ & (ctx->gfx_level >= GFX12 ? ~0 : C_586_GL1_RANGE)) {
       si_cp_acquire_mem(ctx, cs, gcr_cntl,
                         flags & SI_BARRIER_PFP_SYNC_ME ? V_580_CP_PFP : V_580_CP_ME);
    } else if (flags & SI_BARRIER_PFP_SYNC_ME) {
       si_cp_pfp_sync_me(cs);
    }
+
+   /* Increase task wait count if not done before. */
+   if (ctx->task_wait_count == ctx->last_task_wait_count)
+      ctx->task_wait_count++;
 }
 
 static void gfx6_emit_barrier(struct si_context *sctx, struct radeon_cmdbuf *cs)
@@ -493,13 +514,6 @@ static void si_emit_barrier_as_atom(struct si_context *sctx, unsigned index)
    sctx->emit_barrier(sctx, &sctx->gfx_cs);
 }
 
-static bool si_is_buffer_idle(struct si_context *sctx, struct si_resource *buf,
-                              unsigned usage)
-{
-   return !si_cs_is_buffer_referenced(sctx, buf->buf, usage) &&
-          sctx->ws->buffer_wait(sctx->ws, buf->buf, 0, usage);
-}
-
 void si_barrier_before_internal_op(struct si_context *sctx, unsigned flags,
                                    unsigned num_buffers,
                                    const struct pipe_shader_buffer *buffers,
@@ -507,6 +521,11 @@ void si_barrier_before_internal_op(struct si_context *sctx, unsigned flags,
                                    unsigned num_images,
                                    const struct pipe_image_view *images)
 {
+   unsigned new_barriers;
+
+   /* Invalidate the VMEM cache only. The SMEM cache isn't used by shader buffers. */
+   new_barriers = SI_BARRIER_INV_VMEM;
+
    for (unsigned i = 0; i < num_images; i++) {
       /* The driver doesn't decompress resources automatically for internal blits, so do it manually. */
       si_decompress_subresource(&sctx->b, images[i].resource, PIPE_MASK_RGBAZS,
@@ -516,14 +535,14 @@ void si_barrier_before_internal_op(struct si_context *sctx, unsigned flags,
    }
 
    /* Don't sync if buffers are idle. */
-   const unsigned ps_mask = SI_BIND_CONSTANT_BUFFER(PIPE_SHADER_FRAGMENT) |
-                            SI_BIND_SHADER_BUFFER(PIPE_SHADER_FRAGMENT) |
-                            SI_BIND_IMAGE_BUFFER(PIPE_SHADER_FRAGMENT) |
-                            SI_BIND_SAMPLER_BUFFER(PIPE_SHADER_FRAGMENT);
-   const unsigned cs_mask = SI_BIND_CONSTANT_BUFFER(PIPE_SHADER_COMPUTE) |
-                            SI_BIND_SHADER_BUFFER(PIPE_SHADER_COMPUTE) |
-                            SI_BIND_IMAGE_BUFFER(PIPE_SHADER_COMPUTE) |
-                            SI_BIND_SAMPLER_BUFFER(PIPE_SHADER_COMPUTE);
+   const unsigned ps_mask = SI_BIND_CONSTANT_BUFFER(MESA_SHADER_FRAGMENT) |
+                            SI_BIND_SHADER_BUFFER(MESA_SHADER_FRAGMENT) |
+                            SI_BIND_IMAGE_BUFFER(MESA_SHADER_FRAGMENT) |
+                            SI_BIND_SAMPLER_BUFFER(MESA_SHADER_FRAGMENT);
+   const unsigned cs_mask = SI_BIND_CONSTANT_BUFFER(MESA_SHADER_COMPUTE) |
+                            SI_BIND_SHADER_BUFFER(MESA_SHADER_COMPUTE) |
+                            SI_BIND_IMAGE_BUFFER(MESA_SHADER_COMPUTE) |
+                            SI_BIND_SAMPLER_BUFFER(MESA_SHADER_COMPUTE);
 
    for (unsigned i = 0; i < num_buffers; i++) {
       struct si_resource *buf = si_resource(buffers[i].buffer);
@@ -537,12 +556,12 @@ void si_barrier_before_internal_op(struct si_context *sctx, unsigned flags,
       if (!si_is_buffer_idle(sctx, buf, RADEON_USAGE_WRITE |
                              (writable_buffers_mask & BITFIELD_BIT(i) ? RADEON_USAGE_READ : 0))) {
          if (buf->bind_history & ps_mask)
-            sctx->barrier_flags |= SI_BARRIER_SYNC_PS;
+            new_barriers |= SI_BARRIER_SYNC_PS;
          else
-            sctx->barrier_flags |= SI_BARRIER_SYNC_VS;
+            new_barriers |= SI_BARRIER_SYNC_VS;
 
          if (buf->bind_history & cs_mask)
-            sctx->barrier_flags |= SI_BARRIER_SYNC_CS;
+            new_barriers |= SI_BARRIER_SYNC_CS;
       }
    }
 
@@ -557,13 +576,11 @@ void si_barrier_before_internal_op(struct si_context *sctx, unsigned flags,
       if (!si_is_buffer_idle(sctx, img, RADEON_USAGE_WRITE | (writable ? RADEON_USAGE_READ : 0))) {
          si_make_CB_shader_coherent(sctx, images[i].resource->nr_samples, true,
                ((struct si_texture*)images[i].resource)->surface.u.gfx9.color.dcc.pipe_aligned);
-         sctx->barrier_flags |= SI_BARRIER_SYNC_PS | SI_BARRIER_SYNC_CS;
+         new_barriers |= SI_BARRIER_SYNC_PS | SI_BARRIER_SYNC_CS;
       }
    }
 
-   /* Invalidate the VMEM cache only. The SMEM cache isn't used by shader buffers. */
-   sctx->barrier_flags |= SI_BARRIER_INV_VMEM;
-   si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier);
+   si_set_barrier_flags(sctx, new_barriers);
 }
 
 void si_barrier_after_internal_op(struct si_context *sctx, unsigned flags,
@@ -573,18 +590,18 @@ void si_barrier_after_internal_op(struct si_context *sctx, unsigned flags,
                                   unsigned num_images,
                                   const struct pipe_image_view *images)
 {
-   sctx->barrier_flags |= SI_BARRIER_SYNC_CS;
+   unsigned new_barriers = SI_BARRIER_SYNC_CS;
 
    if (num_images) {
       /* Make sure image stores are visible to CB, which doesn't use L2 on GFX6-8. */
-      sctx->barrier_flags |= sctx->gfx_level <= GFX8 ? SI_BARRIER_WB_L2 : 0;
+      new_barriers |= sctx->gfx_level <= GFX8 ? SI_BARRIER_WB_L2 : 0;
       /* Make sure image stores are visible to all CUs. */
-      sctx->barrier_flags |= SI_BARRIER_INV_VMEM;
+      new_barriers |= SI_BARRIER_INV_VMEM;
    }
 
    /* Make sure buffer stores are visible to all CUs and also as index/indirect buffers. */
    if (num_buffers)
-      sctx->barrier_flags |= SI_BARRIER_INV_SMEM | SI_BARRIER_INV_VMEM | SI_BARRIER_PFP_SYNC_ME;
+      new_barriers |= SI_BARRIER_INV_SMEM | SI_BARRIER_INV_VMEM | SI_BARRIER_PFP_SYNC_ME;
 
    /* We must set L2_cache_dirty for buffers because:
     * - GFX6,12: CP DMA doesn't use L2.
@@ -604,13 +621,13 @@ void si_barrier_after_internal_op(struct si_context *sctx, unsigned flags,
              images[i].access & PIPE_IMAGE_ACCESS_WRITE &&
              (sctx->screen->always_allow_dcc_stores ||
               images[i].access & SI_IMAGE_ACCESS_ALLOW_DCC_STORE)) {
-            sctx->barrier_flags |= SI_BARRIER_INV_L2;
+            new_barriers |= SI_BARRIER_INV_L2;
             break;
          }
       }
    }
 
-   si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier);
+   si_set_barrier_flags(sctx, new_barriers);
 }
 
 static void si_set_dst_src_barrier_buffers(struct pipe_shader_buffer *buffers,
@@ -650,6 +667,7 @@ static void si_texture_barrier(struct pipe_context *ctx, unsigned flags)
 static void si_memory_barrier(struct pipe_context *ctx, unsigned flags)
 {
    struct si_context *sctx = (struct si_context *)ctx;
+   unsigned new_barriers;
 
    /* Ignore PIPE_BARRIER_UPDATE_BUFFER - it synchronizes against updates like buffer_subdata. */
    /* Ignore PIPE_BARRIER_UPDATE_TEXTURE - it synchronizes against updates like texture_subdata. */
@@ -663,10 +681,10 @@ static void si_memory_barrier(struct pipe_context *ctx, unsigned flags)
    if (!flags)
       return;
 
-   sctx->barrier_flags |= SI_BARRIER_SYNC_PS | SI_BARRIER_SYNC_CS;
+   new_barriers = SI_BARRIER_SYNC_PS | SI_BARRIER_SYNC_CS;
 
    if (flags & PIPE_BARRIER_CONSTANT_BUFFER)
-      sctx->barrier_flags |= SI_BARRIER_INV_SMEM | SI_BARRIER_INV_VMEM;
+      new_barriers |= SI_BARRIER_INV_SMEM | SI_BARRIER_INV_VMEM;
 
    /* VMEM cache contents are written back to L2 automatically at the end of waves, but
     * the contents of other VMEM caches might still be stale.
@@ -675,42 +693,47 @@ static void si_memory_barrier(struct pipe_context *ctx, unsigned flags)
     */
    if (flags & (PIPE_BARRIER_VERTEX_BUFFER | PIPE_BARRIER_SHADER_BUFFER | PIPE_BARRIER_TEXTURE |
                 PIPE_BARRIER_IMAGE | PIPE_BARRIER_STREAMOUT_BUFFER | PIPE_BARRIER_GLOBAL_BUFFER))
-      sctx->barrier_flags |= SI_BARRIER_INV_VMEM;
+      new_barriers |= SI_BARRIER_INV_VMEM;
+
+   /* Unlike LLVM, ACO may use SMEM for SSBOs and global access. */
+   if (sctx->screen->use_aco &&
+       (flags & (PIPE_BARRIER_SHADER_BUFFER | PIPE_BARRIER_GLOBAL_BUFFER)))
+      new_barriers |= SI_BARRIER_INV_SMEM;
 
    if (flags & (PIPE_BARRIER_INDEX_BUFFER | PIPE_BARRIER_INDIRECT_BUFFER))
-      sctx->barrier_flags |= SI_BARRIER_PFP_SYNC_ME;
+      new_barriers |= SI_BARRIER_PFP_SYNC_ME;
 
    /* Index buffers use L2 since GFX8 */
    if (flags & PIPE_BARRIER_INDEX_BUFFER &&
        (sctx->gfx_level <= GFX7 || sctx->screen->info.cp_sdma_ge_use_system_memory_scope))
-      sctx->barrier_flags |= SI_BARRIER_WB_L2;
+      new_barriers |= SI_BARRIER_WB_L2;
 
    /* Indirect buffers use L2 since GFX9. */
    if (flags & PIPE_BARRIER_INDIRECT_BUFFER &&
        (sctx->gfx_level <= GFX8 || sctx->screen->info.cp_sdma_ge_use_system_memory_scope))
-      sctx->barrier_flags |= SI_BARRIER_WB_L2;
+      new_barriers |= SI_BARRIER_WB_L2;
 
    /* MSAA color images are flushed in si_decompress_textures when needed.
     * Shaders never write to depth/stencil images.
     */
    if (flags & PIPE_BARRIER_FRAMEBUFFER && sctx->framebuffer.uncompressed_cb_mask) {
-      sctx->barrier_flags |= SI_BARRIER_SYNC_AND_INV_CB;
+      new_barriers |= SI_BARRIER_SYNC_AND_INV_CB;
 
       if (sctx->gfx_level >= GFX10 && sctx->gfx_level < GFX12) {
          if (sctx->screen->info.tcc_rb_non_coherent)
-            sctx->barrier_flags |= SI_BARRIER_INV_L2;
+            new_barriers |= SI_BARRIER_INV_L2;
          else /* We don't know which shaders do image stores with DCC: */
-            sctx->barrier_flags |= SI_BARRIER_INV_L2_METADATA;
+            new_barriers |= SI_BARRIER_INV_L2_METADATA;
       } else if (sctx->gfx_level == GFX9) {
          /* We have to invalidate L2 for MSAA and when DCC can have pipe_aligned=0. */
-         sctx->barrier_flags |= SI_BARRIER_INV_L2;
+         new_barriers |= SI_BARRIER_INV_L2;
       } else if (sctx->gfx_level <= GFX8) {
          /* CB doesn't use L2 on GFX6-8.  */
-         sctx->barrier_flags |= SI_BARRIER_WB_L2;
+         new_barriers |= SI_BARRIER_WB_L2;
       }
    }
 
-   si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier);
+   si_set_barrier_flags(sctx, new_barriers);
 }
 
 static void si_set_sampler_depth_decompress_mask(struct si_context *sctx, struct si_texture *tex)
@@ -733,10 +756,8 @@ static void si_set_sampler_depth_decompress_mask(struct si_context *sctx, struct
 void si_fb_barrier_before_rendering(struct si_context *sctx)
 {
    /* Wait for all shaders because all image loads must finish before CB/DB can write there. */
-   if (sctx->framebuffer.state.nr_cbufs || sctx->framebuffer.state.zsbuf) {
-      sctx->barrier_flags |= SI_BARRIER_SYNC_CS | SI_BARRIER_SYNC_PS;
-      si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier);
-   }
+   if (sctx->framebuffer.state.nr_cbufs || sctx->framebuffer.state.zsbuf.texture)
+      si_set_barrier_flags(sctx, SI_BARRIER_SYNC_CS | SI_BARRIER_SYNC_PS);
 }
 
 void si_fb_barrier_after_rendering(struct si_context *sctx, unsigned flags)
@@ -745,14 +766,14 @@ void si_fb_barrier_after_rendering(struct si_context *sctx, unsigned flags)
       /* Setting dirty_level_mask should ignore SI_FB_BARRIER_SYNC_* because it triggers
        * decompression, which is not syncing.
        */
-      if (sctx->framebuffer.state.zsbuf) {
-         struct pipe_surface *surf = sctx->framebuffer.state.zsbuf;
+      if (sctx->framebuffer.state.zsbuf.texture) {
+         struct pipe_surface *surf = &sctx->framebuffer.state.zsbuf;
          struct si_texture *tex = (struct si_texture *)surf->texture;
 
-         tex->dirty_level_mask |= 1 << surf->u.tex.level;
+         tex->dirty_level_mask |= 1 << surf->level;
 
          if (tex->surface.has_stencil)
-            tex->stencil_dirty_level_mask |= 1 << surf->u.tex.level;
+            tex->stencil_dirty_level_mask |= 1 << surf->level;
 
          si_set_sampler_depth_decompress_mask(sctx, tex);
       }
@@ -760,11 +781,11 @@ void si_fb_barrier_after_rendering(struct si_context *sctx, unsigned flags)
       unsigned compressed_cb_mask = sctx->framebuffer.compressed_cb_mask;
       while (compressed_cb_mask) {
          unsigned i = u_bit_scan(&compressed_cb_mask);
-         struct pipe_surface *surf = sctx->framebuffer.state.cbufs[i];
+         struct pipe_surface *surf = &sctx->framebuffer.state.cbufs[i];
          struct si_texture *tex = (struct si_texture *)surf->texture;
 
          if (tex->surface.fmask_offset) {
-            tex->dirty_level_mask |= 1 << surf->u.tex.level;
+            tex->dirty_level_mask |= 1 << surf->level;
             tex->fmask_is_identity = false;
          }
       }
@@ -782,7 +803,7 @@ void si_fb_barrier_after_rendering(struct si_context *sctx, unsigned flags)
       }
    }
 
-   if (flags & SI_FB_BARRIER_SYNC_DB && sctx->framebuffer.state.zsbuf) {
+   if (flags & SI_FB_BARRIER_SYNC_DB && sctx->framebuffer.state.zsbuf.texture) {
       /* DB caches are flushed on demand (using si_decompress_textures) except the cases below. */
       if (sctx->gfx_level >= GFX12) {
          si_make_DB_shader_coherent(sctx, sctx->framebuffer.nr_samples, true, false);
@@ -794,20 +815,17 @@ void si_fb_barrier_after_rendering(struct si_context *sctx, unsigned flags)
           */
          si_make_DB_shader_coherent(sctx, 1, false, sctx->framebuffer.DB_has_shader_readable_metadata);
       } else if (sctx->screen->info.family == CHIP_NAVI33) {
-         struct si_surface *old_zsurf = (struct si_surface *)sctx->framebuffer.state.zsbuf;
-         struct si_texture *old_ztex = (struct si_texture *)old_zsurf->base.texture;
+         struct si_texture *old_ztex = (struct si_texture *)sctx->framebuffer.state.zsbuf.texture;
 
          if (old_ztex->upgraded_depth) {
             /* TODO: some failures related to hyperz appeared after 969ed851 on nv33:
              * - piglit tex-miplevel-selection
              * - KHR-GL46.direct_state_access.framebuffers_texture_attachment
-             * - GTF-GL46.gtf30.GL3Tests.blend_minmax.blend_minmax_draw
              * - KHR-GL46.direct_state_access.framebuffers_texture_layer_attachment
              *
              * This seems to fix them:
              */
-            sctx->barrier_flags |= SI_BARRIER_SYNC_AND_INV_DB | SI_BARRIER_INV_L2;
-            si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier);
+            si_set_barrier_flags(sctx, SI_BARRIER_SYNC_AND_INV_DB | SI_BARRIER_INV_L2);
          }
       } else if (sctx->gfx_level == GFX9) {
          /* It appears that DB metadata "leaks" in a sequence of:
@@ -816,14 +834,16 @@ void si_fb_barrier_after_rendering(struct si_context *sctx, unsigned flags)
           *  - render with DEPTH_BEFORE_SHADER=1
           * Flushing DB metadata works around the problem.
           */
-         sctx->barrier_flags |= SI_BARRIER_EVENT_FLUSH_AND_INV_DB_META;
-         si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier);
+         si_set_barrier_flags(sctx, SI_BARRIER_EVENT_FLUSH_AND_INV_DB_META);
       }
    }
 }
 
 void si_barrier_before_image_fast_clear(struct si_context *sctx, unsigned types)
 {
+   /* Invalidate the VMEM cache because we always use compute. */
+   unsigned new_barriers = SI_BARRIER_INV_VMEM;
+
    /* Flush caches and wait for idle. */
    if (types & (SI_CLEAR_TYPE_CMASK | SI_CLEAR_TYPE_DCC)) {
       si_make_CB_shader_coherent(sctx, sctx->framebuffer.nr_samples,
@@ -836,26 +856,23 @@ void si_barrier_before_image_fast_clear(struct si_context *sctx, unsigned types)
                                  sctx->framebuffer.DB_has_shader_readable_metadata);
    }
 
-   /* Invalidate the VMEM cache because we always use compute. */
-   sctx->barrier_flags |= SI_BARRIER_INV_VMEM;
-
    /* GFX6-8: CB and DB don't use L2. */
    if (sctx->gfx_level <= GFX8)
-      sctx->barrier_flags |= SI_BARRIER_INV_L2;
+      new_barriers |= SI_BARRIER_INV_L2;
 
-   si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier);
+   si_set_barrier_flags(sctx, new_barriers);
 }
 
 void si_barrier_after_image_fast_clear(struct si_context *sctx)
 {
    /* Wait for idle. */
-   sctx->barrier_flags |= SI_BARRIER_SYNC_CS;
+   unsigned new_barriers = SI_BARRIER_SYNC_CS;
 
    /* GFX6-8: CB and DB don't use L2. */
    if (sctx->gfx_level <= GFX8)
-      sctx->barrier_flags |= SI_BARRIER_WB_L2;
+      new_barriers |= SI_BARRIER_WB_L2;
 
-   si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier);
+   si_set_barrier_flags(sctx, new_barriers);
 }
 
 void si_init_barrier_functions(struct si_context *sctx)

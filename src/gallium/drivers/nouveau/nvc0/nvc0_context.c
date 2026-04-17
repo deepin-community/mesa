@@ -195,6 +195,7 @@ nvc0_context_unreference_resources(struct nvc0_context *nvc0)
    nouveau_bufctx_del(&nvc0->bufctx);
    nouveau_bufctx_del(&nvc0->bufctx_cp);
 
+   nvc0_framebuffer_init(&nvc0->base.pipe, NULL, nvc0->fb_cbufs, &nvc0->fb_zsbuf);
    util_unreference_framebuffer_state(&nvc0->framebuffer);
 
    for (i = 0; i < nvc0->num_vtxbufs; ++i)
@@ -216,11 +217,6 @@ nvc0_context_unreference_resources(struct nvc0_context *nvc0)
          if (nvc0->screen->base.class_3d >= GM107_3D_CLASS)
             pipe_sampler_view_reference(&nvc0->images_tic[s][i], NULL);
       }
-   }
-
-   for (s = 0; s < 2; ++s) {
-      for (i = 0; i < NVC0_MAX_SURFACE_SLOTS; ++i)
-         pipe_surface_reference(&nvc0->surfaces[s][i], NULL);
    }
 
    for (i = 0; i < nvc0->num_tfbbufs; ++i)
@@ -298,8 +294,7 @@ nvc0_invalidate_resource_storage(struct nouveau_context *ctx,
 
    if (res->bind & PIPE_BIND_RENDER_TARGET) {
       for (i = 0; i < nvc0->framebuffer.nr_cbufs; ++i) {
-         if (nvc0->framebuffer.cbufs[i] &&
-             nvc0->framebuffer.cbufs[i]->texture == res) {
+         if (nvc0->framebuffer.cbufs[i].texture == res) {
             nvc0->dirty_3d |= NVC0_NEW_3D_FRAMEBUFFER;
             nouveau_bufctx_reset(nvc0->bufctx_3d, NVC0_BIND_3D_FB);
             if (!--ref)
@@ -308,8 +303,7 @@ nvc0_invalidate_resource_storage(struct nouveau_context *ctx,
       }
    }
    if (res->bind & PIPE_BIND_DEPTH_STENCIL) {
-      if (nvc0->framebuffer.zsbuf &&
-          nvc0->framebuffer.zsbuf->texture == res) {
+      if (nvc0->framebuffer.zsbuf.texture == res) {
          nvc0->dirty_3d |= NVC0_NEW_3D_FRAMEBUFFER;
          nouveau_bufctx_reset(nvc0->bufctx_3d, NVC0_BIND_3D_FB);
          if (!--ref)
@@ -534,7 +528,7 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
 
    memset(nvc0->tex_handles, ~0, sizeof(nvc0->tex_handles));
 
-   util_dynarray_init(&nvc0->global_residents, NULL);
+   nvc0->global_residents = UTIL_DYNARRAY_INIT;
 
    // Make sure that the first TSC entry has SRGB conversion bit set, since we
    // use it as a fallback on Fermi for TXF, and on Kepler+ generations for

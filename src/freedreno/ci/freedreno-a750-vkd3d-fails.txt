@@ -1,16 +1,9 @@
-test_clear_depth_stencil_view,Fail
-test_copy_texture,Fail
-test_early_depth_stencil_tests,Fail
-test_index_buffer_edge_case_stream_output,Fail
-test_multisample_resolve_strongly_typed,Fail
-test_primitive_restart_list_topology_stream_output,Fail
-test_query_pipeline_statistics,Fail
-test_sampler_rounding,Fail
 test_shader_instructions,Fail
-test_shader_sm66_quad_op_semantics,Fail
-test_suballocate_small_textures_size,Fail
-test_vertex_id_dxbc,Fail
-test_vertex_id_dxil,Fail
+test_large_texel_buffer_view,Fail
+test_sparse_depth_stencil_rendering,Fail
 
-# msm_dpu ae01000.display-controller: [drm:hangcheck_handler] *ERROR* 67.5.20.1: hangcheck detected gpu lockup rb 0!
-test_fence_wait_robustness,Crash
+# msm_dpu ae01000.display-controller: [drm:hangcheck_handler] *ERROR* 67.5.20.1: hangcheck detected gpu lockup rb 2!
+# msm_dpu ae01000.display-controller: [drm:hangcheck_handler] *ERROR* 67.5.20.1:     completed fence: 4294967112
+# msm_dpu ae01000.display-controller: [drm:hangcheck_handler] *ERROR* 67.5.20.1:     submitted fence: 4294967115
+# *** gpu fault: ttbr0=00000008b80fc000 iova=0000000100691300 dir=READ type=TRANSLATION source=UCHE (3736059565,3736059565,3736059565,3736059565)
+test_fence_pending_signal_cpu_rewind_plain,Crash
