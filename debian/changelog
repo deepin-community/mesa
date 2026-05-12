@@ -1,3 +1,10 @@
+mesa (24.3.0-1deepin9) unstable; urgency=medium
+
+  * Fix build failure: add missing util/stack_array.h header for CVE-2026-40393
+    patch
+
+ -- lichenggang <lichenggang@uniontech.com>  Tue, 12 May 2026 20:49:05 +0800
+
 mesa (24.3.0-1deepin8) unstable; urgency=medium
 
   * Fix CVE-2026-40393: replace NIR_VLA with STACK_ARRAY to prevent out-
