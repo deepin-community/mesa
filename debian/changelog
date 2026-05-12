@@ -1,3 +1,10 @@
+mesa (24.3.0-1deepin8) unstable; urgency=medium
+
+  * Fix CVE-2026-40393: replace NIR_VLA with STACK_ARRAY to prevent out-
+    of-bounds memory access in WebGPU
+
+ -- deepin-ci-robot <packages@deepin.org>  Tue, 12 May 2026 09:17:02 +0800
+
 mesa (24.3.0-1deepin7) unstable; urgency=medium
 
   * fix: backport EGL software fallback handling fix

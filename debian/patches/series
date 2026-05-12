@@ -9,3 +9,4 @@ backports/0002-nvk-Enable-compression.patch
 backports/0003-nvk-Disable-compression-for-image-import-export.patch
 backports/0004-egl-fix-sw-fallback-rejection-in-non-sw-EGL_PLATFORM.patch
 backports/0005-drisw-Avoid-crashing-when-swrast_loader-NULL.patch
+CVE-2026-40393.patch
