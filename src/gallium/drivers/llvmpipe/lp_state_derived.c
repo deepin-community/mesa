@@ -80,8 +80,40 @@ compute_vertex_info(struct llvmpipe_context *llvmpipe)
    draw_emit_vertex_attr(vinfo, EMIT_4F, vs_index);
 
    struct nir_shader *nir = llvmpipe->fs->base.ir.nir;
-   uint64_t slot_emitted = 0;
+
+   /* The FS reads the input with driver location i from attrib i + 1, so
+    * emit the vertex attributes in driver location order. The variable
+    * list is sorted by location, which is not necessarily the same order
+    * (e.g. the FS inputs PRIMITIVE_ID, VIEWPORT and LAYER are assigned
+    * driver locations after all other inputs).
+    */
+   nir_variable *inputs[PIPE_MAX_SHADER_INPUTS] = { NULL };
+   unsigned num_input_slots = 0;
+
    nir_foreach_shader_in_variable(var, nir) {
+      unsigned slots = nir_variable_count_slots(var, var->type);
+      assert(var->data.driver_location + slots <= PIPE_MAX_SHADER_INPUTS);
+      inputs[var->data.driver_location] = var;
+      num_input_slots = MAX2(num_input_slots,
+                             var->data.driver_location + slots);
+   }
+
+   for (unsigned attr = 0; attr < num_input_slots;) {
+      nir_variable *var = inputs[attr];
+
+      assert(vinfo->num_attribs == attr + 1);
+
+      if (!var) {
+         /* There should be no holes between driver locations, but emit a
+          * dummy attribute to preserve the FS input mapping if there is
+          * one.
+          */
+         assert(!"hole in FS input driver locations");
+         draw_emit_vertex_attr(vinfo, EMIT_4F, 0);
+         attr++;
+         continue;
+      }
+
       unsigned tgsi_semantic_name, tgsi_semantic_index;
       unsigned slots = nir_variable_count_slots(var, var->type);
       tgsi_get_gl_varying_semantic(var->data.location,
@@ -93,10 +125,6 @@ compute_vertex_info(struct llvmpipe_context *llvmpipe)
          vs_index = draw_find_shader_output(llvmpipe->draw,
                                             tgsi_semantic_name,
                                             tgsi_semantic_index);
-         if (slot_emitted & BITFIELD64_BIT(vs_index)) {
-            tgsi_semantic_index++;
-            continue;
-         }
 
          if (tgsi_semantic_name == TGSI_SEMANTIC_COLOR &&
              tgsi_semantic_index < 2) {
@@ -128,9 +156,9 @@ compute_vertex_info(struct llvmpipe_context *llvmpipe)
              */
             draw_emit_vertex_attr(vinfo, EMIT_4F, vs_index);
          }
-         slot_emitted |= BITFIELD64_BIT(vs_index);
          tgsi_semantic_index++;
       }
+      attr += slots;
    }
 
    /*
@@ -199,18 +227,18 @@ static void
 check_linear_rasterizer(struct llvmpipe_context *lp)
 {
    const bool valid_cb_format =
-      (lp->framebuffer.nr_cbufs == 1 && lp->framebuffer.cbufs[0] &&
-       util_res_sample_count(lp->framebuffer.cbufs[0]->texture) == 1 &&
-       lp->framebuffer.cbufs[0]->texture->target == PIPE_TEXTURE_2D &&
-       (lp->framebuffer.cbufs[0]->format == PIPE_FORMAT_B8G8R8A8_UNORM ||
-        lp->framebuffer.cbufs[0]->format == PIPE_FORMAT_B8G8R8X8_UNORM ||
-        lp->framebuffer.cbufs[0]->format == PIPE_FORMAT_R8G8B8A8_UNORM ||
-        lp->framebuffer.cbufs[0]->format == PIPE_FORMAT_R8G8B8X8_UNORM));
+      (lp->framebuffer.nr_cbufs == 1 && lp->framebuffer.cbufs[0].texture &&
+       util_res_sample_count(lp->framebuffer.cbufs[0].texture) == 1 &&
+       lp->framebuffer.cbufs[0].texture->target == PIPE_TEXTURE_2D &&
+       (lp->framebuffer.cbufs[0].format == PIPE_FORMAT_B8G8R8A8_UNORM ||
+        lp->framebuffer.cbufs[0].format == PIPE_FORMAT_B8G8R8X8_UNORM ||
+        lp->framebuffer.cbufs[0].format == PIPE_FORMAT_R8G8B8A8_UNORM ||
+        lp->framebuffer.cbufs[0].format == PIPE_FORMAT_R8G8B8X8_UNORM));
 
    /* permit_linear means guardband, hence fake scissor, which we can only
     * handle if there's just one vp. */
    const bool single_vp = lp->viewport_index_slot < 0;
-   const bool permit_linear = (!lp->framebuffer.zsbuf &&
+   const bool permit_linear = (!lp->framebuffer.zsbuf.texture &&
                                valid_cb_format &&
                                single_vp);
 
@@ -306,7 +334,8 @@ llvmpipe_update_derived(struct llvmpipe_context *llvmpipe)
                           LP_NEW_RASTERIZER |
                           LP_NEW_SAMPLER |
                           LP_NEW_SAMPLER_VIEW |
-                          LP_NEW_OCCLUSION_QUERY))
+                          LP_NEW_OCCLUSION_QUERY |
+                          LP_NEW_SAMPLE_LOCATIONS))
       llvmpipe_update_fs(llvmpipe);
 
    if (llvmpipe->dirty & (LP_NEW_FS |
@@ -331,6 +360,11 @@ llvmpipe_update_derived(struct llvmpipe_context *llvmpipe)
       lp_setup_set_blend_color(llvmpipe->setup,
                                &llvmpipe->blend_color);
 
+   if (llvmpipe->dirty & LP_NEW_SAMPLE_LOCATIONS)
+      lp_setup_set_sample_locations(llvmpipe->setup,
+                                    llvmpipe->sample_locations_enabled,
+                                    llvmpipe->sample_locations);
+
    if (llvmpipe->dirty & LP_NEW_SCISSOR)
       lp_setup_set_scissors(llvmpipe->setup, llvmpipe->scissors);
 
@@ -339,32 +373,35 @@ llvmpipe_update_derived(struct llvmpipe_context *llvmpipe)
                                    llvmpipe->depth_stencil->alpha_ref_value);
       lp_setup_set_stencil_ref_values(llvmpipe->setup,
                                       llvmpipe->stencil_ref.ref_value);
+      lp_setup_set_depth_bounds_test_value(llvmpipe->setup,
+                                           llvmpipe->depth_stencil->depth_bounds_min,
+                                           llvmpipe->depth_stencil->depth_bounds_max);
    }
 
    if (llvmpipe->dirty & LP_NEW_FS_CONSTANTS)
       lp_setup_set_fs_constants(llvmpipe->setup,
-                                ARRAY_SIZE(llvmpipe->constants[PIPE_SHADER_FRAGMENT]),
-                                llvmpipe->constants[PIPE_SHADER_FRAGMENT]);
+                                ARRAY_SIZE(llvmpipe->constants[MESA_SHADER_FRAGMENT]),
+                                llvmpipe->constants[MESA_SHADER_FRAGMENT]);
 
    if (llvmpipe->dirty & LP_NEW_FS_SSBOS)
       lp_setup_set_fs_ssbos(llvmpipe->setup,
-                            ARRAY_SIZE(llvmpipe->ssbos[PIPE_SHADER_FRAGMENT]),
-                            llvmpipe->ssbos[PIPE_SHADER_FRAGMENT], llvmpipe->fs_ssbo_write_mask);
+                            ARRAY_SIZE(llvmpipe->ssbos[MESA_SHADER_FRAGMENT]),
+                            llvmpipe->ssbos[MESA_SHADER_FRAGMENT], llvmpipe->fs_ssbo_write_mask);
 
    if (llvmpipe->dirty & LP_NEW_FS_IMAGES)
       lp_setup_set_fs_images(llvmpipe->setup,
-                             ARRAY_SIZE(llvmpipe->images[PIPE_SHADER_FRAGMENT]),
-                             llvmpipe->images[PIPE_SHADER_FRAGMENT]);
+                             ARRAY_SIZE(llvmpipe->images[MESA_SHADER_FRAGMENT]),
+                             llvmpipe->images[MESA_SHADER_FRAGMENT]);
 
    if (llvmpipe->dirty & (LP_NEW_SAMPLER_VIEW))
       lp_setup_set_fragment_sampler_views(llvmpipe->setup,
-                                          llvmpipe->num_sampler_views[PIPE_SHADER_FRAGMENT],
-                                          llvmpipe->sampler_views[PIPE_SHADER_FRAGMENT]);
+                                          llvmpipe->num_sampler_views[MESA_SHADER_FRAGMENT],
+                                          llvmpipe->sampler_views[MESA_SHADER_FRAGMENT]);
 
    if (llvmpipe->dirty & (LP_NEW_SAMPLER))
       lp_setup_set_fragment_sampler_state(llvmpipe->setup,
-                                          llvmpipe->num_samplers[PIPE_SHADER_FRAGMENT],
-                                          llvmpipe->samplers[PIPE_SHADER_FRAGMENT]);
+                                          llvmpipe->num_samplers[MESA_SHADER_FRAGMENT],
+                                          llvmpipe->samplers[MESA_SHADER_FRAGMENT]);
 
    if (llvmpipe->dirty & LP_NEW_VIEWPORT) {
       /*

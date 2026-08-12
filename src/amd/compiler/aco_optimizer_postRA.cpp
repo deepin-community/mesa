@@ -139,10 +139,12 @@ save_reg_writes(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
                 ctx.instr_idx_by_regs[ctx.current_block->index].begin() + r + dw_size, idx);
    }
    if (instr->isPseudo() && instr->pseudo().needs_scratch_reg) {
-      if (!instr->pseudo().tmp_in_scc)
-         ctx.instr_idx_by_regs[ctx.current_block->index][scc] = overwritten_unknown_instr;
       ctx.instr_idx_by_regs[ctx.current_block->index][instr->pseudo().scratch_sgpr] =
          overwritten_unknown_instr;
+   }
+   if (instr->isCall()) {
+      std::fill(ctx.instr_idx_by_regs[ctx.current_block->index].begin(),
+                ctx.instr_idx_by_regs[ctx.current_block->index].end(), overwritten_unknown_instr);
    }
 }
 
@@ -286,183 +288,214 @@ try_apply_branch_vcc(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
 }
 
 void
-try_optimize_scc_nocompare(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
+try_optimize_to_scc_zero_cmp(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
 {
    /* We are looking for the following pattern:
     *
     * s_bfe_u32 s0, s3, 0x40018  ; outputs SGPR and SCC if the SGPR != 0
     * s_cmp_eq_i32 s0, 0         ; comparison between the SGPR and 0
-    * s_cbranch_scc0 BB3         ; use the result of the comparison, eg. branch or cselect
     *
     * If possible, the above is optimized into:
     *
     * s_bfe_u32 s0, s3, 0x40018  ; original instruction
-    * s_cbranch_scc1 BB3         ; modified to use SCC directly rather than the SGPR with comparison
+    * s_cmp_eq_i32 scc, 0         ; comparison between the scc and 0
     *
+    * This can then be further optimized by try_optimize_scc_nocompare.
+    *
+    * Alternatively, if scc is overwritten between the first instruction and the comparison,
+    * try to pull down the original instruction to replace the cmp entirely.
     */
 
-   if (!instr->isSALU() && !instr->isBranch())
+   if (!instr->isSOPC() ||
+       (instr->opcode != aco_opcode::s_cmp_eq_u32 && instr->opcode != aco_opcode::s_cmp_eq_i32 &&
+        instr->opcode != aco_opcode::s_cmp_lg_u32 && instr->opcode != aco_opcode::s_cmp_lg_i32 &&
+        instr->opcode != aco_opcode::s_cmp_eq_u64 && instr->opcode != aco_opcode::s_cmp_lg_u64) ||
+       (!instr->operands[0].constantEquals(0) && !instr->operands[1].constantEquals(0)) ||
+       (!instr->operands[0].isTemp() && !instr->operands[1].isTemp()))
       return;
 
-   if (instr->isSOPC() &&
-       (instr->opcode == aco_opcode::s_cmp_eq_u32 || instr->opcode == aco_opcode::s_cmp_eq_i32 ||
-        instr->opcode == aco_opcode::s_cmp_lg_u32 || instr->opcode == aco_opcode::s_cmp_lg_i32 ||
-        instr->opcode == aco_opcode::s_cmp_eq_u64 || instr->opcode == aco_opcode::s_cmp_lg_u64) &&
-       (instr->operands[0].constantEquals(0) || instr->operands[1].constantEquals(0)) &&
-       (instr->operands[0].isTemp() || instr->operands[1].isTemp())) {
-      /* Make sure the constant is always in operand 1 */
-      if (instr->operands[0].isConstant())
-         std::swap(instr->operands[0], instr->operands[1]);
+   /* Make sure the constant is always in operand 1 */
+   if (instr->operands[0].isConstant())
+      std::swap(instr->operands[0], instr->operands[1]);
 
-      /* Find the writer instruction of Operand 0. */
-      Idx wr_idx = last_writer_idx(ctx, instr->operands[0]);
-      if (!wr_idx.found())
+   /* Find the writer instruction of Operand 0. */
+   Idx wr_idx = last_writer_idx(ctx, instr->operands[0]);
+   if (!wr_idx.found())
+      return;
+
+   Instruction* wr_instr = ctx.get(wr_idx);
+   if (!wr_instr->isSALU() || wr_instr->definitions.size() < 2 ||
+       wr_instr->definitions[1].physReg() != scc)
+      return;
+
+   /* Look for instructions which set SCC := (D != 0) */
+   switch (wr_instr->opcode) {
+   case aco_opcode::s_bfe_i32:
+   case aco_opcode::s_bfe_i64:
+   case aco_opcode::s_bfe_u32:
+   case aco_opcode::s_bfe_u64:
+   case aco_opcode::s_and_b32:
+   case aco_opcode::s_and_b64:
+   case aco_opcode::s_andn2_b32:
+   case aco_opcode::s_andn2_b64:
+   case aco_opcode::s_or_b32:
+   case aco_opcode::s_or_b64:
+   case aco_opcode::s_orn2_b32:
+   case aco_opcode::s_orn2_b64:
+   case aco_opcode::s_xor_b32:
+   case aco_opcode::s_xor_b64:
+   case aco_opcode::s_not_b32:
+   case aco_opcode::s_not_b64:
+   case aco_opcode::s_nor_b32:
+   case aco_opcode::s_nor_b64:
+   case aco_opcode::s_xnor_b32:
+   case aco_opcode::s_xnor_b64:
+   case aco_opcode::s_nand_b32:
+   case aco_opcode::s_nand_b64:
+   case aco_opcode::s_lshl_b32:
+   case aco_opcode::s_lshl_b64:
+   case aco_opcode::s_lshr_b32:
+   case aco_opcode::s_lshr_b64:
+   case aco_opcode::s_ashr_i32:
+   case aco_opcode::s_ashr_i64:
+   case aco_opcode::s_abs_i32:
+   case aco_opcode::s_absdiff_i32: break;
+   default: return;
+   }
+
+   /* Check whether both SCC and Operand 0 are written by the same instruction. */
+   Idx sccwr_idx = last_writer_idx(ctx, scc, s1);
+   if (wr_idx != sccwr_idx) {
+      /* Check whether the current instruction is the only user of its first operand. */
+      if (ctx.uses[wr_instr->definitions[1].tempId()] ||
+          ctx.uses[wr_instr->definitions[0].tempId()] > 1)
          return;
 
-      Instruction* wr_instr = ctx.get(wr_idx);
-      if (!wr_instr->isSALU() || wr_instr->definitions.size() < 2 ||
-          wr_instr->definitions[1].physReg() != scc)
-         return;
-
-      /* Look for instructions which set SCC := (D != 0) */
-      switch (wr_instr->opcode) {
-      case aco_opcode::s_bfe_i32:
-      case aco_opcode::s_bfe_i64:
-      case aco_opcode::s_bfe_u32:
-      case aco_opcode::s_bfe_u64:
-      case aco_opcode::s_and_b32:
-      case aco_opcode::s_and_b64:
-      case aco_opcode::s_andn2_b32:
-      case aco_opcode::s_andn2_b64:
-      case aco_opcode::s_or_b32:
-      case aco_opcode::s_or_b64:
-      case aco_opcode::s_orn2_b32:
-      case aco_opcode::s_orn2_b64:
-      case aco_opcode::s_xor_b32:
-      case aco_opcode::s_xor_b64:
-      case aco_opcode::s_not_b32:
-      case aco_opcode::s_not_b64:
-      case aco_opcode::s_nor_b32:
-      case aco_opcode::s_nor_b64:
-      case aco_opcode::s_xnor_b32:
-      case aco_opcode::s_xnor_b64:
-      case aco_opcode::s_nand_b32:
-      case aco_opcode::s_nand_b64:
-      case aco_opcode::s_lshl_b32:
-      case aco_opcode::s_lshl_b64:
-      case aco_opcode::s_lshr_b32:
-      case aco_opcode::s_lshr_b64:
-      case aco_opcode::s_ashr_i32:
-      case aco_opcode::s_ashr_i64:
-      case aco_opcode::s_abs_i32:
-      case aco_opcode::s_absdiff_i32: break;
-      default: return;
+      /* Check whether the operands of the writer are overwritten. */
+      for (const Operand& op : wr_instr->operands) {
+         if (is_overwritten_since(ctx, op, wr_idx))
+            return;
       }
 
-      /* Check whether both SCC and Operand 0 are written by the same instruction. */
-      Idx sccwr_idx = last_writer_idx(ctx, scc, s1);
-      if (wr_idx != sccwr_idx) {
-         /* Check whether the current instruction is the only user of its first operand. */
-         if (ctx.uses[wr_instr->definitions[1].tempId()] ||
-             ctx.uses[wr_instr->definitions[0].tempId()] > 1)
-            return;
-
-         /* Check whether the operands of the writer are overwritten. */
-         for (const Operand& op : wr_instr->operands) {
-            if (is_overwritten_since(ctx, op, wr_idx))
-               return;
-         }
-
-         aco_opcode pulled_opcode = wr_instr->opcode;
-         if (instr->opcode == aco_opcode::s_cmp_eq_u32 ||
-             instr->opcode == aco_opcode::s_cmp_eq_i32 ||
-             instr->opcode == aco_opcode::s_cmp_eq_u64) {
-            /* When s_cmp_eq is used, it effectively inverts the SCC def.
-             * However, we can't simply invert the opcodes here because that
-             * would change the meaning of the program.
-             */
-            return;
-         }
-
-         Definition scc_def = instr->definitions[0];
-         ctx.uses[wr_instr->definitions[0].tempId()]--;
-
-         /* Copy the writer instruction, but use SCC from the current instr.
-          * This means that the original instruction will be eliminated.
+      aco_opcode pulled_opcode = wr_instr->opcode;
+      if (instr->opcode == aco_opcode::s_cmp_eq_u32 || instr->opcode == aco_opcode::s_cmp_eq_i32 ||
+          instr->opcode == aco_opcode::s_cmp_eq_u64) {
+         /* When s_cmp_eq is used, it effectively inverts the SCC def.
+          * However, we can't simply invert the opcodes here because that
+          * would change the meaning of the program.
           */
-         if (wr_instr->format == Format::SOP2) {
-            instr.reset(create_instruction(pulled_opcode, Format::SOP2, 2, 2));
-            instr->operands[1] = wr_instr->operands[1];
-         } else if (wr_instr->format == Format::SOP1) {
-            instr.reset(create_instruction(pulled_opcode, Format::SOP1, 1, 2));
-         }
-         instr->definitions[0] = wr_instr->definitions[0];
-         instr->definitions[1] = scc_def;
-         instr->operands[0] = wr_instr->operands[0];
          return;
       }
 
-      /* Use the SCC def from wr_instr */
-      ctx.uses[instr->operands[0].tempId()]--;
-      instr->operands[0] = Operand(wr_instr->definitions[1].getTemp());
-      instr->operands[0].setFixed(scc);
-      ctx.uses[instr->operands[0].tempId()]++;
+      Definition scc_def = instr->definitions[0];
+      ctx.uses[wr_instr->definitions[0].tempId()]--;
 
-      /* Set the opcode and operand to 32-bit */
-      instr->operands[1] = Operand::zero();
-      instr->opcode =
-         (instr->opcode == aco_opcode::s_cmp_eq_u32 || instr->opcode == aco_opcode::s_cmp_eq_i32 ||
-          instr->opcode == aco_opcode::s_cmp_eq_u64)
-            ? aco_opcode::s_cmp_eq_u32
-            : aco_opcode::s_cmp_lg_u32;
-   } else if ((instr->format == Format::PSEUDO_BRANCH && instr->operands.size() == 1 &&
-               instr->operands[0].physReg() == scc) ||
-              instr->opcode == aco_opcode::s_cselect_b32 ||
-              instr->opcode == aco_opcode::s_cselect_b64) {
-
-      /* For cselect, operand 2 is the SCC condition */
-      unsigned scc_op_idx = 0;
-      if (instr->opcode == aco_opcode::s_cselect_b32 ||
-          instr->opcode == aco_opcode::s_cselect_b64) {
-         scc_op_idx = 2;
+      /* Copy the writer instruction, but use SCC from the current instr.
+       * This means that the original instruction will be eliminated.
+       */
+      if (wr_instr->format == Format::SOP2) {
+         instr.reset(create_instruction(pulled_opcode, Format::SOP2, 2, 2));
+         instr->operands[1] = wr_instr->operands[1];
+      } else if (wr_instr->format == Format::SOP1) {
+         instr.reset(create_instruction(pulled_opcode, Format::SOP1, 1, 2));
       }
+      instr->definitions[0] = wr_instr->definitions[0];
+      instr->definitions[1] = scc_def;
+      instr->operands[0] = wr_instr->operands[0];
+      return;
+   }
 
-      Idx wr_idx = last_writer_idx(ctx, instr->operands[scc_op_idx]);
-      if (!wr_idx.found())
-         return;
+   /* Use the SCC def from wr_instr */
+   ctx.uses[instr->operands[0].tempId()]--;
+   instr->operands[0] = Operand(wr_instr->definitions[1].getTemp());
+   instr->operands[0].setFixed(scc);
+   ctx.uses[instr->operands[0].tempId()]++;
 
-      Instruction* wr_instr = ctx.get(wr_idx);
+   /* Set the opcode and operand to 32-bit */
+   instr->operands[1] = Operand::zero();
+   instr->opcode =
+      (instr->opcode == aco_opcode::s_cmp_eq_u32 || instr->opcode == aco_opcode::s_cmp_eq_i32 ||
+       instr->opcode == aco_opcode::s_cmp_eq_u64)
+         ? aco_opcode::s_cmp_eq_u32
+         : aco_opcode::s_cmp_lg_u32;
+}
 
-      /* Check if we found the pattern above. */
-      if (wr_instr->opcode != aco_opcode::s_cmp_eq_u32 &&
-          wr_instr->opcode != aco_opcode::s_cmp_lg_u32)
-         return;
-      if (wr_instr->operands[0].physReg() != scc)
-         return;
-      if (!wr_instr->operands[1].constantEquals(0))
-         return;
+void
+try_optimize_scc_nocompare(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
+{
+   /* If we have this pattern:
+    * s_cmp_eq_i32 scc, 0 ; comparison between scc and 0
+    * s_cbranch_scc0 BB3  ; use the result of the comparison, eg. branch or cselect
+    *
+    * Turn it into:
+    * <>                  ; removed s_cmp
+    * s_cbranch_scc1 BB3  ; inverted branch
+    */
 
+   int scc_op_idx = -1;
+   for (unsigned i = 0; i < instr->operands.size(); i++) {
+      if (instr->operands[i].isTemp() && instr->operands[i].physReg() == scc) {
+         scc_op_idx = i;
+         break;
+      }
+   }
+
+   if (scc_op_idx < 0)
+      return;
+
+   Idx wr_idx = last_writer_idx(ctx, instr->operands[scc_op_idx]);
+   if (!wr_idx.found())
+      return;
+
+   Instruction* wr_instr = ctx.get(wr_idx);
+
+   /* Check if we found the pattern above. */
+   if (wr_instr->opcode != aco_opcode::s_cmp_eq_u32 && wr_instr->opcode != aco_opcode::s_cmp_lg_u32)
+      return;
+   if (wr_instr->operands[0].physReg() != scc || !wr_instr->operands[0].isTemp())
+      return;
+   if (!wr_instr->operands[1].constantEquals(0))
+      return;
+
+   if (wr_instr->opcode == aco_opcode::s_cmp_eq_u32) {
       /* The optimization can be unsafe when there are other users. */
       if (ctx.uses[instr->operands[scc_op_idx].tempId()] > 1)
          return;
 
-      if (wr_instr->opcode == aco_opcode::s_cmp_eq_u32) {
-         /* Flip the meaning of the instruction to correctly use the SCC. */
-         if (instr->format == Format::PSEUDO_BRANCH)
-            instr->opcode = instr->opcode == aco_opcode::p_cbranch_z ? aco_opcode::p_cbranch_nz
-                                                                     : aco_opcode::p_cbranch_z;
-         else if (instr->opcode == aco_opcode::s_cselect_b32 ||
-                  instr->opcode == aco_opcode::s_cselect_b64)
-            std::swap(instr->operands[0], instr->operands[1]);
-         else
-            unreachable(
-               "scc_nocompare optimization is only implemented for p_cbranch and s_cselect");
+      /* Flip the meaning of the instruction to correctly use the SCC. */
+      if (instr->format == Format::PSEUDO_BRANCH) {
+         instr->opcode = instr->opcode == aco_opcode::p_cbranch_z ? aco_opcode::p_cbranch_nz
+                                                                  : aco_opcode::p_cbranch_z;
+      } else if (instr->opcode == aco_opcode::s_cselect_b32 ||
+                 instr->opcode == aco_opcode::s_cselect_b64) {
+         std::swap(instr->operands[0], instr->operands[1]);
+      } else if (instr->opcode == aco_opcode::s_cmovk_i32 ||
+                 instr->opcode == aco_opcode::s_mul_i32) {
+         /* Convert to s_cselect_b32 and swap the operands. */
+         Instruction* cselect = create_instruction(aco_opcode::s_cselect_b32, Format::SOP2, 3, 1);
+         cselect->definitions[0] = instr->definitions[0];
+         cselect->operands[2] = instr->operands[scc_op_idx];
+         if (instr->opcode == aco_opcode::s_cmovk_i32) {
+            cselect->operands[0] = instr->operands[0];
+            cselect->operands[1] = Operand::c32((int32_t)(int16_t)instr->salu().imm);
+         } else if (instr->opcode == aco_opcode::s_mul_i32) {
+            cselect->operands[0] = Operand::c32(0);
+            cselect->operands[1] = instr->operands[!scc_op_idx];
+         } else {
+            UNREACHABLE("invalid op");
+         }
+         scc_op_idx = 2;
+         instr.reset(cselect);
+      } else {
+         return;
       }
-
-      /* Use the SCC def from the original instruction, not the comparison */
-      ctx.uses[instr->operands[scc_op_idx].tempId()]--;
-      instr->operands[scc_op_idx] = wr_instr->operands[0];
    }
+
+   /* Use the SCC def from the original instruction, not the comparison */
+   ctx.uses[instr->operands[scc_op_idx].tempId()]--;
+   if (ctx.uses[instr->operands[scc_op_idx].tempId()])
+      ctx.uses[wr_instr->operands[0].tempId()]++;
+   instr->operands[scc_op_idx] = wr_instr->operands[0];
 }
 
 static bool
@@ -583,6 +616,10 @@ try_combine_dpp(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
       if (mov->opcode != aco_opcode::v_mov_b32 || !mov->isDPP())
          continue;
 
+      /* Applying DPP with many uses is unlikely to be profitable. */
+      if (ctx.uses[mov->definitions[0].tempId()] > 3)
+         continue;
+
       /* If we aren't going to remove the v_mov_b32, we have to ensure that it doesn't overwrite
        * it's own operand before we use it.
        */
@@ -609,19 +646,31 @@ try_combine_dpp(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
          continue;
 
       bool input_mods = can_use_input_modifiers(ctx.program->gfx_level, instr->opcode, i) &&
-                        get_operand_size(instr, i) == 32;
+                        get_operand_type(instr, i).bit_size == 32;
       bool mov_uses_mods = mov->valu().neg[0] || mov->valu().abs[0];
       if (((dpp8 && ctx.program->gfx_level < GFX11) || !input_mods) && mov_uses_mods)
          continue;
 
+      Format old_format = instr->format;
       if (i != 0) {
-         if (!can_swap_operands(instr, &instr->opcode, 0, i))
+         if (!instr->operands[0].isOfType(RegType::vgpr) && !instr->isVOP3P())
+            instr->format = asVOP3(instr->format);
+         if (!can_swap_operands(instr, &instr->opcode, 0, i)) {
+            instr->format = old_format;
             continue;
+         }
          instr->valu().swapOperands(0, i);
       }
 
-      if (!can_use_DPP(ctx.program->gfx_level, instr, dpp8))
+      if (!can_use_DPP(ctx.program->gfx_level, instr, dpp8)) {
+         if (i != 0) {
+            ASSERTED bool success = can_swap_operands(instr, &instr->opcode, 0, i);
+            assert(success);
+            instr->valu().swapOperands(0, i);
+            instr->format = old_format;
+         }
          continue;
+      }
 
       if (!dpp8) /* anything else doesn't make sense in SSA */
          assert(mov->dpp16().row_mask == 0xf && mov->dpp16().bank_mask == 0xf);
@@ -637,7 +686,7 @@ try_combine_dpp(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
          DPP8_instruction* dpp = &instr->dpp8();
          dpp->lane_sel = mov->dpp8().lane_sel;
          dpp->fetch_inactive = mov->dpp8().fetch_inactive;
-         if (mov_uses_mods)
+         if (mov_uses_mods && !instr->isVOP3P())
             instr->format = asVOP3(instr->format);
       } else {
          DPP16_instruction* dpp = &instr->dpp16();
@@ -788,37 +837,410 @@ try_reassign_split_vector(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
    }
 }
 
-void
-try_convert_fma_to_vop2(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
+bool
+instr_overwrites(Instruction* instr, PhysReg reg, unsigned size)
 {
-   /* We convert v_fma_f32 with inline constant to fmamk/fmaak.
-    * This is only benefical if it allows more VOPD.
-    */
-   if (ctx.program->gfx_level < GFX11 || ctx.program->wave_size != 32 ||
-       instr->opcode != aco_opcode::v_fma_f32 || instr->usesModifiers())
-      return;
+   for (Definition def : instr->definitions) {
+      if (def.physReg() + def.size() > reg && reg + size > def.physReg())
+         return true;
+   }
+   if (instr->isPseudo() && instr->pseudo().needs_scratch_reg) {
+      PhysReg scratch_reg = instr->pseudo().scratch_sgpr;
+      if (scratch_reg >= reg && reg + size > scratch_reg)
+         return true;
+   }
+   if (instr->isCall())
+      return true;
+   return false;
+}
 
-   int constant_idx = -1;
-   int vgpr_idx = -1;
-   for (int i = 0; i < 3; i++) {
-      const Operand& op = instr->operands[i];
-      if (op.isConstant() && !op.isLiteral())
-         constant_idx = i;
-      else if (op.isOfType(RegType::vgpr))
-         vgpr_idx = i;
-      else
-         return;
+bool
+try_insert_saveexec_out_of_loop(pr_opt_ctx& ctx, Block* block, Definition saved_exec,
+                                unsigned saveexec_pos)
+{
+   /* This pattern can be created by try_optimize_branching_sequence:
+    * BB1: // loop-header
+    *    ...                              // nothing that clobbers s[0:1] or writes exec
+    *    s[0:1] = p_parallelcopy exec     // we will move this
+    *    exec = v_cmpx_...
+    *    p_branch_z exec BB3, BB2
+    * BB2:
+    *    ...
+    *    p_branch BB3
+    * BB3:
+    *    exec = p_parallelcopy s[0:1]     // exec and s[0:1] contain the same mask
+    *    ...                              // nothing that clobbers s[0:1] or writes exec
+    *    p_branch_nz scc BB1, BB4
+    * BB4:
+    *    ...
+    *
+    * If we know that that exec copy in the loop header is only needed in the
+    * first iteration, it can be inserted into the preheader by adding a phi:
+    *
+    * BB1: // loop-header
+    *    s[0:1] = p_linear_phi exec, s[0:1]
+    *
+    * will be lowered to a parallelcopy at the loop preheader.
+    */
+   if (block->linear_preds.size() != 2)
+      return false;
+
+   /* Check if exec is written, or the copy's dst overwritten in the loop header. */
+   for (unsigned i = 0; i < saveexec_pos; i++) {
+      if (!block->instructions[i])
+         continue;
+      if (block->instructions[i]->writes_exec())
+         return false;
+      if (instr_overwrites(block->instructions[i].get(), saved_exec.physReg(), saved_exec.size()))
+         return false;
    }
 
-   if (constant_idx < 0 || vgpr_idx < 0)
+   /* The register(s) must already contain the same value as exec in the continue block. */
+   Block* cont = &ctx.program->blocks[block->linear_preds[1]];
+   do {
+      for (int i = cont->instructions.size() - 1; i >= 0; i--) {
+         Instruction* instr = cont->instructions[i].get();
+         if (instr->opcode == aco_opcode::p_parallelcopy && instr->definitions.size() == 1 &&
+             instr->definitions[0].physReg() == exec &&
+             instr->operands[0].physReg() == saved_exec.physReg()) {
+
+            /* Insert after existing phis at the loop header because
+             * the first phi might contain a valid scratch reg if needed.
+             */
+            auto it = std::find_if(block->instructions.begin(), block->instructions.end(),
+                                   [](aco_ptr<Instruction>& phi) { return phi && !is_phi(phi); });
+
+            Instruction* phi = create_instruction(aco_opcode::p_linear_phi, Format::PSEUDO, 2, 1);
+            phi->definitions[0] = saved_exec;
+            phi->operands[0] = Operand(exec, ctx.program->lane_mask);
+            phi->operands[1] = instr->operands[0];
+            block->instructions.emplace(it, phi);
+            return true;
+         }
+
+         if (instr->writes_exec())
+            return false;
+         if (instr_overwrites(instr, saved_exec.physReg(), saved_exec.size()))
+            return false;
+      }
+   } while (cont->linear_preds.size() == 1 && (cont = &ctx.program->blocks[cont->linear_preds[0]]));
+
+   return false;
+}
+
+void
+fixup_reg_writes(pr_opt_ctx& ctx, unsigned start)
+{
+   const unsigned current_idx = ctx.current_instr_idx;
+   for (unsigned i = start; i < current_idx; i++) {
+      ctx.current_instr_idx = i;
+      if (ctx.current_block->instructions[i])
+         save_reg_writes(ctx, ctx.current_block->instructions[i]);
+   }
+
+   ctx.current_instr_idx = current_idx;
+}
+
+bool
+is_nop_copy(Instruction* instr)
+{
+   if (instr->opcode == aco_opcode::p_split_vector) {
+      PhysReg op_reg = instr->operands[0].physReg();
+      for (const Definition& def : instr->definitions) {
+         if (def.physReg() != op_reg)
+            return false;
+         op_reg = op_reg.advance(def.bytes());
+      }
+      return true;
+   } else if (instr->opcode == aco_opcode::p_create_vector) {
+      PhysReg def_reg = instr->definitions[0].physReg();
+      for (const Operand& op : instr->operands) {
+         if (op.physReg() != def_reg)
+            return false;
+         def_reg = def_reg.advance(op.bytes());
+      }
+      return true;
+   } else {
+      return false;
+   }
+}
+
+bool
+try_optimize_branching_sequence(pr_opt_ctx& ctx, aco_ptr<Instruction>& exec_copy)
+{
+   /* Try to optimize the branching sequence at the end of a block.
+    *
+    * We are looking for blocks that look like this:
+    *
+    * BB:
+    * ... instructions ...
+    * s[N:M] = <exec_val instruction>
+    * ... other instructions that don't depend on exec ...
+    * p_logical_end
+    * exec = <exec_copy instruction> s[N:M]
+    * p_cbranch exec
+    *
+    * The main motivation is to eliminate exec_copy.
+    * Depending on the context, we try to do the following:
+    *
+    * 1. Reassign exec_val to write exec directly
+    * 2. If possible, eliminate exec_copy
+    * 3. When exec_copy also saves the old exec mask, insert a
+    *    new copy instruction before exec_val
+    * 4. Reassign any instruction that used s[N:M] to use exec
+    *
+    * This is beneficial for the following reasons:
+    *
+    * - Fewer instructions in the block when exec_copy can be eliminated
+    * - As a result, when exec_val is VOPC this also improves the stalls
+    *   due to SALU waiting for VALU. This works best when we can also
+    *   remove the branching instruction, in which case the stall
+    *   is entirely eliminated.
+    * - When exec_copy can't be removed, the reassignment may still be
+    *   very slightly beneficial to latency.
+    */
+
+   if (!exec_copy->writes_exec())
+      return false;
+
+   const aco_opcode and_saveexec = ctx.program->lane_mask == s2 ? aco_opcode::s_and_saveexec_b64
+                                                                : aco_opcode::s_and_saveexec_b32;
+
+   const aco_opcode s_and =
+      ctx.program->lane_mask == s2 ? aco_opcode::s_and_b64 : aco_opcode::s_and_b32;
+
+   const aco_opcode s_andn2 =
+      ctx.program->lane_mask == s2 ? aco_opcode::s_andn2_b64 : aco_opcode::s_andn2_b32;
+
+   if (exec_copy->opcode != and_saveexec && exec_copy->opcode != aco_opcode::p_parallelcopy &&
+       (exec_copy->opcode != s_and || exec_copy->operands[1].physReg() != exec) &&
+       (exec_copy->opcode != s_andn2 || exec_copy->operands[0].physReg() != exec))
+      return false;
+
+   const bool negate = exec_copy->opcode == s_andn2;
+   const Operand& exec_copy_op = exec_copy->operands[negate];
+
+   /* The SCC def of s_and/s_and_saveexec must be unused. */
+   if (exec_copy->opcode != aco_opcode::p_parallelcopy && !exec_copy->definitions[1].isKill())
+      return false;
+
+   Idx exec_val_idx = last_writer_idx(ctx, exec_copy_op);
+   if (!exec_val_idx.found() || exec_val_idx.block != ctx.current_block->index)
+      return false;
+
+   if (is_overwritten_since(ctx, exec, ctx.program->lane_mask, exec_val_idx)) {
+      // TODO: in case nothing needs the previous exec mask, just remove it
+      return false;
+   }
+
+   Instruction* exec_val = ctx.get(exec_val_idx);
+
+   /* Only allow SALU with multiple definitions. */
+   if (!exec_val->isSALU() && exec_val->definitions.size() > 1)
+      return false;
+
+   const bool vcmpx_exec_only = ctx.program->gfx_level >= GFX10;
+
+   if (negate && !exec_val->isVOPC())
+      return false;
+
+   /* Check if a suitable v_cmpx opcode exists. */
+   const aco_opcode v_cmpx_op =
+      exec_val->isVOPC()
+         ? (negate ? get_vcmpx(get_vcmp_inverse(exec_val->opcode)) : get_vcmpx(exec_val->opcode))
+         : aco_opcode::num_opcodes;
+   const bool vopc = v_cmpx_op != aco_opcode::num_opcodes;
+
+   /* If s_and_saveexec is used, we'll need to insert a new instruction to save the old exec. */
+   bool save_original_exec =
+      exec_copy->opcode == and_saveexec && !exec_copy->definitions[0].isKill();
+
+   const Definition exec_wr_def = exec_val->definitions[0];
+   const Definition exec_copy_def = exec_copy->definitions[0];
+
+   /* If we need to negate, the instruction has to be otherwise unused. */
+   if (negate && ctx.uses[exec_copy_op.tempId()] != 1)
+      return false;
+
+   /* The copy can be removed when it kills its operand.
+    * v_cmpx also writes the original destination pre GFX10.
+    */
+   const bool can_remove_copy = exec_copy_op.isKill() || (vopc && !vcmpx_exec_only);
+
+   /* Always allow reassigning when the value is written by (usable) VOPC.
+    * Note, VOPC implicitly contains "& exec" because it yields zero on inactive lanes.
+    * Additionally, when value is copied as-is, also allow SALU and parallelcopies.
+    */
+   const bool can_reassign =
+      vopc || (exec_copy->opcode == aco_opcode::p_parallelcopy &&
+               (exec_val->isSALU() || exec_val->opcode == aco_opcode::p_parallelcopy ||
+                exec_val->opcode == aco_opcode::p_create_vector));
+
+   /* The reassignment is not worth it when both the original exec needs to be copied
+    * and the new exec copy can't be removed. In this case we'd end up with more instructions.
+    */
+   if (!can_reassign || (save_original_exec && !can_remove_copy))
+      return false;
+
+   /* Ensure that nothing needs a previous exec between exec_val_idx and the current exec write. */
+   for (unsigned i = exec_val_idx.instr + 1; i < ctx.current_instr_idx; i++) {
+      Instruction* instr = ctx.current_block->instructions[i].get();
+      if (instr && needs_exec_mask(instr) && !is_nop_copy(instr))
+         return false;
+
+      /* If the successor has phis, copies might have to be inserted at p_logical_end. */
+      if (instr && instr->opcode == aco_opcode::p_logical_end &&
+          ctx.current_block->logical_succs.size() == 1)
+         return false;
+   }
+
+   /* When exec_val and exec_copy are non-adjacent, check whether there are any
+    * instructions inbetween (besides p_logical_end) which may inhibit the optimization.
+    */
+   if (save_original_exec) {
+      if (is_overwritten_since(ctx, exec_copy_def, exec_val_idx))
+         return false;
+
+      unsigned prev_wr_idx = ctx.current_instr_idx;
+      if (exec_copy_op.physReg() == exec_copy_def.physReg()) {
+         /* We'd overwrite the saved original exec */
+         if (vopc && !vcmpx_exec_only)
+            return false;
+
+         /* Other instructions can use exec directly, so only check exec_val instr */
+         prev_wr_idx = exec_val_idx.instr + 1;
+      }
+      /* Make sure that nothing else needs these registers in-between. */
+      for (unsigned i = exec_val_idx.instr; i < prev_wr_idx; i++) {
+         if (ctx.current_block->instructions[i]) {
+            for (const Operand op : ctx.current_block->instructions[i]->operands) {
+               if (op.physReg() + op.size() > exec_copy_def.physReg() &&
+                   exec_copy_def.physReg() + exec_copy_def.size() > op.physReg())
+                  return false;
+            }
+         }
+      }
+   }
+
+   /* Reassign the instruction to write exec directly. */
+   if (vopc) {
+      /* Add one extra definition for exec and copy the VOP3-specific fields if present. */
+      if (!vcmpx_exec_only) {
+         if (exec_val->isSDWA() || exec_val->isDPP()) {
+            /* This might work but it needs testing and more code to copy the instruction. */
+            return false;
+         } else {
+            Instruction* tmp =
+               create_instruction(v_cmpx_op, exec_val->format, exec_val->operands.size(),
+                                  exec_val->definitions.size() + 1);
+            std::copy(exec_val->operands.cbegin(), exec_val->operands.cend(),
+                      tmp->operands.begin());
+            std::copy(exec_val->definitions.cbegin(), exec_val->definitions.cend(),
+                      tmp->definitions.begin());
+
+            VALU_instruction& src = exec_val->valu();
+            VALU_instruction& dst = tmp->valu();
+            dst.opsel = src.opsel;
+            dst.omod = src.omod;
+            dst.clamp = src.clamp;
+            dst.neg = src.neg;
+            dst.abs = src.abs;
+
+            ctx.current_block->instructions[exec_val_idx.instr].reset(tmp);
+            exec_val = ctx.get(exec_val_idx);
+         }
+      }
+
+      /* Set v_cmpx opcode. */
+      exec_val->opcode = v_cmpx_op;
+      exec_val->definitions.back() = Definition(exec, ctx.program->lane_mask);
+
+      /* Change instruction from VOP3 to plain VOPC when possible. */
+      if (vcmpx_exec_only && !exec_val->usesModifiers() &&
+          (exec_val->operands.size() < 2 || exec_val->operands[1].isOfType(RegType::vgpr)))
+         exec_val->format = Format::VOPC;
+   } else {
+      exec_val->definitions[0] = Definition(exec, ctx.program->lane_mask);
+   }
+   for (unsigned i = 0; i < ctx.program->lane_mask.size(); i++)
+      ctx.instr_idx_by_regs[ctx.current_block->index][exec + i] =
+         ctx.instr_idx_by_regs[ctx.current_block->index][exec_copy_op.physReg() + i];
+
+   /* If there are other instructions (besides p_logical_end) between
+    * writing the value and copying it to exec, reassign uses
+    * of the old definition.
+    */
+   Temp exec_temp = exec_copy_op.getTemp();
+   for (unsigned i = exec_val_idx.instr + 1; i < ctx.current_instr_idx; i++) {
+      if (ctx.current_block->instructions[i]) {
+         for (Operand& op : ctx.current_block->instructions[i]->operands) {
+            if (op.isTemp() && op.getTemp() == exec_temp) {
+               op = Operand(exec, op.regClass());
+               ctx.uses[exec_temp.id()]--;
+            }
+         }
+      }
+   }
+
+   if (can_remove_copy) {
+      /* Remove the copy. */
+      exec_copy.reset();
+      ctx.uses[exec_temp.id()]--;
+   } else {
+      /* Reassign the copy to write the register of the original value. */
+      exec_copy.reset(create_instruction(aco_opcode::p_parallelcopy, Format::PSEUDO, 1, 1));
+      exec_copy->definitions[0] = exec_wr_def;
+      exec_copy->operands[0] = Operand(exec, ctx.program->lane_mask);
+   }
+
+   if (save_original_exec) {
+      /* Insert a new instruction that saves the original exec before it is overwritten.
+       * Do this last, because inserting in the instructions vector may invalidate the exec_val
+       * reference.
+       */
+      if (ctx.current_block->kind & block_kind_loop_header) {
+         if (try_insert_saveexec_out_of_loop(ctx, ctx.current_block, exec_copy_def,
+                                             exec_val_idx.instr)) {
+            /* We inserted something after the last phi, so fixup indices from the start. */
+            fixup_reg_writes(ctx, 0);
+            return true;
+         }
+      }
+      Instruction* copy = create_instruction(aco_opcode::p_parallelcopy, Format::PSEUDO, 1, 1);
+      copy->definitions[0] = exec_copy_def;
+      copy->operands[0] = Operand(exec, ctx.program->lane_mask);
+      auto it = std::next(ctx.current_block->instructions.begin(), exec_val_idx.instr);
+      ctx.current_block->instructions.emplace(it, copy);
+
+      /* Fixup indices after inserting an instruction. */
+      fixup_reg_writes(ctx, exec_val_idx.instr);
+      return true;
+   }
+
+   return true;
+}
+
+void
+try_skip_const_branch(pr_opt_ctx& ctx, aco_ptr<Instruction>& branch)
+{
+   if (branch->opcode != aco_opcode::p_cbranch_z || branch->operands[0].physReg() != exec)
+      return;
+   if (branch->branch().never_taken)
       return;
 
-   std::swap(instr->operands[constant_idx], instr->operands[2]);
-   if (constant_idx == 0 || vgpr_idx == 0)
-      std::swap(instr->operands[0], instr->operands[1]);
-   instr->operands[2] = Operand::literal32(instr->operands[2].constantValue());
-   instr->opcode = constant_idx == 2 ? aco_opcode::v_fmaak_f32 : aco_opcode::v_fmamk_f32;
-   instr->format = Format::VOP2;
+   Idx exec_val_idx = last_writer_idx(ctx, branch->operands[0]);
+   if (!exec_val_idx.found())
+      return;
+
+   Instruction* exec_val = ctx.get(exec_val_idx);
+   if ((exec_val->opcode == aco_opcode::p_parallelcopy && exec_val->operands.size() == 1) ||
+       exec_val->opcode == aco_opcode::p_create_vector) {
+      /* Remove the branch instruction when exec is constant non-zero. */
+      bool is_const_val = std::any_of(exec_val->operands.begin(), exec_val->operands.end(),
+                                      [](const Operand& op) -> bool
+                                      { return op.isConstant() && op.constantValue(); });
+      branch->branch().never_taken |= is_const_val;
+   }
 }
 
 void
@@ -830,16 +1252,18 @@ process_instruction(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
       ctx.current_instr_idx++;
       return;
    }
+   if (try_optimize_branching_sequence(ctx, instr))
+      return;
 
    try_apply_branch_vcc(ctx, instr);
+
+   try_optimize_to_scc_zero_cmp(ctx, instr);
 
    try_optimize_scc_nocompare(ctx, instr);
 
    try_combine_dpp(ctx, instr);
 
    try_reassign_split_vector(ctx, instr);
-
-   try_convert_fma_to_vop2(ctx, instr);
 
    try_eliminate_scc_copy(ctx, instr);
 
@@ -864,14 +1288,12 @@ optimize_postRA(Program* program)
    for (auto& block : program->blocks) {
       ctx.reset_block(&block);
 
-      for (aco_ptr<Instruction>& instr : block.instructions)
+      while (ctx.current_instr_idx < block.instructions.size()) {
+         aco_ptr<Instruction>& instr = block.instructions[ctx.current_instr_idx];
          process_instruction(ctx, instr);
+      }
 
-      /* SCC might get overwritten by copies or swaps from parallelcopies
-       * inserted by SSA-elimination for linear phis.
-       */
-      if (!block.scc_live_out)
-         ctx.instr_idx_by_regs[block.index][scc] = overwritten_unknown_instr;
+      try_skip_const_branch(ctx, block.instructions.back());
    }
 
    /* Cleanup pass

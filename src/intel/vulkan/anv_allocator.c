@@ -28,10 +28,12 @@
 #include <sys/mman.h>
 
 #include "anv_private.h"
+#include "anv_slab_bo.h"
 
 #include "common/intel_aux_map.h"
 #include "util/anon_file.h"
 #include "util/futex.h"
+#include "util/os_mman.h"
 
 #ifdef HAVE_VALGRIND
 #define VG_NOACCESS_READ(__ptr) ({                       \
@@ -71,16 +73,7 @@
  * block (8k) allocator, which operates out of a bo.  Allocation is done by
  * either pulling a block from the free list or growing the used range of the
  * bo.  Growing the range may run out of space in the bo which we then need to
- * grow.  Growing the bo is tricky in a multi-threaded, lockless environment:
- * we need to keep all pointers and contents in the old map valid.  GEM bos in
- * general can't grow, but we use a trick: we create a memfd and use ftruncate
- * to grow it as necessary.  We mmap the new size and then create a gem bo for
- * it using the new gem userptr ioctl.  Without heavy-handed locking around
- * our allocation fast-path, there isn't really a way to munmap the old mmap,
- * so we just keep it around until garbage collection time.  While the block
- * allocator is lockless for normal operations, we block other threads trying
- * to allocate while we're growing the map.  It shouldn't happen often, and
- * growing is fast anyway.
+ * grow.
  *
  * At the next level we can use various sub-allocators.  The state pool is a
  * pool of smaller, fixed size objects, which operates much like the block
@@ -103,7 +96,9 @@
 
 /* Allocations are always at least 64 byte aligned, so 1 is an invalid value.
  * We use it to indicate the free list is empty. */
-#define EMPTY UINT32_MAX
+#define ANV_FREE_LIST_EMPTY_VAL UINT32_MAX
+
+#define ANV_FREE_LIST_EMPTY ((union anv_free_list) { { ANV_FREE_LIST_EMPTY_VAL, 0 } })
 
 /* On FreeBSD PAGE_SIZE is already defined in
  * /usr/include/machine/param.h that is indirectly
@@ -328,7 +323,7 @@ anv_free_list_pop(union anv_free_list *list,
    union anv_free_list current, new, old;
 
    current.u64 = list->u64;
-   while (current.offset != EMPTY) {
+   while (current.offset != ANV_FREE_LIST_EMPTY_VAL) {
       __sync_synchronize();
       new.offset = table->map[current.offset].next;
       new.count = current.count + 1;
@@ -357,8 +352,8 @@ anv_block_pool_init(struct anv_block_pool *pool,
    VkResult result;
 
    /* Make sure VMA addresses are aligned for the block pool */
-   assert(anv_is_aligned(start_address, device->info->mem_alignment));
-   assert(anv_is_aligned(initial_size, device->info->mem_alignment));
+   assert(util_is_aligned(start_address, device->info->mem_alignment));
+   assert(util_is_aligned(initial_size, device->info->mem_alignment));
    assert(max_size > 0);
    assert(max_size > initial_size);
 
@@ -462,12 +457,17 @@ anv_block_pool_expand_range(struct anv_block_pool *pool, uint32_t size)
  * The returned pointer points to the map for the memory at the specified
  * offset. The offset parameter is relative to the "center" of the block pool
  * rather than the start of the block pool BO map.
+ *
+ * offset parameter here is a offset from the beginning of block_pool.
  */
-void*
-anv_block_pool_map(struct anv_block_pool *pool, int32_t offset, uint32_t size)
+void *
+anv_block_pool_map(struct anv_block_pool *pool, int64_t offset, uint32_t size)
 {
    struct anv_bo *bo = NULL;
-   int32_t bo_offset = 0;
+   int64_t bo_offset = 0;
+
+   assert(offset + size <= pool->max_size);
+
    anv_block_pool_foreach_bo(iter_bo, pool) {
       if (offset < bo_offset + iter_bo->size) {
          bo = iter_bo;
@@ -480,6 +480,30 @@ anv_block_pool_map(struct anv_block_pool *pool, int32_t offset, uint32_t size)
    assert((offset - bo_offset) + size <= bo->size);
 
    return bo->map + (offset - bo_offset);
+}
+
+static bool
+anv_device_has_perf_improvement_with_2mb_pages(struct anv_device *device)
+{
+   return device->info->verx10 >= 110;
+}
+
+static bool
+anv_device_has_perf_improvement_with_64k_pages(struct anv_device *device)
+{
+   if (device->info->has_local_mem || device->info->verx10 < 110)
+      return false;
+
+   return device->info->kmd_type == INTEL_KMD_TYPE_XE;
+}
+
+static bool
+anv_device_has_perf_improvement_with_2mb_pages_oversubscription(struct anv_device *device)
+{
+   /* for now it is the same restriction as anv_device_has_perf_improvement_with_64k_pages()
+    * but lets have a function to adjust it in future if needed
+    */
+   return anv_device_has_perf_improvement_with_64k_pages(device);
 }
 
 /** Grows and re-centers the block pool.
@@ -522,9 +546,9 @@ anv_block_pool_grow(struct anv_block_pool *pool, struct anv_block_state *state,
     * We align to a page size because it makes it easier to do our
     * calculations later in such a way that we state page-aigned.
     */
-   uint32_t total_used = align(pool->state.next, PAGE_SIZE);
+   const uint64_t total_used = align(pool->state.next, PAGE_SIZE);
 
-   uint32_t old_size = pool->size;
+   const uint64_t old_size = pool->size;
 
    /* The block pool is always initialized to a nonzero size and this function
     * is always called after initialization.
@@ -535,7 +559,7 @@ anv_block_pool_grow(struct anv_block_pool *pool, struct anv_block_state *state,
     * they are based on the next pointers which are updated prior to calling
     * this function.
     */
-   uint32_t required = MAX2(total_used, old_size);
+   uint64_t required = MAX2(total_used, old_size);
 
    /* With softpin, the pool is made up of a bunch of buffers with separate
     * maps.  Make sure we have enough contiguous space that we can get a
@@ -545,8 +569,8 @@ anv_block_pool_grow(struct anv_block_pool *pool, struct anv_block_state *state,
 
    if (required > pool->max_size) {
       result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
-   } else if (total_used * 2 > required) {
-      uint32_t size = old_size * 2;
+   } else {
+      uint64_t size = old_size * 2;
       while (size < required)
          size *= 2;
 
@@ -568,13 +592,13 @@ anv_block_pool_grow(struct anv_block_pool *pool, struct anv_block_state *state,
    return pool->size;
 }
 
-static VkResult
-anv_block_pool_alloc_new(struct anv_block_pool *pool,
-                         struct anv_block_state *pool_state,
-                         uint32_t block_size,
-                         int64_t *offset,
-                         uint32_t *padding)
+VkResult
+anv_block_pool_alloc(struct anv_block_pool *pool,
+                     uint32_t block_size,
+                     int64_t *offset,
+                     uint32_t *padding)
 {
+   struct anv_block_state *pool_state = &pool->state;
    struct anv_block_state state, old, new;
 
    /* Most allocations won't generate any padding */
@@ -632,20 +656,14 @@ anv_block_pool_alloc_new(struct anv_block_pool *pool,
 }
 
 VkResult
-anv_block_pool_alloc(struct anv_block_pool *pool,
-                     uint32_t block_size,
-                     int64_t *offset, uint32_t *padding)
-{
-   return anv_block_pool_alloc_new(pool, &pool->state, block_size, offset, padding);
-}
-
-VkResult
 anv_state_pool_init(struct anv_state_pool *pool,
                     struct anv_device *device,
                     const struct anv_state_pool_params *params)
 {
    uint32_t initial_size = MAX2(params->block_size * 16,
                                 device->info->mem_alignment);
+   if (anv_device_has_perf_improvement_with_2mb_pages(device))
+      initial_size = MAX2(initial_size, 2 * 1024 * 1024);
 
    VkResult result = anv_block_pool_init(&pool->block_pool, device,
                                          params->name,
@@ -753,7 +771,7 @@ anv_state_pool_get_bucket_size(uint32_t bucket)
  */
 static void
 anv_state_pool_return_blocks(struct anv_state_pool *pool,
-                             uint32_t chunk_offset, uint32_t count,
+                             uint64_t chunk_offset, uint32_t count,
                              uint32_t block_size)
 {
    /* Disallow returning 0 chunks */
@@ -769,10 +787,12 @@ anv_state_pool_return_blocks(struct anv_state_pool *pool,
       /* update states that were added back to the state table */
       struct anv_state *state_i = anv_state_table_get(&pool->table,
                                                       st_idx + i);
+      const int64_t offset = chunk_offset + block_size * i;
       state_i->alloc_size = block_size;
-      state_i->offset = pool->start_offset + chunk_offset + block_size * i;
+      state_i->offset = pool->start_offset + offset;
+
       state_i->map = anv_block_pool_map(&pool->block_pool,
-                                        state_i->offset,
+                                        offset,
                                         state_i->alloc_size);
    }
 
@@ -797,7 +817,7 @@ anv_state_pool_return_blocks(struct anv_state_pool *pool,
  */
 static void
 anv_state_pool_return_chunk(struct anv_state_pool *pool,
-                            uint32_t chunk_offset, uint32_t chunk_size,
+                            uint64_t chunk_offset, uint32_t chunk_size,
                             uint32_t small_size)
 {
    uint32_t divisor = pool->block_size;
@@ -810,7 +830,7 @@ anv_state_pool_return_chunk(struct anv_state_pool *pool,
        * aligned to divisor. Also anv_state_pool_return_blocks() only accepts
        * aligned chunks.
        */
-      uint32_t offset = chunk_offset + rest;
+      uint64_t offset = chunk_offset + rest;
       anv_state_pool_return_blocks(pool, offset, nblocks, divisor);
    }
 
@@ -863,7 +883,7 @@ anv_state_pool_alloc_no_vg(struct anv_state_pool *pool,
       state = anv_free_list_pop(&pool->buckets[b].free_list, &pool->table);
       if (state) {
          unsigned chunk_size = anv_state_pool_get_bucket_size(b);
-         int32_t chunk_offset = state->offset;
+         int64_t chunk_offset = state->offset - pool->start_offset;
 
          /* First lets update the state we got to its new size. offset and map
           * remain the same.
@@ -929,7 +949,7 @@ anv_state_pool_alloc_no_vg(struct anv_state_pool *pool,
    state->map = anv_block_pool_map(&pool->block_pool, offset, alloc_size);
 
    if (padding > 0) {
-      uint32_t return_offset = offset - padding;
+      uint64_t return_offset = offset - padding;
       anv_state_pool_return_chunk(pool, return_offset, padding, 0);
    }
 
@@ -1006,7 +1026,7 @@ anv_state_stream_init(struct anv_state_stream *stream,
    stream->next = block_size;
 
    stream->total_size = 0;
-   util_dynarray_init(&stream->all_blocks, NULL);
+   stream->all_blocks = UTIL_DYNARRAY_INIT;
 
    VG(VALGRIND_CREATE_MEMPOOL(stream, 0, false));
 }
@@ -1044,8 +1064,7 @@ anv_state_stream_alloc(struct anv_state_stream *stream,
       if (stream->block.alloc_size == 0)
          return ANV_STATE_NULL;
 
-      util_dynarray_append(&stream->all_blocks,
-                           struct anv_state, stream->block);
+      util_dynarray_append(&stream->all_blocks, stream->block);
       VG(VALGRIND_MAKE_MEM_NOACCESS(stream->block.map, block_size));
 
       /* Reset back to the start */
@@ -1134,7 +1153,7 @@ anv_state_reserved_array_pool_init(struct anv_state_reserved_array_pool *pool,
    if (pool->states == NULL)
       return vk_error(&device->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   BITSET_SET_RANGE(pool->states, 0, pool->count - 1);
+   BITSET_SET_COUNT(pool->states, 0, pool->count);
    simple_mtx_init(&pool->mutex, mtx_plain);
 
    pool->state = anv_state_pool_alloc(pool->pool, pool->stride * count, alignment);
@@ -1265,7 +1284,7 @@ anv_bo_pool_alloc(struct anv_bo_pool *pool, uint32_t size,
    struct anv_bo *bo =
       util_sparse_array_free_list_pop_elem(&pool->free_list[bucket]);
    if (bo != NULL) {
-      VG(VALGRIND_MEMPOOL_ALLOC(pool, bo->map, size));
+      VG(VALGRIND_MEMPOOL_ALLOC(pool, bo->map, bo->size));
       *bo_out = bo;
       return VK_SUCCESS;
    }
@@ -1281,7 +1300,7 @@ anv_bo_pool_alloc(struct anv_bo_pool *pool, uint32_t size,
 
    /* We want it to look like it came from this pool */
    VG(VALGRIND_FREELIKE_BLOCK(bo->map, 0));
-   VG(VALGRIND_MEMPOOL_ALLOC(pool, bo->map, size));
+   VG(VALGRIND_MEMPOOL_ALLOC(pool, bo->map, bo->size));
 
    *bo_out = bo;
 
@@ -1292,6 +1311,19 @@ void
 anv_bo_pool_free(struct anv_bo_pool *pool, struct anv_bo *bo)
 {
    VG(VALGRIND_MEMPOOL_FREE(pool, bo->map));
+
+   /* When a BO is part of a slab, don't put it on the free list. First
+    * it doesn't have a GEM handle that we could use in managing the free
+    * list, second the BO is going to return to the slab and will not
+    * necessarily get freed immediately which is what the bo_pool is also
+    * trying to achieve.
+    */
+   if (anv_bo_get_real(bo) != bo) {
+      VG(VALGRIND_MALLOCLIKE_BLOCK(bo->map, bo->size, 0, 1));
+      anv_device_release_bo(pool->device, bo);
+
+      return;
+   }
 
    assert(util_is_power_of_two_or_zero(bo->size));
    const unsigned size_log2 = util_logbase2_ceil(bo->size);
@@ -1336,15 +1368,15 @@ anv_scratch_pool_finish(struct anv_device *device, struct anv_scratch_pool *pool
 
 struct anv_bo *
 anv_scratch_pool_alloc(struct anv_device *device, struct anv_scratch_pool *pool,
-                       gl_shader_stage stage, unsigned per_thread_scratch)
+                       mesa_shader_stage stage, unsigned per_thread_scratch)
 {
    if (per_thread_scratch == 0)
       return NULL;
 
-   unsigned scratch_size_log2 = ffs(per_thread_scratch / 2048);
-   assert(scratch_size_log2 < 16);
-
-   assert(stage < ARRAY_SIZE(pool->bos));
+   unsigned scratch_size_log2 =
+      per_thread_scratch < 2048 ? 11 : util_logbase2_ceil(per_thread_scratch);
+   unsigned bucket = scratch_size_log2 - 11;
+   assert(bucket < 16);
 
    const struct intel_device_info *devinfo = device->info;
 
@@ -1356,13 +1388,14 @@ anv_scratch_pool_alloc(struct anv_device *device, struct anv_scratch_pool *pool,
    if (devinfo->verx10 >= 125)
       stage = MESA_SHADER_COMPUTE;
 
-   struct anv_bo *bo = p_atomic_read(&pool->bos[scratch_size_log2][stage]);
+   assert(stage < ARRAY_SIZE(pool->bos[0]));
+   struct anv_bo *bo = p_atomic_read(&pool->bos[bucket][stage]);
 
    if (bo != NULL)
       return bo;
 
    assert(stage < ARRAY_SIZE(devinfo->max_scratch_ids));
-   uint32_t size = per_thread_scratch * devinfo->max_scratch_ids[stage];
+   uint64_t size = (uint64_t) devinfo->max_scratch_ids[stage] << scratch_size_log2;
 
    /* Even though the Scratch base pointers in 3DSTATE_*S are 64 bits, they
     * are still relative to the general state base address.  When we emit
@@ -1389,7 +1422,7 @@ anv_scratch_pool_alloc(struct anv_device *device, struct anv_scratch_pool *pool,
       return NULL; /* TODO */
 
    struct anv_bo *current_bo =
-      p_atomic_cmpxchg(&pool->bos[scratch_size_log2][stage], NULL, bo);
+      p_atomic_cmpxchg(&pool->bos[bucket][stage], NULL, bo);
    if (current_bo) {
       anv_device_release_bo(device, bo);
       return current_bo;
@@ -1408,16 +1441,18 @@ anv_scratch_pool_get_surf(struct anv_device *device,
    if (per_thread_scratch == 0)
       return 0;
 
-   unsigned scratch_size_log2 = ffs(per_thread_scratch / 2048);
-   assert(scratch_size_log2 < 16);
+   unsigned scratch_size_log2 =
+      per_thread_scratch < 2048 ? 11 : util_logbase2_ceil(per_thread_scratch);
+   unsigned bucket = scratch_size_log2 - 11;
+   assert(bucket < 16);
 
-   uint32_t surf = p_atomic_read(&pool->surfs[scratch_size_log2]);
+   uint32_t surf = p_atomic_read(&pool->surfs[bucket]);
    if (surf > 0)
       return surf;
 
    struct anv_bo *bo =
       anv_scratch_pool_alloc(device, pool, MESA_SHADER_COMPUTE,
-                             per_thread_scratch);
+                             1u << scratch_size_log2);
    struct anv_address addr = { .bo = bo };
 
    struct anv_state state =
@@ -1434,18 +1469,38 @@ anv_scratch_pool_get_surf(struct anv_device *device,
                          .mocs = anv_mocs(device, bo, usage),
                          .format = ISL_FORMAT_RAW,
                          .swizzle = ISL_SWIZZLE_IDENTITY,
-                         .stride_B = per_thread_scratch,
-                         .is_scratch = true);
+                         .stride_B = 1u << scratch_size_log2,
+                         .is_scratch = true,
+                         .usage = usage);
 
-   uint32_t current = p_atomic_cmpxchg(&pool->surfs[scratch_size_log2],
-                                       0, state.offset);
+   uint32_t current = p_atomic_cmpxchg(&pool->surfs[bucket], 0, state.offset);
    if (current) {
       anv_state_pool_free(&device->scratch_surface_state_pool, state);
       return current;
    } else {
-      pool->surf_states[scratch_size_log2] = state;
+      pool->surf_states[bucket] = state;
       return state.offset;
    }
+}
+
+uint32_t
+anv_shader_get_scratch_surf(struct anv_batch *batch,
+                            struct anv_device *device,
+                            mesa_shader_stage stage,
+                            uint32_t total_scratch,
+                            bool protected)
+{
+   if (total_scratch == 0)
+      return 0;
+
+   struct anv_scratch_pool *pool = protected ?
+      &device->protected_scratch_pool : &device->scratch_pool;
+   struct anv_bo *bo =
+      anv_scratch_pool_alloc(device, pool, stage, total_scratch);
+   anv_reloc_list_add_bo(batch->relocs, bo);
+   uint32_t ret = anv_scratch_pool_get_surf(device, pool, total_scratch);
+
+   return ret >> ANV_SCRATCH_SPACE_SHIFT;
 }
 
 VkResult
@@ -1499,20 +1554,29 @@ anv_bo_finish(struct anv_device *device, struct anv_bo *bo)
    anv_bo_unmap_close(device, bo);
 }
 
-static VkResult
-anv_bo_vma_alloc_or_close(struct anv_device *device,
-                          struct anv_bo *bo,
-                          enum anv_bo_alloc_flags alloc_flags,
-                          uint64_t explicit_address)
+/* Return the minimum bo alignment requirement, not taking into consideration
+ * KMD bind requirements.
+ */
+static uint32_t
+anv_bo_vma_calc_alignment_requirement(struct anv_device *device,
+                                      enum anv_bo_alloc_flags alloc_flags,
+                                      uint64_t size)
 {
-   assert(bo->vma_heap == NULL);
-   assert(explicit_address == intel_48b_address(explicit_address));
+   const bool is_small_heap = anv_bo_is_small_heap(alloc_flags);
+   uint32_t align = 64; /* A cache line */
 
-   uint32_t align = device->physical->info.mem_alignment;
-
-   /* If it's big enough to store a tiled resource, we need 64K alignment */
-   if (bo->size >= 64 * 1024)
-      align = MAX2(64 * 1024, align);
+   /* If it's big enough to store a 64K tiled resource, we need 64K alignment.
+    * Wa_22015614752 requires that some images be aligned to 64k when used on
+    * multiple engines, so allocation that might contain 4k tiled images need
+    * to be aligned to 64k.
+    */
+   const uint64_t image_alignment =
+      (size >= 64 * 1024 ||
+       (device->queue_count > 1 &&
+        intel_needs_workaround(device->info, 22015614752))) ?
+      64 * 1024 : 4 * 1024;
+   if (size >= 4 * 1024 && !is_small_heap)
+      align = MAX2(image_alignment, align);
 
    /* If we're using the AUX map, make sure we follow the required
     * alignment.
@@ -1520,13 +1584,32 @@ anv_bo_vma_alloc_or_close(struct anv_device *device,
    if (alloc_flags & ANV_BO_ALLOC_AUX_TT_ALIGNED)
       align = MAX2(intel_aux_map_get_alignment(device->aux_map_ctx), align);
 
+   return align;
+}
+
+static VkResult
+anv_bo_vma_alloc_or_close(struct anv_device *device,
+                          struct anv_bo *bo,
+                          enum anv_bo_alloc_flags alloc_flags,
+                          uint64_t explicit_address,
+                          uint32_t align)
+{
+   assert(bo->vma_heap == NULL);
+   assert(explicit_address == intel_48b_address(explicit_address));
+   const bool is_small_heap = anv_bo_is_small_heap(alloc_flags);
+
+   /* KMD alignment requirement */
+   align = MAX2(align, device->physical->info.mem_alignment);
+
    /* Opportunistically align addresses to 2Mb when above 1Mb. We do this
     * because this gives an opportunity for the kernel to use Transparent Huge
-    * Pages (the 2MB page table layout) for faster memory access.
+    * Pages (the 2MB page table layout) for faster memory access. Avoid doing
+    * it for small heaps because that could cause fragmentation.
     *
     * Only available on ICL+.
     */
-   if (device->info->ver >= 11 && bo->size >= 1 * 1024 * 1024)
+   if (anv_device_has_perf_improvement_with_2mb_pages(device) &&
+       (bo->size >= 1 * 1024 * 1024) && !is_small_heap)
       align = MAX2(2 * 1024 * 1024, align);
 
    if (alloc_flags & ANV_BO_ALLOC_FIXED_ADDRESS) {
@@ -1544,71 +1627,76 @@ anv_bo_vma_alloc_or_close(struct anv_device *device,
    return VK_SUCCESS;
 }
 
-enum intel_device_info_mmap_mode
-anv_bo_get_mmap_mode(struct anv_device *device, struct anv_bo *bo)
-{
-   enum anv_bo_alloc_flags alloc_flags = bo->alloc_flags;
-
-   if (device->info->has_set_pat_uapi)
-      return anv_device_get_pat_entry(device, alloc_flags)->mmap;
-
-   if (anv_physical_device_has_vram(device->physical)) {
-      if ((alloc_flags & ANV_BO_ALLOC_NO_LOCAL_MEM) ||
-          (alloc_flags & ANV_BO_ALLOC_IMPORTED))
-         return INTEL_DEVICE_INFO_MMAP_MODE_WB;
-
-      return INTEL_DEVICE_INFO_MMAP_MODE_WC;
-   }
-
-   /* gfx9 atom */
-   if (!device->info->has_llc) {
-      /* user wants a cached and coherent memory but to achieve it without
-       * LLC in older platforms DRM_IOCTL_I915_GEM_SET_CACHING needs to be
-       * supported and set.
-       */
-      if (alloc_flags & ANV_BO_ALLOC_HOST_CACHED)
-         return INTEL_DEVICE_INFO_MMAP_MODE_WB;
-
-      return INTEL_DEVICE_INFO_MMAP_MODE_WC;
-   }
-
-   if (alloc_flags & (ANV_BO_ALLOC_SCANOUT | ANV_BO_ALLOC_EXTERNAL))
-      return INTEL_DEVICE_INFO_MMAP_MODE_WC;
-
-   return INTEL_DEVICE_INFO_MMAP_MODE_WB;
-}
-
 VkResult
 anv_device_alloc_bo(struct anv_device *device,
                     const char *name,
-                    uint64_t size,
+                    const uint64_t base_size,
                     enum anv_bo_alloc_flags alloc_flags,
                     uint64_t explicit_address,
                     struct anv_bo **bo_out)
 {
-   /* bo that needs CPU access needs to be HOST_CACHED, HOST_COHERENT or both */
-   assert((alloc_flags & ANV_BO_ALLOC_MAPPED) == 0 ||
-          (alloc_flags & (ANV_BO_ALLOC_HOST_CACHED | ANV_BO_ALLOC_HOST_COHERENT)));
+   /* ANV_BO_ALLOC_MAPPED are internal allocated bos that need mmap() but as
+    * internally we don't do any cflush() we need to make sure those are also
+    * ANV_BO_ALLOC_HOST_COHERENT.
+    */
+   assert((alloc_flags & ANV_BO_ALLOC_MAPPED) == 0 || (alloc_flags & ANV_BO_ALLOC_HOST_COHERENT));
 
    /* In platforms with LLC we can promote all bos to cached+coherent for free */
    const enum anv_bo_alloc_flags not_allowed_promotion = ANV_BO_ALLOC_SCANOUT |
                                                          ANV_BO_ALLOC_EXTERNAL |
-                                                         ANV_BO_ALLOC_PROTECTED;
+                                                         ANV_BO_ALLOC_PROTECTED |
+                                                         ANV_BO_ALLOC_SLAB_PARENT;
    if (device->info->has_llc && ((alloc_flags & not_allowed_promotion) == 0))
       alloc_flags |= ANV_BO_ALLOC_HOST_COHERENT;
 
-   const uint32_t bo_flags =
-         device->kmd_backend->bo_alloc_flags_to_bo_flags(device, alloc_flags);
+   uint64_t ccs_offset = 0;
+   uint64_t size = base_size;
 
+   if (alloc_flags & ANV_BO_ALLOC_AUX_CCS) {
+      assert(device->info->has_aux_map);
+      size = align64(size, 4096);
+      ccs_offset = size;
+      size += (size / INTEL_AUX_MAP_MAIN_SIZE_SCALEDOWN);
+   }
+
+   uint32_t alignment = anv_bo_vma_calc_alignment_requirement(device, alloc_flags, size);
+   /* calling in here to avoid the 4k size promotion */
+   *bo_out = anv_slab_bo_alloc(device, name, size, alignment, alloc_flags);
+   if (*bo_out) {
+      if (alloc_flags & ANV_BO_ALLOC_AUX_CCS)
+         (*bo_out)->ccs_offset = ccs_offset;
+
+      return VK_SUCCESS;
+   }
+
+   /* bo was not allocated in slab, so reset size again to base_size */
+   size = base_size;
    /* The kernel is going to give us whole pages anyway. */
    size = align64(size, 4096);
 
-   const uint64_t ccs_offset = size;
    if (alloc_flags & ANV_BO_ALLOC_AUX_CCS) {
+      ccs_offset = size;
       assert(device->info->has_aux_map);
       size += size / INTEL_AUX_MAP_MAIN_SIZE_SCALEDOWN;
       size = align64(size, 4096);
    }
+
+   /* Round up allocations to 2MB intervals so long as increase doesn't
+    * increase allocation by more than 1.33%. This reduces page
+    * count at the cost of increased memory footprint. Only apply on
+    * MTL(Xe KMD only)/LNL platforms, which incur largest perf penalty from
+    * page misses.
+    */
+   if (align64(size, 2 * 1024 * 1024) <= (size * 4 / 3) &&
+       anv_device_has_perf_improvement_with_2mb_pages_oversubscription(device))
+      size = align64(size, 2 * 1024 * 1024);
+   /* bos larger than 1MB can't be allocated with slab but to reduce pages we
+    * could align size to 64k pages to gain performance with minimum memory
+    * waste.
+    */
+   else if ((size > (1 * 1024 * 1024)) &&
+            anv_device_has_perf_improvement_with_64k_pages(device))
+      size = align64(size, 64 * 1024);
 
    const struct intel_memory_class_instance *regions[2];
    uint32_t nregions = 0;
@@ -1653,11 +1741,12 @@ anv_device_alloc_bo(struct anv_device *device,
       .size = size,
       .ccs_offset = ccs_offset,
       .actual_size = actual_size,
-      .flags = bo_flags,
+      .flags = device->kmd_backend->bo_alloc_flags_to_bo_flags(device, alloc_flags),
       .alloc_flags = alloc_flags,
    };
 
-   if (alloc_flags & ANV_BO_ALLOC_MAPPED) {
+   if ((alloc_flags & ANV_BO_ALLOC_MAPPED) &&
+       ((alloc_flags & ANV_BO_ALLOC_SLAB_PARENT) == 0)) {
       VkResult result = anv_device_map_bo(device, &new_bo, 0, size,
                                           NULL, &new_bo.map);
       if (unlikely(result != VK_SUCCESS)) {
@@ -1668,7 +1757,8 @@ anv_device_alloc_bo(struct anv_device *device,
 
    VkResult result = anv_bo_vma_alloc_or_close(device, &new_bo,
                                                alloc_flags,
-                                               explicit_address);
+                                               explicit_address,
+                                               alignment);
    if (result != VK_SUCCESS)
       return result;
 
@@ -1694,6 +1784,46 @@ anv_device_alloc_bo(struct anv_device *device,
    return VK_SUCCESS;
 }
 
+static VkResult
+map_placed_addr_slab(struct anv_device *device,
+                     struct anv_bo *bo,
+                     uint64_t offset,
+                     size_t size,
+                     void *placed_addr,
+                     void **map_out)
+{
+   int prime_handle = anv_gem_handle_to_fd(device, bo->gem_handle);
+   VkResult result = VK_SUCCESS;
+
+   if (prime_handle < 0) {
+      return vk_errorf(device, VK_ERROR_MEMORY_MAP_FAILED,
+                       "anv_gem_handle_to_fd() before mmap failed: %m");
+   }
+
+   offset += (bo->offset - bo->slab_parent->offset);
+   void *map = os_mmap(placed_addr,
+                       size,
+                       PROT_READ | PROT_WRITE,
+                       MAP_FIXED | MAP_SHARED,
+                       prime_handle,
+                       offset);
+   if (map == MAP_FAILED) {
+      result = vk_errorf(device, VK_ERROR_MEMORY_MAP_FAILED, "mmap failed: %m");
+      goto end;
+   }
+
+   assert(placed_addr == NULL || map == placed_addr);
+   assert(map != NULL);
+   VG(VALGRIND_MALLOCLIKE_BLOCK(map, size, 0, 1));
+
+   if (map_out)
+      *map_out = map;
+
+end:
+   close(prime_handle);
+   return result;
+}
+
 VkResult
 anv_device_map_bo(struct anv_device *device,
                   struct anv_bo *bo,
@@ -1705,6 +1835,26 @@ anv_device_map_bo(struct anv_device *device,
    assert(!bo->from_host_ptr);
    assert(size > 0);
 
+   struct anv_bo *real = anv_bo_get_real(bo);
+   uint64_t offset_adjustment = 0;
+   if (real != bo) {
+      if (placed_addr)
+         return map_placed_addr_slab(device, bo, offset, size, placed_addr, map_out);
+
+      offset += (bo->offset - real->offset);
+
+      const uint64_t page_size = device->physical->page_size;
+      /* KMD rounds munmap() to whole pages, so here doing some adjustments */
+      const uint64_t munmap_offset = ROUND_DOWN_TO(offset, page_size);
+      if (munmap_offset != offset) {
+         offset_adjustment = offset - munmap_offset;
+         size += offset_adjustment;
+         offset = munmap_offset;
+      }
+
+      assert((offset & (page_size - 1)) == 0);
+   }
+
    void *map = device->kmd_backend->gem_mmap(device, bo, offset, size, placed_addr);
    if (unlikely(map == MAP_FAILED))
       return vk_errorf(device, VK_ERROR_MEMORY_MAP_FAILED, "mmap failed: %m");
@@ -1715,7 +1865,7 @@ anv_device_map_bo(struct anv_device *device,
    VG(VALGRIND_MALLOCLIKE_BLOCK(map, size, 0, 1));
 
    if (map_out)
-      *map_out = map;
+      *map_out = map + offset_adjustment;
 
    return VK_SUCCESS;
 }
@@ -1727,6 +1877,19 @@ anv_device_unmap_bo(struct anv_device *device,
                     bool replace)
 {
    assert(!bo->from_host_ptr);
+
+   struct anv_bo *real = anv_bo_get_real(bo);
+   if (real != bo) {
+      const uint64_t page_size = device->physical->page_size;
+      uint64_t slab_offset = bo->offset - real->offset;
+
+      if (ROUND_DOWN_TO(slab_offset, page_size) != slab_offset) {
+         slab_offset -= ROUND_DOWN_TO(slab_offset, page_size);
+         map -= slab_offset;
+         map_size += slab_offset;
+      }
+      assert(((uintptr_t)map & (page_size - 1)) == 0);
+   }
 
    if (replace) {
       map = mmap(map, map_size, PROT_NONE,
@@ -1754,6 +1917,7 @@ anv_device_import_bo_from_host_ptr(struct anv_device *device,
                            ANV_BO_ALLOC_HOST_COHERENT |
                            ANV_BO_ALLOC_AUX_CCS |
                            ANV_BO_ALLOC_PROTECTED |
+                           ANV_BO_ALLOC_COMPRESSED |
                            ANV_BO_ALLOC_FIXED_ADDRESS)));
    assert(alloc_flags & ANV_BO_ALLOC_EXTERNAL);
 
@@ -1822,9 +1986,11 @@ anv_device_import_bo_from_host_ptr(struct anv_device *device,
          .from_host_ptr = true,
       };
 
+      uint32_t alignment = anv_bo_vma_calc_alignment_requirement(device, alloc_flags, size);
       VkResult result = anv_bo_vma_alloc_or_close(device, &new_bo,
                                                   alloc_flags,
-                                                  client_address);
+                                                  client_address,
+                                                  alignment);
       if (result != VK_SUCCESS) {
          pthread_mutex_unlock(&cache->mutex);
          return result;
@@ -1918,9 +2084,11 @@ anv_device_import_bo(struct anv_device *device,
       new_bo.size = size;
       new_bo.actual_size = size;
 
+      uint32_t alignment = anv_bo_vma_calc_alignment_requirement(device, alloc_flags, size);
       VkResult result = anv_bo_vma_alloc_or_close(device, &new_bo,
                                                   alloc_flags,
-                                                  client_address);
+                                                  client_address,
+                                                  alignment);
       if (result != VK_SUCCESS) {
          pthread_mutex_unlock(&cache->mutex);
          return result;
@@ -1989,6 +2157,7 @@ anv_device_set_bo_tiling(struct anv_device *device,
                          uint32_t row_pitch_B,
                          enum isl_tiling tiling)
 {
+   assert(bo->slab_parent == NULL);
    int ret = anv_gem_set_tiling(device, bo->gem_handle, row_pitch_B,
                                 isl_tiling_to_i915_tiling(tiling));
    if (ret) {
@@ -2024,8 +2193,6 @@ anv_device_release_bo(struct anv_device *device,
    struct anv_bo_cache *cache = &device->bo_cache;
    const bool bo_is_xe_userptr = device->info->kmd_type == INTEL_KMD_TYPE_XE &&
                                  bo->from_host_ptr;
-   assert(bo_is_xe_userptr ||
-          anv_device_lookup_bo(device, bo->gem_handle) == bo);
 
    /* Try to decrement the counter but don't go below one.  If this succeeds
     * then the refcount has been decremented and we are not the last
@@ -2033,8 +2200,6 @@ anv_device_release_bo(struct anv_device *device,
     */
    if (atomic_dec_not_one(&bo->refcount))
       return;
-
-   ANV_RMV(bo_destroy, device, bo);
 
    pthread_mutex_lock(&cache->mutex);
 
@@ -2049,6 +2214,17 @@ anv_device_release_bo(struct anv_device *device,
       return;
    }
    assert(bo->refcount == 0);
+
+   if (bo->slab_parent) {
+      pthread_mutex_unlock(&cache->mutex);
+      anv_slab_bo_free(device, bo);
+      return;
+   }
+
+   assert(bo_is_xe_userptr ||
+          anv_device_lookup_bo(device, bo->gem_handle) == bo);
+
+   ANV_RMV(bo_destroy, device, bo);
 
    /* Memset the BO just in case.  The refcount being zero should be enough to
     * prevent someone from assuming the data is valid but it's safer to just

@@ -9,6 +9,8 @@
 
 #include "tu_event.h"
 
+#include "vk_synchronization.h"
+
 #include "tu_cmd_buffer.h"
 #include "tu_rmv.h"
 
@@ -26,14 +28,11 @@ tu_CreateEvent(VkDevice _device,
    if (!event)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   VkResult result = tu_bo_init_new(device, &event->base, &event->bo, 0x1000,
-                                    TU_BO_ALLOC_NO_FLAGS, "event");
+   mtx_lock(&device->event_mutex);
+   VkResult result = tu_suballoc_bo_alloc(&event->bo, &device->event_suballoc, 64, 64);
+   mtx_unlock(&device->event_mutex);
    if (result != VK_SUCCESS)
       goto fail_alloc;
-
-   result = tu_bo_map(device, event->bo, NULL);
-   if (result != VK_SUCCESS)
-      goto fail_map;
 
    TU_RMV(event_create, device, pCreateInfo, event);
 
@@ -41,8 +40,6 @@ tu_CreateEvent(VkDevice _device,
 
    return VK_SUCCESS;
 
-fail_map:
-   tu_bo_finish(device, event->bo);
 fail_alloc:
    vk_object_free(&device->vk, pAllocator, event);
    return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
@@ -61,8 +58,17 @@ tu_DestroyEvent(VkDevice _device,
 
    TU_RMV(resource_destroy, device, event);
 
-   tu_bo_finish(device, event->bo);
+   mtx_lock(&device->event_mutex);
+   tu_suballoc_bo_free(&device->event_suballoc, &event->bo);
+   mtx_unlock(&device->event_mutex);
    vk_object_free(&device->vk, pAllocator, event);
+}
+
+
+static uint64_t *
+tu_event_map(tu_event *event)
+{
+   return (uint64_t *)tu_suballoc_bo_map(&event->bo);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -74,7 +80,7 @@ tu_GetEventStatus(VkDevice _device, VkEvent _event)
    if (vk_device_is_lost(&device->vk))
       return VK_ERROR_DEVICE_LOST;
 
-   if (*(uint64_t*) event->bo->map == 1)
+   if (*tu_event_map(event) == 1)
       return VK_EVENT_SET;
    return VK_EVENT_RESET;
 }
@@ -83,7 +89,7 @@ VKAPI_ATTR VkResult VKAPI_CALL
 tu_SetEvent(VkDevice _device, VkEvent _event)
 {
    VK_FROM_HANDLE(tu_event, event, _event);
-   *(uint64_t*) event->bo->map = 1;
+   *tu_event_map(event) = 1;
 
    return VK_SUCCESS;
 }
@@ -92,7 +98,7 @@ VKAPI_ATTR VkResult VKAPI_CALL
 tu_ResetEvent(VkDevice _device, VkEvent _event)
 {
    VK_FROM_HANDLE(tu_event, event, _event);
-   *(uint64_t*) event->bo->map = 0;
+   *tu_event_map(event) = 0;
 
    return VK_SUCCESS;
 }
@@ -105,14 +111,8 @@ tu_CmdSetEvent2(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(tu_event, event, _event);
-   VkPipelineStageFlags2 src_stage_mask = 0;
-
-   for (uint32_t i = 0; i < pDependencyInfo->memoryBarrierCount; i++)
-      src_stage_mask |= pDependencyInfo->pMemoryBarriers[i].srcStageMask;
-   for (uint32_t i = 0; i < pDependencyInfo->bufferMemoryBarrierCount; i++)
-      src_stage_mask |= pDependencyInfo->pBufferMemoryBarriers[i].srcStageMask;
-   for (uint32_t i = 0; i < pDependencyInfo->imageMemoryBarrierCount; i++)
-      src_stage_mask |= pDependencyInfo->pImageMemoryBarriers[i].srcStageMask;
+   VkPipelineStageFlags2 src_stage_mask =
+      vk_collect_dependency_info_src_stages(pDependencyInfo);
 
    tu_write_event<CHIP>(cmd, event, src_stage_mask, 1);
 }
@@ -146,7 +146,7 @@ tu_CmdWaitEvents2(VkCommandBuffer commandBuffer,
       tu_cs_emit_pkt7(cs, CP_WAIT_REG_MEM, 6);
       tu_cs_emit(cs, CP_WAIT_REG_MEM_0_FUNCTION(WRITE_EQ) |
                      CP_WAIT_REG_MEM_0_POLL(POLL_MEMORY));
-      tu_cs_emit_qw(cs, event->bo->iova); /* POLL_ADDR_LO/HI */
+      tu_cs_emit_qw(cs, event->bo.iova); /* POLL_ADDR_LO/HI */
       tu_cs_emit(cs, CP_WAIT_REG_MEM_3_REF(1));
       tu_cs_emit(cs, CP_WAIT_REG_MEM_4_MASK(~0u));
       tu_cs_emit(cs, CP_WAIT_REG_MEM_5_DELAY_LOOP_CYCLES(20));

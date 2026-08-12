@@ -42,9 +42,9 @@ extern "C" {
 static inline void
 intel_set_ps_dispatch_state(struct GENX(3DSTATE_PS) *ps,
                             const struct intel_device_info *devinfo,
-                            const struct brw_wm_prog_data *prog_data,
+                            const struct brw_fs_prog_data *prog_data,
                             unsigned rasterization_samples,
-                            enum intel_msaa_flags msaa_flags)
+                            enum intel_fs_config fs_config)
 {
    assert(rasterization_samples != 0);
 
@@ -88,7 +88,7 @@ intel_set_ps_dispatch_state(struct GENX(3DSTATE_PS) *ps,
 #endif
 
    const bool is_persample_dispatch =
-      brw_wm_prog_data_is_persample(prog_data, msaa_flags);
+      brw_fs_prog_data_is_persample(prog_data, fs_config);
 
    if (is_persample_dispatch) {
       /* TGL PRMs, Volume 2d: Command Reference: Structures:
@@ -96,7 +96,7 @@ intel_set_ps_dispatch_state(struct GENX(3DSTATE_PS) *ps,
        *
        *    "Must not be enabled when dispatch rate is sample AND NUM_MULTISAMPLES > 1."
        */
-      if (GFX_VER >= 12 && rasterization_samples > 1)
+      if (GFX_VER >= 12 && GFX_VER < 20 && rasterization_samples > 1)
          enable_32 = false;
 
       /* Starting with SandyBridge (where we first get MSAA), the different
@@ -126,7 +126,7 @@ intel_set_ps_dispatch_state(struct GENX(3DSTATE_PS) *ps,
     *
     * 16x MSAA only exists on Gfx9+, so we can skip this on Gfx8.
     */
-   if (GFX_VER >= 9 && rasterization_samples == 16 && !is_persample_dispatch) {
+   if (GFX_VER >= 9 && GFX_VER < 20 && rasterization_samples == 16 && !is_persample_dispatch) {
       assert(enable_8 || enable_16);
       enable_32 = false;
    }
@@ -149,7 +149,7 @@ intel_set_ps_dispatch_state(struct GENX(3DSTATE_PS) *ps,
          ps->Kernel0PolyPackingPolicy = POLY_PACK16_FIXED;
          break;
       default:
-         unreachable("Invalid polygon width");
+         UNREACHABLE("Invalid polygon width");
       }
    } else if (enable_16) {
       ps->Kernel0Enable = true;

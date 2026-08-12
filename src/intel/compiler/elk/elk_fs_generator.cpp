@@ -1,24 +1,6 @@
 /*
  * Copyright © 2010 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 /** @file elk_fs_generator.cpp
@@ -32,7 +14,7 @@
 #include "elk_fs.h"
 #include "elk_cfg.h"
 #include "dev/intel_debug.h"
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 #include "util/half_float.h"
 
 static enum elk_reg_file
@@ -51,7 +33,7 @@ elk_file_from_reg(elk_fs_reg *reg)
    case BAD_FILE:
    case ATTR:
    case UNIFORM:
-      unreachable("not reached");
+      UNREACHABLE("not reached");
    }
    return ELK_ARCHITECTURE_REGISTER_FILE;
 }
@@ -167,7 +149,7 @@ elk_reg_from_fs_reg(const struct intel_device_info *devinfo, elk_fs_inst *inst,
       break;
    case ATTR:
    case UNIFORM:
-      unreachable("not reached");
+      UNREACHABLE("not reached");
    }
 
    /* On HSW+, scalar DF sources can be accessed using the normal <0,1,0>
@@ -190,7 +172,7 @@ elk_fs_generator::elk_fs_generator(const struct elk_compiler *compiler,
                            const struct elk_compile_params *params,
                            struct elk_stage_prog_data *prog_data,
                            bool runtime_check_aads_emit,
-                           gl_shader_stage stage)
+                           mesa_shader_stage stage)
 
    : compiler(compiler), params(params),
      devinfo(compiler->devinfo),
@@ -212,7 +194,7 @@ elk_fs_generator::~elk_fs_generator()
 {
 }
 
-class ip_record : public exec_node {
+class ip_record : public brw_exec_node {
 public:
    DECLARE_RALLOC_CXX_OPERATORS(ip_record)
 
@@ -251,7 +233,7 @@ elk_fs_generator::patch_halt_jumps()
 
    int ip = p->nr_insn;
 
-   foreach_in_list(ip_record, patch_ip, &discard_halt_patches) {
+   brw_foreach_in_list(ip_record, patch_ip, &discard_halt_patches) {
       elk_inst *patch = &p->store[patch_ip->ip];
 
       assert(elk_inst_opcode(p->isa, patch) == ELK_OPCODE_HALT);
@@ -344,7 +326,7 @@ elk_fs_generator::fire_fb_write(elk_fs_inst *inst,
                             struct elk_reg implied_header,
                             GLuint nr)
 {
-   struct elk_wm_prog_data *prog_data = elk_wm_prog_data(this->prog_data);
+   struct elk_fs_prog_data *prog_data = elk_fs_prog_data(this->prog_data);
 
    if (devinfo->ver < 6) {
       elk_push_insn_state(p);
@@ -944,7 +926,7 @@ elk_fs_generator::generate_tex(elk_fs_inst *inst, struct elk_reg dst,
       simd_mode = ELK_SAMPLER_SIMD_MODE_SIMD16;
       break;
    default:
-      unreachable("Invalid width for texture instruction");
+      UNREACHABLE("Invalid width for texture instruction");
    }
 
    if (devinfo->ver >= 5) {
@@ -995,7 +977,7 @@ elk_fs_generator::generate_tex(elk_fs_inst *inst, struct elk_reg dst,
          msg_type = GFX6_SAMPLER_MESSAGE_SAMPLE_SAMPLEINFO;
          break;
       default:
-	 unreachable("not reached");
+	 UNREACHABLE("not reached");
       }
    } else {
       switch (inst->opcode) {
@@ -1059,7 +1041,7 @@ elk_fs_generator::generate_tex(elk_fs_inst *inst, struct elk_reg dst,
 	 simd_mode = ELK_SAMPLER_SIMD_MODE_SIMD16;
 	 break;
       default:
-	 unreachable("not reached");
+	 UNREACHABLE("not reached");
       }
    }
    assert(msg_type != -1);
@@ -2154,10 +2136,10 @@ elk_fs_generator::generate_code(const elk_cfg_t *cfg, int dispatch_width,
          break;
 
       default:
-         unreachable("Unsupported opcode");
+         UNREACHABLE("Unsupported opcode");
 
       case ELK_SHADER_OPCODE_LOAD_PAYLOAD:
-         unreachable("Should be lowered by lower_load_payload()");
+         UNREACHABLE("Should be lowered by lower_load_payload()");
       }
 
       if (multiple_instructions_emitted)
@@ -2206,27 +2188,27 @@ elk_fs_generator::generate_code(const elk_cfg_t *cfg, int dispatch_width,
    int after_size = p->next_insn_offset - start_offset;
 
    bool dump_shader_bin = elk_should_dump_shader_bin();
-   unsigned char sha1[21];
-   char sha1buf[41];
+   unsigned char blake3[BLAKE3_KEY_LEN + 1];
+   char blake3buf[BLAKE3_HEX_LEN];
 
    if (unlikely(debug_flag || dump_shader_bin)) {
-      _mesa_sha1_compute(p->store + start_offset / sizeof(elk_inst),
-                         after_size, sha1);
-      _mesa_sha1_format(sha1buf, sha1);
+      _mesa_blake3_compute(p->store + start_offset / sizeof(elk_inst),
+                         after_size, blake3);
+      _mesa_blake3_format(blake3buf, blake3);
    }
 
    if (unlikely(dump_shader_bin))
       elk_dump_shader_bin(p->store, start_offset, p->next_insn_offset,
-                          sha1buf);
+                          blake3buf);
 
    if (unlikely(debug_flag)) {
-      fprintf(stderr, "Native code for %s (src_hash 0x%08x) (sha1 %s)\n"
+      fprintf(stderr, "Native code for %s (src_hash 0x%08x) (blake3 %s)\n"
               "SIMD%d shader: %d instructions. %d loops. %u cycles. "
               "%d:%d spills:fills, %u sends, "
               "scheduled with mode %s. "
               "Promoted %u constants. "
               "Compacted %d to %d bytes (%.0f%%)\n",
-              shader_name, params->source_hash, sha1buf,
+              shader_name, params->source_hash, blake3buf,
               dispatch_width, before_size / 16,
               loop_count, perf.latency,
               shader_stats.spill_count,
@@ -2238,11 +2220,11 @@ elk_fs_generator::generate_code(const elk_cfg_t *cfg, int dispatch_width,
               100.0f * (before_size - after_size) / before_size);
 
       /* overriding the shader makes elk_disasm_info invalid */
-      if (!elk_try_override_assembly(p, start_offset, sha1buf)) {
+      if (!elk_try_override_assembly(p, start_offset, blake3buf)) {
          elk_dump_assembly(p->store, start_offset, p->next_insn_offset,
                        elk_disasm_info, perf.block_latency);
       } else {
-         fprintf(stderr, "Successfully overrode shader with sha1 %s\n\n", sha1buf);
+         fprintf(stderr, "Successfully overrode shader with blake3 %s\n\n", blake3buf);
       }
    }
    ralloc_free(elk_disasm_info);

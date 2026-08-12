@@ -13,6 +13,8 @@
 
 #include "vk_pipeline_layout.h"
 
+#include "clb097.h"
+
 static bool
 binding_has_immutable_samplers(const VkDescriptorSetLayoutBinding *binding)
 {
@@ -24,6 +26,27 @@ binding_has_immutable_samplers(const VkDescriptorSetLayoutBinding *binding)
    default:
       return false;
    }
+}
+
+static uint32_t
+nvk_max_descriptor_size(const struct nv_device_info *info)
+{
+   // This should be constant-folded.
+   uint32_t max_desc_size = 0;
+
+   max_desc_size = MAX2(max_desc_size, sizeof(struct nvk_sampled_image_descriptor));
+   max_desc_size = MAX2(max_desc_size, sizeof(struct nvk_edb_buffer_view_descriptor));
+   max_desc_size = MAX2(max_desc_size, sizeof(union nvk_buffer_descriptor));
+
+   if (info->cls_eng3d >= MAXWELL_A) {
+      max_desc_size = MAX2(max_desc_size, sizeof(struct nvk_storage_image_descriptor));
+      max_desc_size = MAX2(max_desc_size, sizeof(struct nvk_buffer_view_descriptor));
+   } else {
+      max_desc_size = MAX2(max_desc_size, sizeof(struct nvk_kepler_storage_image_descriptor));
+      max_desc_size = MAX2(max_desc_size, sizeof(struct nvk_kepler_storage_buffer_view_descriptor));
+   }
+
+   return max_desc_size;
 }
 
 void
@@ -43,7 +66,12 @@ nvk_descriptor_stride_align_for_type(const struct nvk_physical_device *pdev,
       break;
 
    case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
-      *stride = *alignment = sizeof(struct nvk_storage_image_descriptor);
+      if (pdev->info.cls_eng3d >= MAXWELL_A) {
+         *stride = *alignment = sizeof(struct nvk_storage_image_descriptor);
+      } else {
+         *stride = sizeof(struct nvk_kepler_storage_image_descriptor);
+         *alignment = 16;
+      }
       break;
 
    case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
@@ -51,8 +79,12 @@ nvk_descriptor_stride_align_for_type(const struct nvk_physical_device *pdev,
       if ((layout_flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT) ||
           nvk_use_edb_buffer_views(pdev)) {
          *stride = *alignment = sizeof(struct nvk_edb_buffer_view_descriptor);
-      } else {
+      } else if (pdev->info.cls_eng3d >= MAXWELL_A ||
+                 type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER) {
          *stride = *alignment = sizeof(struct nvk_buffer_view_descriptor);
+      } else {
+         *stride = sizeof(struct nvk_kepler_storage_buffer_view_descriptor);
+         *alignment = 16;
       }
       break;
 
@@ -74,7 +106,7 @@ nvk_descriptor_stride_align_for_type(const struct nvk_physical_device *pdev,
    case VK_DESCRIPTOR_TYPE_MUTABLE_EXT:
       *stride = *alignment = 0;
       if (type_list == NULL)
-         *stride = *alignment = NVK_MAX_DESCRIPTOR_SIZE;
+         *stride = *alignment = nvk_max_descriptor_size(&pdev->info);
       for (unsigned i = 0; type_list && i < type_list->descriptorTypeCount; i++) {
          /* This shouldn't recurse */
          assert(type_list->pDescriptorTypes[i] !=
@@ -86,11 +118,11 @@ nvk_descriptor_stride_align_for_type(const struct nvk_physical_device *pdev,
          *stride = MAX2(*stride, desc_stride);
          *alignment = MAX2(*alignment, desc_align);
       }
-      *stride = ALIGN(*stride, *alignment);
+      *stride = align(*stride, *alignment);
       break;
 
    default:
-      unreachable("Invalid descriptor type");
+      UNREACHABLE("Invalid descriptor type");
    }
 
    assert(*stride <= NVK_MAX_DESCRIPTOR_SIZE);
@@ -134,7 +166,7 @@ nvk_CreateDescriptorSetLayout(VkDevice device,
                               VkDescriptorSetLayout *pSetLayout)
 {
    VK_FROM_HANDLE(nvk_device, dev, device);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    uint32_t num_bindings = 0;
    uint32_t immutable_sampler_count = 0;
@@ -164,7 +196,7 @@ nvk_CreateDescriptorSetLayout(VkDevice device,
    VK_MULTIALLOC_DECL(&ma, struct nvk_sampler *, samplers,
                       immutable_sampler_count);
 
-   if (!vk_descriptor_set_layout_multizalloc(&dev->vk, &ma))
+   if (!vk_descriptor_set_layout_multizalloc(&dev->vk, &ma, pCreateInfo))
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    layout->vk.destroy = nvk_descriptor_set_layout_destroy;
@@ -220,8 +252,8 @@ nvk_CreateDescriptorSetLayout(VkDevice device,
       switch (binding->descriptorType) {
       case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
          layout->binding[b].dynamic_buffer_index = dynamic_buffer_count;
-         BITSET_SET_RANGE(layout->dynamic_ubos, dynamic_buffer_count,
-                          dynamic_buffer_count + binding->descriptorCount - 1);
+         BITSET_SET_COUNT(layout->dynamic_ubos, dynamic_buffer_count,
+                         binding->descriptorCount);
          dynamic_buffer_count += binding->descriptorCount;
          break;
 
@@ -297,14 +329,14 @@ nvk_CreateDescriptorSetLayout(VkDevice device,
 
    layout->non_variable_descriptor_buffer_size = buffer_size;
    layout->max_buffer_size = buffer_size + max_variable_descriptor_size;
-   layout->dynamic_buffer_count = dynamic_buffer_count;
+   layout->vk.dynamic_descriptor_count = dynamic_buffer_count;
 
    struct mesa_blake3 blake3_ctx;
    _mesa_blake3_init(&blake3_ctx);
 
 #define BLAKE3_UPDATE_VALUE(x) _mesa_blake3_update(&blake3_ctx, &(x), sizeof(x));
    BLAKE3_UPDATE_VALUE(layout->non_variable_descriptor_buffer_size);
-   BLAKE3_UPDATE_VALUE(layout->dynamic_buffer_count);
+   BLAKE3_UPDATE_VALUE(layout->vk.dynamic_descriptor_count);
    BLAKE3_UPDATE_VALUE(layout->binding_count);
 
    for (uint32_t b = 0; b < num_bindings; b++) {
@@ -386,7 +418,7 @@ nvk_GetDescriptorSetLayoutSupport(VkDevice device,
                                   VkDescriptorSetLayoutSupport *pSupport)
 {
    VK_FROM_HANDLE(nvk_device, dev, device);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    const VkMutableDescriptorTypeCreateInfoEXT *mutable_info =
       vk_find_struct_const(pCreateInfo->pNext,
@@ -416,6 +448,7 @@ nvk_GetDescriptorSetLayoutSupport(VkDevice device,
    uint64_t non_variable_size = 0;
    uint32_t variable_stride = 0;
    uint32_t variable_count = 0;
+   bool variable_is_inline_uniform_block = false;
    uint8_t dynamic_buffer_count = 0;
 
    for (uint32_t i = 0; i < pCreateInfo->bindingCount; i++) {
@@ -425,14 +458,8 @@ nvk_GetDescriptorSetLayoutSupport(VkDevice device,
       if (binding_flags != NULL && binding_flags->bindingCount > 0)
          flags = binding_flags->pBindingFlags[i];
 
-      switch (binding->descriptorType) {
-      case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
-      case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+      if (vk_descriptor_type_is_dynamic(binding->descriptorType))
          dynamic_buffer_count += binding->descriptorCount;
-         break;
-      default:
-         break;
-      }
 
       const VkMutableDescriptorTypeListEXT *type_list =
          nvk_descriptor_get_type_list(binding->descriptorType,
@@ -456,6 +483,9 @@ nvk_GetDescriptorSetLayoutSupport(VkDevice device,
              */
             variable_count = MAX2(1, binding->descriptorCount);
             variable_stride = stride;
+
+            variable_is_inline_uniform_block =
+               binding->descriptorType == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK;
          } else {
             /* Since we're aligning to the maximum and since this is just a
              * check for whether or not the max buffer size is big enough, we
@@ -476,7 +506,7 @@ nvk_GetDescriptorSetLayoutSupport(VkDevice device,
    uint32_t max_buffer_size;
    if (pCreateInfo->flags &
        VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR)
-      max_buffer_size = NVK_PUSH_DESCRIPTOR_SET_SIZE;
+      max_buffer_size = NVK_MAX_PUSH_DESCRIPTORS * nvk_max_descriptor_size(&pdev->info);
    else
       max_buffer_size = NVK_MAX_DESCRIPTOR_SET_SIZE;
 
@@ -487,12 +517,21 @@ nvk_GetDescriptorSetLayoutSupport(VkDevice device,
       switch (ext->sType) {
       case VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_LAYOUT_SUPPORT: {
          VkDescriptorSetVariableDescriptorCountLayoutSupport *vs = (void *)ext;
+         uint32_t max_var_count;
+
          if (variable_stride > 0) {
-            vs->maxVariableDescriptorCount =
+            max_var_count =
                (max_buffer_size - non_variable_size) / variable_stride;
          } else {
-            vs->maxVariableDescriptorCount = 0;
+            max_var_count = 0;
          }
+
+         if (variable_is_inline_uniform_block) {
+            max_var_count =
+               MIN2(max_var_count, NVK_MAX_INLINE_UNIFORM_BLOCK_SIZE);
+         }
+
+         vs->maxVariableDescriptorCount = max_var_count;
          break;
       }
 

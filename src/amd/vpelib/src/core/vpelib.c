@@ -39,6 +39,12 @@
 #include "geometric_scaling.h"
 #include <stdlib.h>
 #include <time.h>
+#include <vpe_command.h>
+
+static void dummy_sys_event(enum vpe_event_id eventId, ...)
+{
+    // Do nothing, if no callback is provided for sys event
+}
 
 static void override_debug_option(
     struct vpe_debug_options *debug, const struct vpe_debug_options *user_debug)
@@ -133,6 +139,7 @@ static void verify_collaboration_mode(struct vpe_priv *vpe_priv)
     if (vpe_priv->pub.level == VPE_IP_LEVEL_1_1) {
         if (vpe_priv->collaboration_mode == true && vpe_priv->collaborate_sync_index == 0) {
             srand((unsigned int)time(NULL)); // Initialization, should only be called once.
+            // coverity[dont_call]
             uint32_t randnum                 = (uint32_t)rand() % 15;
             randnum                          = randnum << 12;
             vpe_priv->collaborate_sync_index = (int32_t)randnum;
@@ -173,34 +180,88 @@ static void free_output_ctx(struct vpe_priv *vpe_priv)
 {
     if (vpe_priv->output_ctx.gamut_remap)
         vpe_free(vpe_priv->output_ctx.gamut_remap);
+    vpe_priv->output_ctx.gamut_remap = NULL;
 
     if (vpe_priv->output_ctx.output_tf)
         vpe_free(vpe_priv->output_ctx.output_tf);
+    vpe_priv->output_ctx.output_tf = NULL;
 
     destroy_output_config_vector(vpe_priv);
+}
+
+static enum vpe_status vpe_build_set_predication(uint64_t buf_cpu_va,
+    enum predication_polarity polarity, uint64_t condition_address, uint32_t execution_count)
+{
+    if (!buf_cpu_va || !condition_address || !execution_count)
+        return VPE_STATUS_ERROR;
+
+    uint32_t *buffer = (uint32_t *)(uintptr_t)buf_cpu_va;
+    uint32_t  header = VPE_CMD_HEADER(VPE_CMD_OPCODE_SET_PREDICATION, VPE_PREDICATION_SUB_OPCODE);
+    header |= (polarity << VPE_PREDICATION_POLARITY_SHIFT);
+
+    uint32_t low_condition_addr = (condition_address & VPE_PREDICATION_LOW_ADDR_MASK);
+    uint32_t high_condition_addr =
+        (condition_address & VPE_PREDICATION_HIGH_ADDR_MASK) >> VPE_PREDICATION_ADDR_SHIFT;
+
+    uint32_t number_of_dwords = int_divide_with_ceil(execution_count, sizeof(uint32_t));
+
+    *buffer = header;
+    buffer++;
+    *buffer = low_condition_addr;
+    buffer++;
+    *buffer = high_condition_addr;
+    buffer++;
+    *buffer = number_of_dwords;
+
+    return VPE_STATUS_OK;
 }
 
 struct vpe *vpe_create(const struct vpe_init_data *params)
 {
     struct vpe_priv *vpe_priv;
     enum vpe_status  status;
+    struct vpe_engine_priv *engine_priv = NULL;
 
     if (!params || (params->funcs.zalloc == NULL) || (params->funcs.free == NULL) ||
-        (params->funcs.log == NULL))
+        (params->funcs.log == (vpe_log_func_t)NULL))
         return NULL;
 
-    vpe_priv =
-        (struct vpe_priv *)params->funcs.zalloc(params->funcs.mem_ctx, sizeof(struct vpe_priv));
+    if (!params->engine_handle) {
+        vpe_priv =
+            (struct vpe_priv *)params->funcs.zalloc(params->funcs.mem_ctx, sizeof(struct vpe_priv));
+    } else {
+        engine_priv = container_of(params->engine_handle, struct vpe_engine_priv, pub);
+        vpe_priv    = (struct vpe_priv *)engine_priv->init.funcs.zalloc(
+            engine_priv->init.funcs.mem_ctx, sizeof(struct vpe_priv));
+    }
+
     if (!vpe_priv)
         return NULL;
 
     vpe_priv->init = *params;
 
-    vpe_priv->pub.level =
-        vpe_resource_parse_ip_version(params->ver_major, params->ver_minor, params->ver_rev);
+    if (!params->engine_handle) {
+        vpe_priv->engine_handle = NULL;
+        vpe_priv->pub.level =
+            vpe_resource_parse_ip_version(params->ver_major, params->ver_minor, params->ver_rev);
 
-    vpe_priv->pub.version = (VPELIB_API_VERSION_MAJOR << VPELIB_API_VERSION_MAJOR_SHIFT) |
-                            (VPELIB_API_VERSION_MINOR << VPELIB_API_VERSION_MINOR_SHIFT);
+        vpe_priv->pub.version = (VPELIB_API_VERSION_MAJOR << VPELIB_API_VERSION_MAJOR_SHIFT) |
+                                (VPELIB_API_VERSION_MINOR << VPELIB_API_VERSION_MINOR_SHIFT);
+        vpe_setup_check_funcs(&vpe_priv->pub.check_funcs, vpe_priv->pub.level);
+    } else if (engine_priv) {
+        /* use ip level, api version, check functions and init functions from vpe_engine */
+        vpe_priv->pub.level       = params->engine_handle->ip_level;
+        vpe_priv->pub.version     = params->engine_handle->api_version;
+        vpe_priv->pub.check_funcs = params->engine_handle->check_funcs;
+        vpe_priv->engine_handle   = params->engine_handle;
+        vpe_priv->init.funcs      = engine_priv->init.funcs;
+    }
+
+    // Make sys event an optional feature but hooking up to dummy function if no
+    // callback is
+    // provided
+    if (vpe_priv->init.funcs.sys_event == (vpe_sys_event_func_t)NULL)
+        vpe_priv->init.funcs.sys_event = dummy_sys_event;
 
     status = vpe_construct_resource(vpe_priv, vpe_priv->pub.level, &vpe_priv->resource);
     if (status != VPE_STATUS_OK) {
@@ -231,7 +292,6 @@ struct vpe *vpe_create(const struct vpe_init_data *params)
     vpe_priv->scale_yuv_matrix = true;
 
     vpe_priv->collaborate_sync_index = 0;
-
     return &vpe_priv->pub;
 }
 
@@ -250,14 +310,20 @@ void vpe_destroy(struct vpe **vpe)
 
     vpe_free_stream_ctx(vpe_priv);
 
-    if (vpe_priv->vpe_cmd_vector)
+    if (vpe_priv->vpe_cmd_vector) {
         vpe_vector_free(vpe_priv->vpe_cmd_vector);
+        vpe_priv->vpe_cmd_vector = NULL;
+    }
 
-    if (vpe_priv->dummy_input_param)
+    if (vpe_priv->dummy_input_param) {
         vpe_free(vpe_priv->dummy_input_param);
+        vpe_priv->dummy_input_param = NULL;
+    }
 
-    if (vpe_priv->dummy_stream)
+    if (vpe_priv->dummy_stream) {
         vpe_free(vpe_priv->dummy_stream);
+        vpe_priv->dummy_stream = NULL;
+    }
 
     vpe_free(vpe_priv);
 
@@ -287,14 +353,13 @@ static enum vpe_status populate_bg_stream(struct vpe_priv *vpe_priv, const struc
     stream = &stream_ctx->stream;
     stream_ctx->stream_type = VPE_STREAM_TYPE_BG_GEN;
 
-    // if output surface is too small, don't use it as dummy input
+    // if output surface is too small, do not use it as dummy input
     // request 2x2 instead of 1x1 for bpc safety
     // as we are to treat output as input for RGB 1x1, need 4bytes at least
     // but if output is YUV, bpc will be smaller and need larger dimension
 
     if (param->dst_surface.plane_size.surface_size.width < VPE_MIN_VIEWPORT_SIZE ||
         param->dst_surface.plane_size.surface_size.height < VPE_MIN_VIEWPORT_SIZE ||
-        param->dst_surface.plane_size.surface_pitch < 256 / 4 || // 256bytes, 4bpp
         param->target_rect.width < VPE_MIN_VIEWPORT_SIZE ||
         param->target_rect.height < VPE_MIN_VIEWPORT_SIZE) {
         return VPE_STATUS_ERROR;
@@ -304,26 +369,16 @@ static enum vpe_status populate_bg_stream(struct vpe_priv *vpe_priv, const struc
     surface_info                      = &stream->surface_info;
     scaling_info                      = &stream->scaling_info;
     polyphaseCoeffs                   = &stream->polyphase_scaling_coeffs;
-    surface_info->address.type        = param->dst_surface.address.type;
-    surface_info->address.tmz_surface = param->dst_surface.address.tmz_surface;
-    surface_info->address.grph.addr.quad_part =
-        param->dst_surface.address.grph.addr.quad_part;
 
-    surface_info->swizzle                   = param->dst_surface.swizzle; // treat it as linear for simple
+    memcpy(surface_info, &param->dst_surface, sizeof(struct vpe_surface_info));
+
     surface_info->plane_size.surface_size.x = 0;
     surface_info->plane_size.surface_size.y = 0;
-    // min width & height in pixels
     surface_info->plane_size.surface_size.width     = VPE_MIN_VIEWPORT_SIZE;
     surface_info->plane_size.surface_size.height    = VPE_MIN_VIEWPORT_SIZE;
-    surface_info->plane_size.surface_pitch          = param->dst_surface.plane_size.surface_pitch;
-    surface_info->plane_size.surface_aligned_height = param->dst_surface.plane_size.surface_aligned_height;
     surface_info->dcc.enable                        = false;
-    surface_info->format                            = param->dst_surface.format;
-    surface_info->cs.encoding                       = param->dst_surface.cs.encoding;
-    surface_info->cs.range                          = param->dst_surface.cs.range;
-    surface_info->cs.tf                             = param->dst_surface.cs.tf;
-    surface_info->cs.cositing                       = param->dst_surface.cs.cositing;
-    surface_info->cs.primaries                      = param->dst_surface.cs.primaries;
+
+    // min width & height in pixels
     scaling_info->src_rect.x                        = 0;
     scaling_info->src_rect.y                        = 0;
     scaling_info->src_rect.width                    = VPE_MIN_VIEWPORT_SIZE;
@@ -402,16 +457,6 @@ static enum vpe_status populate_input_streams(struct vpe_priv *vpe_priv, const s
             stream_ctx->flip_horizonal_output = false;
 
         memcpy(&stream_ctx->stream, &param->streams[i], sizeof(struct vpe_stream));
-
-        /* if top-bottom blending is not supported,
-         * the 1st stream still can support blending with background,
-         * however, the 2nd stream and onward can't enable blending.
-         */
-        if (i && param->streams[i].blend_info.blending &&
-            !vpe_priv->pub.caps->color_caps.mpc.top_bottom_blending) {
-            result = VPE_STATUS_ALPHA_BLENDING_NOT_SUPPORTED;
-            break;
-        }
     }
 
     return result;
@@ -508,7 +553,7 @@ enum vpe_status vpe_check_support(
     }
 
 
-    if (status == VPE_STATUS_OK) {  
+    if (status == VPE_STATUS_OK) {
         // output checking - check per asic support
         status = vpe_check_output_support(vpe, param);
         if (status != VPE_STATUS_OK) {
@@ -524,17 +569,19 @@ enum vpe_status vpe_check_support(
                 vpe_log("fail input support check. status %d\n", (int)status);
                 break;
             }
-        }
-    }
-
-    if (status == VPE_STATUS_OK) {
-        // input checking - check tone map support
-        for (i = 0; i < param->num_streams; i++) {
+            // input checking - check tone map support
             status = vpe_check_tone_map_support(vpe, &param->streams[i], param);
             if (status != VPE_STATUS_OK) {
                 vpe_log("fail tone map support check. status %d\n", (int)status);
                 break;
             }
+            // blending support check
+            status = vpe_check_blending_support(vpe, &param->streams[i], i);
+            if (status != VPE_STATUS_OK) {
+                vpe_log("fail blending support check. status %d\n", (int)status);
+                break;
+            }
+
         }
     }
 
@@ -542,7 +589,8 @@ enum vpe_status vpe_check_support(
         // output resource preparation for further checking (cache the result)
         output_ctx                     = &vpe_priv->output_ctx;
         output_ctx->surface            = param->dst_surface;
-        output_ctx->bg_color           = param->bg_color;
+        output_ctx->mpc_bg_color       = param->bg_color;
+        output_ctx->opp_bg_color       = param->bg_color;
         output_ctx->target_rect        = param->target_rect;
         output_ctx->alpha_mode         = param->alpha_mode;
         output_ctx->flags.hdr_metadata = param->flags.hdr_metadata;
@@ -554,7 +602,6 @@ enum vpe_status vpe_check_support(
 
 
     if (status == VPE_STATUS_OK) {
-        // blending support check
         status = populate_input_streams(vpe_priv, param, vpe_priv->stream_ctx);
         if (status != VPE_STATUS_OK)
             vpe_log("fail input stream population. status %d\n", (int)status);
@@ -576,7 +623,7 @@ enum vpe_status vpe_check_support(
         // if the bg_color support is false, there is a flag to verify if the bg_color falls in the
         // output gamut
         if (!vpe_priv->pub.caps->bg_color_check_support) {
-            status = vpe_priv->resource.check_bg_color_support(vpe_priv, &output_ctx->bg_color);
+            status = vpe_priv->resource.check_bg_color_support(vpe_priv, &output_ctx->mpc_bg_color);
             if (status != VPE_STATUS_OK) {
                 vpe_log(
                     "failed in checking the background color versus the output color space %d\n",
@@ -596,8 +643,13 @@ enum vpe_status vpe_check_support(
         status = vpe_validate_geometric_scaling_support(param);
     }
 
-    if (vpe_priv->init.debug.assert_when_not_support)
-        VPE_ASSERT(status == VPE_STATUS_OK);
+    if (vpe_priv->init.debug.assert_when_not_support && status != VPE_STATUS_OK) {
+        vpe_log("vpe_check_support failed with status %d\n", (int)status);
+        VPE_EXIT(1);
+    }
+
+    vpe_event(VPE_EVENT_CHECK_SUPPORT, vpe_priv->num_streams, param->target_rect.width,
+        param->target_rect.height, status);
 
     return status;
 }
@@ -620,47 +672,6 @@ enum vpe_status vpe_build_noops(struct vpe *vpe, uint32_t num_dword, uint32_t **
     return status;
 }
 
-static bool validate_cached_param(struct vpe_priv *vpe_priv, const struct vpe_build_param *param)
-{
-    uint32_t           i;
-    struct output_ctx *output_ctx;
-
-    if (vpe_priv->num_input_streams != param->num_streams &&
-       !(vpe_priv->init.debug.bg_color_fill_only == true && vpe_priv->num_streams == 1))
-        return false;
-
-    if (vpe_priv->collaboration_mode != param->collaboration_mode)
-        return false;
-
-    if (param->num_instances > 0 && vpe_priv->vpe_num_instance != param->num_instances)
-        return false;
-
-    for (i = 0; i < vpe_priv->num_input_streams; i++) {
-        struct vpe_stream stream = param->streams[i];
-
-        vpe_clip_stream(
-            &stream.scaling_info.src_rect, &stream.scaling_info.dst_rect, &param->target_rect);
-
-        if (memcmp(&vpe_priv->stream_ctx[i].stream, &stream, sizeof(struct vpe_stream)))
-            return false;
-    }
-
-    output_ctx = &vpe_priv->output_ctx;
-    if (output_ctx->alpha_mode != param->alpha_mode)
-        return false;
-
-    if (memcmp(&output_ctx->bg_color, &param->bg_color, sizeof(struct vpe_color)))
-        return false;
-
-    if (memcmp(&output_ctx->target_rect, &param->target_rect, sizeof(struct vpe_rect)))
-        return false;
-
-    if (memcmp(&output_ctx->surface, &param->dst_surface, sizeof(struct vpe_surface_info)))
-        return false;
-
-    return true;
-}
-
 enum vpe_status vpe_build_commands(
     struct vpe *vpe, const struct vpe_build_param *param, struct vpe_build_bufs *bufs)
 {
@@ -681,20 +692,27 @@ enum vpe_status vpe_build_commands(
 
     vpe_priv = container_of(vpe, struct vpe_priv, pub);
 
+#ifdef VPE_REGISTER_PROFILE
+    vpe_priv->config_writer.total_register_count        = 0;
+    vpe_priv->config_writer.burstMode_register_count    = 0;
+    vpe_priv->config_writer.nonBurstMode_register_count = 0;
+    vpe_priv->config_writer.total_config_count = 0;
+    vpe_priv->config_writer.reused_config_count = 0;
+#endif
     if (!vpe_priv->ops_support) {
-        VPE_ASSERT(vpe_priv->ops_support);
+        if (vpe_priv->init.debug.assert_when_not_support) {
+            VPE_ASSERT(vpe_priv->ops_support);
+        }
         status = VPE_STATUS_NOT_SUPPORTED;
     }
 
     if (status == VPE_STATUS_OK) {
-        if (!validate_cached_param(vpe_priv, param)) {
+        if (!vpe_priv->resource.validate_cached_param(vpe_priv, param)) {
             status = VPE_STATUS_PARAM_CHECK_ERROR;
         }
     }
 
     if (status == VPE_STATUS_OK) {
-        vpe_geometric_scaling_feature_skip(vpe_priv, param);
-
         if (bufs->cmd_buf.size == 0 || bufs->emb_buf.size == 0) {
             /* Here we directly return without setting ops_support to false
              *  becaues the supported check is already passed
@@ -708,6 +726,8 @@ enum vpe_status vpe_build_commands(
                    (bufs->emb_buf.size < vpe_priv->bufs_required.emb_buf_size)) {
             status = VPE_STATUS_INVALID_BUFFER_SIZE;
         }
+
+        vpe_geometric_scaling_feature_skip(vpe_priv, param);
     }
 
     builder = &vpe_priv->resource.cmd_builder;
@@ -776,8 +796,15 @@ enum vpe_status vpe_build_commands(
          * the 3dlut enablement for the background color conversion
          * is used based on the information of the first stream.
          */
-        vpe_bg_color_convert(vpe_priv->output_ctx.cs, vpe_priv->output_ctx.output_tf,
-            &vpe_priv->output_ctx.bg_color, vpe_priv->stream_ctx[0].enable_3dlut);
+        vpe_priv->resource.bg_color_convert(vpe_priv->output_ctx.cs, vpe_priv->output_ctx.output_tf,
+            vpe_priv->output_ctx.surface.format, &vpe_priv->output_ctx.mpc_bg_color,
+            &vpe_priv->output_ctx.opp_bg_color, vpe_priv->stream_ctx[0].enable_3dlut);
+
+        if (param->predication_info.enable == true) {
+            curr_bufs.cmd_buf.cpu_va += VPE_PREDICATION_CMD_SIZE;
+            curr_bufs.cmd_buf.gpu_va += VPE_PREDICATION_CMD_SIZE;
+            curr_bufs.cmd_buf.size -= VPE_PREDICATION_CMD_SIZE;
+        }
 
         if (vpe_priv->collaboration_mode == true) {
             status = builder->build_collaborate_sync_cmd(vpe_priv, &curr_bufs);
@@ -805,7 +832,7 @@ enum vpe_status vpe_build_commands(
                     break;
                 }
 
-                // Add next collaborate sync start command when this vpe_cmd isn't the final one.
+                // Add next collaborate sync start command when this vpe_cmd is not the final one.
                 if (cmd_idx < (uint32_t)(vpe_priv->vpe_cmd_vector->num_elements - 1)) {
                     status = builder->build_collaborate_sync_cmd(vpe_priv, &curr_bufs);
                     if (status != VPE_STATUS_OK) {
@@ -814,12 +841,36 @@ enum vpe_status vpe_build_commands(
                     }
                 }
             }
+#ifdef VPE_REGISTER_PROFILE
+            vpe_priv->config_writer.total_config_count += vpe_priv->vpe_desc_writer.num_config_desc;
+            vpe_priv->config_writer.reused_config_count += vpe_priv->vpe_desc_writer.reuse_num_config_dec;
+#endif
         }
+#ifdef VPE_REGISTER_PROFILE
+        vpe_log("Total Registers Accessed: % d\n", vpe_priv->config_writer.total_register_count);
+        vpe_log("Burst Mode Registers Accessed: % d\n",
+            vpe_priv->config_writer.burstMode_register_count);
+        vpe_log("Non-Burst Mode Registers Accessed: % d\n",
+            vpe_priv->config_writer.nonBurstMode_register_count);
+        vpe_log("Total Config Descriptors: % d\n", vpe_priv->config_writer.total_config_count);
+        vpe_log("Total Re-used Config Descriptors: % d\n", vpe_priv->config_writer.reused_config_count);
+#endif
         if ((status == VPE_STATUS_OK) && (vpe_priv->collaboration_mode == true)) {
             status = builder->build_collaborate_sync_cmd(vpe_priv, &curr_bufs);
             if (status != VPE_STATUS_OK) {
                 vpe_log("failed in building collaborate sync cmd %d\n", (int)status);
             }
+        }
+    }
+
+    if (status == VPE_STATUS_OK && param->predication_info.enable == true) {
+        status = vpe_build_set_predication(bufs->cmd_buf.cpu_va, param->predication_info.polarity,
+            param->predication_info.gpu_va,
+            (uint32_t)(bufs->cmd_buf.size -
+                       VPE_PREDICATION_CMD_SIZE)); // build cmd size - predication size
+
+        if (status != VPE_STATUS_OK) {
+            vpe_log("failed in building vpe predication cmd %d\n", (int)status);
         }
     }
 
@@ -835,8 +886,10 @@ enum vpe_status vpe_build_commands(
 
     vpe_priv->ops_support = false;
 
-    if (vpe_priv->init.debug.assert_when_not_support)
-        VPE_ASSERT(status == VPE_STATUS_OK);
+    if (vpe_priv->init.debug.assert_when_not_support && status != VPE_STATUS_OK) {
+        vpe_log("vpe_check_support failed with status %d\n", (int)status);
+        VPE_EXIT(1);
+    }
 
     return status;
 }
@@ -851,4 +904,115 @@ void vpe_get_optimal_num_of_taps(struct vpe *vpe, struct vpe_scaling_info *scali
 
     dpp->funcs->get_optimal_number_of_taps(
         &scaling_info->src_rect, &scaling_info->dst_rect, &scaling_info->taps);
+}
+
+enum vpe_status vpe_build_timestamp(struct vpe_buf *buf, uint64_t dst_addr)
+{
+    if (!dst_addr || !buf)
+        return VPE_STATUS_ERROR;
+
+    enum vpe_status result = VPE_STATUS_OK;
+
+    // We return required size if size is equal to 0
+    if (buf->size == 0) {
+        buf->size = VPE_TIMESTAMP_CMD_SIZE;
+    } else if (buf->size < VPE_TIMESTAMP_CMD_SIZE) {
+        result = VPE_STATUS_BUFFER_OVERFLOW;
+    } else {
+        uint32_t *buffer    = (uint32_t *)(uintptr_t)buf->cpu_va;
+        uint32_t  header    = VPE_CMD_HEADER(VPE_CMD_OPCODE_TIMESTAMP, VPE_TIMESTAMP_SUB_OPCODE);
+        uint32_t  low_addr  = (dst_addr & VPE_TIMESTAMP_LOW_ADDR_MASK);
+        uint32_t  high_addr = (dst_addr & VPE_TIMESTAMP_HIGH_ADDR_MASK) >> VPE_TIMESTAMP_ADDR_SHIFT;
+
+        *buffer = header;
+        buffer++;
+        *buffer = low_addr;
+        buffer++;
+        *buffer = high_addr;
+    }
+
+    return result;
+}
+
+enum vpe_status vpe_build_resolve_query(
+    struct vpe_buf *buf, uint64_t read_addr, uint64_t write_addr, uint32_t dword_count)
+{
+    if (!buf || !read_addr || !write_addr || !dword_count)
+        return VPE_STATUS_ERROR;
+
+    enum vpe_status result = VPE_STATUS_OK;
+
+    // We return required size if size is equal to 0
+    if (buf->size == 0) {
+        buf->size = VPE_RESOLVE_QUERY_CMD_SIZE;
+    } else if (buf->size < VPE_RESOLVE_QUERY_CMD_SIZE) {
+        result = VPE_STATUS_BUFFER_OVERFLOW;
+    } else {
+        uint32_t *buffer = (uint32_t *)(uintptr_t)buf->cpu_va;
+        uint32_t  header =
+            VPE_CMD_HEADER(VPE_CMD_OPCODE_QUERY_RESOLVE, VPE_RESOLVE_QUERY_SUB_OPCODE);
+
+        uint32_t low_read_addr = (read_addr & VPE_RESOLVE_QUERY_LOW_ADDR_MASK);
+        uint32_t high_read_addr =
+            (read_addr & VPE_RESOLVE_QUERY_HIGH_ADDR_MASK) >> VPE_RESOLVE_QUERY_ADDR_SHIFT;
+
+        uint32_t low_write_addr = (write_addr & VPE_RESOLVE_QUERY_LOW_ADDR_MASK);
+        uint32_t high_write_addr =
+            (write_addr & VPE_RESOLVE_QUERY_HIGH_ADDR_MASK) >> VPE_RESOLVE_QUERY_ADDR_SHIFT;
+
+        *buffer = header;
+        buffer++;
+        *buffer = dword_count;
+        buffer++;
+        *buffer = low_read_addr;
+        buffer++;
+        *buffer = high_read_addr;
+        buffer++;
+        *buffer = low_write_addr;
+        buffer++;
+        *buffer = high_write_addr;
+    }
+
+    return result;
+}
+
+struct vpe_engine *vpe_create_engine(struct vpe_init_data *params)
+{
+    struct vpe_engine_priv *engine_priv;
+    struct vpe_engine      *engine_handle;
+    if (!params)
+        return NULL;
+    engine_priv = (struct vpe_engine_priv *)params->funcs.zalloc(
+        params->funcs.mem_ctx, sizeof(struct vpe_engine_priv));
+    if (engine_priv == NULL)
+        return NULL;
+    /* setup public data */
+    engine_handle = &engine_priv->pub;
+    engine_handle->ip_level =
+        vpe_resource_parse_ip_version(params->ver_major, params->ver_minor, params->ver_rev);
+    engine_handle->api_version = (VPELIB_API_VERSION_MAJOR << VPELIB_API_VERSION_MAJOR_SHIFT) |
+                                 (VPELIB_API_VERSION_MINOR << VPELIB_API_VERSION_MINOR_SHIFT);
+    engine_handle->caps = vpe_get_capability(engine_handle->ip_level);
+
+    /* setup internal data */
+    engine_priv->init      = *params;
+    engine_priv->ver_major = params->ver_major;
+    engine_priv->ver_minor = params->ver_minor;
+    engine_priv->ver_rev   = params->ver_rev;
+    vpe_setup_check_funcs(&engine_handle->check_funcs, engine_handle->ip_level);
+    return engine_handle;
+}
+
+/**
+ * destroy the vpe engine instance.
+ * @param[in] engine  vpe engine instance created by vpe_create_engine()
+ */
+void vpe_destroy_engine(struct vpe_engine **engine)
+{
+    struct vpe_engine_priv *engine_priv;
+    if (!engine || ((*engine) == NULL))
+        return;
+    engine_priv = container_of(*engine, struct vpe_engine_priv, pub);
+    engine_priv->init.funcs.free(engine_priv->init.funcs.mem_ctx, engine_priv);
+    *engine = NULL;
 }

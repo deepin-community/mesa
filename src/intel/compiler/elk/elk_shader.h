@@ -1,28 +1,9 @@
 /*
  * Copyright © 2010 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
-#ifndef ELK_SHADER_H
-#define ELK_SHADER_H
+#pragma once
 
 #include <stdint.h>
 #include "elk_cfg.h"
@@ -69,12 +50,12 @@ public:
     * List of either elk_fs_inst or vec4_instruction (inheriting from
     * elk_backend_instruction)
     */
-   exec_list instructions;
+   brw_exec_list instructions;
 
    elk_cfg_t *cfg;
    elk_analysis<elk::idom_tree, elk_backend_shader> idom_analysis;
 
-   gl_shader_stage stage;
+   mesa_shader_stage stage;
    bool debug_enabled;
 
    elk::simple_allocator alloc;
@@ -131,7 +112,7 @@ elk_get_scratch_size(int size)
 
 static inline nir_variable_mode
 elk_nir_no_indirect_mask(const struct elk_compiler *compiler,
-                         gl_shader_stage stage)
+                         mesa_shader_stage stage)
 {
    const struct intel_device_info *devinfo = compiler->devinfo;
    const bool is_scalar = compiler->scalar_stage[stage];
@@ -190,5 +171,3 @@ struct elk_gs_compile
 #ifdef __cplusplus
 }
 #endif
-
-#endif /* ELK_SHADER_H */

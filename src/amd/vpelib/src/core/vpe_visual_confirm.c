@@ -41,12 +41,19 @@ static bool should_generate_visual_confirm(enum vpe_stream_type stream_type)
     }
 }
 
-static uint16_t get_visual_confirm_segs_count(uint32_t max_seg_width, uint32_t target_rect_width)
+static uint16_t get_visual_confirm_segs_count(
+    uint32_t max_seg_width, uint32_t target_rect_width, uint32_t target_width_alignment)
 {
     // Unlike max_gaps logic in vpe10_calculate_segments, we are pure BG seg, no need to worry
     // stream splitted among one of the segment. so no need to "+1", just round up the calculated
     // number of segments.
-    uint16_t seg_cnt = (uint16_t)(max((target_rect_width + max_seg_width - 1) / max_seg_width, 1));
+
+    uint16_t seg_cnt = (uint16_t)(max(int_divide_with_ceil(target_rect_width, max_seg_width), 1));
+    uint16_t segment_width         = (uint16_t)int_divide_with_ceil(target_rect_width, seg_cnt);
+    uint32_t aligned_segment_width = vpe_align_seg(segment_width, target_width_alignment);
+    if (aligned_segment_width > max_seg_width) {
+        seg_cnt++;
+    }
 
     return seg_cnt;
 }
@@ -58,28 +65,30 @@ static uint16_t vpe_get_visual_confirm_total_seg_count(
     uint16_t             total_visual_confirm_segs = 0;
     uint16_t             stream_idx;
     struct stream_ctx   *stream_ctx;
+    uint32_t             alignment = vpe_get_recout_width_alignment(params);
 
     if (vpe_priv->init.debug.visual_confirm_params.input_format) {
         for (stream_idx = 0; stream_idx < vpe_priv->num_streams; stream_idx++) {
             stream_ctx = &vpe_priv->stream_ctx[stream_idx];
             if (should_generate_visual_confirm(stream_ctx->stream_type))
                 total_visual_confirm_segs += get_visual_confirm_segs_count(
-                    max_seg_width, stream_ctx->stream.scaling_info.dst_rect.width);
+                    max_seg_width, stream_ctx->stream.scaling_info.dst_rect.width, alignment);
         }
     }
 
     if (vpe_priv->init.debug.visual_confirm_params.output_format) {
         total_visual_confirm_segs +=
-            get_visual_confirm_segs_count(max_seg_width, params->target_rect.width);
+            get_visual_confirm_segs_count(max_seg_width, params->target_rect.width, alignment);
     }
 
     return total_visual_confirm_segs;
 }
 
-struct vpe_color vpe_get_visual_confirm_color(enum vpe_surface_pixel_format format,
-    struct vpe_color_space cs, enum color_space output_cs, struct transfer_func *output_tf,
-    enum vpe_surface_pixel_format output_format, bool enable_3dlut)
+struct vpe_color vpe_get_visual_confirm_color(struct vpe_priv *vpe_priv,
+    enum vpe_surface_pixel_format format, struct vpe_color_space cs, enum color_space output_cs,
+    struct transfer_func *output_tf, enum vpe_surface_pixel_format output_format, bool enable_3dlut)
 {
+
     struct vpe_color visual_confirm_color;
     visual_confirm_color.is_ycbcr = false;
     visual_confirm_color.rgba.a   = 0.0;
@@ -97,15 +106,17 @@ struct vpe_color vpe_get_visual_confirm_color(enum vpe_surface_pixel_format form
         break;
     case VPE_SURFACE_PIXEL_FORMAT_VIDEO_420_10bpc_YCbCr:
     case VPE_SURFACE_PIXEL_FORMAT_VIDEO_420_10bpc_YCrCb:
-        // YUV420 10bit: yellow (SDR)
+        // YUV420 10bit: Yellow (SDR)
         switch (cs.tf) {
         case VPE_TF_G22:
         case VPE_TF_G24:
+        case VPE_TF_SRGB:
+        case VPE_TF_BT709:
             visual_confirm_color.rgba.r = 1.0;
             visual_confirm_color.rgba.g = 1.0;
             visual_confirm_color.rgba.b = 0.0;
             break;
-            // YUV420 10bit: White (HDR)
+            // YUV420 10bit 3dlut enable: White (HDR)
         case VPE_TF_PQ:
         case VPE_TF_HLG:
             if (enable_3dlut) {
@@ -113,6 +124,7 @@ struct vpe_color vpe_get_visual_confirm_color(enum vpe_surface_pixel_format form
                 visual_confirm_color.rgba.g = 1.0;
                 visual_confirm_color.rgba.b = 1.0;
             } else {
+            // YUV420 10bit 3dlut disable: Red (HDR)
                 visual_confirm_color.rgba.r = 1.0;
                 visual_confirm_color.rgba.g = 0.0;
                 visual_confirm_color.rgba.b = 0.0;
@@ -148,9 +160,9 @@ struct vpe_color vpe_get_visual_confirm_color(enum vpe_surface_pixel_format form
     case VPE_SURFACE_PIXEL_FORMAT_GRPH_ABGR16161616F:
     case VPE_SURFACE_PIXEL_FORMAT_GRPH_RGBA16161616F:
     case VPE_SURFACE_PIXEL_FORMAT_GRPH_BGRA16161616F:
-        // FP16 and variants: orange
+        // FP16 and variants: Orange
         visual_confirm_color.rgba.r = 1.0;
-        visual_confirm_color.rgba.g = 0.21972f;
+        visual_confirm_color.rgba.g = 0.65f;
         visual_confirm_color.rgba.b = 0.0;
         break;
     default:
@@ -158,7 +170,8 @@ struct vpe_color vpe_get_visual_confirm_color(enum vpe_surface_pixel_format form
     }
 
     // Due to there will be regamma (ogam), need convert the bg color for visual confirm
-    vpe_bg_color_convert(output_cs, output_tf, &visual_confirm_color, enable_3dlut);
+    vpe_priv->resource.bg_color_convert(
+        output_cs, output_tf, output_format, &visual_confirm_color, NULL, enable_3dlut);
 
     // Experimental: To make FP16 Linear color looks more visually ok
     if (vpe_is_fp16(output_format)) {
@@ -182,6 +195,7 @@ enum vpe_status vpe_create_visual_confirm_segs(
     uint16_t total_seg_cnt =
         vpe_get_visual_confirm_total_seg_count(vpe_priv, max_seg_width, params);
     uint16_t seg_cnt = 0;
+    uint32_t recout_alignment = vpe_get_recout_width_alignment(params);
 
     if (!total_seg_cnt)
         return VPE_STATUS_OK;
@@ -192,7 +206,7 @@ enum vpe_status vpe_create_visual_confirm_segs(
 
     current_gap = visual_confirm_gaps;
 
-    // Do visual confirm bg generation for intput format
+    // Do visual confirm bg generation for input format
     if (vpe_priv->init.debug.visual_confirm_params.input_format &&
         params->target_rect.height > 2 * VISUAL_CONFIRM_HEIGHT) {
         for (stream_idx = 0; stream_idx < params->num_streams; stream_idx++) {
@@ -201,8 +215,8 @@ enum vpe_status vpe_create_visual_confirm_segs(
             visual_confirm_rect.y += 0;
             visual_confirm_rect.height = VISUAL_CONFIRM_HEIGHT;
             seg_cnt                    = get_visual_confirm_segs_count(
-                max_seg_width, stream_ctx->stream.scaling_info.dst_rect.width);
-            vpe_full_bg_gaps(current_gap, &visual_confirm_rect, seg_cnt);
+                max_seg_width, stream_ctx->stream.scaling_info.dst_rect.width, recout_alignment);
+            vpe_full_bg_gaps(current_gap, &visual_confirm_rect, recout_alignment, seg_cnt);
             vpe_priv->resource.create_bg_segments(
                 vpe_priv, current_gap, seg_cnt, VPE_CMD_OPS_BG_VSCF_INPUT);
             current_gap += seg_cnt;
@@ -214,8 +228,9 @@ enum vpe_status vpe_create_visual_confirm_segs(
         visual_confirm_rect = params->target_rect;
         visual_confirm_rect.y += VISUAL_CONFIRM_HEIGHT;
         visual_confirm_rect.height = VISUAL_CONFIRM_HEIGHT;
-        seg_cnt = get_visual_confirm_segs_count(max_seg_width, params->target_rect.width);
-        vpe_full_bg_gaps(current_gap, &visual_confirm_rect, seg_cnt);
+        seg_cnt                    = get_visual_confirm_segs_count(
+            max_seg_width, params->target_rect.width, recout_alignment);
+        vpe_full_bg_gaps(current_gap, &visual_confirm_rect, recout_alignment, seg_cnt);
         vpe_priv->resource.create_bg_segments(
             vpe_priv, current_gap, seg_cnt, VPE_CMD_OPS_BG_VSCF_OUTPUT);
         current_gap += seg_cnt;

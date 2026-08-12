@@ -283,65 +283,6 @@ softpipe_get_tex_image_offset(const struct softpipe_resource *spr,
    return offset;
 }
 
-
-/**
- * Get a pipe_surface "view" into a texture resource.
- */
-static struct pipe_surface *
-softpipe_create_surface(struct pipe_context *pipe,
-                        struct pipe_resource *pt,
-                        const struct pipe_surface *surf_tmpl)
-{
-   struct pipe_surface *ps;
-
-   ps = CALLOC_STRUCT(pipe_surface);
-   if (ps) {
-      pipe_reference_init(&ps->reference, 1);
-      pipe_resource_reference(&ps->texture, pt);
-      ps->context = pipe;
-      ps->format = surf_tmpl->format;
-      if (pt->target != PIPE_BUFFER) {
-         assert(surf_tmpl->u.tex.level <= pt->last_level);
-         ps->width = u_minify(pt->width0, surf_tmpl->u.tex.level);
-         ps->height = u_minify(pt->height0, surf_tmpl->u.tex.level);
-         ps->u.tex.level = surf_tmpl->u.tex.level;
-         ps->u.tex.first_layer = surf_tmpl->u.tex.first_layer;
-         ps->u.tex.last_layer = surf_tmpl->u.tex.last_layer;
-         if (ps->u.tex.first_layer != ps->u.tex.last_layer) {
-            debug_printf("creating surface with multiple layers, rendering to first layer only\n");
-         }
-      }
-      else {
-         /* setting width as number of elements should get us correct renderbuffer width */
-         ps->width = surf_tmpl->u.buf.last_element - surf_tmpl->u.buf.first_element + 1;
-         ps->height = pt->height0;
-         ps->u.buf.first_element = surf_tmpl->u.buf.first_element;
-         ps->u.buf.last_element = surf_tmpl->u.buf.last_element;
-         assert(ps->u.buf.first_element <= ps->u.buf.last_element);
-         assert(ps->u.buf.last_element < ps->width);
-      }
-   }
-   return ps;
-}
-
-
-/**
- * Free a pipe_surface which was created with softpipe_create_surface().
- */
-static void 
-softpipe_surface_destroy(struct pipe_context *pipe,
-                         struct pipe_surface *surf)
-{
-   /* Effectively do the texture_update work here - if texture images
-    * needed post-processing to put them into hardware layout, this is
-    * where it would happen.  For softpipe, nothing to do.
-    */
-   assert(surf->texture);
-   pipe_resource_reference(&surf->texture, NULL);
-   FREE(surf);
-}
-
-
 /**
  * Geta pipe_transfer object which is used for moving data in/out of
  * a resource object.
@@ -521,8 +462,6 @@ softpipe_init_texture_funcs(struct pipe_context *pipe)
    pipe->buffer_subdata = u_default_buffer_subdata;
    pipe->texture_subdata = u_default_texture_subdata;
 
-   pipe->create_surface = softpipe_create_surface;
-   pipe->surface_destroy = softpipe_surface_destroy;
    pipe->clear_texture = util_clear_texture_sw;
 }
 

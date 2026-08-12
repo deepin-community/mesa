@@ -1,13 +1,11 @@
 /*
  * Copyright © 2021 Collabora, Ltd.
- * Author: Antonio Caggiano <antonio.caggiano@collabora.com>
- *
  * SPDX-License-Identifier: MIT
  */
 
 #pragma once
 
-struct panfrost_perf;
+struct pan_perf;
 
 namespace pps {
 class PanfrostDevice {
@@ -39,7 +37,7 @@ class PanfrostPerf {
    void disable() const;
    int dump() const;
 
-   struct panfrost_perf *perf = nullptr;
+   struct pan_perf *perf = nullptr;
 };
 
 } // namespace pps

@@ -43,7 +43,7 @@ anv_create_engine(struct anv_device *device,
    case INTEL_KMD_TYPE_XE:
       return anv_xe_create_engine(device, queue, pCreateInfo);
    default:
-      unreachable("Missing");
+      UNREACHABLE("Missing");
       return VK_ERROR_UNKNOWN;
    }
 }
@@ -60,7 +60,7 @@ anv_destroy_engine(struct anv_queue *queue)
       anv_xe_destroy_engine(device, queue);
       break;
    default:
-      unreachable("Missing");
+      UNREACHABLE("Missing");
    }
 }
 
@@ -92,9 +92,11 @@ anv_queue_init(struct anv_device *device, struct anv_queue *queue,
    }
 
    /* Add a debug fence to wait on submissions if we're using the synchronized
-    * submission feature or the shader-print feature.
+    * submission feature, shader-print feature, or BVH dump.
     */
-   if (INTEL_DEBUG(DEBUG_SYNC | DEBUG_SHADER_PRINT)) {
+   if (INTEL_DEBUG(DEBUG_SYNC) ||
+       INTEL_DEBUG(DEBUG_SHADER_PRINT) ||
+       INTEL_DEBUG_BVH_ANY) {
       result = vk_sync_create(&device->vk,
                               &device->physical->sync_syncobj_type,
                               0, 0, &queue->sync);
@@ -138,31 +140,4 @@ anv_queue_finish(struct anv_queue *queue)
 
    anv_destroy_engine(queue);
    vk_queue_finish(&queue->vk);
-}
-
-VkResult
-anv_QueueWaitIdle(VkQueue _queue)
-{
-   VK_FROM_HANDLE(anv_queue, queue, _queue);
-   struct anv_device *device = queue->device;
-
-   switch (device->info->kmd_type) {
-   case INTEL_KMD_TYPE_XE:
-      if (queue->vk.submit.mode != VK_QUEUE_SUBMIT_MODE_THREADED) {
-         int ret = anv_xe_wait_exec_queue_idle(device, queue->exec_queue_id);
-
-         if (ret == 0)
-            return VK_SUCCESS;
-         if (ret == -ECANCELED)
-            return VK_ERROR_DEVICE_LOST;
-         return vk_errorf(device, VK_ERROR_UNKNOWN, "anv_xe_wait_exec_queue_idle failed: %m");
-      }
-      FALLTHROUGH;
-   case INTEL_KMD_TYPE_I915:
-      return vk_common_QueueWaitIdle(_queue);
-   default:
-      unreachable("Missing");
-   }
-
-   return VK_SUCCESS;
 }

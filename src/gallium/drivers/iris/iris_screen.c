@@ -1,26 +1,7 @@
 /*
  * Copyright © 2017 Intel Corporation
+ * SPDX-License-Identifier: MIT
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
-
-/**
  * @file iris_screen.c
  *
  * Screen related driver hooks and capability lists.
@@ -62,6 +43,9 @@
 
 #define genX_call(devinfo, func, ...)             \
    switch ((devinfo)->verx10) {                   \
+   case 350:                                      \
+      gfx35_##func(__VA_ARGS__);                  \
+      break;                                      \
    case 300:                                      \
       gfx30_##func(__VA_ARGS__);                  \
       break;                                      \
@@ -84,8 +68,13 @@
       gfx8_##func(__VA_ARGS__);                   \
       break;                                      \
    default:                                       \
-      unreachable("Unknown hardware generation"); \
+      UNREACHABLE("Unknown hardware generation"); \
    }
+
+#ifndef INTEL_USE_ELK
+static inline void gfx8_init_screen_state(struct iris_screen *screen) { UNREACHABLE("no elk support"); }
+static inline void gfx8_init_screen_gen_state(struct iris_screen *screen) { UNREACHABLE("no elk support"); }
+#endif
 
 static const char *
 iris_get_vendor(struct pipe_screen *pscreen)
@@ -114,15 +103,6 @@ iris_get_driver_uuid(struct pipe_screen *pscreen, char *uuid)
    const struct intel_device_info *devinfo = screen->devinfo;
 
    intel_uuid_compute_driver_id((uint8_t *)uuid, devinfo, PIPE_UUID_SIZE);
-}
-
-static bool
-iris_enable_clover()
-{
-   static int enable = -1;
-   if (enable < 0)
-      enable = debug_get_bool_option("IRIS_ENABLE_CLOVER", false);
-   return enable;
 }
 
 static void
@@ -186,14 +166,9 @@ iris_get_video_memory(struct iris_screen *screen)
       const unsigned gpu_mappable_megabytes =
          (devinfo->aperture_bytes * 3 / 4) / (1024 * 1024);
 
-      const long system_memory_pages = sysconf(_SC_PHYS_PAGES);
-      const long system_page_size = sysconf(_SC_PAGE_SIZE);
-
-      if (system_memory_pages <= 0 || system_page_size <= 0)
+      uint64_t system_memory_bytes;
+      if (!os_get_total_physical_memory(&system_memory_bytes))
          return -1;
-
-      const uint64_t system_memory_bytes =
-         (uint64_t) system_memory_pages * (uint64_t) system_page_size;
 
       const unsigned system_memory_megabytes =
          (unsigned) (system_memory_bytes / (1024 * 1024));
@@ -202,450 +177,331 @@ iris_get_video_memory(struct iris_screen *screen)
    }
 }
 
-static int
-iris_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
+static void
+iris_init_shader_caps(struct iris_screen *screen)
 {
-   struct iris_screen *screen = (struct iris_screen *)pscreen;
-   const struct intel_device_info *devinfo = screen->devinfo;
+   for (unsigned i = 0; i <= MESA_SHADER_COMPUTE; i++) {
+      struct pipe_shader_caps *caps =
+         (struct pipe_shader_caps *)&screen->base.shader_caps[i];
 
-   switch (param) {
-   case PIPE_CAP_NPOT_TEXTURES:
-   case PIPE_CAP_ANISOTROPIC_FILTER:
-   case PIPE_CAP_OCCLUSION_QUERY:
-   case PIPE_CAP_QUERY_TIME_ELAPSED:
-   case PIPE_CAP_TEXTURE_SWIZZLE:
-   case PIPE_CAP_TEXTURE_MIRROR_CLAMP_TO_EDGE:
-   case PIPE_CAP_BLEND_EQUATION_SEPARATE:
-   case PIPE_CAP_FRAGMENT_SHADER_TEXTURE_LOD:
-   case PIPE_CAP_FRAGMENT_SHADER_DERIVATIVES:
-   case PIPE_CAP_PRIMITIVE_RESTART:
-   case PIPE_CAP_PRIMITIVE_RESTART_FIXED_INDEX:
-   case PIPE_CAP_INDEP_BLEND_ENABLE:
-   case PIPE_CAP_INDEP_BLEND_FUNC:
-   case PIPE_CAP_FS_COORD_ORIGIN_UPPER_LEFT:
-   case PIPE_CAP_FS_COORD_PIXEL_CENTER_INTEGER:
-   case PIPE_CAP_DEPTH_CLIP_DISABLE:
-   case PIPE_CAP_VS_INSTANCEID:
-   case PIPE_CAP_VERTEX_ELEMENT_INSTANCE_DIVISOR:
-   case PIPE_CAP_SEAMLESS_CUBE_MAP:
-   case PIPE_CAP_SEAMLESS_CUBE_MAP_PER_TEXTURE:
-   case PIPE_CAP_CONDITIONAL_RENDER:
-   case PIPE_CAP_TEXTURE_BARRIER:
-   case PIPE_CAP_STREAM_OUTPUT_PAUSE_RESUME:
-   case PIPE_CAP_VERTEX_COLOR_UNCLAMPED:
-   case PIPE_CAP_COMPUTE:
-   case PIPE_CAP_START_INSTANCE:
-   case PIPE_CAP_QUERY_TIMESTAMP:
-   case PIPE_CAP_TEXTURE_MULTISAMPLE:
-   case PIPE_CAP_CUBE_MAP_ARRAY:
-   case PIPE_CAP_TEXTURE_BUFFER_OBJECTS:
-   case PIPE_CAP_QUERY_PIPELINE_STATISTICS_SINGLE:
-   case PIPE_CAP_TEXTURE_QUERY_LOD:
-   case PIPE_CAP_SAMPLE_SHADING:
-   case PIPE_CAP_FORCE_PERSAMPLE_INTERP:
-   case PIPE_CAP_DRAW_INDIRECT:
-   case PIPE_CAP_MULTI_DRAW_INDIRECT:
-   case PIPE_CAP_MULTI_DRAW_INDIRECT_PARAMS:
-   case PIPE_CAP_MIXED_FRAMEBUFFER_SIZES:
-   case PIPE_CAP_VS_LAYER_VIEWPORT:
-   case PIPE_CAP_TES_LAYER_VIEWPORT:
-   case PIPE_CAP_FS_FINE_DERIVATIVE:
-   case PIPE_CAP_SHADER_PACK_HALF_FLOAT:
-   case PIPE_CAP_ACCELERATED:
-   case PIPE_CAP_CONDITIONAL_RENDER_INVERTED:
-   case PIPE_CAP_CLIP_HALFZ:
-   case PIPE_CAP_TGSI_TEXCOORD:
-   case PIPE_CAP_STREAM_OUTPUT_INTERLEAVE_BUFFERS:
-   case PIPE_CAP_DOUBLES:
-   case PIPE_CAP_INT64:
-   case PIPE_CAP_SAMPLER_VIEW_TARGET:
-   case PIPE_CAP_ROBUST_BUFFER_ACCESS_BEHAVIOR:
-   case PIPE_CAP_DEVICE_RESET_STATUS_QUERY:
-   case PIPE_CAP_COPY_BETWEEN_COMPRESSED_AND_PLAIN_FORMATS:
-   case PIPE_CAP_FRAMEBUFFER_NO_ATTACHMENT:
-   case PIPE_CAP_CULL_DISTANCE:
-   case PIPE_CAP_PACKED_UNIFORMS:
-   case PIPE_CAP_SIGNED_VERTEX_BUFFER_OFFSET:
-   case PIPE_CAP_TEXTURE_FLOAT_LINEAR:
-   case PIPE_CAP_TEXTURE_HALF_FLOAT_LINEAR:
-   case PIPE_CAP_POLYGON_OFFSET_CLAMP:
-   case PIPE_CAP_QUERY_SO_OVERFLOW:
-   case PIPE_CAP_QUERY_BUFFER_OBJECT:
-   case PIPE_CAP_TGSI_TEX_TXF_LZ:
-   case PIPE_CAP_TEXTURE_QUERY_SAMPLES:
-   case PIPE_CAP_SHADER_CLOCK:
-   case PIPE_CAP_SHADER_BALLOT:
-   case PIPE_CAP_MULTISAMPLE_Z_RESOLVE:
-   case PIPE_CAP_CLEAR_SCISSORED:
-   case PIPE_CAP_SHADER_GROUP_VOTE:
-   case PIPE_CAP_VS_WINDOW_SPACE_POSITION:
-   case PIPE_CAP_TEXTURE_GATHER_SM5:
-   case PIPE_CAP_SHADER_ARRAY_COMPONENTS:
-   case PIPE_CAP_GLSL_TESS_LEVELS_AS_INPUTS:
-   case PIPE_CAP_LOAD_CONSTBUF:
-   case PIPE_CAP_DRAW_PARAMETERS:
-   case PIPE_CAP_FS_POSITION_IS_SYSVAL:
-   case PIPE_CAP_FS_FACE_IS_INTEGER_SYSVAL:
-   case PIPE_CAP_COMPUTE_SHADER_DERIVATIVES:
-   case PIPE_CAP_INVALIDATE_BUFFER:
-   case PIPE_CAP_SURFACE_REINTERPRET_BLOCKS:
-   case PIPE_CAP_TEXTURE_SHADOW_LOD:
-   case PIPE_CAP_SHADER_SAMPLES_IDENTICAL:
-   case PIPE_CAP_GL_SPIRV:
-   case PIPE_CAP_GL_SPIRV_VARIABLE_POINTERS:
-   case PIPE_CAP_DEMOTE_TO_HELPER_INVOCATION:
-   case PIPE_CAP_NATIVE_FENCE_FD:
-   case PIPE_CAP_MEMOBJ:
-   case PIPE_CAP_MIXED_COLOR_DEPTH_BITS:
-   case PIPE_CAP_FENCE_SIGNAL:
-   case PIPE_CAP_IMAGE_STORE_FORMATTED:
-   case PIPE_CAP_LEGACY_MATH_RULES:
-   case PIPE_CAP_ALPHA_TO_COVERAGE_DITHER_CONTROL:
-   case PIPE_CAP_MAP_UNSYNCHRONIZED_THREAD_SAFE:
-   case PIPE_CAP_HAS_CONST_BW:
-   case PIPE_CAP_CL_GL_SHARING:
-      return true;
-   case PIPE_CAP_UMA:
-      return iris_bufmgr_vram_size(screen->bufmgr) == 0;
-   case PIPE_CAP_QUERY_MEMORY_INFO:
-      return iris_bufmgr_vram_size(screen->bufmgr) != 0;
-   case PIPE_CAP_PREFER_BACK_BUFFER_REUSE:
-      return false;
-   case PIPE_CAP_FBFETCH:
-      return IRIS_MAX_DRAW_BUFFERS;
-   case PIPE_CAP_FBFETCH_COHERENT:
-      return devinfo->ver >= 9 && devinfo->ver < 20;
-   case PIPE_CAP_CONSERVATIVE_RASTER_INNER_COVERAGE:
-   case PIPE_CAP_POST_DEPTH_COVERAGE:
-   case PIPE_CAP_SHADER_STENCIL_EXPORT:
-   case PIPE_CAP_DEPTH_CLIP_DISABLE_SEPARATE:
-   case PIPE_CAP_FRAGMENT_SHADER_INTERLOCK:
-   case PIPE_CAP_ATOMIC_FLOAT_MINMAX:
-      return devinfo->ver >= 9;
-   case PIPE_CAP_DEPTH_BOUNDS_TEST:
-      return devinfo->ver >= 12;
-   case PIPE_CAP_MAX_DUAL_SOURCE_RENDER_TARGETS:
-      return 1;
-   case PIPE_CAP_MAX_RENDER_TARGETS:
-      return IRIS_MAX_DRAW_BUFFERS;
-   case PIPE_CAP_MAX_TEXTURE_2D_SIZE:
-      return 16384;
-   case PIPE_CAP_MAX_TEXTURE_CUBE_LEVELS:
-      return IRIS_MAX_MIPLEVELS; /* 16384x16384 */
-   case PIPE_CAP_MAX_TEXTURE_3D_LEVELS:
-      return 12; /* 2048x2048 */
-   case PIPE_CAP_MAX_STREAM_OUTPUT_BUFFERS:
-      return 4;
-   case PIPE_CAP_MAX_TEXTURE_ARRAY_LAYERS:
-      return 2048;
-   case PIPE_CAP_MAX_STREAM_OUTPUT_SEPARATE_COMPONENTS:
-      return IRIS_MAX_SOL_BINDINGS / IRIS_MAX_SOL_BUFFERS;
-   case PIPE_CAP_MAX_STREAM_OUTPUT_INTERLEAVED_COMPONENTS:
-      return IRIS_MAX_SOL_BINDINGS;
-   case PIPE_CAP_GLSL_FEATURE_LEVEL:
-   case PIPE_CAP_GLSL_FEATURE_LEVEL_COMPATIBILITY:
-      return 460;
-   case PIPE_CAP_CONSTANT_BUFFER_OFFSET_ALIGNMENT:
-      /* 3DSTATE_CONSTANT_XS requires the start of UBOs to be 32B aligned */
-      return 32;
-   case PIPE_CAP_MIN_MAP_BUFFER_ALIGNMENT:
-      return IRIS_MAP_BUFFER_ALIGNMENT;
-   case PIPE_CAP_SHADER_BUFFER_OFFSET_ALIGNMENT:
-      return 4;
-   case PIPE_CAP_MAX_SHADER_BUFFER_SIZE_UINT:
-      return 1 << 27;
-   case PIPE_CAP_TEXTURE_BUFFER_OFFSET_ALIGNMENT:
-      return 16; // XXX: u_screen says 256 is the minimum value...
-   case PIPE_CAP_LINEAR_IMAGE_PITCH_ALIGNMENT:
-      return 1;
-   case PIPE_CAP_LINEAR_IMAGE_BASE_ADDRESS_ALIGNMENT:
-      return 1;
-   case PIPE_CAP_TEXTURE_TRANSFER_MODES:
-      return PIPE_TEXTURE_TRANSFER_BLIT;
-   case PIPE_CAP_MAX_TEXEL_BUFFER_ELEMENTS_UINT:
-      return IRIS_MAX_TEXTURE_BUFFER_SIZE;
-   case PIPE_CAP_MAX_VIEWPORTS:
-      return 16;
-   case PIPE_CAP_MAX_GEOMETRY_OUTPUT_VERTICES:
-      return 256;
-   case PIPE_CAP_MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS:
-      return 1024;
-   case PIPE_CAP_MAX_GS_INVOCATIONS:
-      return 32;
-   case PIPE_CAP_MAX_TEXTURE_GATHER_COMPONENTS:
-      return 4;
-   case PIPE_CAP_MIN_TEXTURE_GATHER_OFFSET:
-      return -32;
-   case PIPE_CAP_MAX_TEXTURE_GATHER_OFFSET:
-      return 31;
-   case PIPE_CAP_MAX_VERTEX_STREAMS:
-      return 4;
-   case PIPE_CAP_VENDOR_ID:
-      return 0x8086;
-   case PIPE_CAP_DEVICE_ID:
-      return screen->devinfo->pci_device_id;
-   case PIPE_CAP_VIDEO_MEMORY:
-      return iris_get_video_memory(screen);
-   case PIPE_CAP_MAX_SHADER_PATCH_VARYINGS:
-   case PIPE_CAP_MAX_VARYINGS:
-      return 32;
-   case PIPE_CAP_PREFER_IMM_ARRAYS_AS_CONSTBUF:
-      /* We want immediate arrays to go get uploaded as nir->constant_data by
-       * nir_opt_large_constants() instead.
-       */
-      return 0;
-   case PIPE_CAP_RESOURCE_FROM_USER_MEMORY:
-      /* AMD_pinned_memory assumes the flexibility of using client memory
-       * for any buffer (incl. vertex buffers) which rules out the prospect
-       * of using snooped buffers, as using snooped buffers without
-       * cogniscience is likely to be detrimental to performance and require
-       * extensive checking in the driver for correctness, e.g. to prevent
-       * illegal snoop <-> snoop transfers.
-       */
-      return devinfo->has_llc;
-   case PIPE_CAP_THROTTLE:
-      return screen->driconf.disable_throttling ? 0 : 1;
+      caps->max_instructions = i == MESA_SHADER_FRAGMENT ? 1024 : 16384;
+      caps->max_alu_instructions =
+      caps->max_tex_instructions =
+      caps->max_tex_indirections = i == MESA_SHADER_FRAGMENT ? 1024 : 0;
 
-   case PIPE_CAP_CONTEXT_PRIORITY_MASK:
-      return PIPE_CONTEXT_PRIORITY_LOW |
-             PIPE_CONTEXT_PRIORITY_MEDIUM |
-             PIPE_CONTEXT_PRIORITY_HIGH;
+      caps->max_control_flow_depth = UINT_MAX;
 
-   case PIPE_CAP_FRONTEND_NOOP:
-      return true;
+      caps->max_inputs = i == MESA_SHADER_VERTEX ? 16 : 32;
+      caps->max_outputs = 32;
+      caps->max_const_buffer0_size = 16 * 1024 * sizeof(float);
+      caps->max_const_buffers = 16;
+      caps->max_temps = 256; /* GL_MAX_PROGRAM_TEMPORARIES_ARB */
 
-   // XXX: don't hardcode 00:00:02.0 PCI here
-   case PIPE_CAP_PCI_GROUP:
-      return 0;
-   case PIPE_CAP_PCI_BUS:
-      return 0;
-   case PIPE_CAP_PCI_DEVICE:
-      return 2;
-   case PIPE_CAP_PCI_FUNCTION:
-      return 0;
-
-   case PIPE_CAP_OPENCL_INTEGER_FUNCTIONS:
-   case PIPE_CAP_INTEGER_MULTIPLY_32X16:
-      return true;
-
-   case PIPE_CAP_ALLOW_DYNAMIC_VAO_FASTPATH:
-      /* Internal details of VF cache make this optimization harmful on GFX
-       * version 8 and 9, because generated VERTEX_BUFFER_STATEs are cached
-       * separately.
-       */
-      return devinfo->ver >= 11;
-
-   case PIPE_CAP_TIMER_RESOLUTION:
-      return DIV_ROUND_UP(1000000000ull, devinfo->timestamp_frequency);
-
-   case PIPE_CAP_DEVICE_PROTECTED_CONTEXT:
-      return screen->kernel_features & KERNEL_HAS_PROTECTED_CONTEXT;
-
-   case PIPE_CAP_ASTC_VOID_EXTENTS_NEED_DENORM_FLUSH:
-      return devinfo->ver == 9 && !intel_device_info_is_9lp(devinfo);
-
-   default:
-      return u_pipe_screen_get_param_defaults(pscreen, param);
-   }
-   return 0;
-}
-
-static float
-iris_get_paramf(struct pipe_screen *pscreen, enum pipe_capf param)
-{
-   switch (param) {
-   case PIPE_CAPF_MIN_LINE_WIDTH:
-   case PIPE_CAPF_MIN_LINE_WIDTH_AA:
-   case PIPE_CAPF_MIN_POINT_SIZE:
-   case PIPE_CAPF_MIN_POINT_SIZE_AA:
-      return 1;
-
-   case PIPE_CAPF_POINT_SIZE_GRANULARITY:
-   case PIPE_CAPF_LINE_WIDTH_GRANULARITY:
-      return 0.1;
-
-   case PIPE_CAPF_MAX_LINE_WIDTH:
-   case PIPE_CAPF_MAX_LINE_WIDTH_AA:
-      return 7.375f;
-
-   case PIPE_CAPF_MAX_POINT_SIZE:
-   case PIPE_CAPF_MAX_POINT_SIZE_AA:
-      return 255.0f;
-
-   case PIPE_CAPF_MAX_TEXTURE_ANISOTROPY:
-      return 16.0f;
-   case PIPE_CAPF_MAX_TEXTURE_LOD_BIAS:
-      return 15.0f;
-   case PIPE_CAPF_MIN_CONSERVATIVE_RASTER_DILATE:
-   case PIPE_CAPF_MAX_CONSERVATIVE_RASTER_DILATE:
-   case PIPE_CAPF_CONSERVATIVE_RASTER_DILATE_GRANULARITY:
-      return 0.0f;
-   default:
-      unreachable("unknown param");
-   }
-}
-
-static int
-iris_get_shader_param(struct pipe_screen *pscreen,
-                      enum pipe_shader_type p_stage,
-                      enum pipe_shader_cap param)
-{
-   gl_shader_stage stage = stage_from_pipe(p_stage);
-
-   if (p_stage == PIPE_SHADER_MESH ||
-       p_stage == PIPE_SHADER_TASK)
-      return 0;
-
-   /* this is probably not totally correct.. but it's a start: */
-   switch (param) {
-   case PIPE_SHADER_CAP_MAX_INSTRUCTIONS:
-      return stage == MESA_SHADER_FRAGMENT ? 1024 : 16384;
-   case PIPE_SHADER_CAP_MAX_ALU_INSTRUCTIONS:
-   case PIPE_SHADER_CAP_MAX_TEX_INSTRUCTIONS:
-   case PIPE_SHADER_CAP_MAX_TEX_INDIRECTIONS:
-      return stage == MESA_SHADER_FRAGMENT ? 1024 : 0;
-
-   case PIPE_SHADER_CAP_MAX_CONTROL_FLOW_DEPTH:
-      return UINT_MAX;
-
-   case PIPE_SHADER_CAP_MAX_INPUTS:
-      return stage == MESA_SHADER_VERTEX ? 16 : 32;
-   case PIPE_SHADER_CAP_MAX_OUTPUTS:
-      return 32;
-   case PIPE_SHADER_CAP_MAX_CONST_BUFFER0_SIZE:
-      return 16 * 1024 * sizeof(float);
-   case PIPE_SHADER_CAP_MAX_CONST_BUFFERS:
-      return 16;
-   case PIPE_SHADER_CAP_MAX_TEMPS:
-      return 256; /* GL_MAX_PROGRAM_TEMPORARIES_ARB */
-   case PIPE_SHADER_CAP_CONT_SUPPORTED:
-      return 0;
-   case PIPE_SHADER_CAP_INDIRECT_INPUT_ADDR:
-   case PIPE_SHADER_CAP_INDIRECT_OUTPUT_ADDR:
-   case PIPE_SHADER_CAP_INDIRECT_TEMP_ADDR:
-   case PIPE_SHADER_CAP_INDIRECT_CONST_ADDR:
       /* Lie about these to avoid st/mesa's GLSL IR lowering of indirects,
        * which we don't want.  Our compiler backend will check brw_compiler's
-       * options and call nir_lower_indirect_derefs appropriately anyway.
+       * options and call nir_lower_indirect_derefs_to_if_else_trees
+       * appropriately anyway.
        */
-      return true;
-   case PIPE_SHADER_CAP_SUBROUTINES:
-      return 0;
-   case PIPE_SHADER_CAP_INTEGERS:
-      return 1;
-   case PIPE_SHADER_CAP_INT64_ATOMICS:
-   case PIPE_SHADER_CAP_FP16:
-   case PIPE_SHADER_CAP_FP16_DERIVATIVES:
-   case PIPE_SHADER_CAP_FP16_CONST_BUFFERS:
-   case PIPE_SHADER_CAP_INT16:
-   case PIPE_SHADER_CAP_GLSL_16BIT_CONSTS:
-      return 0;
-   case PIPE_SHADER_CAP_MAX_TEXTURE_SAMPLERS:
-      return IRIS_MAX_SAMPLERS;
-   case PIPE_SHADER_CAP_MAX_SAMPLER_VIEWS:
-      return IRIS_MAX_TEXTURES;
-   case PIPE_SHADER_CAP_MAX_SHADER_IMAGES:
-      return IRIS_MAX_IMAGES;
-   case PIPE_SHADER_CAP_MAX_SHADER_BUFFERS:
-      return IRIS_MAX_ABOS + IRIS_MAX_SSBOS;
-   case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTERS:
-   case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTER_BUFFERS:
-      return 0;
-   case PIPE_SHADER_CAP_SUPPORTED_IRS: {
-      int irs = 1 << PIPE_SHADER_IR_NIR;
-      if (iris_enable_clover())
-         irs |= 1 << PIPE_SHADER_IR_NIR_SERIALIZED;
-      return irs;
-   }
-   case PIPE_SHADER_CAP_TGSI_ANY_INOUT_DECL_RANGE:
-   case PIPE_SHADER_CAP_TGSI_SQRT_SUPPORTED:
-      return 0;
-   default:
-      unreachable("unknown shader param");
+      caps->indirect_temp_addr = true;
+      caps->indirect_const_addr = true;
+
+      caps->integers = true;
+      caps->max_texture_samplers = IRIS_MAX_SAMPLERS;
+      caps->max_sampler_views = IRIS_MAX_TEXTURES;
+      caps->max_shader_images = IRIS_MAX_IMAGES;
+      caps->max_shader_buffers = IRIS_MAX_ABOS + IRIS_MAX_SSBOS;
+      caps->supported_irs = 1 << PIPE_SHADER_IR_NIR;
    }
 }
 
-static int
-iris_get_compute_param(struct pipe_screen *pscreen,
-                       enum pipe_shader_ir ir_type,
-                       enum pipe_compute_cap param,
-                       void *ret)
+static void
+iris_init_compute_caps(struct iris_screen *screen)
 {
-   struct iris_screen *screen = (struct iris_screen *)pscreen;
+   struct pipe_compute_caps *caps =
+      (struct pipe_compute_caps *)&screen->base.compute_caps;
+
    const struct intel_device_info *devinfo = screen->devinfo;
 
    const uint32_t max_invocations =
       MIN2(1024, 32 * devinfo->max_cs_workgroup_threads);
 
-#define RET(x) do {                  \
-   if (ret)                          \
-      memcpy(ret, x, sizeof(x));     \
-   return sizeof(x);                 \
-} while (0)
+   /* This gets queried on OpenCL device init and is never queried by the
+    * OpenGL state tracker.
+    */
+   caps->address_bits = 64;
 
-   switch (param) {
-   case PIPE_COMPUTE_CAP_ADDRESS_BITS:
-      /* This gets queried on OpenCL device init and is never queried by the
-       * OpenGL state tracker.
-       */
-      iris_warn_cl();
-      RET((uint32_t []){ 64 });
+   caps->grid_dimension = 3;
 
-   case PIPE_COMPUTE_CAP_IR_TARGET:
-      if (ret)
-         strcpy(ret, "gen");
-      return 4;
+   caps->max_grid_size[0] =
+   caps->max_grid_size[1] =
+   caps->max_grid_size[2] = UINT32_MAX;
 
-   case PIPE_COMPUTE_CAP_GRID_DIMENSION:
-      RET((uint64_t []) { 3 });
+   /* MaxComputeWorkGroupSize[0..2] */
+   caps->max_block_size[0] =
+   caps->max_block_size[1] =
+   caps->max_block_size[2] = max_invocations;
 
-   case PIPE_COMPUTE_CAP_MAX_GRID_SIZE:
-      RET(((uint64_t []) { UINT32_MAX, UINT32_MAX, UINT32_MAX }));
+   /* MaxComputeWorkGroupInvocations */
+   caps->max_threads_per_block =
+   /* MaxComputeVariableGroupInvocations */
+   caps->max_variable_threads_per_block = max_invocations;
 
-   case PIPE_COMPUTE_CAP_MAX_BLOCK_SIZE:
-      /* MaxComputeWorkGroupSize[0..2] */
-      RET(((uint64_t []) {max_invocations, max_invocations, max_invocations}));
+   /* MaxComputeSharedMemorySize */
+   caps->max_local_size = 64 * 1024;
 
-   case PIPE_COMPUTE_CAP_MAX_THREADS_PER_BLOCK:
-      /* MaxComputeWorkGroupInvocations */
-   case PIPE_COMPUTE_CAP_MAX_VARIABLE_THREADS_PER_BLOCK:
-      /* MaxComputeVariableGroupInvocations */
-      RET((uint64_t []) { max_invocations });
+   caps->subgroup_sizes = 32 | 16 | 8;
 
-   case PIPE_COMPUTE_CAP_MAX_LOCAL_SIZE:
-      /* MaxComputeSharedMemorySize */
-      RET((uint64_t []) { 64 * 1024 });
+   caps->max_subgroups = devinfo->max_cs_workgroup_threads;
 
-   case PIPE_COMPUTE_CAP_IMAGES_SUPPORTED:
-      RET((uint32_t []) { 1 });
+   caps->max_mem_alloc_size =
+   caps->max_global_size = 1 << 30; /* TODO */
 
-   case PIPE_COMPUTE_CAP_SUBGROUP_SIZES:
-      RET((uint32_t []) { 32 | 16 | 8 });
+   caps->max_clock_frequency = 400; /* TODO */
 
-   case PIPE_COMPUTE_CAP_MAX_SUBGROUPS:
-      RET((uint32_t []) { devinfo->max_cs_workgroup_threads });
+   caps->max_compute_units = intel_device_info_subslice_total(devinfo);
+}
 
-   case PIPE_COMPUTE_CAP_MAX_MEM_ALLOC_SIZE:
-   case PIPE_COMPUTE_CAP_MAX_GLOBAL_SIZE:
-      RET((uint64_t []) { 1 << 30 }); /* TODO */
+static void
+iris_init_screen_caps(struct iris_screen *screen)
+{
+   struct pipe_caps *caps = (struct pipe_caps *)&screen->base.caps;
 
-   case PIPE_COMPUTE_CAP_MAX_CLOCK_FREQUENCY:
-      RET((uint32_t []) { 400 }); /* TODO */
+   u_init_pipe_screen_caps(&screen->base, 1);
 
-   case PIPE_COMPUTE_CAP_MAX_COMPUTE_UNITS: {
-      RET((uint32_t []) { intel_device_info_subslice_total(devinfo) });
-   }
+   const struct intel_device_info *devinfo = screen->devinfo;
 
-   case PIPE_COMPUTE_CAP_MAX_PRIVATE_SIZE:
-      /* MaxComputeSharedMemorySize */
-      RET((uint64_t []) { 64 * 1024 });
+   caps->prefer_real_buffer_in_constbuf0 = true;
+   caps->npot_textures = true;
+   caps->anisotropic_filter = true;
+   caps->occlusion_query = true;
+   caps->query_time_elapsed = true;
+   caps->texture_swizzle = true;
+   caps->texture_mirror_clamp_to_edge = true;
+   caps->blend_equation_separate = true;
+   caps->fragment_shader_texture_lod = true;
+   caps->fragment_shader_derivatives = true;
+   caps->primitive_restart = true;
+   caps->primitive_restart_fixed_index = true;
+   caps->indep_blend_enable = true;
+   caps->indep_blend_func = true;
+   caps->fs_coord_origin_upper_left = true;
+   caps->fs_coord_pixel_center_integer = true;
+   caps->depth_clip_disable = true;
+   caps->vs_instanceid = true;
+   caps->vertex_element_instance_divisor = true;
+   caps->seamless_cube_map = true;
+   caps->seamless_cube_map_per_texture = true;
+   caps->conditional_render = true;
+   caps->texture_barrier = true;
+   caps->stream_output_pause_resume = true;
+   caps->vertex_color_unclamped = true;
+   caps->compute = true;
+   caps->start_instance = true;
+   caps->query_timestamp = true;
+   caps->texture_multisample = true;
+   caps->cube_map_array = true;
+   caps->texture_buffer_objects = true;
+   caps->sampler_reduction_minmax_arb = devinfo->ver > 8;
+   caps->query_pipeline_statistics_single = true;
+   caps->texture_query_lod = true;
+   caps->sample_shading = true;
+   caps->force_persample_interp = true;
+   caps->draw_indirect = true;
+   caps->multi_draw_indirect = true;
+   caps->multi_draw_indirect_params = true;
+   caps->mixed_framebuffer_sizes = true;
+   caps->vs_layer_viewport = true;
+   caps->tes_layer_viewport = true;
+   caps->fs_fine_derivative = true;
+   caps->shader_pack_half_float = true;
+   caps->conditional_render_inverted = true;
+   caps->clip_halfz = true;
+   caps->tgsi_texcoord = true;
+   caps->stream_output_interleave_buffers = true;
+   caps->doubles = true;
+   caps->int64 = true;
+   caps->sampler_view_target = true;
+   caps->robust_buffer_access_behavior = true;
+   caps->device_reset_status_query = true;
+   caps->copy_between_compressed_and_plain_formats = true;
+   caps->framebuffer_no_attachment = true;
+   caps->cull_distance = true;
+   caps->packed_uniforms = true;
+   caps->signed_vertex_buffer_offset = true;
+   caps->texture_float_linear = true;
+   caps->texture_half_float_linear = true;
+   caps->polygon_offset_clamp = true;
+   caps->query_so_overflow = true;
+   caps->query_buffer_object = true;
+   caps->tgsi_tex_txf_lz = true;
+   caps->texture_query_samples = true;
+   caps->shader_clock = true;
+   caps->shader_ballot = true;
+   caps->multisample_z_resolve = true;
+   caps->clear_scissored = true;
+   caps->shader_group_vote = true;
+   caps->vs_window_space_position = true;
+   caps->texture_gather_sm5 = true;
+   caps->shader_array_components = true;
+   caps->glsl_tess_levels_as_inputs = true;
+   caps->load_constbuf = true;
+   caps->draw_parameters = true;
+   caps->fs_position_is_sysval = true;
+   caps->fs_face_is_integer_sysval = true;
+   caps->compute_shader_derivatives = true;
+   caps->invalidate_buffer = true;
+   caps->surface_reinterpret_blocks = true;
+   caps->compressed_surface_reinterpret_blocks_layered = devinfo->ver >= 9;
+   caps->texture_shadow_lod = true;
+   caps->shader_samples_identical = true;
+   caps->gl_spirv = true;
+   caps->gl_spirv_variable_pointers = true;
+   caps->demote_to_helper_invocation = true;
+   caps->native_fence_fd = true;
+   caps->memobj = true;
+   caps->mixed_color_depth_bits = true;
+   caps->fence_signal = true;
+   caps->image_store_formatted = true;
+   caps->legacy_math_rules = true;
+   caps->alpha_to_coverage_dither_control = true;
+   caps->map_unsynchronized_thread_safe = true;
+   caps->has_const_bw = true;
+   caps->cl_gl_sharing = true;
+   caps->uma = iris_bufmgr_vram_size(screen->bufmgr) == 0;
+   caps->query_memory_info = iris_bufmgr_vram_size(screen->bufmgr) != 0;
+   caps->prefer_back_buffer_reuse = false;
+   caps->fbfetch = IRIS_MAX_DRAW_BUFFERS;
+   caps->fbfetch_coherent = devinfo->ver >= 9 && devinfo->ver < 20;
+   caps->conservative_raster_inner_coverage =
+   caps->post_depth_coverage =
+   caps->shader_stencil_export =
+   caps->depth_clip_disable_separate =
+   caps->fragment_shader_interlock =
+   caps->atomic_float_minmax = devinfo->ver >= 9;
+   caps->depth_bounds_test = devinfo->ver >= 12;
+   caps->max_dual_source_render_targets = 1;
+   caps->max_render_targets = IRIS_MAX_DRAW_BUFFERS;
+   caps->max_texture_2d_size = 16384;
+   caps->max_texture_cube_levels = IRIS_MAX_MIPLEVELS; /* 16384x16384 */
+   caps->max_texture_3d_levels = 12; /* 2048x2048 */
+   caps->max_stream_output_buffers = 4;
+   caps->max_texture_array_layers = 2048;
+   caps->max_stream_output_separate_components =
+      IRIS_MAX_SOL_BINDINGS / IRIS_MAX_SOL_BUFFERS;
+   caps->max_stream_output_interleaved_components = IRIS_MAX_SOL_BINDINGS;
+   caps->glsl_feature_level =
+   caps->glsl_feature_level_compatibility = 460;
+   /* 3DSTATE_CONSTANT_XS requires the start of UBOs to be 32B aligned */
+   caps->constant_buffer_offset_alignment = 32;
+   caps->min_map_buffer_alignment = IRIS_MAP_BUFFER_ALIGNMENT;
+   caps->shader_buffer_offset_alignment = 4;
+   caps->max_shader_buffer_size = ROUND_DOWN_TO((unsigned)MIN2(screen->isl_dev.max_buffer_size, INT32_MAX), 256);
+   caps->texture_buffer_offset_alignment = 16; // XXX: u_screen says 256 is the minimum value...
+   caps->linear_image_pitch_alignment = 1;
+   caps->linear_image_base_address_alignment = 1;
+   caps->texture_transfer_modes = PIPE_TEXTURE_TRANSFER_BLIT;
+   caps->max_texel_buffer_elements = IRIS_MAX_TEXTURE_BUFFER_SIZE;
+   caps->max_viewports = 16;
+   caps->max_geometry_output_vertices = 256;
+   caps->max_geometry_total_output_components = 1024;
+   caps->max_gs_invocations = 32;
+   caps->max_texture_gather_components = 4;
+   caps->min_texture_gather_offset = -32;
+   caps->max_texture_gather_offset = 31;
+   caps->max_vertex_streams = 4;
+   caps->vendor_id = 0x8086;
+   caps->device_id = screen->devinfo->pci_device_id;
+   caps->video_memory = iris_get_video_memory(screen);
+   caps->max_shader_patch_varyings =
+   caps->max_varyings = 32;
+   /* We want immediate arrays to go get uploaded as nir->constant_data by
+    * nir_opt_large_constants() instead.
+    */
+   caps->prefer_imm_arrays_as_constbuf = false;
+   /* AMD_pinned_memory assumes the flexibility of using client memory
+    * for any buffer (incl. vertex buffers) which rules out the prospect
+    * of using snooped buffers, as using snooped buffers without
+    * cogniscience is likely to be detrimental to performance and require
+    * extensive checking in the driver for correctness, e.g. to prevent
+    * illegal snoop <-> snoop transfers.
+    */
+   caps->resource_from_user_memory = devinfo->has_llc && devinfo->has_userptr_uapi;
+   caps->throttle = !screen->driconf.disable_throttling;
 
-   case PIPE_COMPUTE_CAP_MAX_INPUT_SIZE:
-      /* We could probably allow more; this is the OpenCL minimum */
-      RET((uint64_t []) { 1024 });
+   caps->context_priority_mask =
+      PIPE_CONTEXT_PRIORITY_LOW |
+      PIPE_CONTEXT_PRIORITY_MEDIUM |
+      PIPE_CONTEXT_PRIORITY_HIGH;
 
-   default:
-      unreachable("unknown compute param");
+   /* Let mesa/st lower for us */
+   caps->flatshade = false;
+
+   caps->frontend_noop = true;
+
+   caps->pci_group = devinfo->pci_domain;
+   caps->pci_bus = devinfo->pci_bus;
+   caps->pci_device = devinfo->pci_dev;
+   caps->pci_function = devinfo->pci_func;
+
+   caps->opencl_integer_functions =
+   caps->integer_multiply_32x16 = true;
+
+   /* Internal details of VF cache make this optimization harmful on GFX
+    * version 8 and 9, because generated VERTEX_BUFFER_STATEs are cached
+    * separately.
+    */
+   caps->allow_dynamic_vao_fastpath = devinfo->ver >= 11;
+
+   caps->timer_resolution = DIV_ROUND_UP(1000000000ull, devinfo->timestamp_frequency);
+
+   caps->device_protected_context =
+      screen->kernel_features & KERNEL_HAS_PROTECTED_CONTEXT;
+
+   caps->astc_void_extents_need_denorm_flush =
+      devinfo->ver == 9 && !intel_device_info_is_9lp(devinfo);
+
+   caps->min_line_width =
+   caps->min_line_width_aa =
+   caps->min_point_size =
+   caps->min_point_size_aa = 1;
+
+   caps->point_size_granularity =
+   caps->line_width_granularity = 0.1;
+
+   caps->max_line_width =
+   caps->max_line_width_aa = 7.375f;
+
+   caps->max_point_size =
+   caps->max_point_size_aa = 255.0f;
+
+   caps->max_texture_anisotropy = 16.0f;
+   caps->max_texture_lod_bias = 15.0f;
+
+   caps->min_vma = IRIS_MEMZONE_OTHER_START;
+   /* Exclude addresses which would need to be converted to their canonical form.
+    * The easy way to go about this is to take the highest address and simply
+    * shift it right by one, so the highest valid address bit gets unset.
+    */
+   caps->max_vma = intel_48b_address(UINT64_MAX) >> 1;
+
+   /* We could implement two-sided color via SBE attribute swizzling but
+    * opt to use common NIR lowering instead of maintaining the complexity
+    * for a minor improvement for a long deprecated feature.
+    */
+   caps->two_sided_color = false;
+
+   if (devinfo->ver >= 9) {
+      caps->shader_subgroup_size = 32;
+      caps->shader_subgroup_supported_stages = BITFIELD_MASK(MESA_SHADER_STAGES);
+      caps->shader_subgroup_supported_features =
+         devinfo->has_64bit_float ? BITFIELD_MASK(PIPE_SHADER_SUBGROUP_NUM_FEATURES)
+                                  : (PIPE_SHADER_SUBGROUP_FEATURE_BASIC |
+                                     PIPE_SHADER_SUBGROUP_FEATURE_VOTE |
+                                     PIPE_SHADER_SUBGROUP_FEATURE_BALLOT |
+                                     PIPE_SHADER_SUBGROUP_FEATURE_SHUFFLE |
+                                     PIPE_SHADER_SUBGROUP_FEATURE_SHUFFLE_RELATIVE |
+                                     PIPE_SHADER_SUBGROUP_FEATURE_QUAD);
+      caps->shader_subgroup_quad_all_stages = true;
    }
 }
 
@@ -676,6 +532,7 @@ iris_screen_destroy(struct iris_screen *screen)
    u_transfer_helper_destroy(screen->base.transfer_helper);
    iris_bufmgr_unref(screen->bufmgr);
    disk_cache_destroy(screen->disk_cache);
+   intel_virtio_unref_fd(screen->winsys_fd);
    close(screen->winsys_fd);
    ralloc_free(screen);
 }
@@ -751,7 +608,7 @@ iris_init_identifier_bo(struct iris_screen *screen)
 
    screen->workaround_address = (struct iris_address) {
       .bo = screen->workaround_bo,
-      .offset = ALIGN(
+      .offset = align(
          intel_debug_write_identifiers(bo_map, 4096, "Iris"), 32),
    };
 
@@ -766,6 +623,38 @@ iris_screen_get_fd(struct pipe_screen *pscreen)
    struct iris_screen *screen = (struct iris_screen *) pscreen;
 
    return screen->winsys_fd;
+}
+
+static void
+iris_set_damage_region(struct pipe_screen *pscreen, struct pipe_resource *pres,
+                       unsigned int nrects, const struct pipe_box *rects)
+{
+   struct iris_resource *res = (struct iris_resource *)pres;
+
+   if (nrects == 0) {
+      res->use_damage = false;
+      return;
+   }
+
+   struct pipe_box damage = rects[0];
+   for (unsigned i = 1; i < nrects; i++)
+      u_box_union_2d(&damage, &damage, &rects[i]);
+
+   /* The damage we get from EGL uses a lower-left origin but the hardware
+    * uses upper-left so we need to flip it.
+    */
+   damage.y = res->base.b.height0 - (damage.y + damage.height);
+
+   /* Intersect with the area of the resource */
+   struct pipe_box res_area;
+   u_box_origin_2d(res->base.b.width0, res->base.b.height0, &res_area);
+   u_box_intersect_2d(&damage, &damage, &res_area);
+
+   res->damage = damage;
+   res->use_damage = damage.x != 0 ||
+                     damage.y != 0 ||
+                     damage.width != res->base.b.width0 ||
+                     damage.height != res->base.b.height0;
 }
 
 struct pipe_screen *
@@ -787,6 +676,9 @@ iris_screen_create(int fd, const struct pipe_screen_config *config)
       bo_reuse = true;
       break;
    }
+
+   if (intel_virtio_init_fd(fd) < 0)
+      return NULL;
 
    process_intel_debug_variable();
 
@@ -845,10 +737,22 @@ iris_screen_create(int fd, const struct pipe_screen_config *config)
       driQueryOptionf(config->options, "lower_depth_range_rate");
    screen->driconf.intel_enable_wa_14018912822 =
       driQueryOptionb(config->options, "intel_enable_wa_14018912822");
+   screen->driconf.intel_enable_wa_14024015672_msaa =
+      driQueryOptionb(config->options, "intel_enable_wa_14024015672_msaa");
+   screen->driconf.force_sampler_prefetch =
+      driQueryOptionb(config->options, "intel_force_sampler_prefetch");
+   screen->driconf.force_compute_surface_prefetch =
+      driQueryOptionb(config->options, "intel_force_compute_surface_prefetch");
    screen->driconf.enable_tbimr =
       driQueryOptionb(config->options, "intel_tbimr");
+   screen->driconf.enable_vf_distribution =
+      driQueryOptionb(config->options, "intel_vf_distribution");
+   screen->driconf.enable_te_distribution =
+      driQueryOptionb(config->options, "intel_te_distribution");
    screen->driconf.generated_indirect_threshold =
       driQueryOptioni(config->options, "generated_indirect_threshold");
+   screen->driconf.disable_threaded_context =
+      driQueryOptionb(config->options, "intel_disable_threaded_context");
 
    screen->precompile = debug_get_bool_option("shader_precompile", true);
 
@@ -857,6 +761,8 @@ iris_screen_create(int fd, const struct pipe_screen_config *config)
 
    screen->isl_dev.sampler_route_to_lsc =
       driQueryOptionb(config->options, "intel_sampler_route_to_lsc");
+   screen->isl_dev.l1_storage_wt =
+      driQueryOptionb(config->options, "intel_storage_cache_policy_wt");
 
    iris_compiler_init(screen);
 
@@ -882,11 +788,6 @@ iris_screen_create(int fd, const struct pipe_screen_config *config)
    pscreen->get_device_vendor = iris_get_device_vendor;
    pscreen->get_cl_cts_version = iris_get_cl_cts_version;
    pscreen->get_screen_fd = iris_screen_get_fd;
-   pscreen->get_param = iris_get_param;
-   pscreen->get_shader_param = iris_get_shader_param;
-   pscreen->get_compute_param = iris_get_compute_param;
-   pscreen->get_paramf = iris_get_paramf;
-   pscreen->get_compiler_options = iris_get_compiler_options;
    pscreen->get_device_uuid = iris_get_device_uuid;
    pscreen->get_driver_uuid = iris_get_driver_uuid;
    pscreen->get_disk_shader_cache = iris_get_disk_shader_cache;
@@ -896,7 +797,15 @@ iris_screen_create(int fd, const struct pipe_screen_config *config)
    pscreen->query_memory_info = iris_query_memory_info;
    pscreen->get_driver_query_group_info = iris_get_monitor_group_info;
    pscreen->get_driver_query_info = iris_get_monitor_info;
+   pscreen->set_damage_region = iris_set_damage_region;
    iris_init_screen_program_functions(pscreen);
+
+   for (unsigned i = 0; i <= MESA_SHADER_COMPUTE; i++)
+      pscreen->nir_options[i] = iris_get_compiler_options(pscreen, i);
+
+   iris_init_shader_caps(screen);
+   iris_init_compute_caps(screen);
+   iris_init_screen_caps(screen);
 
    genX_call(screen->devinfo, init_screen_state, screen);
    genX_call(screen->devinfo, init_screen_gen_state, screen);

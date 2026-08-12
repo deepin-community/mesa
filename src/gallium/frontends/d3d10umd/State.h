@@ -76,8 +76,8 @@ struct Device
    unsigned restart_index;
    unsigned index_size;
    unsigned ib_offset;
-   void *samplers[PIPE_SHADER_TYPES][PIPE_MAX_SAMPLERS];
-   struct pipe_sampler_view *sampler_views[PIPE_SHADER_TYPES][PIPE_MAX_SHADER_SAMPLER_VIEWS];
+   void *samplers[MESA_SHADER_STAGES][PIPE_MAX_SAMPLERS];
+   struct pipe_sampler_view *sampler_views[MESA_SHADER_STAGES][PIPE_MAX_SHADER_SAMPLER_VIEWS];
 
    void *empty_fs;
    void *empty_vs;
@@ -207,7 +207,7 @@ CastPipeBuffer(D3D10DDI_HRESOURCE hResource)
 
 struct RenderTargetView
 {
-   struct pipe_surface *surface;
+   struct pipe_surface surface;
    D3D10DDI_HRTRENDERTARGETVIEW hRTRenderTargetView;
 };
 
@@ -223,13 +223,13 @@ static inline struct pipe_surface *
 CastPipeRenderTargetView(D3D10DDI_HRENDERTARGETVIEW hRenderTargetView)
 {
    RenderTargetView *pRenderTargetView = CastRenderTargetView(hRenderTargetView);
-   return pRenderTargetView ? pRenderTargetView->surface : NULL;
+   return pRenderTargetView ? &pRenderTargetView->surface : NULL;
 }
 
 
 struct DepthStencilView
 {
-   struct pipe_surface *surface;
+   struct pipe_surface surface;
    D3D10DDI_HRTDEPTHSTENCILVIEW hRTDepthStencilView;
 };
 
@@ -245,7 +245,7 @@ static inline struct pipe_surface *
 CastPipeDepthStencilView(D3D10DDI_HDEPTHSTENCILVIEW hDepthStencilView)
 {
    DepthStencilView *pDepthStencilView = CastDepthStencilView(hDepthStencilView);
-   return pDepthStencilView ? pDepthStencilView->surface : NULL;
+   return pDepthStencilView ? &pDepthStencilView->surface : NULL;
 }
 
 
@@ -408,4 +408,3 @@ CastPipeQuery(D3D10DDI_HQUERY hQuery)
    Query *pQuery = CastQuery(hQuery);
    return pQuery ? pQuery->handle : NULL;
 }
-

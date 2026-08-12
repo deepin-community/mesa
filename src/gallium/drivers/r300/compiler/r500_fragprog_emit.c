@@ -25,9 +25,9 @@
 
 #define PROG_CODE struct r500_fragment_program_code *code = &c->code->code.r500
 
-#define error(fmt, args...)                                                                        \
-   do {                                                                                            \
-      rc_error(&c->Base, "%s::%s(): " fmt "\n", __FILE__, __func__, ##args);                       \
+#define error(fmt, args...)                                                  \
+   do {                                                                      \
+      rc_error(&c->Base, "%s::%s(): " fmt "\n", __FILE__, __func__, ##args); \
    } while (0)
 
 struct branch_info {
@@ -159,7 +159,7 @@ translate_alu_result_op(struct r300_fragment_program_compiler *c, rc_compare_fun
    case RC_COMPARE_FUNC_GEQUAL: return R500_INST_ALU_RESULT_OP_GE;
    case RC_COMPARE_FUNC_NOTEQUAL: return R500_INST_ALU_RESULT_OP_NE;
    default:
-      rc_error(&c->Base, "%s: unsupported compare func %i\n", __func__, func);
+      rc_error(&c->Base, "%s: unsupported compare func %i", __func__, func);
       return 0;
    }
 }
@@ -544,8 +544,8 @@ emit_flowcontrol(struct emit_state *s, struct rc_instruction *inst)
          | R500_FC_B_POP_CNT(1);
       s->Code->inst[branch->Endif].inst3 = R500_FC_JUMP_ADDR(branch->Endif + 1);
       s->Code->inst[branch->If].inst2 = R500_FC_OP_JUMP | R500_FC_A_OP_NONE /* no address stack */
-                                        | R500_FC_JUMP_FUNC(0x0f) /* jump if ALU result is false */
-                                        | R500_FC_B_OP0_INCR /* increment branch counter if stay */
+                                        | R500_FC_JUMP_FUNC(0x0f)           /* jump if ALU result is false */
+                                        | R500_FC_B_OP0_INCR                /* increment branch counter if stay */
                                         | R500_FC_IGNORE_UNCOVERED;
 
       if (branch->Else >= 0) {
@@ -569,7 +569,7 @@ emit_flowcontrol(struct emit_state *s, struct rc_instruction *inst)
       s->CurrentBranchDepth--;
       break;
    default:
-      rc_error(s->C, "%s: unknown opcode %s\n", __func__,
+      rc_error(s->C, "%s: unknown opcode %s", __func__,
                rc_get_opcode_info(inst->U.I.Opcode)->Name);
    }
 }
@@ -607,7 +607,7 @@ r500BuildFragmentProgramHwCode(struct radeon_compiler *c, void *user)
    }
 
    if (code->max_temp_idx >= compiler->Base.max_temp_regs)
-      rc_error(&compiler->Base, "Too many hardware temporaries used\n");
+      rc_error(&compiler->Base, "Too many hardware temporaries used");
 
    if (compiler->Base.Error)
       return;

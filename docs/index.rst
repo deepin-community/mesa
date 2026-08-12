@@ -5,7 +5,7 @@ The Mesa project began as an open-source implementation of the
 `OpenGL`_ specification - a system for rendering interactive 3D graphics.
 
 Over the years the project has grown to implement more graphics APIs,
-including `OpenGL ES`_, `OpenCL`_, `VDPAU`_, `VA-API`_,
+including `OpenGL ES`_, `OpenCL`_, `VA-API`_,
 `Vulkan`_ and `EGL`_.
 
 A variety of device drivers allows the Mesa libraries to be used in many
@@ -19,7 +19,6 @@ Linux, FreeBSD, and other operating systems.
 .. _OpenGL: https://www.opengl.org/
 .. _OpenGL ES: https://www.khronos.org/opengles/
 .. _OpenCL: https://www.khronos.org/opencl/
-.. _VDPAU: https://en.wikipedia.org/wiki/VDPAU
 .. _VA-API: https://en.wikipedia.org/wiki/Video_Acceleration_API
 .. _Vulkan: https://www.vulkan.org/
 .. _EGL: https://www.khronos.org/egl/
@@ -62,19 +61,15 @@ Linux, FreeBSD, and other operating systems.
    :caption: User Topics
    :hidden:
 
-   shading
+   glsl
    egl
    opengles
    envvars
-   osmesa
-   debugging
    perf
    gpu-perf-tracing
    extensions
    application-issues
-   gallium-nine
    viewperf
-   xlibdriver
    teflon
 
 .. toctree::
@@ -86,6 +81,7 @@ Linux, FreeBSD, and other operating systems.
    drivers/asahi
    drivers/d3d12
    drivers/freedreno
+   drivers/kosmickrisp
    drivers/lima
    drivers/llvmpipe
    drivers/nvk
@@ -98,6 +94,7 @@ Linux, FreeBSD, and other operating systems.
    drivers/venus
    drivers/virgl
    drivers/zink
+   xlibdriver
 
 .. toctree::
    :maxdepth: 1
@@ -114,10 +111,12 @@ Linux, FreeBSD, and other operating systems.
    rust
    releasing
    release-calendar
+   graphics-debugging/debugging-misrenderings-crashes
    dispatch
    gallium/index
    vulkan/index
    nir/index
+   spirv/index
    isl/index
    isaspec
    rusticl

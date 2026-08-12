@@ -11,9 +11,7 @@
 #ifndef RADV_PIPELINE_H
 #define RADV_PIPELINE_H
 
-#include "util/mesa-sha1.h"
-
-#include "nir.h"
+#include "util/mesa-blake3.h"
 
 #include "vk_pipeline.h"
 #include "vk_pipeline_cache.h"
@@ -26,6 +24,8 @@ struct radv_shader_stage;
 struct radv_pipeline_layout;
 struct radv_graphics_state_key;
 struct radv_shader_layout;
+struct nir_shader;
+typedef struct nir_shader nir_shader;
 
 enum radv_pipeline_type {
    RADV_PIPELINE_GRAPHICS,
@@ -39,25 +39,27 @@ enum radv_pipeline_type {
 
 struct radv_pipeline {
    struct vk_object_base base;
-   uint8_t sha1[SHA1_DIGEST_LENGTH];
+   uint8_t blake3[BLAKE3_KEY_LEN];
    enum radv_pipeline_type type;
 
-   VkPipelineCreateFlags2KHR create_flags;
+   VkPipelineCreateFlags2 create_flags;
 
    struct vk_pipeline_cache_object *cache_object;
 
    bool is_internal;
-   bool need_indirect_descriptor_sets;
+   bool need_indirect_descriptors;
+   bool need_push_constants_upload;
    struct radv_shader *shaders[MESA_VULKAN_SHADER_STAGES];
    struct radv_shader *gs_copy_shader;
-
-   uint32_t user_data_0[MESA_VULKAN_SHADER_STAGES];
 
    /* Unique pipeline hash identifier. */
    uint64_t pipeline_hash;
 
    /* Pipeline layout info. */
    uint32_t push_constant_size;
+
+   /* Dynamic buffers info. */
+   bool need_dynamic_descriptors_offset_addr;
    uint32_t dynamic_offset_count;
 };
 
@@ -70,11 +72,11 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(radv_pipeline, base, VkPipeline, VK_OBJECT_TYPE_P
       return (struct radv_##pipe_type##_pipeline *)pipeline;                                                           \
    }
 
-bool radv_pipeline_capture_shaders(const struct radv_device *device, VkPipelineCreateFlags2KHR flags);
+bool radv_pipeline_capture_shaders(const struct radv_device *device, VkPipelineCreateFlags2 flags);
 
-bool radv_shader_need_indirect_descriptor_sets(const struct radv_shader *shader);
+bool radv_pipeline_capture_shader_stats(const struct radv_device *device, VkPipelineCreateFlags2 flags);
 
-bool radv_pipeline_capture_shader_stats(const struct radv_device *device, VkPipelineCreateFlags2KHR flags);
+bool radv_pipeline_skip_shaders_cache(const struct radv_device *device, const struct radv_pipeline *pipeline);
 
 void radv_pipeline_init(struct radv_device *device, struct radv_pipeline *pipeline, enum radv_pipeline_type type);
 
@@ -83,14 +85,16 @@ void radv_pipeline_destroy(struct radv_device *device, struct radv_pipeline *pip
 
 struct radv_shader_stage_key radv_pipeline_get_shader_key(const struct radv_device *device,
                                                           const VkPipelineShaderStageCreateInfo *stage,
-                                                          VkPipelineCreateFlags2KHR flags, const void *pNext);
+                                                          VkPipelineCreateFlags2 flags, const void *pNext);
 
-void radv_pipeline_stage_init(VkPipelineCreateFlags2KHR pipeline_flags,
-                              const VkPipelineShaderStageCreateInfo *sinfo, const struct radv_pipeline_layout *layout,
-                              const struct radv_shader_stage_key *stage_key, struct radv_shader_stage *out_stage);
+void radv_pipeline_stage_init(VkPipelineCreateFlags2 pipeline_flags, const VkPipelineShaderStageCreateInfo *sinfo,
+                              const struct radv_pipeline_layout *layout, const struct radv_shader_stage_key *stage_key,
+                              struct radv_shader_stage *out_stage);
 
-void radv_shader_layout_init(const struct radv_pipeline_layout *pipeline_layout, gl_shader_stage stage,
+void radv_shader_layout_init(const struct radv_pipeline_layout *pipeline_layout, mesa_shader_stage stage,
                              struct radv_shader_layout *layout);
+
+void radv_pipeline_stage_finish(struct radv_shader_stage *stage);
 
 void radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_state_key *gfx_state,
                           struct radv_shader_stage *stage);
@@ -101,11 +105,19 @@ VkPipelineShaderStageCreateInfo *radv_copy_shader_stage_create_info(struct radv_
                                                                     const VkPipelineShaderStageCreateInfo *pStages,
                                                                     void *mem_ctx);
 
-void radv_pipeline_hash(const struct radv_device *device, const struct radv_pipeline_layout *pipeline_layout,
-                        struct mesa_sha1 *ctx);
+VkShaderDescriptorSetAndBindingMappingInfoEXT *
+radv_copy_descriptor_heap_mapping_info(const VkShaderDescriptorSetAndBindingMappingInfoEXT *mapping, void *mem_ctx);
 
-void radv_pipeline_hash_shader_stage(VkPipelineCreateFlags2KHR pipeline_flags,
+void radv_pipeline_hash(const struct radv_device *device, const struct radv_pipeline_layout *pipeline_layout,
+                        blake3_hasher *ctx);
+
+void radv_pipeline_hash_shader_stage(VkPipelineCreateFlags2 pipeline_flags,
                                      const VkPipelineShaderStageCreateInfo *sinfo,
-                                     const struct radv_shader_stage_key *stage_key, struct mesa_sha1 *ctx);
+                                     const struct radv_shader_stage_key *stage_key, blake3_hasher *ctx);
+
+void radv_pipeline_report_pso_history(const struct radv_device *device, struct radv_pipeline *pipeline);
+
+struct radv_shader *radv_get_shader_from_executable_index(struct radv_pipeline *pipeline, int index,
+                                                          mesa_shader_stage *stage);
 
 #endif /* RADV_PIPELINE_H */

@@ -1,24 +1,6 @@
 /*
  * Copyright © 2013 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "elk_shader.h"
@@ -180,12 +162,12 @@ elk_opt_predicated_break(elk_backend_shader *s)
        * one. Instead, promote the link to logical.
        */
       bool need_to_link = true;
-      foreach_list_typed(elk_bblock_link, link, link, &jump_block->children) {
+      brw_foreach_list_typed(elk_bblock_link, link, link, &jump_block->children) {
          if (link->block == later_block) {
             assert(later_block->starts_with_control_flow());
 
             /* Update the link from later_block back to jump_block. */
-            foreach_list_typed(elk_bblock_link, parent_link, link, &later_block->parents) {
+            brw_foreach_list_typed(elk_bblock_link, parent_link, link, &later_block->parents) {
                if (parent_link->block == jump_block) {
                   parent_link->kind = bblock_link_logical;
                }

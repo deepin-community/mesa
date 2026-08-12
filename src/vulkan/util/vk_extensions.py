@@ -104,6 +104,9 @@ class VkVersion:
 
         return self.__int_ver() > other.__int_ver()
 
+    def __le__(self, other):
+        return not self.__gt__(other)
+
 # Sort the extension list the way we expect: KHR, then EXT, then vendors
 # alphabetically. For digits, read them as a whole number sort that.
 # eg.: VK_KHR_8bit_storage < VK_KHR_16bit_storage < VK_EXT_acquire_xlib_display
@@ -199,8 +202,10 @@ def get_all_required(xml, thing, api, beta):
         version = VkVersion(feature.attrib['number'])
         for t in feature.findall('./require/' + thing):
             name = t.attrib['name']
-            assert name not in things
-            things[name] = Requirements(core_version=version)
+            if name in things:
+                assert things[name].core_version <= version
+            else:
+                things[name] = Requirements(core_version=version)
 
     for extension in xml.findall('.extensions/extension'):
         ext = Extension.from_xml(extension)
@@ -345,6 +350,58 @@ ALLOWED_ANDROID_VERSION = {
     "VK_KHR_present_id": 33,
     "VK_KHR_present_wait": 33,
     "VK_KHR_shader_subgroup_uniform_control_flow": 33,
+    # on android14-tests-release
+    "VK_KHR_fragment_shader_barycentric": 34,
+    "VK_KHR_ray_tracing_maintenance1": 34,
+    # blocked by testVulkanBlockedExtensions
+    # "VK_KHR_video_decode_h264": 34,
+    # "VK_KHR_video_decode_h265": 34,
+    # "VK_KHR_video_decode_queue": 34,
+    # "VK_KHR_video_queue": 34,
+    # on android15-tests-release
+    "VK_KHR_calibrated_timestamps": 35,
+    "VK_KHR_cooperative_matrix": 35,
+    "VK_KHR_dynamic_rendering_local_read": 35,
+    "VK_KHR_index_type_uint8": 35,
+    "VK_KHR_line_rasterization": 35,
+    "VK_KHR_load_store_op_none": 35,
+    "VK_KHR_maintenance5": 35,
+    "VK_KHR_maintenance6": 35,
+    "VK_KHR_map_memory2": 35,
+    "VK_KHR_ray_tracing_position_fetch": 35,
+    "VK_KHR_shader_expect_assume": 35,
+    "VK_KHR_shader_float_controls2": 35,
+    "VK_KHR_shader_maximal_reconvergence": 35,
+    "VK_KHR_shader_quad_control": 35,
+    "VK_KHR_shader_subgroup_rotate": 35,
+    "VK_KHR_vertex_attribute_divisor": 35,
+    # blocked by testVulkanBlockedExtensions
+    # "VK_KHR_video_decode_av1": 35,
+    # "VK_KHR_video_encode_h264": 35,
+    # "VK_KHR_video_encode_h265": 35,
+    # "VK_KHR_video_encode_queue": 35,
+    # "VK_KHR_video_maintenance1": 35,
+
+    # on android16-tests-release
+    "VK_KHR_compute_shader_derivatives": 36,
+    "VK_KHR_maintenance7": 36,
+    "VK_KHR_pipeline_binary": 36,
+    "VK_KHR_shader_relaxed_extended_instruction": 36,
+    # blocked by testVulkanBlockedExtensions
+    # "VK_KHR_video_encode_av1": 36,
+    # "VK_KHR_video_encode_quantization_map": 36,
+
+    # on Vulkan Profile Android 17 allow list
+    "VK_KHR_copy_memory_indirect": 37,
+    "VK_KHR_depth_clamp_zero_one": 37,
+    "VK_KHR_maintenance8": 37,
+    "VK_KHR_maintenance9": 37,
+    "VK_KHR_maintenance10": 37,
+    "VK_KHR_robustness2": 37,
+    "VK_KHR_shader_bfloat16": 37,
+    "VK_KHR_shader_fma": 37,
+    "VK_KHR_shader_untyped_pointers": 37,
+    "VK_KHR_unified_image_layouts": 37,
 
     # testNoUnknownExtensions on oreo-cts-release
     "VK_GOOGLE_display_timing": 26,
@@ -355,6 +412,8 @@ ALLOWED_ANDROID_VERSION = {
     "VK_GOOGLE_hlsl_functionality1": 30,
     # on android13-tests-release
     "VK_GOOGLE_surfaceless_query": 33,
+    # on android15-tests-release
+    "VK_ANDROID_external_format_resolve": 35,
 
     # this HAL extension is always allowed and will be filtered out by the
     # loader

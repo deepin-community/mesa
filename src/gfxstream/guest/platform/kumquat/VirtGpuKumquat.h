@@ -5,14 +5,10 @@
 
 #pragma once
 
+#include "GfxStreamVulkanMapper.h"
 #include "VirtGpu.h"
 
-// Blueprint and Meson builds place things differently
-#if defined(ANDROID)
 #include "virtgpu_kumquat_ffi.h"
-#else
-#include "virtgpu_kumquat/virtgpu_kumquat_ffi.h"
-#endif
 
 class VirtGpuKumquatResource : public std::enable_shared_from_this<VirtGpuKumquatResource>,
                                public VirtGpuResource {
@@ -47,6 +43,10 @@ class VirtGpuKumquatResourceMapping : public VirtGpuResourceMapping {
    public:
     VirtGpuKumquatResourceMapping(VirtGpuResourcePtr blob, struct virtgpu_kumquat* virtGpu,
                                   uint8_t* ptr, uint64_t size);
+
+    VirtGpuKumquatResourceMapping(VirtGpuResourcePtr blob, struct virtgpu_kumquat* virtGpu,
+                                  struct VulkanMapperData& data, uint64_t size);
+
     ~VirtGpuKumquatResourceMapping(void);
 
     uint8_t* asRawPtr(void) override;
@@ -54,8 +54,9 @@ class VirtGpuKumquatResourceMapping : public VirtGpuResourceMapping {
    private:
     VirtGpuResourcePtr mBlob;
     struct virtgpu_kumquat* mVirtGpu = nullptr;
-    uint8_t* mPtr;
-    uint64_t mSize;
+    struct VulkanMapperData mVulkanData;
+    uint8_t* mPtr = nullptr;
+    uint64_t mSize = 0;
 };
 
 class VirtGpuKumquatDevice : public VirtGpuDevice {

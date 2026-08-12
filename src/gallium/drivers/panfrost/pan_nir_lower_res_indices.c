@@ -1,24 +1,6 @@
 /*
  * Copyright © 2024 Collabora Ltd.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "compiler/nir/nir_builder.h"
@@ -75,17 +57,14 @@ lower_image_intrin(nir_builder *b, nir_intrinsic_instr *intrin)
 
 static bool
 lower_input_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
-                   const struct panfrost_compile_inputs *inputs)
+                   const struct pan_compile_inputs *inputs)
 {
-   /* We always use heap-based varying allocation when IDVS is used on Valhall. */
-   bool malloc_idvs = !inputs->no_idvs;
-
    /* All vertex attributes come from the attribute table.
     * Fragment inputs come from the attribute table too, unless they've
     * been allocated on the heap.
     */
    if (b->shader->info.stage == MESA_SHADER_VERTEX ||
-       (b->shader->info.stage == MESA_SHADER_FRAGMENT && !malloc_idvs)) {
+       b->shader->info.stage == MESA_SHADER_FRAGMENT) {
       nir_intrinsic_set_base(
          intrin,
          pan_res_handle(PAN_TABLE_ATTRIBUTE, nir_intrinsic_base(intrin)));
@@ -112,30 +91,36 @@ static bool
 lower_ssbo_intrin(nir_builder *b, nir_intrinsic_instr *intrin)
 {
    b->cursor = nir_before_instr(&intrin->instr);
+   bool is_store = intrin->intrinsic == nir_intrinsic_store_ssbo;
+   nir_src *handle = &intrin->src[is_store ? 1 : 0];
 
-   nir_def *new_offset = nir_ior_imm(b, intrin->src[0].ssa,
+   nir_def *new_handle = nir_ior_imm(b, handle->ssa,
                                      pan_res_handle(PAN_TABLE_SSBO, 0));
 
-   nir_src_rewrite(&intrin->src[0], new_offset);
+   nir_src_rewrite(handle, new_handle);
 
    return true;
 }
 
 static bool
 lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin,
-                const struct panfrost_compile_inputs *inputs)
+                const struct pan_compile_inputs *inputs)
 {
    switch (intrin->intrinsic) {
    case nir_intrinsic_image_load:
    case nir_intrinsic_image_store:
-   case nir_intrinsic_image_texel_address:
+   case nir_intrinsic_image_atomic:
+   case nir_intrinsic_image_atomic_swap:
       return lower_image_intrin(b, intrin);
    case nir_intrinsic_load_input:
+   case nir_intrinsic_load_interpolated_input:
       return lower_input_intrin(b, intrin, inputs);
    case nir_intrinsic_load_ubo:
       return lower_load_ubo_intrin(b, intrin);
    case nir_intrinsic_load_ssbo:
-   case nir_intrinsic_load_ssbo_address:
+   case nir_intrinsic_store_ssbo:
+   case nir_intrinsic_ssbo_atomic:
+   case nir_intrinsic_ssbo_atomic_swap:
       return lower_ssbo_intrin(b, intrin);
    default:
       return false;
@@ -145,7 +130,7 @@ lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin,
 static bool
 lower_instr(nir_builder *b, nir_instr *instr, void *data)
 {
-   const struct panfrost_compile_inputs *inputs = data;
+   const struct pan_compile_inputs *inputs = data;
 
    switch (instr->type) {
    case nir_instr_type_tex:
@@ -159,7 +144,7 @@ lower_instr(nir_builder *b, nir_instr *instr, void *data)
 
 bool
 panfrost_nir_lower_res_indices(nir_shader *shader,
-                               struct panfrost_compile_inputs *inputs)
+                               struct pan_compile_inputs *inputs)
 {
    /**
     * Starting with Valhall, we are required to encode table indices by the

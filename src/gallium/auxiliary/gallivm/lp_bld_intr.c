@@ -46,7 +46,6 @@
 #include <llvm/Config/llvm-config.h>
 
 #include "util/u_debug.h"
-#include "util/u_string.h"
 #include "util/bitscan.h"
 
 #include "lp_bld_const.h"
@@ -91,7 +90,7 @@ lp_format_intrinsic(char *name,
       width = 16;
       break;
    default:
-      unreachable("unexpected LLVMTypeKind");
+      UNREACHABLE("unexpected LLVMTypeKind");
    }
 
    if (length) {
@@ -140,6 +139,8 @@ static const char *attr_to_str(enum lp_func_attr attr)
    case LP_FUNC_ATTR_NOUNWIND: return "nounwind";
    case LP_FUNC_ATTR_CONVERGENT: return "convergent";
    case LP_FUNC_ATTR_PRESPLITCORO: return "presplitcoroutine";
+   case LP_FUNC_ATTR_NOINLINE: return "noinline";
+   case LP_FUNC_ATTR_OPTNONE: return "optnone";
    default:
       _debug_printf("Unhandled function attribute: %x\n", attr);
       return 0;

@@ -1,26 +1,7 @@
 /*
  * © Copyright 2018 Alyssa Rosenzweig
  * Copyright (C) 2019 Collabora, Ltd.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- *
+ * SPDX-License-Identifier: MIT
  */
 
 #include <unistd.h>
@@ -28,6 +9,7 @@
 
 #include "pan_device.h"
 #include "pan_mempool.h"
+#include "pan_trace.h"
 
 /* Knockoff u_upload_mgr. Uploads wherever we left off, allocating new entries
  * when needed.
@@ -46,6 +28,8 @@
 static struct panfrost_bo *
 panfrost_pool_alloc_backing(struct panfrost_pool *pool, size_t bo_sz)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_MEMPOOL);
+
    /* We don't know what the BO will be used for, so let's flag it
     * RW and attach it to both the fragment and vertex/tiler jobs.
     * TODO: if we want fine grained BO assignment we should pass
@@ -54,10 +38,12 @@ panfrost_pool_alloc_backing(struct panfrost_pool *pool, size_t bo_sz)
     */
    struct panfrost_bo *bo =
       panfrost_bo_create(pool->dev, bo_sz, pool->create_flags, pool->label);
-   assert(bo);
+   if (!bo)
+      return NULL;
 
-   if (pool->owned)
-      util_dynarray_append(&pool->bos, struct panfrost_bo *, bo);
+   if (pool->owned) {
+      util_dynarray_append(&pool->bos, bo);
+   }
    else
       panfrost_bo_unreference(pool->transient_bo);
 
@@ -67,12 +53,14 @@ panfrost_pool_alloc_backing(struct panfrost_pool *pool, size_t bo_sz)
    return bo;
 }
 
-void
+int
 panfrost_pool_init(struct panfrost_pool *pool, void *memctx,
                    struct panfrost_device *dev, unsigned create_flags,
                    size_t slab_size, const char *label, bool prealloc,
                    bool owned)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_MEMPOOL);
+
    memset(pool, 0, sizeof(*pool));
    pan_pool_init(&pool->base, slab_size);
    pool->dev = dev;
@@ -83,13 +71,19 @@ panfrost_pool_init(struct panfrost_pool *pool, void *memctx,
    if (owned)
       util_dynarray_init(&pool->bos, memctx);
 
-   if (prealloc)
-      panfrost_pool_alloc_backing(pool, pool->base.slab_size);
+   if (prealloc) {
+      if (panfrost_pool_alloc_backing(pool, pool->base.slab_size) == NULL)
+         return -1;
+   }
+
+   return 0;
 }
 
 void
 panfrost_pool_cleanup(struct panfrost_pool *pool)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_MEMPOOL);
+
    if (!pool->owned) {
       panfrost_bo_unreference(pool->transient_bo);
       return;
@@ -124,10 +118,12 @@ panfrost_pool_get_bo_handles(struct panfrost_pool *pool, uint32_t *handles)
 
 #define PAN_GUARD_SIZE 4096
 
-static struct panfrost_ptr
+static struct pan_ptr
 panfrost_pool_alloc_aligned(struct panfrost_pool *pool, size_t sz,
                             unsigned alignment)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_MEMPOOL);
+
    assert(alignment == util_next_power_of_two(alignment));
 
    /* Find or create a suitable BO */
@@ -137,10 +133,18 @@ panfrost_pool_alloc_aligned(struct panfrost_pool *pool, size_t sz,
 #ifdef PAN_DBG_OVERFLOW
    if (unlikely(pool->dev->debug & PAN_DBG_OVERFLOW) &&
        !(pool->create_flags & PAN_BO_INVISIBLE)) {
-      unsigned aligned = ALIGN_POT(sz, sysconf(_SC_PAGESIZE));
-      unsigned bo_size = aligned + PAN_GUARD_SIZE;
+      uint64_t page_size = 0;
+      if (!os_get_page_size(&page_size))
+         return (struct pan_ptr){0};
+
+      assert(util_is_power_of_two_nonzero(page_size));
+      size_t aligned = ALIGN_POT(sz, page_size);
+      size_t bo_size = aligned + PAN_GUARD_SIZE;
 
       bo = panfrost_pool_alloc_backing(pool, bo_size);
+      if (!bo)
+         return (struct pan_ptr){0};
+
       memset(bo->ptr.cpu, 0xbb, bo_size);
 
       /* Place the object as close as possible to the protected
@@ -148,7 +152,7 @@ panfrost_pool_alloc_aligned(struct panfrost_pool *pool, size_t sz,
       offset = ROUND_DOWN_TO(aligned - sz, alignment);
 
       if (mprotect(bo->ptr.cpu + aligned, PAN_GUARD_SIZE, PROT_NONE) == -1)
-         perror("mprotect");
+         mesa_loge("mprotect failed: %s", strerror(errno));
 
       pool->transient_bo = NULL;
    }
@@ -158,15 +162,27 @@ panfrost_pool_alloc_aligned(struct panfrost_pool *pool, size_t sz,
    if (unlikely(bo == NULL || (offset + sz) >= pool->base.slab_size)) {
       bo = panfrost_pool_alloc_backing(
          pool, ALIGN_POT(MAX2(pool->base.slab_size, sz), 4096));
+      if (!bo)
+         return (struct pan_ptr){0};
+
       offset = 0;
    }
 
    pool->transient_offset = offset + sz;
 
-   struct panfrost_ptr ret = {
+   struct pan_ptr ret = {
       .cpu = bo->ptr.cpu + offset,
       .gpu = bo->ptr.gpu + offset,
    };
+
+   struct panfrost_device *dev = bo->dev;
+
+   /* The first 32MB are reserved, so pick a dumb address from there. */
+   if (dev->fault_injection_rate &&
+       !(random() % dev->fault_injection_rate)) {
+      ret.gpu =
+         0x1a7af00ull & ~((uint64_t)util_next_power_of_two(alignment) - 1);
+   }
 
    return ret;
 }

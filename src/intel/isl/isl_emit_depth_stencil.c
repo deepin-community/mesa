@@ -99,7 +99,8 @@ isl_genX(emit_depth_stencil_hiz_s)(const struct isl_device *dev, void *batch,
    }
 
    if (info->stencil_surf) {
-      assert((info->stencil_surf->usage & ISL_SURF_USAGE_STENCIL_BIT));
+      assert(info->stencil_surf->usage & (ISL_SURF_USAGE_STENCIL_BIT |
+                                          ISL_SURF_USAGE_CPB_BIT));
       if (info->stencil_surf->dim == ISL_SURF_DIM_3D) {
          assert(info->view->base_array_layer + info->view->array_len <=
                 info->stencil_surf->logical_level0_px.depth);
@@ -168,7 +169,9 @@ isl_genX(emit_depth_stencil_hiz_s)(const struct isl_device *dev, void *batch,
 #if GFX_VER >= 7
       db.DepthWriteEnable = true;
 #endif
+#if GFX_VER >= 9
       assert(info->depth_address % info->depth_surf->alignment_B == 0);
+#endif
       db.SurfaceBaseAddress = info->depth_address;
 
 #if GFX_VERx10 >= 125
@@ -212,7 +215,7 @@ isl_genX(emit_depth_stencil_hiz_s)(const struct isl_device *dev, void *batch,
    const bool separate_stencil =
       info->stencil_surf && info->stencil_surf->format == ISL_FORMAT_R8_UINT;
    if (separate_stencil || info->hiz_usage == ISL_AUX_USAGE_HIZ) {
-      assert(ISL_DEV_USE_SEPARATE_STENCIL(dev));
+      assert(dev->use_separate_stencil);
       /* From the IronLake PRM, Vol 2 Part 1:
        *
        *    3DSTATE_DEPTH_BUFFER::Separate Stencil Buffer Enable
@@ -264,14 +267,15 @@ isl_genX(emit_depth_stencil_hiz_s)(const struct isl_device *dev, void *batch,
       assert(info->stencil_aux_usage == ISL_AUX_USAGE_NONE ||
              info->stencil_aux_usage == ISL_AUX_USAGE_STC_CCS);
 #if GFX_VER < 20
-      sb.StencilCompressionEnable =
+      sb.ControlSurfaceEnable = sb.StencilCompressionEnable =
          info->stencil_aux_usage == ISL_AUX_USAGE_STC_CCS;
-      sb.ControlSurfaceEnable = sb.StencilCompressionEnable;
 #endif
 #elif GFX_VERx10 >= 75
       sb.StencilBufferEnable = true;
 #endif
+#if GFX_VER >= 9
       assert(info->stencil_address % info->stencil_surf->alignment_B == 0);
+#endif
       sb.SurfaceBaseAddress = info->stencil_address;
       sb.SurfacePitch = info->stencil_surf->row_pitch_B - 1;
 #if GFX_VER >= 8
@@ -313,7 +317,9 @@ isl_genX(emit_depth_stencil_hiz_s)(const struct isl_device *dev, void *batch,
       assert(GFX_VER >= 12 || info->hiz_usage == ISL_AUX_USAGE_HIZ);
       db.HierarchicalDepthBufferEnable = true;
 
+#if GFX_VER >= 9
       assert(info->hiz_address % info->hiz_surf->alignment_B == 0);
+#endif
       hiz.SurfaceBaseAddress = info->hiz_address;
       hiz.SurfacePitch = info->hiz_surf->row_pitch_B - 1;
 
@@ -355,12 +361,13 @@ isl_genX(emit_depth_stencil_hiz_s)(const struct isl_device *dev, void *batch,
       hiz.HierarchicalDepthBufferWriteThruEnable =
          info->hiz_usage == ISL_AUX_USAGE_HIZ_CCS_WT;
 
-#if GFX_VER == 12
+#if GFX_VERx10 == 120
       /* The bspec docs up to GFX 12 for this bit are fairly unclear about
        * exactly what is and isn't supported with HiZ write-through.  It's
        * fairly clear that you can't sample from a multisampled depth buffer
-       * with CCS.  This limitation isn't called out explicitly but the docs
-       * for the CCS_E value of RENDER_SURFACE_STATE::AuxiliarySurfaceMode say:
+       * with CCS on GFX12.0. This limitation isn't called out explicitly but
+       * the docs for the CCS_E value of
+       * RENDER_SURFACE_STATE::AuxiliarySurfaceMode say:
        *
        *    "If Number of multisamples > 1, programming this value means MSAA
        *    compression is enabled for that surface. Auxiliary surface is MSC
@@ -387,7 +394,7 @@ isl_genX(emit_depth_stencil_hiz_s)(const struct isl_device *dev, void *batch,
        */
       if (hiz.HierarchicalDepthBufferWriteThruEnable)
          assert(info->depth_surf->samples == 1);
-#endif /* #if GFX_VER == 12 */
+#endif /* #if GFX_VERx10 == 120 */
 #endif /* #if GFX_VER >= 12 */
 
 #if GFX_VER >= 8
@@ -427,7 +434,7 @@ isl_genX(emit_depth_stencil_hiz_s)(const struct isl_device *dev, void *batch,
          clear.DepthClearValue = info->depth_clear_value * ((1u << 16) - 1);
          break;
       default:
-         unreachable("Invalid depth type");
+         UNREACHABLE("Invalid depth type");
       }
 #endif
 #endif

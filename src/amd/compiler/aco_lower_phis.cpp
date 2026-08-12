@@ -103,19 +103,27 @@ get_output(Program* program, unsigned block_idx, ssa_state* state)
    return output;
 }
 
-void
-insert_before_logical_end(Block* block, aco_ptr<Instruction> instr)
+Builder
+bld_before_logical_end(Program* program, Block* block)
 {
    auto IsLogicalEnd = [](const aco_ptr<Instruction>& inst) -> bool
    { return inst->opcode == aco_opcode::p_logical_end; };
-   auto it = std::find_if(block->instructions.crbegin(), block->instructions.crend(), IsLogicalEnd);
+   auto it = std::find_if(block->instructions.rbegin(), block->instructions.rend(), IsLogicalEnd);
 
-   if (it == block->instructions.crend()) {
+   Builder bld(program);
+   if (it == block->instructions.rend()) {
       assert(block->instructions.back()->isBranch());
-      block->instructions.insert(std::prev(block->instructions.end()), std::move(instr));
+      bld.reset(&block->instructions, std::prev(block->instructions.end()));
    } else {
-      block->instructions.insert(std::prev(it.base()), std::move(instr));
+      bld.reset(&block->instructions, std::prev(it.base()));
    }
+   return bld;
+}
+
+void
+insert_before_logical_end(Block* block, aco_ptr<Instruction> instr)
+{
+   bld_before_logical_end(NULL, block).insert(std::move(instr));
 }
 
 void
@@ -127,12 +135,7 @@ build_merge_code(Program* program, ssa_state* state, Block* block, Operand cur)
    if (cur.isUndefined())
       return;
 
-   Builder bld(program);
-   auto IsLogicalEnd = [](const aco_ptr<Instruction>& instr) -> bool
-   { return instr->opcode == aco_opcode::p_logical_end; };
-   auto it = std::find_if(block->instructions.rbegin(), block->instructions.rend(), IsLogicalEnd);
-   assert(it != block->instructions.rend());
-   bld.reset(&block->instructions, std::prev(it.base()));
+   Builder bld = bld_before_logical_end(program, block);
 
    pred_defined defined = state->any_pred_defined[block_idx];
    if (defined == pred_defined::undef) {
@@ -184,7 +187,6 @@ build_const_else_merge_code(Program* program, Block& invert_block, aco_ptr<Instr
     * instructions to the invert block instead.
     * This allows us to actually delete the else block when it's empty.
     */
-   assert(invert_block.kind & block_kind_invert);
    Builder bld(program);
    Operand then = phi->operands[0];
    const Operand els = phi->operands[1];
@@ -220,6 +222,55 @@ build_const_else_merge_code(Program* program, Block& invert_block, aco_ptr<Instr
    phi->operands[1] = Operand(tmp);
 }
 
+bool
+block_is_empty(Block& block)
+{
+   for (auto& instr : block.instructions) {
+      if (instr->opcode != aco_opcode::p_logical_start &&
+          instr->opcode != aco_opcode::p_logical_end && instr->opcode != aco_opcode::p_branch)
+         return false;
+   }
+   return true;
+}
+
+void
+build_empty_else_merge_code(Program* program, Block& merge_block, Block& invert_block,
+                            aco_ptr<Instruction>& phi)
+{
+   /* If the else block is empty, we know that the else phi operand dominates the
+    * then block, so we can handle the phi only in the then block.
+    */
+   Block& then_block = program->blocks[merge_block.logical_preds[0]];
+   Builder bld = bld_before_logical_end(program, &then_block);
+   Operand then_op = phi->operands[0];
+   Operand else_op = phi->operands[1];
+
+   Operand new_op;
+
+   if (then_op.constantEquals(-1)) {
+      new_op =
+         bld.sop2(Builder::s_or, bld.def(bld.lm), bld.def(s1, scc), else_op, Operand(exec, bld.lm));
+   } else if (then_op.constantEquals(0)) {
+      new_op = bld.sop2(Builder::s_andn2, bld.def(bld.lm), bld.def(s1, scc), else_op,
+                        Operand(exec, bld.lm));
+   } else {
+      new_op = bld.sop2(Builder::s_andn2, bld.def(bld.lm), bld.def(s1, scc), else_op,
+                        Operand(exec, bld.lm));
+      then_op = bld.sop2(Builder::s_and, bld.def(bld.lm), bld.def(s1, scc), then_op,
+                         Operand(exec, bld.lm));
+      new_op = bld.sop2(Builder::s_or, bld.def(bld.lm), bld.def(s1, scc), then_op, new_op);
+   }
+
+   /* Insert new linear phi in the invert block, make merge block phi trivial to not invalidate
+    * iterators. */
+   bld.reset(&invert_block.instructions, invert_block.instructions.begin());
+   Temp tmp = bld.pseudo(aco_opcode::p_linear_phi, bld.def(bld.lm), new_op, else_op);
+
+   phi->opcode = aco_opcode::p_linear_phi;
+   phi->operands[0] = Operand(tmp);
+   phi->operands[1] = Operand(tmp);
+}
+
 void
 init_state(Program* program, Block* block, ssa_state* state, aco_ptr<Instruction>& phi)
 {
@@ -250,16 +301,9 @@ init_state(Program* program, Block* block, ssa_state* state, aco_ptr<Instruction
    unsigned end = block->linear_preds.back();
 
    /* The value might not be loop-invariant if the loop has a divergent break and
-    *  - this is a boolean phi, which must be combined with logical exits from previous iterations
-    *  - or the loop also has an additional linear exit (continue_or_break), which might be taken in
-    *    a different iteration than the logical exit
+    * this is a boolean phi, which must be combined with logical exits from previous iterations
     */
-   bool continue_or_break = block->linear_preds.size() > block->logical_preds.size();
-   bool has_divergent_break = std::any_of(
-      block->logical_preds.begin(), block->logical_preds.end(),
-      [&](unsigned pred) { return !(program->blocks[pred].kind & block_kind_uniform); });
-   if (block->kind & block_kind_loop_exit && has_divergent_break &&
-       (phi->opcode == aco_opcode::p_boolean_phi || continue_or_break)) {
+   if (block->kind & block_kind_loop_exit && phi->opcode == aco_opcode::p_boolean_phi) {
       /* Start at the loop pre-header as we need the value from previous iterations. */
       while (program->blocks[start].loop_nest_depth >= state->loop_nest_depth)
          start--;
@@ -267,21 +311,12 @@ init_state(Program* program, Block* block, ssa_state* state, aco_ptr<Instruction
       /* If the loop-header has a back-edge, we need to insert a phi.
        * This will contain a defined value */
       if (program->blocks[start + 1].linear_preds.size() > 1) {
-         if (phi->opcode == aco_opcode::p_boolean_phi) {
-            state->any_pred_defined[start + 1] = pred_defined::temp | pred_defined::zero;
-            /* add dominating zero: this allows to emit simpler merge sequences
-             * if we can ensure that all disabled lanes are always zero on incoming values
-             */
-            state->any_pred_defined[start] = pred_defined::const_0;
-         } else {
-            state->any_pred_defined[start + 1] = pred_defined::temp;
-         }
+         state->any_pred_defined[start + 1] = pred_defined::temp | pred_defined::zero;
+         /* add dominating zero: this allows to emit simpler merge sequences
+          * if we can ensure that all disabled lanes are always zero on incoming values
+          */
+         state->any_pred_defined[start] = pred_defined::const_0;
       }
-   }
-
-   /* For loop header phis, don't propagate the incoming value */
-   if (block->kind & block_kind_loop_header) {
-      state->any_pred_defined[block->index] = pred_defined::undef;
    }
 
    for (unsigned j = start; j <= end; j++) {
@@ -335,11 +370,22 @@ lower_phi_to_linear(Program* program, ssa_state* state, Block* block, aco_ptr<In
       phi->opcode = aco_opcode::p_linear_phi;
       return;
    }
+   /* Loop headers only ever have uniform predecessors. */
+   assert(!(block->kind & block_kind_loop_header));
 
    if ((block->kind & block_kind_merge) && phi->opcode == aco_opcode::p_boolean_phi &&
-       phi->operands.size() == 2 && phi->operands[1].isConstant()) {
-      build_const_else_merge_code(program, program->blocks[block->linear_idom], phi);
-      return;
+       phi->operands.size() == 2) {
+      Block& invert_block = program->blocks[block->linear_idom];
+      Block& els_block = program->blocks[block->logical_preds[1]];
+      assert(invert_block.kind & block_kind_invert);
+      if (phi->operands[1].isConstant()) {
+         build_const_else_merge_code(program, invert_block, phi);
+         return;
+      } else if (phi->operands[1].isTemp() && block_is_empty(els_block) &&
+                 els_block.linear_preds[0] == invert_block.index) {
+         build_empty_else_merge_code(program, *block, invert_block, phi);
+         return;
+      }
    }
 
    init_state(program, block, state, phi);
@@ -373,7 +419,7 @@ lower_subdword_phis(Program* program, Block* block, aco_ptr<Instruction>& phi)
 {
    Builder bld(program);
    for (unsigned i = 0; i < phi->operands.size(); i++) {
-      if (phi->operands[i].isUndefined())
+      if (!phi->operands[i].isTemp())
          continue;
       if (phi->operands[i].regClass() == phi->definitions[0].regClass())
          continue;

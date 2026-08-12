@@ -16,6 +16,7 @@
 #include "util/u_transfer_helper.h"
 
 #include "freedreno/fdl/freedreno_layout.h"
+#include "freedreno/fdl/freedreno_lrz_layout.h"
 #include "freedreno_batch.h"
 #include "freedreno_util.h"
 
@@ -38,6 +39,8 @@ enum fd_lrz_direction {
    /* Depth func greater/greater-than: */
    FD_LRZ_GREATER,
 };
+
+#define FD_BIND_GLOBAL_BUFFER         (1 << 31)
 
 /**
  * State related to batch/resource tracking.
@@ -139,18 +142,10 @@ struct fd_resource {
     */
    bool needs_ubwc_clear : 1;
 
-   /*
-    * LRZ
-    *
-    * TODO lrz width/height/pitch should probably also move to
-    * fdl_layout
-    */
+   /* LRZ */
+   struct fdl_lrz_layout lrz_layout;
    bool lrz_valid : 1;
    enum fd_lrz_direction lrz_direction : 2;
-   uint16_t lrz_width; // for lrz clear, does this differ from lrz_pitch?
-   uint16_t lrz_height;
-   uint16_t lrz_pitch;
-   uint32_t lrz_fc_offset;
    struct fd_bo *lrz;
 };
 
@@ -329,11 +324,31 @@ fd_resource_nr_samples(const struct pipe_resource *prsc)
    return MAX2(1, prsc->nr_samples);
 }
 
+static inline struct fdl_image_params
+fd_image_params(const struct pipe_resource *prsc, bool ubwc,
+		unsigned tile_mode, uint32_t plane)
+{
+   return (struct fdl_image_params) {
+      .format = prsc->format,
+      .nr_samples = fd_resource_nr_samples(prsc),
+      .width0 = prsc->width0,
+      .height0 = prsc->height0,
+      .depth0 = prsc->depth0,
+      .mip_levels = prsc->last_level + 1,
+      .array_size = prsc->array_size,
+      .tile_mode = tile_mode,
+      .ubwc = ubwc,
+      .is_3d = (prsc->target == PIPE_TEXTURE_3D),
+      .plane = plane,
+   };
+}
+
 void fd_resource_screen_init(struct pipe_screen *pscreen);
 void fd_resource_context_init(struct pipe_context *pctx);
 
 uint32_t fd_setup_slices(struct fd_resource *rsc);
 void fd_resource_resize(struct pipe_resource *prsc, uint32_t sz);
+void fd_resource_layout_init(struct pipe_resource *prsc);
 void fd_replace_buffer_storage(struct pipe_context *ctx,
                                struct pipe_resource *dst,
                                struct pipe_resource *src,
@@ -419,7 +434,7 @@ fd_dirty_resource(struct fd_context *ctx, struct pipe_resource *prsc,
 
 static inline void
 fd_dirty_shader_resource(struct fd_context *ctx, struct pipe_resource *prsc,
-                         enum pipe_shader_type shader,
+                         mesa_shader_stage shader,
                          BITMASK_ENUM(fd_dirty_shader_state) dirty,
                          bool write)
    assert_dt
@@ -453,7 +468,7 @@ fdl_type_from_pipe_target(enum pipe_texture_target target) {
       return FDL_VIEW_TYPE_3D;
    case PIPE_MAX_TEXTURE_TYPES:
    default:
-      unreachable("bad texture type");
+      UNREACHABLE("bad texture type");
    }
 }
 

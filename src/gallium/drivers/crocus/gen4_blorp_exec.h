@@ -102,7 +102,7 @@ static struct blorp_address
 blorp_emit_wm_state(struct blorp_batch *blorp_batch,
                     const struct blorp_params *params)
 {
-   const struct elk_wm_prog_data *prog_data = params->wm_prog_data;
+   const struct elk_fs_prog_data *prog_data = params->fs_prog_data;
 
    uint32_t offset;
    blorp_emit_dynamic(blorp_batch, GENX(WM_STATE), wm, 64, &offset) {
@@ -132,17 +132,17 @@ blorp_emit_wm_state(struct blorp_batch *blorp_batch,
 #if GFX_VER == 4
          wm.KernelStartPointer0 =
             instruction_state_address(blorp_batch, params->wm_prog_kernel);
-         wm.GRFRegisterCount0 = elk_wm_prog_data_reg_blocks(prog_data, wm, 0);
+         wm.GRFRegisterCount0 = elk_fs_prog_data_reg_blocks(prog_data, wm, 0);
 #else
          wm.KernelStartPointer0 = params->wm_prog_kernel +
-                                  elk_wm_prog_data_prog_offset(prog_data, wm, 0);
+                                  elk_fs_prog_data_prog_offset(prog_data, wm, 0);
          wm.KernelStartPointer1 = params->wm_prog_kernel +
-                                  elk_wm_prog_data_prog_offset(prog_data, wm, 1);
+                                  elk_fs_prog_data_prog_offset(prog_data, wm, 1);
          wm.KernelStartPointer2 = params->wm_prog_kernel +
-                                  elk_wm_prog_data_prog_offset(prog_data, wm, 2);
-         wm.GRFRegisterCount0 = elk_wm_prog_data_reg_blocks(prog_data, wm, 0);
-         wm.GRFRegisterCount1 = elk_wm_prog_data_reg_blocks(prog_data, wm, 1);
-         wm.GRFRegisterCount2 = elk_wm_prog_data_reg_blocks(prog_data, wm, 2);
+                                  elk_fs_prog_data_prog_offset(prog_data, wm, 2);
+         wm.GRFRegisterCount0 = elk_fs_prog_data_reg_blocks(prog_data, wm, 0);
+         wm.GRFRegisterCount1 = elk_fs_prog_data_reg_blocks(prog_data, wm, 1);
+         wm.GRFRegisterCount2 = elk_fs_prog_data_reg_blocks(prog_data, wm, 2);
 #endif
       }
 
@@ -172,7 +172,7 @@ blorp_emit_pipeline(struct blorp_batch *blorp_batch,
 {
    struct crocus_batch *batch = blorp_batch->driver_batch;
 
-   emit_urb_config(blorp_batch, params, NULL);
+   emit_urb_config(blorp_batch, params);
 
    blorp_emit(blorp_batch, GENX(3DSTATE_PIPELINED_POINTERS), pp) {
       pp.PointertoVSState = blorp_emit_vs_state(blorp_batch);

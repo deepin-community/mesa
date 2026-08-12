@@ -55,7 +55,7 @@ extern "C" {
         SRIDFVL(VPCNVC_PRE_CSC_C23_C24, VPCNVC_CFG, id),                                           \
         SRIDFVL(VPCNVC_PRE_CSC_C31_C32, VPCNVC_CFG, id),                                           \
         SRIDFVL(VPCNVC_PRE_CSC_C33_C34, VPCNVC_CFG, id),                                           \
-        SRIDFVL(VPCNVC_COEF_FORMAT, VPCNVC_CFG, id), SRIDFVL(VPCNVC_PRE_DEGAM, VPCNVC_CFG, id),    \
+        SRIDFVL(VPCNVC_COEF_FORMAT, VPCNVC_CFG, id),                                               \
         SRIDFVL(VPCNVC_PRE_REALPHA, VPCNVC_CFG, id),                                               \
         SRIDFVL(VPDSCL_COEF_RAM_TAP_SELECT, VPDSCL, id),                                           \
         SRIDFVL(VPDSCL_COEF_RAM_TAP_DATA, VPDSCL, id), SRIDFVL(VPDSCL_MODE, VPDSCL, id),           \
@@ -130,7 +130,8 @@ extern "C" {
         SRIDFVL(VPCM_GAMUT_REMAP_CONTROL, VPCM, id),                                               \
         SRIDFVL(VPCM_GAMUT_REMAP_C11_C12, VPCM, id), SRIDFVL(VPCM_GAMUT_REMAP_C13_C14, VPCM, id),  \
         SRIDFVL(VPCM_GAMUT_REMAP_C21_C22, VPCM, id), SRIDFVL(VPCM_GAMUT_REMAP_C23_C24, VPCM, id),  \
-        SRIDFVL(VPCM_GAMUT_REMAP_C31_C32, VPCM, id), SRIDFVL(VPCM_GAMUT_REMAP_C33_C34, VPCM, id)
+        SRIDFVL(VPCM_GAMUT_REMAP_C31_C32, VPCM, id), SRIDFVL(VPCM_GAMUT_REMAP_C33_C34, VPCM, id),  \
+        SRIDFVL(VPCNVC_PRE_DEGAM, VPCNVC_CFG, id),    
 
 #define DPP_FIELD_LIST_VPE10_COMMON(post_fix)                                                      \
     SFRB(VPCNVC_SURFACE_PIXEL_FORMAT, VPCNVC_SURFACE_PIXEL_FORMAT, post_fix),                      \
@@ -175,8 +176,6 @@ extern "C" {
         SFRB(PRE_CSC_C33, VPCNVC_PRE_CSC_C33_C34, post_fix),                                       \
         SFRB(PRE_CSC_C34, VPCNVC_PRE_CSC_C33_C34, post_fix),                                       \
         SFRB(PRE_CSC_COEF_FORMAT, VPCNVC_COEF_FORMAT, post_fix),                                   \
-        SFRB(PRE_DEGAM_MODE, VPCNVC_PRE_DEGAM, post_fix),                                          \
-        SFRB(PRE_DEGAM_SELECT, VPCNVC_PRE_DEGAM, post_fix),                                        \
         SFRB(PRE_REALPHA_EN, VPCNVC_PRE_REALPHA, post_fix),                                        \
         SFRB(PRE_REALPHA_ABLND_EN, VPCNVC_PRE_REALPHA, post_fix),                                  \
         SFRB(SCL_COEF_RAM_TAP_PAIR_IDX, VPDSCL_COEF_RAM_TAP_SELECT, post_fix),                     \
@@ -277,7 +276,6 @@ extern "C" {
         SFRB(VPCM_GAMCOR_LUT_READ_COLOR_SEL, VPCM_GAMCOR_LUT_CONTROL, post_fix),                   \
         SFRB(VPCM_GAMCOR_LUT_READ_DBG, VPCM_GAMCOR_LUT_CONTROL, post_fix),                         \
         SFRB(VPCM_GAMCOR_LUT_HOST_SEL, VPCM_GAMCOR_LUT_CONTROL, post_fix),                         \
-        SFRB(VPCM_GAMCOR_LUT_CONFIG_MODE, VPCM_GAMCOR_LUT_CONTROL, post_fix),                      \
         SFRB(VPCM_GAMCOR_RAMA_EXP_REGION_START_B, VPCM_GAMCOR_RAMA_START_CNTL_B, post_fix),        \
         SFRB(                                                                                      \
             VPCM_GAMCOR_RAMA_EXP_REGION_START_SEGMENT_B, VPCM_GAMCOR_RAMA_START_CNTL_B, post_fix), \
@@ -399,6 +397,7 @@ extern "C" {
 
 #define DPP_FIELD_LIST_VPE10(post_fix)                                                             \
     DPP_FIELD_LIST_VPE10_COMMON(post_fix),                                                         \
+        SFRB(VPCM_GAMCOR_LUT_CONFIG_MODE, VPCM_GAMCOR_LUT_CONTROL, post_fix),                      \
         SFRB(ALPHA_2BIT_LUT0, VPCNVC_ALPHA_2BIT_LUT, post_fix),                                    \
         SFRB(ALPHA_2BIT_LUT1, VPCNVC_ALPHA_2BIT_LUT, post_fix),                                    \
         SFRB(ALPHA_2BIT_LUT2, VPCNVC_ALPHA_2BIT_LUT, post_fix),                                    \
@@ -424,8 +423,9 @@ extern "C" {
         SFRB(DISPCLK_R_GATE_DISABLE, VPDPP_CONTROL, post_fix),                                     \
         SFRB(DISPCLK_G_GATE_DISABLE, VPDPP_CONTROL, post_fix),                                     \
         SFRB(VPDPP_TEST_CLK_SEL, VPDPP_CONTROL, post_fix),                                         \
-        SFRB(VPDPP_CLOCK_ENABLE, VPDPP_CONTROL, post_fix)
-
+        SFRB(VPDPP_CLOCK_ENABLE, VPDPP_CONTROL, post_fix),                                         \
+        SFRB(PRE_DEGAM_MODE, VPCNVC_PRE_DEGAM, post_fix),                                          \
+        SFRB(PRE_DEGAM_SELECT, VPCNVC_PRE_DEGAM, post_fix)
 
 #define DPP_REG_VARIABLE_LIST_VPE10_COMMON                                                         \
     reg_id_val VPCNVC_SURFACE_PIXEL_FORMAT;                                                        \
@@ -450,7 +450,6 @@ extern "C" {
     reg_id_val VPCNVC_PRE_CSC_C31_C32;                                                             \
     reg_id_val VPCNVC_PRE_CSC_C33_C34;                                                             \
     reg_id_val VPCNVC_COEF_FORMAT;                                                                 \
-    reg_id_val VPCNVC_PRE_DEGAM;                                                                   \
     reg_id_val VPCNVC_PRE_REALPHA;                                                                 \
     reg_id_val VPDSCL_COEF_RAM_TAP_SELECT;                                                         \
     reg_id_val VPDSCL_COEF_RAM_TAP_DATA;                                                           \
@@ -548,9 +547,10 @@ extern "C" {
     reg_id_val VPCM_GAMUT_REMAP_C21_C22;                                                           \
     reg_id_val VPCM_GAMUT_REMAP_C23_C24;                                                           \
     reg_id_val VPCM_GAMUT_REMAP_C31_C32;                                                           \
-    reg_id_val VPCM_GAMUT_REMAP_C33_C34;
+    reg_id_val VPCM_GAMUT_REMAP_C33_C34;                                                           \
+    reg_id_val VPCNVC_PRE_DEGAM;                                                                   \
 
-#define DPP_FIELD_VARIABLE_LIST_VPE10(type)                                                        \
+#define DPP_FIELD_VARIABLE_LIST_VPE10_COMMON(type)                                                 \
     type VPCNVC_SURFACE_PIXEL_FORMAT;                                                              \
     type FORMAT_EXPANSION_MODE;                                                                    \
     type FORMAT_CNV16;                                                                             \
@@ -597,8 +597,6 @@ extern "C" {
     type PRE_CSC_C33;                                                                              \
     type PRE_CSC_C34;                                                                              \
     type PRE_CSC_COEF_FORMAT;                                                                      \
-    type PRE_DEGAM_MODE;                                                                           \
-    type PRE_DEGAM_SELECT;                                                                         \
     type PRE_REALPHA_EN;                                                                           \
     type PRE_REALPHA_ABLND_EN;                                                                     \
     type SCL_COEF_RAM_TAP_PAIR_IDX;                                                                \
@@ -716,7 +714,6 @@ extern "C" {
     type VPCM_GAMCOR_LUT_READ_COLOR_SEL;                                                           \
     type VPCM_GAMCOR_LUT_READ_DBG;                                                                 \
     type VPCM_GAMCOR_LUT_HOST_SEL;                                                                 \
-    type VPCM_GAMCOR_LUT_CONFIG_MODE;                                                              \
     type VPCM_GAMCOR_RAMA_EXP_REGION_START_B;                                                      \
     type VPCM_GAMCOR_RAMA_EXP_REGION_START_SEGMENT_B;                                              \
     type VPCM_GAMCOR_RAMA_EXP_REGION_START_G;                                                      \
@@ -834,6 +831,12 @@ extern "C" {
     type VPDPP_CRC_PIX_FORMAT_SEL;                                                                 \
     type VPDPP_CRC_MASK;
 
+#define DPP_FIELD_VARIABLE_LIST_VPE10(type)                                                        \
+    DPP_FIELD_VARIABLE_LIST_VPE10_COMMON(type)                                                     \
+    type VPCM_GAMCOR_LUT_CONFIG_MODE;                                                              \
+    type PRE_DEGAM_MODE;                                                                           \
+    type PRE_DEGAM_SELECT;
+
 #define IDENTITY_RATIO(ratio) (vpe_fixpt_u3d19(ratio) == (1 << 19))
 
 struct vpe10_dpp_registers {
@@ -890,6 +893,8 @@ void vpe10_dpp_set_hdr_multiplier(struct dpp *dpp, uint32_t multiplier);
 /*Program Scaler*/
 void vpe10_dpp_set_segment_scaler(struct dpp *dpp, const struct scaler_data *scl_data);
 
+void vpe10_dpp_dscl_set_scaler_position(struct dpp *dpp, const struct scaler_data *scl_data);
+
 void vpe10_dpp_set_frame_scaler(struct dpp *dpp, const struct scaler_data *scl_data);
 
 /*Scalar helper functions*/
@@ -941,10 +946,8 @@ void vpe10_dpp_dscl_set_scale_ratio(struct dpp *dpp, const struct scaler_data *d
 
 void vpe10_dpp_dscl_set_taps(struct dpp *dpp, const struct scaler_data *scl_data);
 
-void vpe10_dpp_dscl_set_scl_filter(struct dpp *dpp, const struct scaler_data *scl_data,
-    enum vpe10_dscl_mode_sel scl_mode, bool chroma_coef_mode);
-
-void vpe10_dpp_dscl_set_dscl_mode(struct dpp *dpp, enum vpe10_dscl_mode_sel dscl_mode);
+void vpe10_dpp_dscl_set_scl_filter_and_dscl_mode(struct dpp *dpp,
+    const struct scaler_data *scl_data, enum vpe10_dscl_mode_sel scl_mode, bool chroma_coef_mode);
 
 enum vpe10_dscl_mode_sel vpe10_dpp_dscl_get_dscl_mode(const struct scaler_data *data);
 

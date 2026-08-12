@@ -28,10 +28,11 @@
 #include "util/detect_os.h"
 #include "util/u_math.h"
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
 enum android_buffer_type {
    ANDROID_BUFFER_NONE = 0,
    ANDROID_BUFFER_NATIVE,
+   ANDROID_BUFFER_NATIVE_ALIAS,
    ANDROID_BUFFER_HARDWARE,
 };
 #endif
@@ -88,7 +89,7 @@ struct vk_image {
    uint64_t drm_format_mod;
 #endif
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
    enum android_buffer_type android_buffer_type;
    VkDeviceMemory anb_memory;
 
@@ -143,6 +144,11 @@ vk_image_mip_level_extent(const struct vk_image *image,
    return extent;
 }
 
+uint32_t
+vk_image_subresource_slice_count(const struct vk_device *device,
+                                 const struct vk_image *image,
+                                 const VkImageSubresourceLayers *range);
+
 /* This is defined as a macro so that it works for both
  * VkImageSubresourceRange and VkImageSubresourceLayers
  */
@@ -170,7 +176,7 @@ vk_image_sanitize_extent(const struct vk_image *image,
    case VK_IMAGE_TYPE_3D:
       return imageExtent;
    default:
-      unreachable("invalid image type");
+      UNREACHABLE("invalid image type");
    }
 }
 
@@ -189,7 +195,7 @@ vk_image_sanitize_offset(const struct vk_image *image,
    case VK_IMAGE_TYPE_3D:
       return imageOffset;
    default:
-      unreachable("invalid image type");
+      UNREACHABLE("invalid image type");
    }
 }
 
@@ -248,12 +254,18 @@ vk_image_buffer_copy_layout(const struct vk_image *image,
                             const VkBufferImageCopy2* region);
 
 struct vk_image_buffer_layout
+vk_image_memory_copy_layout(const struct vk_image *image,
+                            const VkDeviceMemoryImageCopyKHR* region);
+
+struct vk_image_buffer_layout
 vk_memory_to_image_copy_layout(const struct vk_image *image,
                                const VkMemoryToImageCopyEXT* region);
 
 struct vk_image_buffer_layout
 vk_image_to_memory_copy_layout(const struct vk_image *image,
                                const VkImageToMemoryCopyEXT* region);
+
+bool vk_image_can_be_aliased_to_yuv_plane(const struct vk_image *image);
 
 struct vk_image_view {
    struct vk_object_base base;
@@ -366,12 +378,10 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(vk_image_view, base, VkImageView,
 
 void vk_image_view_init(struct vk_device *device,
                         struct vk_image_view *image_view,
-                        bool driver_internal,
                         const VkImageViewCreateInfo *pCreateInfo);
 void vk_image_view_finish(struct vk_image_view *image_view);
 
 void *vk_image_view_create(struct vk_device *device,
-                           bool driver_internal,
                            const VkImageViewCreateInfo *pCreateInfo,
                            const VkAllocationCallbacks *alloc,
                            size_t size);
@@ -396,6 +406,8 @@ vk_image_view_subresource_range(const struct vk_image_view *view)
 bool vk_image_layout_is_read_only(VkImageLayout layout,
                                   VkImageAspectFlagBits aspect);
 bool vk_image_layout_is_depth_only(VkImageLayout layout);
+VkImageLayout vk_image_layout_depth_only(VkImageLayout layout);
+VkImageLayout vk_image_layout_stencil_only(VkImageLayout layout);
 
 VkImageUsageFlags vk_image_layout_to_usage_flags(VkImageLayout layout,
                                                  VkImageAspectFlagBits aspect);
@@ -405,11 +417,17 @@ VkImageLayout vk_att_ref_stencil_layout(const VkAttachmentReference2 *att_ref,
 VkImageLayout vk_att_desc_stencil_layout(const VkAttachmentDescription2 *att_desc,
                                            bool final);
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
 static inline bool
 vk_image_is_android_native_buffer(struct vk_image *image)
 {
    return image->android_buffer_type == ANDROID_BUFFER_NATIVE;
+}
+
+static inline bool
+vk_image_is_android_native_buffer_alias(struct vk_image *image)
+{
+   return image->android_buffer_type == ANDROID_BUFFER_NATIVE_ALIAS;
 }
 #else
 static inline bool
@@ -417,9 +435,15 @@ vk_image_is_android_native_buffer(struct vk_image *image)
 {
    return false;
 }
-#endif /* DETECT_OS_ANDROID */
 
-#if DETECT_OS_ANDROID && ANDROID_API_LEVEL >= 26
+static inline bool
+vk_image_is_android_native_buffer_alias(struct vk_image *image)
+{
+   return false;
+}
+#endif /* VK_USE_PLATFORM_ANDROID_KHR */
+
+#if defined(VK_USE_PLATFORM_ANDROID_KHR) && ANDROID_API_LEVEL >= 26
 static inline bool
 vk_image_is_android_hardware_buffer(struct vk_image *image)
 {

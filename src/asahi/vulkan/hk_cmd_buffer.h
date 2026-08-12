@@ -10,11 +10,13 @@
 #include "util/macros.h"
 
 #include "util/list.h"
+#include "agx_abi.h"
 #include "agx_helpers.h"
 #include "agx_linker.h"
 #include "agx_pack.h"
 #include "agx_tilebuffer.h"
 #include "agx_uvs.h"
+#include "libagx_dgc.h"
 #include "pool.h"
 #include "shader_enums.h"
 
@@ -44,7 +46,13 @@ struct vk_shader;
 
 /** Root descriptor table. */
 struct hk_root_descriptor_table {
+   /* Address of this descriptor itself. Must be first for reflection. */
    uint64_t root_desc_addr;
+
+   /* Descriptor set base addresses. Must follow root_desc_addr to match our
+    * push layout.
+    */
+   uint64_t sets[HK_MAX_SETS];
 
    union {
       struct {
@@ -54,15 +62,13 @@ struct hk_root_descriptor_table {
          /* Vertex input state */
          uint64_t attrib_base[AGX_MAX_VBUFS];
          uint32_t attrib_clamps[AGX_MAX_VBUFS];
-
-         /* Pointer to the VS->TCS, VS->GS, or TES->GS buffer. */
-         uint64_t vertex_output_buffer;
+         uint32_t attrib_strides[AGX_MAX_VBUFS];
 
          /* Mask of outputs flowing VS->TCS, VS->GS, or TES->GS . */
          uint64_t vertex_outputs;
 
-         /* Address of input assembly buffer if geom/tess is used, else 0 */
-         uint64_t input_assembly;
+         /* Address of vertex param buffer if geom/tess is used, else 0 */
+         uint64_t vertex_params;
 
          /* Address of tessellation param buffer if tessellation used, else 0 */
          uint64_t tess_params;
@@ -84,6 +90,16 @@ struct hk_root_descriptor_table {
          uint16_t provoking;
          uint16_t _pad4;
 
+         /* True if there is an API geometry shader. If false, there may still
+          * be a geometry shader in use (notably for transform feedback) but it
+          * should not contribute to pipeline statistics.
+          */
+         uint16_t api_gs;
+         uint16_t _pad5;
+
+         uint16_t rasterization_stream;
+         uint16_t _pad6;
+
          /* Mapping from varying slots written by the last vertex stage to UVS
           * indices. This mapping must be compatible with the fragment shader.
           */
@@ -97,9 +113,6 @@ struct hk_root_descriptor_table {
 
    /* Client push constants */
    uint8_t push[HK_MAX_PUSH_SIZE];
-
-   /* Descriptor set base addresses */
-   uint64_t sets[HK_MAX_SETS];
 
    /* Dynamic buffer bindings */
    struct hk_buffer_address dynamic_buffers[HK_MAX_DYNAMIC_BUFFERS];
@@ -130,6 +143,9 @@ struct hk_attachment {
 
    VkResolveModeFlagBits resolve_mode;
    struct hk_image_view *resolve_iview;
+
+   bool clear;
+   uint32_t clear_colour[4];
 };
 
 struct hk_bg_eot {
@@ -139,12 +155,13 @@ struct hk_bg_eot {
 
 struct hk_render_registers {
    uint32_t width, height, layers;
+   uint32_t zls_width, zls_height;
    uint32_t isp_bgobjdepth;
    uint32_t isp_bgobjvals;
    struct agx_zls_control_packed zls_control, zls_control_partial;
-   uint32_t iogpu_unk_214;
    uint32_t depth_dimensions;
    bool process_empty_tiles;
+   enum u_tristate dbias_is_int;
 
    struct {
       uint32_t dimensions;
@@ -194,11 +211,10 @@ struct hk_index_buffer_state {
  * shaders_dirty.
  */
 enum hk_dirty {
-   HK_DIRTY_INDEX = BITFIELD_BIT(0),
-   HK_DIRTY_VB = BITFIELD_BIT(1),
-   HK_DIRTY_OCCLUSION = BITFIELD_BIT(2),
-   HK_DIRTY_PROVOKING = BITFIELD_BIT(3),
-   HK_DIRTY_VARYINGS = BITFIELD_BIT(4),
+   HK_DIRTY_VB = BITFIELD_BIT(0),
+   HK_DIRTY_OCCLUSION = BITFIELD_BIT(1),
+   HK_DIRTY_PROVOKING = BITFIELD_BIT(2),
+   HK_DIRTY_VARYINGS = BITFIELD_BIT(3),
 };
 
 struct hk_graphics_state {
@@ -257,8 +273,11 @@ struct hk_graphics_state {
    struct agx_varyings_vs linked_varyings;
 
    uint32_t linked_dirty;
-   struct hk_linked_shader *linked[PIPE_SHADER_TYPES];
+   struct hk_linked_shader *linked[MESA_SHADER_STAGES];
    bool generate_primitive_id;
+
+   /* Whether blend constants are required by the active blend state */
+   bool uses_blend_constant;
 
    /* Tessellation state */
    struct {
@@ -291,6 +310,19 @@ struct hk_scratch_req {
 };
 
 /*
+ * Represents a firmware timestamp request.  Handle is a kernel timestamp object
+ * handle, not a GEM handle.
+ *
+ * The kernel/firmware uses the handle/offset_B to write. We use the address to
+ * read the results back. We could deduplicate this, but this is convenient.
+ */
+struct agx_timestamp_req {
+   uint64_t addr;
+   uint32_t handle;
+   uint32_t offset_B;
+};
+
+/*
  * hk_cs represents a single control stream, to be enqueued either to the
  * CDM or VDM for compute/3D respectively.
  */
@@ -302,11 +334,17 @@ enum hk_cs_type {
 struct hk_cs {
    struct list_head node;
 
+   /* Parent command buffer. Convenience. */
+   struct hk_cmd_buffer *cmd;
+
    /* Data master */
    enum hk_cs_type type;
 
    /* Address of the root control stream for the job */
    uint64_t addr;
+
+   /* Fat pointer to the start of the current chunk of the control stream */
+   struct agx_ptr chunk;
 
    /* Start pointer of the root control stream */
    void *start;
@@ -319,6 +357,12 @@ struct hk_cs {
 
    /* Whether there is more than just the root chunk */
    bool stream_linked;
+
+   /* Whether the sampler heap is required. Although we always must maintain the
+    * heap for correctness, it's often not necessary since we can push lots of
+    * samplers (especially for GL/DX11-era engines).
+    */
+   bool uses_sampler_heap;
 
    /* Scratch requirements */
    struct {
@@ -337,8 +381,16 @@ struct hk_cs {
 
    /* Statistics */
    struct {
-      uint32_t calls, cmds, flushes;
+      uint32_t calls, cmds, flushes, merged;
    } stats;
+
+   /* Timestamp writes. Currently just compute end / fragment end. We could
+    * flesh this out later if we want finer info. (We will, but it's not
+    * required for conformance.)
+    */
+   struct {
+      struct agx_timestamp_req end;
+   } timestamp;
 
    /* Remaining state is for graphics only, ignored for compute */
    struct agx_tilebuffer_layout tib;
@@ -356,7 +408,47 @@ struct hk_cs {
    uint32_t ppp_multisamplectl;
 
    struct hk_render_registers cr;
+
+   /* Active restart index if one is set. Zero if there is no restart index set
+    * yet, since Vulkan does not allow zero restart indices (unlike OpenGL).
+    * This is used in place of dirty tracking, because dirty tracking
+    * restart indices is complicated and just checking the saved value is cheap.
+    */
+   uint32_t restart_index;
 };
+
+/*
+ * Helper to merge two compute control streams, concatenating the second control
+ * stream to the first one. Must sync with hk_cs.
+ */
+static inline void
+hk_cs_merge_cdm(struct hk_cs *a, const struct hk_cs *b)
+{
+   assert(a->type == HK_CS_CDM && b->type == HK_CS_CDM);
+   assert(a->cmd == b->cmd);
+   assert(!a->timestamp.end.handle);
+
+   agx_cdm_jump(a->current, b->addr);
+   a->current = b->current;
+   a->stream_linked = true;
+
+   a->uses_sampler_heap |= b->uses_sampler_heap;
+   a->scratch.cs.main |= b->scratch.cs.main;
+   a->scratch.cs.preamble |= b->scratch.cs.preamble;
+
+   a->timestamp = b->timestamp;
+
+   a->stats.calls += b->stats.calls;
+   a->stats.cmds += b->stats.cmds;
+   a->stats.flushes += b->stats.flushes;
+   a->stats.merged++;
+}
+
+static inline uint64_t
+hk_cs_current_addr(struct hk_cs *cs)
+{
+   return cs->chunk.gpu + ((uint8_t *)cs->current - (uint8_t *)cs->chunk.cpu);
+}
 
 struct hk_uploader {
    /** List of hk_cmd_bo */
@@ -409,9 +501,11 @@ struct hk_cmd_buffer {
 
    /* XXX: move me?
     *
-    * Indirect draw generated by the pre-GS for the geometry shader.
+    * Indirect draw generated by the indirect GS translator.
     */
-   uint64_t geom_indirect;
+   uint64_t geom_index_buffer;
+   uint32_t geom_index_count;
+   uint32_t geom_instance_count;
 
    /* Does the command buffer use the geometry heap? */
    bool uses_heap;
@@ -424,12 +518,6 @@ VK_DEFINE_HANDLE_CASTS(hk_cmd_buffer, vk.base, VkCommandBuffer,
                        VK_OBJECT_TYPE_COMMAND_BUFFER)
 
 extern const struct vk_command_buffer_ops hk_cmd_buffer_ops;
-
-static inline struct hk_device *
-hk_cmd_buffer_device(struct hk_cmd_buffer *cmd)
-{
-   return (struct hk_device *)cmd->vk.base.device;
-}
 
 static inline struct hk_cmd_pool *
 hk_cmd_buffer_pool(struct hk_cmd_buffer *cmd)
@@ -513,9 +601,11 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
       /* Allocate hk_cs for the new stream */
       struct hk_cs *cs = malloc(sizeof(*cs));
       *cs = (struct hk_cs){
+         .cmd = cmd,
          .type = compute ? HK_CS_CDM : HK_CS_VDM,
          .addr = root.gpu,
          .start = root.cpu,
+         .chunk = root,
          .current = root.cpu,
          .end = root.cpu + initial_size,
       };
@@ -555,6 +645,16 @@ hk_cmd_buffer_get_cs(struct hk_cmd_buffer *cmd, bool compute)
 
 void hk_ensure_cs_has_space(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                             size_t space);
+
+static inline uint64_t
+hk_cs_alloc_for_indirect(struct hk_cs *cs, size_t size_B)
+{
+   hk_ensure_cs_has_space(cs->cmd, cs, size_B);
+
+   uint64_t addr = hk_cs_current_addr(cs);
+   cs->current += size_B;
+   return addr;
+}
 
 static void
 hk_cmd_buffer_dirty_all(struct hk_cmd_buffer *cmd)
@@ -597,12 +697,6 @@ hk_cmd_buffer_end_compute_internal(struct hk_cmd_buffer *cmd,
       if (cs->imm_writes.size) {
          hk_dispatch_imm_writes(cmd, cs);
       }
-
-      void *map = cs->current;
-      agx_push(map, CDM_STREAM_TERMINATE, _)
-         ;
-
-      cs->current = map;
    }
 
    *ptr = NULL;
@@ -614,19 +708,19 @@ hk_cmd_buffer_end_compute(struct hk_cmd_buffer *cmd)
    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.cs);
 }
 
+void hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd);
+
 static void
 hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
 {
    struct hk_cs *cs = cmd->current_cs.gfx;
 
-   if (cs) {
-      void *map = cs->current;
-      agx_push(map, VDM_STREAM_TERMINATE, _)
-         ;
-
-      /* Scissor and depth bias arrays are staged to dynamic arrays on the CPU.
-       * When we end the control stream, they're done growing and are ready for
-       * upload.
+   if (cs && cs->stats.cmds == 0) {
+      hk_optimize_empty_vdm(cmd);
+   } else if (cs) {
+      /* Scissor and depth bias arrays are staged to dynamic arrays on the
+       * CPU. When we end the control stream, they're done growing and are
+       * ready for upload.
        */
       cs->uploaded_scissor =
          hk_pool_upload(cmd, cs->scissor.data, cs->scissor.size, 64);
@@ -635,15 +729,16 @@ hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
          hk_pool_upload(cmd, cs->depth_bias.data, cs->depth_bias.size, 64);
 
       /* TODO: maybe free scissor/depth_bias now? */
-
-      cmd->current_cs.gfx->current = map;
-      cmd->current_cs.gfx = NULL;
+      cs->current = agx_vdm_terminate(cs->current);
    }
+
+   cmd->current_cs.gfx = NULL;
 
    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.pre_gfx);
    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.post_gfx);
 
-   assert(cmd->current_cs.gfx == NULL);
+   assert(cmd->current_cs.pre_gfx == NULL);
+   assert(cmd->current_cs.post_gfx == NULL);
 
    /* We just flushed out the heap use. If we want to use it again, we'll need
     * to queue a free for it again.
@@ -668,8 +763,14 @@ hk_pipeline_stat_addr(struct hk_cmd_buffer *cmd,
       return root->draw.pipeline_stats + (sizeof(uint64_t) * index);
    } else {
       /* Query disabled */
-      return 0;
+      return AGX_SCRATCH_PAGE_ADDRESS;
    }
+}
+
+static inline bool
+hk_stat_enabled(uint64_t addr)
+{
+   return addr != AGX_SCRATCH_PAGE_ADDRESS;
 }
 
 void hk_cmd_buffer_begin_graphics(struct hk_cmd_buffer *cmd,
@@ -681,11 +782,11 @@ void hk_cmd_invalidate_graphics_state(struct hk_cmd_buffer *cmd);
 void hk_cmd_invalidate_compute_state(struct hk_cmd_buffer *cmd);
 
 void hk_cmd_bind_shaders(struct vk_command_buffer *vk_cmd, uint32_t stage_count,
-                         const gl_shader_stage *stages,
+                         const mesa_shader_stage *stages,
                          struct vk_shader **const shaders);
 
 void hk_cmd_bind_graphics_shader(struct hk_cmd_buffer *cmd,
-                                 const gl_shader_stage stage,
+                                 const mesa_shader_stage stage,
                                  struct hk_api_shader *shader);
 
 void hk_cmd_bind_compute_shader(struct hk_cmd_buffer *cmd,
@@ -704,7 +805,7 @@ hk_get_descriptors_state(struct hk_cmd_buffer *cmd,
    case VK_PIPELINE_BIND_POINT_COMPUTE:
       return &cmd->state.cs.descriptors;
    default:
-      unreachable("Unhandled bind point");
+      UNREACHABLE("Unhandled bind point");
    }
 };
 
@@ -723,80 +824,46 @@ void hk_reserve_scratch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 uint32_t hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                              struct hk_linked_shader *linked);
 
-uint32_t hk_upload_usc_words_kernel(struct hk_cmd_buffer *cmd,
-                                    struct hk_shader *s, void *data,
-                                    size_t data_size);
-
 void hk_usc_upload_spilled_rt_descs(struct agx_usc_builder *b,
                                     struct hk_cmd_buffer *cmd);
 
 void hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs);
 
-struct hk_grid {
-   bool indirect;
-   bool indirect_local;
-   union {
-      uint32_t count[3];
-      uint64_t ptr;
-   };
-};
-
-static struct hk_grid
-hk_grid(uint32_t x, uint32_t y, uint32_t z)
-{
-   return (struct hk_grid){.indirect = false, .count = {x, y, z}};
-}
-
-static struct hk_grid
-hk_grid_indirect(uint64_t ptr)
-{
-   return (struct hk_grid){.indirect = true, .ptr = ptr};
-}
-
-static struct hk_grid
-hk_grid_indirect_local(uint64_t ptr)
-{
-   return (struct hk_grid){
-      .indirect = true,
-      .indirect_local = true,
-      .ptr = ptr,
-   };
-}
+void hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
+                                 struct agx_cdm_launch_word_0_packed launch,
+                                 uint32_t usc, struct agx_grid grid,
+                                 struct agx_workgroup local_size);
 
 void hk_dispatch_with_usc(struct hk_device *dev, struct hk_cs *cs,
-                          struct hk_shader *s, uint32_t usc,
-                          struct hk_grid grid, struct hk_grid local_size);
+                          struct agx_shader_info *info, uint32_t usc,
+                          struct agx_grid grid,
+                          struct agx_workgroup local_size);
 
 static inline void
 hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
-                            struct hk_shader *s, struct hk_grid grid,
-                            struct hk_grid local_size)
+                            struct hk_shader *s, struct agx_grid grid,
+                            struct agx_workgroup local_size)
 {
+   if (agx_is_shader_empty(&s->b))
+      return;
+
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    uint32_t usc = hk_upload_usc_words(cmd, s, s->only_linked);
 
    hk_reserve_scratch(cmd, cs, s);
-   hk_dispatch_with_usc(dev, cs, s, usc, grid, local_size);
+   hk_dispatch_with_usc(dev, cs, &s->b.info, usc, grid, local_size);
 }
 
-static inline void
-hk_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs, struct hk_shader *s,
-            struct hk_grid grid)
-{
-   assert(s->info.stage == MESA_SHADER_COMPUTE);
+void hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
+                         enum agx_barrier barrier, enum libagx_program idx,
+                         void *data, size_t data_size);
 
-   struct hk_grid local_size =
-      hk_grid(s->info.cs.local_size[0], s->info.cs.local_size[1],
-              s->info.cs.local_size[2]);
-
-   if (!grid.indirect) {
-      grid.count[0] *= local_size.count[0];
-      grid.count[1] *= local_size.count[1];
-      grid.count[2] *= local_size.count[2];
-   }
-
-   hk_dispatch_with_local_size(cmd, cs, s, grid, local_size);
-}
+#define MESA_DISPATCH_PRECOMP hk_dispatch_precomp
 
 void hk_queue_write(struct hk_cmd_buffer *cmd, uint64_t address, uint32_t value,
                     bool after_gfx);
+
+void agx_fill_velem_keys(const struct vk_vertex_input_state *vi,
+                         uint64_t attribs_read, struct agx_velem_key *keys);
+
+struct agx_robustness hk_prolog_robustness(struct hk_device *dev);

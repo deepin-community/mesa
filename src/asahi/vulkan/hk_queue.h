@@ -22,10 +22,13 @@ struct hk_queue {
       /* Timeline syncobj backing the queue */
       uint32_t syncobj;
 
+      /* Ring-idx used with virtgpu, equal to priority + 1 */
+      uint32_t virt_ring_idx;
+
       /* Current maximum timeline value for the queue's syncobj. If the
        * syncobj's value equals timeline_value, then all work is complete.
        */
-      uint32_t timeline_value;
+      uint64_t timeline_value;
    } drm;
 };
 
@@ -35,7 +38,7 @@ hk_queue_device(struct hk_queue *queue)
    return (struct hk_device *)queue->vk.base.device;
 }
 
-VkResult hk_queue_init(struct hk_device *dev, struct hk_queue *queue,
+VkResult hk_queue_init(struct hk_device *dev,
                        const VkDeviceQueueCreateInfo *pCreateInfo,
                        uint32_t index_in_family);
 

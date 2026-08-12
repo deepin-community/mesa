@@ -138,7 +138,7 @@ ac_build_gfx6_fmask_descriptor(const enum amd_gfx_level gfx_level, const struct 
          num_format = V_008F14_IMG_NUM_FORMAT_FMASK_64_16_8;
          break;
       default:
-         unreachable("invalid nr_samples");
+         UNREACHABLE("invalid nr_samples");
       }
    } else {
       switch (FMASK(state->num_samples, state->num_storage_samples)) {
@@ -182,7 +182,7 @@ ac_build_gfx6_fmask_descriptor(const enum amd_gfx_level gfx_level, const struct 
          data_format = V_008F14_IMG_DATA_FORMAT_FMASK64_S16_F8;
          break;
       default:
-         unreachable("invalid nr_samples");
+         UNREACHABLE("invalid nr_samples");
       }
       num_format = V_008F14_IMG_NUM_FORMAT_UINT;
    }
@@ -282,7 +282,7 @@ ac_build_gfx10_fmask_descriptor(const enum amd_gfx_level gfx_level, const struct
       format = V_008F0C_GFX10_FORMAT_FMASK64_S16_F8;
       break;
    default:
-      unreachable("invalid nr_samples");
+      UNREACHABLE("invalid nr_samples");
    }
 #undef FMASK
 
@@ -437,8 +437,12 @@ ac_build_gfx10_texture_descriptor(const struct radeon_info *info, const struct a
    const struct radeon_surf *surf = state->surf;
    const struct util_format_description *fmt_desc = util_format_description(state->format);
    const uint32_t img_format = ac_get_gfx10_img_format(info->gfx_level, state);
-   const struct ac_surf_nbc_view *nbc_view = state->gfx9.nbc_view;
-   const uint32_t field_last_level = state->num_samples > 1 ? util_logbase2(state->num_samples) : state->last_level;
+   const struct ac_surf_nbc_view *nbc_view = state->gfx10.nbc_view;
+   uint32_t num_samples;
+
+   num_samples = fmt_desc->colorspace == UTIL_FORMAT_COLORSPACE_ZS ? MAX2(1, state->num_samples) :
+                                                                     MAX2(1, state->num_storage_samples);
+   const uint32_t field_last_level = num_samples > 1 ? util_logbase2(num_samples) : state->last_level;
 
    desc[0] = 0;
    desc[1] = S_00A004_FORMAT_GFX10(img_format) |
@@ -450,7 +454,7 @@ ac_build_gfx10_texture_descriptor(const struct radeon_info *info, const struct a
              S_00A00C_DST_SEL_Y(ac_map_swizzle(state->swizzle[1])) |
              S_00A00C_DST_SEL_Z(ac_map_swizzle(state->swizzle[2])) |
              S_00A00C_DST_SEL_W(ac_map_swizzle(state->swizzle[3])) |
-             S_00A00C_BASE_LEVEL(state->num_samples > 1 ? 0 : state->first_level) |
+             S_00A00C_BASE_LEVEL(num_samples > 1 ? 0 : state->first_level) |
              S_00A00C_LAST_LEVEL_GFX10(field_last_level) |
              S_00A00C_BC_SWIZZLE(ac_border_color_swizzle(fmt_desc)) |
              S_00A00C_TYPE(state->type);
@@ -469,7 +473,7 @@ ac_build_gfx10_texture_descriptor(const struct radeon_info *info, const struct a
    desc[6] = 0;
    desc[7] = 0;
 
-   uint32_t max_mip = state->num_samples > 1 ? util_logbase2(state->num_samples) : state->num_levels - 1;
+   uint32_t max_mip = num_samples > 1 ? util_logbase2(num_samples) : state->num_levels - 1;
    if (nbc_view && nbc_view->valid)
       max_mip = nbc_view->num_levels - 1;
 
@@ -496,11 +500,15 @@ ac_build_gfx12_texture_descriptor(const struct radeon_info *info, const struct a
    const struct radeon_surf *surf = state->surf;
    const struct util_format_description *fmt_desc = util_format_description(state->format);
    const uint32_t img_format = ac_get_gfx10_img_format(info->gfx_level, state);
-   const uint32_t max_mip = state->num_samples > 1 ? util_logbase2(state->num_samples) : state->num_levels - 1;
    const uint32_t field_last_level = state->num_samples > 1 ? util_logbase2(state->num_samples) : state->last_level;
    const bool no_edge_clamp = state->num_levels > 1 && util_format_is_compressed(state->img_format) &&
                               !util_format_is_compressed(state->format);
    const uint32_t min_lod_clamped = util_unsigned_fixed(CLAMP(state->min_lod, 0, 15), 8);
+   const struct ac_surf_nbc_view *nbc_view = state->gfx10.nbc_view;
+
+   uint32_t max_mip = state->num_samples > 1 ? util_logbase2(state->num_samples) : state->num_levels - 1;
+   if (nbc_view && nbc_view->valid)
+      max_mip = nbc_view->num_levels - 1;
 
    desc[0] = 0;
    desc[1] = S_00A004_MAX_MIP_GFX12(max_mip) |
@@ -558,7 +566,7 @@ ac_set_mutable_tex_desc_fields(const struct radeon_info *info, const struct ac_m
 {
    const struct radeon_surf *surf = state->surf;
    const struct legacy_surf_level *base_level_info = state->gfx6.base_level_info;
-   const struct ac_surf_nbc_view *nbc_view = state->gfx9.nbc_view;
+   const struct ac_surf_nbc_view *nbc_view = state->gfx10.nbc_view;
    uint8_t swizzle = surf->tile_swizzle;
    uint64_t va = state->va, meta_va = 0;
 
@@ -766,6 +774,11 @@ ac_set_buf_desc_word3(const enum amd_gfx_level gfx_level, const struct ac_buffer
                                            S_008F0C_FORMAT_GFX10(fmt->img_format)) |
                      S_008F0C_OOB_SELECT(state->gfx10_oob_select) |
                      S_008F0C_RESOURCE_LEVEL(gfx_level < GFX11);
+
+      if (gfx_level >= GFX12) {
+         *rsrc_word3 |= S_008F0C_COMPRESSION_EN(state->gfx12.compression_en) |
+                        S_008F0C_WRITE_COMPRESS_ENABLE(state->gfx12.write_compress_enable);
+      }
    } else {
       const struct util_format_description * desc =  util_format_description(state->format);
       const int first_non_void = util_format_get_first_non_void_channel(state->format);
@@ -996,7 +1009,10 @@ ac_init_gfx12_ds_surface(const struct radeon_info *info, const struct ac_ds_stat
 
    ds->db_depth_view = S_028004_SLICE_START(state->first_layer) |
                        S_028004_SLICE_MAX(state->last_layer);
-   ds->u.gfx12.db_depth_view1 = S_028008_MIPID_GFX12(state->level);
+   ds->u.gfx12.db_depth_view1 = S_028008_MIPID_GFX12(state->level) |
+                                S_028008_Z_READ_ONLY(state->z_read_only) |
+                                S_028008_STENCIL_READ_ONLY(state->stencil_read_only);
+
    ds->db_depth_size = S_028014_X_MAX(state->width - 1) |
                        S_028014_Y_MAX(state->height - 1);
    ds->db_z_info = S_028018_FORMAT(db_format) |
@@ -1009,7 +1025,6 @@ ac_init_gfx12_ds_surface(const struct radeon_info *info, const struct ac_ds_stat
    ds->db_depth_base = state->va >> 8;
    ds->db_stencil_base = (state->va + surf->u.gfx9.zs.stencil_offset) >> 8;
    ds->u.gfx12.hiz_info = 0;
-   ds->u.gfx12.his_info = 0;
 
    /* HiZ. */
    if (surf->u.gfx9.zs.hiz.offset) {
@@ -1019,15 +1034,6 @@ ac_init_gfx12_ds_surface(const struct radeon_info *info, const struct ac_ds_stat
       ds->u.gfx12.hiz_size_xy = S_028BA4_X_MAX(surf->u.gfx9.zs.hiz.width_in_tiles - 1) |
                                 S_028BA4_Y_MAX(surf->u.gfx9.zs.hiz.height_in_tiles - 1);
       ds->u.gfx12.hiz_base = (state->va + surf->u.gfx9.zs.hiz.offset) >> 8;
-   }
-
-   /* HiS. */
-   if (surf->u.gfx9.zs.his.offset) {
-      ds->u.gfx12.his_info = S_028B98_SURFACE_ENABLE(1) |
-                             S_028B98_SW_MODE(surf->u.gfx9.zs.his.swizzle_mode);
-      ds->u.gfx12.his_size_xy = S_028BB0_X_MAX(surf->u.gfx9.zs.his.width_in_tiles - 1) |
-                                S_028BB0_Y_MAX(surf->u.gfx9.zs.his.height_in_tiles - 1);
-      ds->u.gfx12.his_base = (state->va + surf->u.gfx9.zs.his.offset) >> 8;
    }
 }
 
@@ -1049,8 +1055,15 @@ ac_init_ds_surface(const struct radeon_info *info, const struct ac_ds_state *sta
 
 static unsigned
 ac_get_decompress_on_z_planes(const struct radeon_info *info, enum pipe_format format, uint8_t log_num_samples,
-                              bool htile_stencil_disabled, bool no_d16_compression)
+                              bool tc_compat_htile_enabled, bool htile_stencil_disabled, bool no_d16_compression,
+                              bool z_allow_expclear)
 {
+   if (info->gfx_level < GFX8)
+      return 0;
+
+   if (!tc_compat_htile_enabled)
+      return z_allow_expclear ? 15 : 0;
+
    uint32_t max_zplanes = 0;
 
    if (info->gfx_level >= GFX9) {
@@ -1067,6 +1080,7 @@ ac_get_decompress_on_z_planes(const struct radeon_info *info, enum pipe_format f
          max_zplanes = 1;
 
       max_zplanes++;
+      assert(max_zplanes != 1); /* 1 is invalid and can cause corruption on gfx11-11.5 */
    } else {
       if (format == PIPE_FORMAT_Z16_UNORM && no_d16_compression) {
          /* Do not enable Z plane compression for 16-bit depth
@@ -1087,6 +1101,7 @@ ac_get_decompress_on_z_planes(const struct radeon_info *info, enum pipe_format f
       }
    }
 
+   assert(max_zplanes != 10 && max_zplanes != 13); /* disallowed values */
    return max_zplanes;
 }
 
@@ -1109,14 +1124,18 @@ ac_set_mutable_ds_surface_fields(const struct radeon_info *info, const struct ac
       log_num_samples = G_028040_NUM_SAMPLES(ds->db_z_info);
    }
 
+   bool z_allow_expclear = info->gfx_level <= GFX11_5 &&
+                           G_028038_ALLOW_EXPCLEAR(ds->db_z_info);
+
    const uint32_t max_zplanes =
       ac_get_decompress_on_z_planes(info, state->format, log_num_samples,
-                                    tile_stencil_disable, state->no_d16_compression);
+                                    state->tc_compat_htile_enabled, tile_stencil_disable,
+                                    state->no_d16_compression, z_allow_expclear);
 
    if (info->gfx_level >= GFX9) {
-      if (state->tc_compat_htile_enabled) {
-         ds->db_z_info |= S_028038_DECOMPRESS_ON_N_ZPLANES(max_zplanes);
+      ds->db_z_info |= S_028038_DECOMPRESS_ON_N_ZPLANES(max_zplanes);
 
+      if (state->tc_compat_htile_enabled) {
          if (info->gfx_level >= GFX10) {
             const bool iterate256 = log_num_samples >= 1;
 
@@ -1132,12 +1151,13 @@ ac_set_mutable_ds_surface_fields(const struct radeon_info *info, const struct ac
 
       ds->db_z_info |= S_028038_ZRANGE_PRECISION(state->zrange_precision);
    } else {
-      if (state->tc_compat_htile_enabled) {
-         ds->u.gfx6.db_htile_surface |= S_028ABC_TC_COMPATIBLE(1);
+      if (info->gfx_level >= GFX8)
          ds->db_z_info |= S_028040_DECOMPRESS_ON_N_ZPLANES(max_zplanes);
-      } else {
+
+      if (state->tc_compat_htile_enabled)
+         ds->u.gfx6.db_htile_surface |= S_028ABC_TC_COMPATIBLE(1);
+      else
          ds->u.gfx6.db_depth_info |= S_02803C_ADDR5_SWIZZLE_MASK(1);
-      }
 
       ds->db_z_info |= S_028040_ZRANGE_PRECISION(state->zrange_precision);
    }
@@ -1151,7 +1171,7 @@ ac_get_dcc_min_compressed_block_size(const struct radeon_info *info)
     * 32B minimum request size. Sometimes a different size is used depending on the data fabric,
     * etc.
     */
-   return info->has_dedicated_vram || info->family == CHIP_GFX1151 ?
+   return info->has_dedicated_vram || info->family == CHIP_STRIX_HALO ?
             V_028C78_MIN_BLOCK_SIZE_32B : V_028C78_MIN_BLOCK_SIZE_64B;
 }
 
@@ -1263,18 +1283,28 @@ ac_init_gfx12_cb_surface(const struct radeon_info *info, const struct ac_cb_stat
                          struct ac_cb_surface *cb)
 {
    const struct radeon_surf *surf = state->surf;
+   uint32_t first_layer = state->first_layer;
+   uint32_t base_level = state->base_level;
+   uint32_t num_levels = state->num_levels;
+
+   if (state->gfx10.nbc_view) {
+      assert(state->gfx10.nbc_view->valid);
+      first_layer = 0;
+      base_level = state->gfx10.nbc_view->level;
+      num_levels = state->gfx10.nbc_view->num_levels;
+   }
 
    assert(!UTIL_ARCH_BIG_ENDIAN);
    cb->cb_color_info |= S_028EC0_FORMAT(cb_format);
-   cb->cb_color_view = S_028C64_SLICE_START(state->first_layer) |
+   cb->cb_color_view = S_028C64_SLICE_START(first_layer) |
                        S_028C64_SLICE_MAX(state->last_layer);
-   cb->cb_color_view2 = S_028C68_MIP_LEVEL(state->base_level);
+   cb->cb_color_view2 = S_028C68_MIP_LEVEL(base_level);
    cb->cb_color_attrib = S_028C6C_NUM_FRAGMENTS(util_logbase2(state->num_storage_samples)) |
                          S_028C6C_FORCE_DST_ALPHA_1(force_dst_alpha_1);
    cb->cb_color_attrib2 = S_028C78_MIP0_HEIGHT(state->height - 1) |
                           S_028C78_MIP0_WIDTH(width - 1);
    cb->cb_color_attrib3 = S_028C7C_MIP0_DEPTH(state->num_layers) |
-                          S_028C7C_MAX_MIP(state->num_levels - 1) |
+                          S_028C7C_MAX_MIP(num_levels - 1) |
                           S_028C7C_RESOURCE_TYPE(surf->u.gfx9.resource_type);
    cb->cb_dcc_control = S_028C70_MAX_UNCOMPRESSED_BLOCK_SIZE(1) | /* 256B */
                         S_028C70_MAX_COMPRESSED_BLOCK_SIZE(surf->u.gfx9.color.dcc.max_compressed_block_size) |
@@ -1409,7 +1439,7 @@ ac_set_mutable_cb_surface_fields(const struct radeon_info *info, const struct ac
          cb->cb_dcc_control |= S_028C78_DISABLE_CONSTANT_ENCODE_REG(1) |
                                S_028C78_FDCC_ENABLE(1);
 
-         if (info->family >= CHIP_GFX1103_R2) {
+         if (info->family >= CHIP_PHOENIX2) {
             cb->cb_dcc_control |= S_028C78_ENABLE_MAX_COMP_FRAG_OVERRIDE(1) |
                                   S_028C78_MAX_COMP_FRAGS(state->num_samples >= 4);
          }
@@ -1493,4 +1523,41 @@ ac_set_mutable_cb_surface_fields(const struct radeon_info *info, const struct ac
 
    if (info->gfx_level < GFX11)
       cb->cb_color_info |= S_028C70_DCC_ENABLE(state->dcc_enabled);
+}
+
+void
+ac_build_gfx12_hiz_descriptor(const struct ac_gfx12_hiz_state *state, uint32_t desc[8])
+{
+   const uint32_t field_last_level = state->num_samples > 1 ? util_logbase2(state->num_samples) : state->last_level;
+   const uint32_t max_mip = state->num_samples > 1 ? util_logbase2(state->num_samples) : state->num_levels - 1;
+   const struct radeon_surf *surf = state->surf;
+
+   const uint32_t width = surf->u.gfx9.zs.hiz.width_in_tiles;
+   const uint32_t height = surf->u.gfx9.zs.hiz.height_in_tiles;
+   const uint64_t va = state->va + surf->u.gfx9.zs.hiz.offset;
+
+   desc[0] = (va >> 8) | surf->tile_swizzle;
+   desc[1] = S_00A004_BASE_ADDRESS_HI(va >> 40) |
+             S_00A004_MAX_MIP_GFX12(max_mip) |
+             S_00A004_FORMAT_GFX12(V_00A004_GFX11_FORMAT_32_UINT) |
+             S_00A004_BASE_LEVEL(state->num_samples > 1 ? 0 : state->first_level) |
+             S_00A004_WIDTH_LO(width - 1);
+   desc[2] = S_00A008_WIDTH_HI((width - 1) >> 2) |
+             S_00A008_HEIGHT(height - 1);
+   desc[3] = S_00A00C_DST_SEL_X(V_008F0C_SQ_SEL_X) |
+             S_00A00C_DST_SEL_Y(V_008F0C_SQ_SEL_0) |
+             S_00A00C_DST_SEL_Z(V_008F0C_SQ_SEL_0) |
+             S_00A00C_DST_SEL_W(V_008F0C_SQ_SEL_1) |
+             S_00A00C_LAST_LEVEL_GFX12(field_last_level) |
+             S_00A00C_BC_SWIZZLE(V_00A00C_BC_SWIZZLE_XYZW) |
+             S_00A00C_TYPE(state->type) |
+             S_00A00C_SW_MODE(surf->u.gfx9.zs.hiz.swizzle_mode);
+   desc[4] = S_00A010_DEPTH_GFX12(state->last_layer) |
+             S_00A010_BASE_ARRAY(state->first_layer);
+   desc[5] = S_00A014_PERF_MOD(4);
+   desc[6] = S_00A018_MAX_UNCOMPRESSED_BLOCK_SIZE(1 /*256B*/) |
+             S_00A018_MAX_COMPRESSED_BLOCK_SIZE(0) |
+             S_00A018_COMPRESSION_EN(1) |
+             S_00A018_WRITE_COMPRESS_ENABLE(1);
+   desc[7] = 0;
 }

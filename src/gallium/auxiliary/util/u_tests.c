@@ -70,19 +70,18 @@ static void
 util_set_framebuffer_cb0(struct cso_context *cso, struct pipe_context *ctx,
 			 struct pipe_resource *tex)
 {
-   struct pipe_surface templ = {{0}}, *surf;
+   struct pipe_surface templ = {{0}};
    struct pipe_framebuffer_state fb = {0};
 
    templ.format = tex->format;
-   surf = ctx->create_surface(ctx, tex, &templ);
+   templ.texture = tex;
 
    fb.width = tex->width0;
    fb.height = tex->height0;
-   fb.cbufs[0] = surf;
+   fb.cbufs[0] = templ;
    fb.nr_cbufs = 1;
 
    cso_set_framebuffer(cso, &fb);
-   pipe_surface_reference(&surf, NULL);
 }
 
 static void
@@ -182,7 +181,7 @@ util_set_common_states_and_clear(struct cso_context *cso, struct pipe_context *c
    util_set_rasterizer_normal(cso);
    util_set_max_viewport(cso, cb);
 
-   ctx->clear(ctx, PIPE_CLEAR_COLOR0, NULL, (void*)clear_color, 0, 0);
+   ctx->clear(ctx, PIPE_CLEAR_COLOR0, 0xf, 0xff, NULL, (void*)clear_color, 0, 0);
 }
 
 static void
@@ -324,8 +323,7 @@ tgsi_vs_window_space_position(struct pipe_context *ctx)
    bool pass = true;
    static const float red[] = {1, 0, 0, 1};
 
-   if (!ctx->screen->get_param(ctx->screen,
-                               PIPE_CAP_VS_WINDOW_SPACE_POSITION)) {
+   if (!ctx->screen->caps.vs_window_space_position) {
       util_report_result(SKIP);
       return;
    }
@@ -361,6 +359,7 @@ tgsi_vs_window_space_position(struct pipe_context *ctx)
                                        cb->width0, cb->height0, red);
 
    /* Cleanup. */
+   cso_unbind_context(cso);
    cso_destroy_context(cso);
    ctx->delete_vs_state(ctx, vs);
    ctx->delete_fs_state(ctx, fs);
@@ -385,7 +384,7 @@ null_sampler_view(struct pipe_context *ctx, unsigned tgsi_tex_target)
    unsigned num_expected = tgsi_tex_target == TGSI_TEXTURE_BUFFER ? 1 : 2;
 
    if (tgsi_tex_target == TGSI_TEXTURE_BUFFER &&
-       !ctx->screen->get_param(ctx->screen, PIPE_CAP_TEXTURE_BUFFER_OBJECTS)) {
+       !ctx->screen->caps.texture_buffer_objects) {
       util_report_result_helper(SKIP, "%s: %s", __func__,
                                 tgsi_texture_names[tgsi_tex_target]);
       return;
@@ -396,12 +395,13 @@ null_sampler_view(struct pipe_context *ctx, unsigned tgsi_tex_target)
                               PIPE_FORMAT_R8G8B8A8_UNORM, 0);
    util_set_common_states_and_clear(cso, ctx, cb);
 
-   ctx->set_sampler_views(ctx, PIPE_SHADER_FRAGMENT, 0, 0, 1, false, NULL);
+   ctx->set_sampler_views(ctx, MESA_SHADER_FRAGMENT, 0, 0, 1, NULL);
 
    /* Fragment shader. */
    fs = util_make_fragment_tex_shader(ctx, tgsi_tex_target,
                                       TGSI_RETURN_TYPE_FLOAT,
-                                      TGSI_RETURN_TYPE_FLOAT, false, false);
+                                      TGSI_RETURN_TYPE_FLOAT,
+                                      false, false, false);
    cso_set_fragment_shader_handle(cso, fs);
 
    /* Vertex shader. */
@@ -414,6 +414,7 @@ null_sampler_view(struct pipe_context *ctx, unsigned tgsi_tex_target)
                                   num_expected);
 
    /* Cleanup. */
+   cso_unbind_context(cso);
    cso_destroy_context(cso);
    ctx->delete_vs_state(ctx, vs);
    ctx->delete_fs_state(ctx, fs);
@@ -438,7 +439,7 @@ util_test_constant_buffer(struct pipe_context *ctx,
                               PIPE_FORMAT_R8G8B8A8_UNORM, 0);
    util_set_common_states_and_clear(cso, ctx, cb);
 
-   pipe_set_constant_buffer(ctx, PIPE_SHADER_FRAGMENT, 0, constbuf);
+   pipe_set_constant_buffer(ctx, MESA_SHADER_FRAGMENT, 0, constbuf);
 
    /* Fragment shader. */
    {
@@ -471,6 +472,7 @@ util_test_constant_buffer(struct pipe_context *ctx,
                                        cb->height0, zero);
 
    /* Cleanup. */
+   cso_unbind_context(cso);
    cso_destroy_context(cso);
    ctx->delete_vs_state(ctx, vs);
    ctx->delete_fs_state(ctx, fs);
@@ -510,6 +512,7 @@ disabled_fragment_shader(struct pipe_context *ctx)
    ctx->get_query_result(ctx, query, true, &qresult);
 
    /* Cleanup. */
+   cso_unbind_context(cso);
    cso_destroy_context(cso);
    ctx->delete_vs_state(ctx, vs);
    ctx->delete_fs_state(ctx, fs);
@@ -534,7 +537,7 @@ test_sync_file_fences(struct pipe_context *ctx)
    bool pass = true;
    enum pipe_fd_type fd_type = PIPE_FD_TYPE_NATIVE_SYNC;
 
-   if (!screen->get_param(screen, PIPE_CAP_NATIVE_FENCE_FD))
+   if (!screen->caps.native_fence_fd)
       return;
 
    struct cso_context *cso = cso_create_context(ctx, 0);
@@ -574,7 +577,7 @@ test_sync_file_fences(struct pipe_context *ctx)
 
    /* Run another clear after waiting for everything. */
    struct pipe_fence_handle *final_fence = NULL;
-   ctx->fence_server_sync(ctx, merged_fence);
+   ctx->fence_server_sync(ctx, merged_fence, 0);
    value = 0xff;
    ctx->clear_buffer(ctx, buf, 0, buf->width0, &value, sizeof(value));
    ctx->flush(ctx, &final_fence, PIPE_FLUSH_FENCE_FD);
@@ -616,6 +619,7 @@ test_sync_file_fences(struct pipe_context *ctx)
    screen->fence_reference(screen, &merged_fence, NULL);
    screen->fence_reference(screen, &final_fence, NULL);
 
+   cso_unbind_context(cso);
    cso_destroy_context(cso);
    pipe_resource_reference(&buf, NULL);
    pipe_resource_reference(&tex, NULL);
@@ -638,12 +642,12 @@ test_texture_barrier(struct pipe_context *ctx, bool use_fbfetch,
    snprintf(name, sizeof(name), "%s: %s, %u samples", __func__,
             use_fbfetch ? "FBFETCH" : "sampler", MAX2(num_samples, 1));
 
-   if (!ctx->screen->get_param(ctx->screen, PIPE_CAP_TEXTURE_BARRIER)) {
+   if (!ctx->screen->caps.texture_barrier) {
       util_report_result_helper(SKIP, name);
       return;
    }
    if (use_fbfetch &&
-       !ctx->screen->get_param(ctx->screen, PIPE_CAP_FBFETCH)) {
+       !ctx->screen->caps.fbfetch) {
       util_report_result_helper(SKIP, name);
       return;
    }
@@ -709,7 +713,7 @@ test_texture_barrier(struct pipe_context *ctx, bool use_fbfetch,
       templ.swizzle_b = PIPE_SWIZZLE_Z;
       templ.swizzle_a = PIPE_SWIZZLE_W;
       view = ctx->create_sampler_view(ctx, cb, &templ);
-      ctx->set_sampler_views(ctx, PIPE_SHADER_FRAGMENT, 0, 1, 0, false, &view);
+      ctx->set_sampler_views(ctx, MESA_SHADER_FRAGMENT, 0, 1, 0, &view);
 
       /* Fragment shader. */
       if (num_samples > 1) {
@@ -790,6 +794,7 @@ test_texture_barrier(struct pipe_context *ctx, bool use_fbfetch,
                                     cb->width0, cb->height0, expected);
 
    /* Cleanup. */
+   cso_unbind_context(cso);
    cso_destroy_context(cso);
    ctx->delete_vs_state(ctx, vs);
    ctx->delete_fs_state(ctx, fs);
@@ -845,7 +850,7 @@ test_compute_clear_image_shader(struct pipe_context *ctx)
    image.shader_access = image.access = PIPE_IMAGE_ACCESS_READ_WRITE;
    image.format = cb->format;
 
-   ctx->set_shader_images(ctx, PIPE_SHADER_COMPUTE, 0, 1, 0, &image);
+   ctx->set_shader_images(ctx, MESA_SHADER_COMPUTE, 0, 1, 0, &image);
 
    /* Dispatch compute. */
    struct pipe_grid_info info = {0};

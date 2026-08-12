@@ -73,7 +73,7 @@ translate_mipfilter(VkSamplerMipmapMode mode)
       return AGX_MIP_FILTER_LINEAR;
 
    default:
-      unreachable("Invalid filter");
+      UNREACHABLE("Invalid filter");
    }
 }
 
@@ -129,7 +129,7 @@ translate_border_color(VkBorderColor color, bool custom_to_1,
       return AGX_BORDER_COLOUR_OPAQUE_WHITE;
 
    default:
-      unreachable("invalid");
+      UNREACHABLE("invalid");
    }
 }
 
@@ -178,7 +178,6 @@ hk_CreateSampler(VkDevice device,
 {
    VK_FROM_HANDLE(hk_device, dev, device);
    struct hk_physical_device *pdev = hk_device_physical(dev);
-   struct hk_instance *instance = (struct hk_instance *)pdev->vk.instance;
    struct hk_sampler *sampler;
    VkResult result;
 
@@ -186,7 +185,7 @@ hk_CreateSampler(VkDevice device,
    if (!sampler)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   bool workaround_rgba4 = instance->workaround_rgba4;
+   bool workaround_rgba4 = dev->vk.enabled_features.customBorderColors;
    bool custom_border =
       uses_border(info) &&
       is_border_color_custom(info->borderColor, workaround_rgba4);
@@ -194,10 +193,10 @@ hk_CreateSampler(VkDevice device,
    /* Sanity check the noborder setting. There's no way to recover from it being
     * wrong but at least we can make noise to lint for errors in the driconf.
     */
-   if (HK_PERF(dev, NOBORDER) && custom_border) {
+   static bool warned_custom_border = false;
+   if (HK_PERF(dev, NOBORDER) && custom_border && !warned_custom_border) {
       fprintf(stderr, "custom border colour used, but emulation is disabled\n");
       fprintf(stderr, "border %u\n", info->borderColor);
-      fprintf(stderr, "rgba4 workaround: %u\n", workaround_rgba4);
       fprintf(stderr, "unnorm %X\n", info->unnormalizedCoordinates);
       fprintf(stderr, "compare %X\n", info->compareEnable);
       fprintf(stderr, "value: %X, %X, %X, %X\n",
@@ -207,11 +206,7 @@ hk_CreateSampler(VkDevice device,
               sampler->vk.border_color_value.uint32[3]);
       fprintf(stderr, "wraps: %X, %X, %X\n", info->addressModeU,
               info->addressModeV, info->addressModeW);
-
-      /* Blow up debug builds so we can fix the driconf. Allow the rare
-       * misrendering on release builds.
-       */
-      assert(0);
+      warned_custom_border = true;
    }
 
    struct agx_sampler_packed samp;

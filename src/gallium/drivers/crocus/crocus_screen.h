@@ -30,6 +30,7 @@
 #include "util/slab.h"
 #include "util/u_screen.h"
 #include "intel/dev/intel_device_info.h"
+#include "intel/dev/virtio/intel_virtio.h"
 #include "intel/isl/isl.h"
 #include "crocus_bufmgr.h"
 #include "compiler/shader_enums.h"
@@ -41,7 +42,7 @@ struct intel_vue_map;
 struct elk_tcs_prog_key;
 struct elk_tes_prog_key;
 struct elk_cs_prog_key;
-struct elk_wm_prog_key;
+struct elk_fs_prog_key;
 struct elk_vs_prog_key;
 struct elk_gs_prog_key;
 struct shader_info;
@@ -118,21 +119,21 @@ struct crocus_vtable {
                                     const struct intel_vue_map *vue_map);
    void (*populate_vs_key)(const struct crocus_context *ice,
                            const struct shader_info *info,
-                           gl_shader_stage last_stage,
+                           mesa_shader_stage last_stage,
                            struct elk_vs_prog_key *key);
    void (*populate_tcs_key)(const struct crocus_context *ice,
                             struct elk_tcs_prog_key *key);
    void (*populate_tes_key)(const struct crocus_context *ice,
                             const struct shader_info *info,
-                            gl_shader_stage last_stage,
+                            mesa_shader_stage last_stage,
                             struct elk_tes_prog_key *key);
    void (*populate_gs_key)(const struct crocus_context *ice,
                            const struct shader_info *info,
-                           gl_shader_stage last_stage,
+                           mesa_shader_stage last_stage,
                            struct elk_gs_prog_key *key);
    void (*populate_fs_key)(const struct crocus_context *ice,
                            const struct shader_info *info,
-                           struct elk_wm_prog_key *key);
+                           struct elk_fs_prog_key *key);
    void (*populate_cs_key)(const struct crocus_context *ice,
                            struct elk_cs_prog_key *key);
    void (*fill_clamp_mask)(const struct crocus_sampler_state *state,

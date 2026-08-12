@@ -105,7 +105,7 @@ st_mesa_format_to_pipe_format(const struct st_context *st,
          return st->transcode_etc ? PIPE_FORMAT_DXT1_SRGBA :
                 has_bgra_srgb ? PIPE_FORMAT_B8G8R8A8_SRGB : PIPE_FORMAT_R8G8B8A8_SRGB;
       default:
-         unreachable("Unknown ETC2 format");
+         UNREACHABLE("Unknown ETC2 format");
       }
    }
 
@@ -153,7 +153,7 @@ st_mesa_format_to_pipe_format(const struct st_context *st,
       case MESA_FORMAT_LA_LATC2_SNORM:
          return PIPE_FORMAT_L8A8_SNORM;
       default:
-         unreachable("Unknown RGTC format");
+         UNREACHABLE("Unknown RGTC format");
       }
    }
 
@@ -190,7 +190,7 @@ st_pipe_format_to_mesa_format(enum pipe_format format)
 struct format_mapping
 {
    GLenum glFormats[18];       /**< list of GLenum formats, 0-terminated */
-   enum pipe_format pipeFormats[14]; /**< list of pipe formats, 0-terminated */
+   enum pipe_format pipeFormats[16]; /**< list of pipe formats, 0-terminated */
 };
 
 
@@ -201,10 +201,19 @@ struct format_mapping
       PIPE_FORMAT_A8B8G8R8_UNORM, \
       0
 
+#define DEFAULT_BGRA_FORMATS \
+      PIPE_FORMAT_B8G8R8A8_UNORM, \
+      PIPE_FORMAT_R8G8B8A8_UNORM, \
+      PIPE_FORMAT_A8B8G8R8_UNORM, \
+      PIPE_FORMAT_A8R8G8B8_UNORM, \
+      0
+
 #define DEFAULT_RGB_FORMATS \
       PIPE_FORMAT_R8G8B8X8_UNORM, \
       PIPE_FORMAT_B8G8R8X8_UNORM, \
+      PIPE_FORMAT_R8G8B8_UNORM, \
       PIPE_FORMAT_X8R8G8B8_UNORM, \
+      PIPE_FORMAT_B8G8R8_UNORM, \
       PIPE_FORMAT_X8B8G8R8_UNORM, \
       PIPE_FORMAT_B5G6R5_UNORM, \
       DEFAULT_RGBA_FORMATS
@@ -257,11 +266,11 @@ static const struct format_mapping format_map[] = {
    },
    {
       { GL_BGRA, GL_BGRA8_EXT, 0 },
-      { DEFAULT_RGBA_FORMATS }
+      { DEFAULT_BGRA_FORMATS }
    },
    {
       { 3, GL_RGB, GL_RGB8, 0 },
-      { PIPE_FORMAT_R8G8B8X8_UNORM, DEFAULT_RGB_FORMATS }
+      { DEFAULT_RGB_FORMATS }
    },
    {
       { GL_RGB12, GL_RGB16, 0 },
@@ -717,59 +726,59 @@ static const struct format_mapping format_map[] = {
    /* ASTC */
    {
       { GL_COMPRESSED_RGBA_ASTC_4x4_KHR, 0 },
-      { PIPE_FORMAT_ASTC_4x4, 0},
+      { PIPE_FORMAT_ASTC_4x4_FLOAT, PIPE_FORMAT_ASTC_4x4, 0},
    },
    {
       { GL_COMPRESSED_RGBA_ASTC_5x4_KHR, 0 },
-      { PIPE_FORMAT_ASTC_5x4, 0},
+      { PIPE_FORMAT_ASTC_5x4_FLOAT, PIPE_FORMAT_ASTC_5x4, 0},
    },
    {
       { GL_COMPRESSED_RGBA_ASTC_5x5_KHR, 0 },
-      { PIPE_FORMAT_ASTC_5x5, 0},
+      { PIPE_FORMAT_ASTC_5x5_FLOAT, PIPE_FORMAT_ASTC_5x5, 0},
    },
    {
       { GL_COMPRESSED_RGBA_ASTC_6x5_KHR, 0 },
-      { PIPE_FORMAT_ASTC_6x5, 0},
+      { PIPE_FORMAT_ASTC_6x5_FLOAT, PIPE_FORMAT_ASTC_6x5, 0},
    },
    {
       { GL_COMPRESSED_RGBA_ASTC_6x6_KHR, 0 },
-      { PIPE_FORMAT_ASTC_6x6, 0},
+      { PIPE_FORMAT_ASTC_6x6_FLOAT, PIPE_FORMAT_ASTC_6x6, 0},
    },
    {
       { GL_COMPRESSED_RGBA_ASTC_8x5_KHR, 0 },
-      { PIPE_FORMAT_ASTC_8x5, 0},
+      { PIPE_FORMAT_ASTC_8x5_FLOAT, PIPE_FORMAT_ASTC_8x5, 0},
    },
    {
       { GL_COMPRESSED_RGBA_ASTC_8x6_KHR, 0 },
-      { PIPE_FORMAT_ASTC_8x6, 0},
+      { PIPE_FORMAT_ASTC_8x6_FLOAT, PIPE_FORMAT_ASTC_8x6, 0},
    },
    {
       { GL_COMPRESSED_RGBA_ASTC_8x8_KHR, 0 },
-      { PIPE_FORMAT_ASTC_8x8, 0},
+      { PIPE_FORMAT_ASTC_8x8_FLOAT, PIPE_FORMAT_ASTC_8x8, 0},
    },
    {
       { GL_COMPRESSED_RGBA_ASTC_10x5_KHR, 0 },
-      { PIPE_FORMAT_ASTC_10x5, 0},
+      { PIPE_FORMAT_ASTC_10x5_FLOAT, PIPE_FORMAT_ASTC_10x5, 0},
    },
    {
       { GL_COMPRESSED_RGBA_ASTC_10x6_KHR, 0 },
-      { PIPE_FORMAT_ASTC_10x6, 0},
+      { PIPE_FORMAT_ASTC_10x6_FLOAT, PIPE_FORMAT_ASTC_10x6, 0},
    },
    {
       { GL_COMPRESSED_RGBA_ASTC_10x8_KHR, 0 },
-      { PIPE_FORMAT_ASTC_10x8, 0},
+      { PIPE_FORMAT_ASTC_10x8_FLOAT, PIPE_FORMAT_ASTC_10x8, 0},
    },
    {
       { GL_COMPRESSED_RGBA_ASTC_10x10_KHR, 0 },
-      { PIPE_FORMAT_ASTC_10x10, 0},
+      { PIPE_FORMAT_ASTC_10x10_FLOAT, PIPE_FORMAT_ASTC_10x10, 0},
    },
    {
       { GL_COMPRESSED_RGBA_ASTC_12x10_KHR, 0 },
-      { PIPE_FORMAT_ASTC_12x10, 0},
+      { PIPE_FORMAT_ASTC_12x10_FLOAT, PIPE_FORMAT_ASTC_12x10, 0},
    },
    {
       { GL_COMPRESSED_RGBA_ASTC_12x12_KHR, 0 },
-      { PIPE_FORMAT_ASTC_12x12, 0},
+      { PIPE_FORMAT_ASTC_12x12_FLOAT, PIPE_FORMAT_ASTC_12x12, 0},
    },
 
    {
@@ -1213,28 +1222,6 @@ st_choose_format(struct st_context *st, GLenum internalFormat,
       }
    }
 
-   /* For an unsized GL_RGB but a 2_10_10_10 type, try to pick one of the
-    * 2_10_10_10 formats.  This is important for
-    * GL_EXT_texture_type_2_10_10_10_REV support, which says that these
-    * formats are not color-renderable.  Mesa's check for making those
-    * non-color-renderable is based on our chosen format being 2101010.
-    */
-   if (type == GL_UNSIGNED_INT_2_10_10_10_REV ||
-       type == GL_UNSIGNED_INT_10_10_10_2 ||
-       type == GL_UNSIGNED_INT_10_10_10_2_OES) {
-      if (internalFormat == GL_RGB)
-         internalFormat = GL_RGB10;
-      else if (internalFormat == GL_RGBA)
-         internalFormat = GL_RGB10_A2;
-   }
-
-   if (type == GL_UNSIGNED_SHORT_5_5_5_1) {
-      if (internalFormat == GL_RGB)
-         internalFormat = GL_RGB5;
-      else if (internalFormat == GL_RGBA)
-         internalFormat = GL_RGB5_A1;
-   }
-
    /* search table for internalFormat */
    for (i = 0; i < ARRAY_SIZE(format_map); i++) {
       const struct format_mapping *mapping = &format_map[i];
@@ -1312,6 +1299,42 @@ st_choose_matching_format(struct st_context *st, unsigned bind,
    return PIPE_FORMAT_NONE;
 }
 
+static mesa_format
+choose_format_with_bindings(struct gl_context *ctx, GLint internalFormat,
+                            GLenum format, GLenum type,
+                            enum pipe_texture_target target, unsigned bindings)
+{
+   struct st_context *st = st_context(ctx);
+
+   /* GLES allows the driver to choose any format which matches
+    * the format+type combo, because GLES only supports unsized internal
+    * formats and expects the driver to choose whatever suits it.
+    */
+   if (_mesa_is_gles(ctx)) {
+      GLenum baseFormat = _mesa_base_tex_format(ctx, internalFormat);
+      GLenum basePackFormat = _mesa_base_pack_format(format);
+      GLenum iformat = internalFormat;
+
+      /* Treat GL_BGRA as GL_RGBA. */
+      if (iformat == GL_BGRA)
+         iformat = GL_RGBA;
+
+      /* Check if the internalformat is unsized and compatible
+       * with the "format".
+       */
+      if (iformat == baseFormat && iformat == basePackFormat) {
+         enum pipe_format pFormat =
+            st_choose_matching_format(st, bindings, format, type,
+                                      ctx->Unpack.SwapBytes);
+
+         if (pFormat != PIPE_FORMAT_NONE)
+            return st_pipe_format_to_mesa_format(pFormat);
+      }
+   }
+
+   return st_choose_format(st, internalFormat, format, type, target, 0, 0,
+                           bindings, ctx->Unpack.SwapBytes, true);
+}
 
 /**
  * Called via ctx->Driver.ChooseTextureFormat().
@@ -1327,6 +1350,11 @@ st_ChooseTextureFormat(struct gl_context *ctx, GLenum target,
    unsigned bindings;
    bool is_renderbuffer = false;
    enum pipe_texture_target pTarget;
+
+   if (ctx->Const.ForceDepthComponentTypeInt &&
+       internalFormat == GL_DEPTH_COMPONENT &&
+       type == GL_UNSIGNED_SHORT)
+      type = GL_UNSIGNED_INT;
 
    if (target == GL_RENDERBUFFER) {
       pTarget = PIPE_TEXTURE_2D;
@@ -1348,6 +1376,28 @@ st_ChooseTextureFormat(struct gl_context *ctx, GLenum target,
             is_renderbuffer = true;
          }
       }
+   }
+
+   /* For an unsized GL_RGB but a 2_10_10_10 type, try to pick one of the
+    * 2_10_10_10 formats.  This is important for
+    * GL_EXT_texture_type_2_10_10_10_REV support, which says that these
+    * formats are not color-renderable.  Mesa's check for making those
+    * non-color-renderable is based on our chosen format being 2101010.
+    */
+   if (type == GL_UNSIGNED_INT_2_10_10_10_REV ||
+       type == GL_UNSIGNED_INT_10_10_10_2 ||
+       type == GL_UNSIGNED_INT_10_10_10_2_OES) {
+      if (internalFormat == GL_RGB)
+         internalFormat = GL_RGB10;
+      else if (internalFormat == GL_RGBA)
+         internalFormat = GL_RGB10_A2;
+   }
+
+   if (type == GL_UNSIGNED_SHORT_5_5_5_1) {
+      if (internalFormat == GL_RGB)
+         internalFormat = GL_RGB5;
+      else if (internalFormat == GL_RGBA)
+         internalFormat = GL_RGB5_A1;
    }
 
    if (target == GL_TEXTURE_1D || target == GL_TEXTURE_1D_ARRAY) {
@@ -1400,55 +1450,16 @@ st_ChooseTextureFormat(struct gl_context *ctx, GLenum target,
         internalFormat == GL_LUMINANCE_ALPHA16F_ARB))
       bindings |= PIPE_BIND_RENDER_TARGET;
 
-   /* GLES allows the driver to choose any format which matches
-    * the format+type combo, because GLES only supports unsized internal
-    * formats and expects the driver to choose whatever suits it.
-    */
-   if (_mesa_is_gles(ctx)) {
-      GLenum baseFormat = _mesa_base_tex_format(ctx, internalFormat);
-      GLenum basePackFormat = _mesa_base_pack_format(format);
-      GLenum iformat = internalFormat;
-
-      /* Treat GL_BGRA as GL_RGBA. */
-      if (iformat == GL_BGRA)
-         iformat = GL_RGBA;
-
-      /* Check if the internalformat is unsized and compatible
-       * with the "format".
-       */
-      if (iformat == baseFormat && iformat == basePackFormat) {
-         pFormat = st_choose_matching_format(st, bindings, format, type,
-                                             ctx->Unpack.SwapBytes);
-
-         if (pFormat != PIPE_FORMAT_NONE)
-            return st_pipe_format_to_mesa_format(pFormat);
-
-         if (!is_renderbuffer) {
-            /* try choosing format again, this time without render
-             * target bindings.
-             */
-            pFormat = st_choose_matching_format(st, PIPE_BIND_SAMPLER_VIEW,
-                                                format, type,
-                                                ctx->Unpack.SwapBytes);
-            if (pFormat != PIPE_FORMAT_NONE)
-               return st_pipe_format_to_mesa_format(pFormat);
-         }
-      }
-   }
-
-   pFormat = st_choose_format(st, internalFormat, format, type,
-                              pTarget, 0, 0, bindings,
-                              ctx->Unpack.SwapBytes, true);
+   pFormat = choose_format_with_bindings(ctx, internalFormat, format, type,
+                                         pTarget, bindings);
 
    if (pFormat == PIPE_FORMAT_NONE && !is_renderbuffer) {
-      /* try choosing format again, this time without render target bindings */
-      pFormat = st_choose_format(st, internalFormat, format, type,
-                                 pTarget, 0, 0, PIPE_BIND_SAMPLER_VIEW,
-                                 ctx->Unpack.SwapBytes, true);
+      pFormat = choose_format_with_bindings(ctx, internalFormat, format, type,
+                                            pTarget, PIPE_BIND_SAMPLER_VIEW);
    }
 
    if (pFormat == PIPE_FORMAT_NONE) {
-      mFormat = _mesa_glenum_to_compressed_format(internalFormat);
+      mFormat = _mesa_glenum_to_compressed_format(ctx, internalFormat);
       if (st_compressed_format_fallback(st, mFormat))
           return mFormat;
 
@@ -1478,7 +1489,7 @@ st_ChooseTextureFormat(struct gl_context *ctx, GLenum target,
  */
 static size_t
 st_QuerySamplesForFormat(struct gl_context *ctx, GLenum target,
-                         GLenum internalFormat, int samples[16])
+                         GLenum internalFormat, int samples[MAX_SAMPLES])
 {
    struct st_context *st = st_context(ctx);
    enum pipe_format format;
@@ -1507,7 +1518,7 @@ st_QuerySamplesForFormat(struct gl_context *ctx, GLenum target,
    }
 
    /* Set sample counts in descending order. */
-   for (i = 16; i > 1; i--) {
+   for (i = MAX_SAMPLES; i > 1; i--) {
       format = st_choose_format(st, internalFormat, GL_NONE, GL_NONE,
                                 PIPE_TEXTURE_2D, i, i, bind,
                                 false, false);
@@ -1540,7 +1551,7 @@ st_QueryTextureFormatSupport(struct gl_context *ctx, GLenum target, GLenum inter
    /* multisample textures need >= 2 samples */
    unsigned min_samples = target == GL_TEXTURE_2D_MULTISAMPLE ||
                           target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ? 1 : 0;
-   unsigned max_samples = min_samples ? 16 : 1;
+   unsigned max_samples = min_samples ? MAX_SAMPLES : 1;
 
    /* compressed textures will be allocated as e.g., RGBA8, so check that instead */
    enum pipe_format pf = st_choose_format(st, internalFormat, GL_NONE, GL_NONE,
@@ -1623,7 +1634,7 @@ st_QueryInternalFormat(struct gl_context *ctx, GLenum target,
       break;
 
    case GL_NUM_SAMPLE_COUNTS: {
-      int samples[16];
+      int samples[MAX_SAMPLES];
       size_t num_samples;
       num_samples = st_QuerySamplesForFormat(ctx, target, internalFormat,
                                              samples);
@@ -1706,6 +1717,7 @@ st_QueryInternalFormat(struct gl_context *ctx, GLenum target,
       params[0] = (GLint) num_rates;
       break;
    }
+   case GL_FRAMEBUFFER_RENDERABLE:
    case GL_FRAMEBUFFER_BLEND: {
       if (target == GL_RENDERBUFFER)
          target = GL_TEXTURE_2D;
@@ -1713,9 +1725,14 @@ st_QueryInternalFormat(struct gl_context *ctx, GLenum target,
       mesa_format format = st_ChooseTextureFormat(ctx, target, internalFormat, GL_NONE, GL_NONE);
       enum pipe_format pformat = st_mesa_format_to_pipe_format(st, format);
       struct pipe_screen *screen = st->screen;
+      bool is_depth = util_format_is_depth_or_stencil(pformat);
+
+      unsigned bind = is_depth ? PIPE_BIND_DEPTH_STENCIL : PIPE_BIND_RENDER_TARGET;
+      if (pname == GL_FRAMEBUFFER_BLEND)
+         bind |= PIPE_BIND_BLENDABLE;
       bool supported = pformat != PIPE_FORMAT_NONE &&
-                       screen->is_format_supported(screen, pformat, ptarget, 0, 0,
-                                                   PIPE_BIND_BLENDABLE | PIPE_BIND_RENDER_TARGET);
+                       screen->is_format_supported(screen, pformat, ptarget, 0, 0, bind);
+
       params[0] = supported ? GL_FULL_SUPPORT : GL_NONE;
       break;
    }

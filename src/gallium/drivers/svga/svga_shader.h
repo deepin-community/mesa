@@ -24,7 +24,6 @@
 
 struct svga_context;
 
-
 struct svga_compile_key
 {
    /* vertex shader only */
@@ -132,16 +131,16 @@ struct svga_compile_key
       unsigned sampler_index:5;
    } tex[PIPE_MAX_SAMPLERS];
 
-   unsigned uav_splice_index:4;      /* starting uav index */
-   unsigned srv_raw_constbuf_index:8;   /* start index for srv raw buffers */
-   unsigned srv_raw_shaderbuf_index:8;  /* start index for srv raw shader bufs */
-   unsigned image_size_used:1;
+   uint8_t uav_splice_index;         /* starting uav index */
+   uint8_t srv_raw_constbuf_index;   /* start index for srv raw buffers */
+   uint8_t srv_raw_shaderbuf_index;  /* start index for srv raw shader bufs */
+   bool    image_size_used;
 
    uint16_t raw_constbufs;           /* bitmask of raw constant buffers */
    uint64_t raw_shaderbufs;          /* bitmask of raw shader buffers */
 
    struct {
-      enum tgsi_return_type return_type;
+      unsigned return_type;
       enum pipe_texture_target resource_target;
       unsigned is_array:1;
       unsigned is_single_layer:1;
@@ -340,7 +339,7 @@ struct svga_shader_info
 struct svga_shader
 {
    enum pipe_shader_ir type;            /* IR type */
-   enum pipe_shader_type stage;         /* shader stage */
+   mesa_shader_stage stage;         /* shader stage */
 
    struct svga_shader_info info;        /* shader info */
 
@@ -462,7 +461,7 @@ svga_remap_generic_index(int8_t remap_table[MAX_GENERIC_VARYING],
 
 void
 svga_init_shader_key_common(const struct svga_context *svga,
-                            enum pipe_shader_type shader_type,
+                            mesa_shader_stage shader_type,
                             const struct svga_shader *shader,
                             struct svga_compile_key *key);
 
@@ -477,7 +476,7 @@ svga_search_shader_token_key(struct svga_shader *shader,
 struct svga_shader *
 svga_create_shader(struct pipe_context *pipe,
                    const struct pipe_shader_state *templ,
-                   enum pipe_shader_type stage,
+                   mesa_shader_stage stage,
                    unsigned len);
 
 enum pipe_error
@@ -496,7 +495,7 @@ svga_set_shader(struct svga_context *svga,
                 struct svga_shader_variant *variant);
 
 struct svga_shader_variant *
-svga_new_shader_variant(struct svga_context *svga, enum pipe_shader_type type);
+svga_new_shader_variant(struct svga_context *svga, mesa_shader_stage type);
 
 void
 svga_destroy_shader_variant(struct svga_context *svga,
@@ -530,20 +529,20 @@ svga_shader_too_large(const struct svga_context *svga,
  * Convert from PIPE_SHADER_* to SVGA3D_SHADERTYPE_*
  */
 static inline SVGA3dShaderType
-svga_shader_type(enum pipe_shader_type shader)
+svga_shader_type(mesa_shader_stage shader)
 {
    switch (shader) {
-   case PIPE_SHADER_VERTEX:
+   case MESA_SHADER_VERTEX:
       return SVGA3D_SHADERTYPE_VS;
-   case PIPE_SHADER_GEOMETRY:
+   case MESA_SHADER_GEOMETRY:
       return SVGA3D_SHADERTYPE_GS;
-   case PIPE_SHADER_FRAGMENT:
+   case MESA_SHADER_FRAGMENT:
       return SVGA3D_SHADERTYPE_PS;
-   case PIPE_SHADER_TESS_CTRL:
+   case MESA_SHADER_TESS_CTRL:
       return SVGA3D_SHADERTYPE_HS;
-   case PIPE_SHADER_TESS_EVAL:
+   case MESA_SHADER_TESS_EVAL:
       return SVGA3D_SHADERTYPE_DS;
-   case PIPE_SHADER_COMPUTE:
+   case MESA_SHADER_COMPUTE:
       return SVGA3D_SHADERTYPE_CS;
    default:
       assert(!"Invalid shader type");

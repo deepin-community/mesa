@@ -44,10 +44,10 @@ isl_gfx20_filter_tiling(const struct isl_device *dev,
    /* Clear flags unsupported on this hardware */
    assert(ISL_GFX_VERX10(dev) >= 200);
 
-   *flags &= ISL_TILING_LINEAR_BIT |
-             ISL_TILING_X_BIT |
-             ISL_TILING_4_BIT |
-             ISL_TILING_64_XE2_BIT;
+   *flags &= isl_device_get_supported_tilings(dev);
+
+   if (info->usage & ISL_SURF_USAGE_SOFTWARE_DETILING)
+      *flags &= (1 << dev->shader_tiling) | ISL_TILING_LINEAR_BIT;
 
    if (isl_surf_usage_is_depth_or_stencil(info->usage)) {
       *flags &= ISL_TILING_4_BIT | ISL_TILING_64_XE2_BIT;
@@ -135,6 +135,18 @@ isl_gfx20_filter_tiling(const struct isl_device *dev,
     */
    if (info->usage & ISL_SURF_USAGE_CPB_BIT)
       *flags &= ISL_TILING_4_BIT | ISL_TILING_64_XE2_BIT;
+
+   /* From ATS-M PRMs, Volume 2a: Command Reference: Instructions,
+    * MFX_SURFACE_STATE,
+    *
+    *    "For optimizing memory efficiency based on access patterns, only
+    *     TileY is supported."
+    *
+    * The other media engines have similar limitations, TileY is the only
+    * well-supported tiling mode that can easily be used on all of them.
+    */
+   if (info->usage & ISL_SURF_USAGE_VIDEO_DECODE_BIT)
+      *flags &= ISL_TILING_4_BIT;
 }
 
 void
@@ -228,14 +240,18 @@ isl_gfx20_choose_image_alignment_el(const struct isl_device *dev,
 
       /* WA_22018390030:
        *
-       * Don't choose VALIGN_4 on Xe2 for color, non-volumetric, Tile4 surfaces
-       * which can be fast cleared. We choose the next smallest option instead,
-       * VALIGN_8.
+       * Don't choose VALIGN_4 on Xe2 for color, non-volumetric, Tile4
+       * surfaces which can be fast cleared. We choose the next smallest
+       * option instead, VALIGN_8.
+       *
+       * Bspec 57340 and HSD 22021327133 state that this also applies to
+       * Xe3P+.
        */
       if (!INTEL_DEBUG(DEBUG_NO_FAST_CLEAR) &&
-          intel_needs_workaround(dev->info, 22018390030) &&
           tiling == ISL_TILING_4 &&
           info->dim != ISL_SURF_DIM_3D) {
+         assert(intel_needs_workaround(dev->info, 22018390030) ||
+                ISL_GFX_VER(dev) >= 35);
          image_align_el->h = 8;
       }
    } else if (fmtl->bpb >= 64) {

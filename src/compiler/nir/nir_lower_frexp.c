@@ -76,7 +76,7 @@ lower_frexp_sig(nir_builder *b, nir_def *x)
       exponent_value = nir_imm_int(b, 0x3fe00000u);
       break;
    default:
-      unreachable("Invalid bitsize");
+      UNREACHABLE("Invalid bitsize");
    }
 
    if (x->bit_size == 64) {
@@ -152,7 +152,7 @@ lower_frexp_exp(nir_builder *b, nir_def *x)
       break;
    }
    default:
-      unreachable("Invalid bitsize");
+      UNREACHABLE("Invalid bitsize");
    }
 
    return exponent;
@@ -168,6 +168,7 @@ lower_frexp_instr(nir_builder *b, nir_instr *instr, UNUSED void *cb_data)
    nir_def *lower;
 
    b->cursor = nir_before_instr(instr);
+   b->fp_math_ctrl = alu_instr->fp_math_ctrl;
 
    switch (alu_instr->op) {
    case nir_op_frexp_sig:

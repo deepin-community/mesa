@@ -34,12 +34,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/types.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <time.h>
 
 #include "util/detect_os.h"
+#include "util/os_file.h"
 
 #if defined(__cplusplus)
 extern "C" {
@@ -85,6 +87,9 @@ struct sync_merge_data {
 	uint32_t	flags;
 	uint32_t	pad;
 };
+#if defined(__GNU__)
+#define _IOT_sync_merge_data _IOT(_IOTS(struct sync_merge_data), 1, 0, 0, 0, 0)
+#endif
 
 struct sync_fence_info {
 	char obj_name[32];
@@ -103,6 +108,9 @@ struct sync_file_info {
 
 	uint64_t	sync_fence_info;
 };
+#if defined(__GNU__)
+#define _IOT_sync_file_info _IOT(_IOTS(struct sync_file_info), 1, 0, 0, 0, 0)
+#endif
 
 #define SYNC_IOC_MAGIC		'>'
 #define SYNC_IOC_MERGE		_IOWR(SYNC_IOC_MAGIC, 3, struct sync_merge_data)
@@ -222,7 +230,7 @@ static inline int sync_accumulate(const char *name, int *fd1, int fd2)
 	assert(fd2 >= 0);
 
 	if (*fd1 < 0) {
-		*fd1 = dup(fd2);
+		*fd1 = os_dupfd_cloexec(fd2);
 		return 0;
 	}
 

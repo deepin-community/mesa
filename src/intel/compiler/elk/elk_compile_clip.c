@@ -1,24 +1,6 @@
 /*
- * Copyright © 2006 - 2017 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * Copyright © 2006-2017 Intel Corporation
+ * SPDX-License-Identifier: MIT
  */
 
 #include "elk_clip.h"
@@ -42,6 +24,7 @@ elk_compile_clip(const struct elk_compiler *compiler,
    elk_init_codegen(&compiler->isa, &c.func, mem_ctx);
 
    c.func.single_program_flow = 1;
+   c.has_negative_rhw_bug = compiler->has_negative_rhw_bug;
 
    c.key = *key;
    c.vue_map = *vue_map;
@@ -77,7 +60,7 @@ elk_compile_clip(const struct elk_compiler *compiler,
       elk_emit_point_clip( &c );
       break;
    default:
-      unreachable("not reached");
+      UNREACHABLE("not reached");
    }
 
    elk_compact_instructions(&c.func, 0, NULL);

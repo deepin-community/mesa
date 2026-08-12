@@ -18,7 +18,8 @@
 
 /* Parse configuration data in .AMDGPU.config section format. */
 void ac_parse_shader_binary_config(const char *data, size_t nbytes, unsigned wave_size,
-                                   const struct radeon_info *info, struct ac_shader_config *conf)
+                                   const struct ac_compiler_info *compiler_info,
+                                   struct ac_shader_config *conf)
 {
    for (size_t i = 0; i < nbytes; i += 8) {
       unsigned reg = util_le32_to_cpu(*(uint32_t *)(data + i));
@@ -29,10 +30,10 @@ void ac_parse_shader_binary_config(const char *data, size_t nbytes, unsigned wav
       case R_00B228_SPI_SHADER_PGM_RSRC1_GS:
       case R_00B848_COMPUTE_PGM_RSRC1:
       case R_00B428_SPI_SHADER_PGM_RSRC1_HS:
-         if (wave_size == 32 || info->wave64_vgpr_alloc_granularity == 8)
-            conf->num_vgprs = MAX2(conf->num_vgprs, (G_00B028_VGPRS(value) + 1) * 8);
-         else
-            conf->num_vgprs = MAX2(conf->num_vgprs, (G_00B028_VGPRS(value) + 1) * 4);
+         conf->num_vgprs = MAX2(conf->num_vgprs,
+                                (G_00B028_VGPRS(value) + 1) *
+                                compiler_info->wave64_vgpr_encode_granularity *
+                                (wave_size == 32 ? 2 : 1));
 
          conf->num_sgprs = MAX2(conf->num_sgprs, (G_00B028_SGPRS(value) + 1) * 8);
          /* TODO: LLVM doesn't set FLOAT_MODE for non-compute shaders */
@@ -40,7 +41,6 @@ void ac_parse_shader_binary_config(const char *data, size_t nbytes, unsigned wav
          conf->rsrc1 = value;
          break;
       case R_00B02C_SPI_SHADER_PGM_RSRC2_PS:
-         conf->lds_size = MAX2(conf->lds_size, G_00B02C_EXTRA_LDS_SIZE(value));
          /* TODO: LLVM doesn't set SHARED_VGPR_CNT for all shader types */
          conf->num_shared_vgprs = G_00B02C_SHARED_VGPR_CNT(value);
          conf->rsrc2 = value;
@@ -58,7 +58,6 @@ void ac_parse_shader_binary_config(const char *data, size_t nbytes, unsigned wav
          conf->rsrc2 = value;
          break;
       case R_00B84C_COMPUTE_PGM_RSRC2:
-         conf->lds_size = MAX2(conf->lds_size, G_00B84C_LDS_SIZE(value));
          conf->rsrc2 = value;
          break;
       case R_00B8A0_COMPUTE_PGM_RSRC3:
@@ -75,7 +74,7 @@ void ac_parse_shader_binary_config(const char *data, size_t nbytes, unsigned wav
          break;
       case R_0286E8_SPI_TMPRING_SIZE:
       case R_00B860_COMPUTE_TMPRING_SIZE:
-         if (info->gfx_level >= GFX11)
+         if (compiler_info->gfx_level >= GFX11)
             conf->scratch_bytes_per_wave = G_00B860_WAVESIZE(value) * 256;
          else
             conf->scratch_bytes_per_wave = G_00B860_WAVESIZE(value) * 1024;

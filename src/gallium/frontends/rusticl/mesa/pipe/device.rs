@@ -1,3 +1,6 @@
+// Copyright 2020 Red Hat.
+// SPDX-License-Identifier: MIT
+
 use crate::pipe::screen::*;
 
 use mesa_rust_gen::*;
@@ -5,6 +8,7 @@ use mesa_rust_util::ptr::ThreadSafeCPtr;
 use mesa_rust_util::string::c_string_to_string;
 
 use std::collections::HashMap;
+use std::ffi::CStr;
 use std::{env, ptr};
 
 #[derive(PartialEq)]
@@ -20,13 +24,17 @@ impl PipeLoaderDevice {
         })
     }
 
-    fn load_screen(self) -> Option<PipeScreen> {
+    fn load_screen(self) -> Option<PipeScreenWithLdev> {
         let s = unsafe { pipe_loader_create_screen(self.ldev.as_ptr(), false) };
-        PipeScreen::new(self, s)
+        PipeScreenWithLdev::new(self, s)
     }
 
-    pub fn driver_name(&self) -> String {
-        c_string_to_string(unsafe { self.ldev.as_ref() }.driver_name)
+    pub fn driver_name(&self) -> &CStr {
+        // SAFETY: ldev is a valid memory allocation
+        let ldev = unsafe { self.ldev.as_ref() };
+
+        // SAFETY: The driver name is a valid C string pointer
+        unsafe { CStr::from_ptr(ldev.driver_name) }
     }
 
     pub fn device_type(&self) -> pipe_loader_device_type {
@@ -59,6 +67,10 @@ fn get_enabled_devs() -> HashMap<String, u32> {
     let default_devs: &[&str] = &[
         #[cfg(any(rusticl_enable_asahi, rusticl_enable_auto))]
         "asahi",
+        #[cfg(rusticl_enable_freedreno)]
+        "freedreno",
+        #[cfg(rusticl_enable_radeonsi)]
+        "radeonsi",
     ];
 
     // I wished we could use different iterators, but that's not really working out.
@@ -103,7 +115,7 @@ fn get_enabled_devs() -> HashMap<String, u32> {
     res
 }
 
-pub fn load_screens() -> impl Iterator<Item = PipeScreen> {
+pub fn load_screens() -> impl Iterator<Item = PipeScreenWithLdev> {
     let devs = load_devs();
     let mut enabled_devs = get_enabled_devs();
 

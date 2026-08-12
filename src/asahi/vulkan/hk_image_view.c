@@ -9,7 +9,7 @@
 #include "vulkan/vulkan_core.h"
 
 #include "agx_helpers.h"
-#include "agx_nir_passes.h"
+#include "agx_nir_texture.h"
 #include "agx_pack.h"
 #include "hk_device.h"
 #include "hk_entrypoints.h"
@@ -45,7 +45,7 @@ hk_image_view_type_is_array(VkImageViewType view_type)
       return true;
 
    default:
-      unreachable("Invalid image view type");
+      UNREACHABLE("Invalid image view type");
    }
 }
 
@@ -93,7 +93,7 @@ translate_image_view_type(VkImageViewType view_type, bool msaa, bool layered,
                          : AGX_TEXTURE_DIMENSION_CUBE_ARRAY;
 
    default:
-      unreachable("Invalid image view type");
+      UNREACHABLE("Invalid image view type");
    }
 }
 
@@ -114,14 +114,18 @@ vk_swizzle_to_pipe(VkComponentSwizzle swizzle)
    case VK_COMPONENT_SWIZZLE_ZERO:
       return PIPE_SWIZZLE_0;
    default:
-      unreachable("Invalid component swizzle");
+      UNREACHABLE("Invalid component swizzle");
    }
 }
 
 static enum pipe_format
 get_stencil_format(enum pipe_format format)
 {
+   /* Note: R8 is not a stencil format, but our copy code will internally cast
+    * between R8 and S8. It's simplest to handle here.
+    */
    switch (format) {
+   case PIPE_FORMAT_R8_UINT:
    case PIPE_FORMAT_S8_UINT:
       return PIPE_FORMAT_S8_UINT;
    case PIPE_FORMAT_Z24_UNORM_S8_UINT:
@@ -131,7 +135,7 @@ get_stencil_format(enum pipe_format format)
    case PIPE_FORMAT_Z32_FLOAT_S8X24_UINT:
       return PIPE_FORMAT_X32_S8X24_UINT;
    default:
-      unreachable("Unsupported depth/stencil format");
+      UNREACHABLE("Unsupported depth/stencil format");
    }
 }
 
@@ -198,7 +202,8 @@ pack_texture(struct hk_image_view *view, unsigned view_plane,
 {
    struct hk_image *image = container_of(view->vk.image, struct hk_image, vk);
    const uint8_t image_plane = view->planes[view_plane].image_plane;
-   struct ail_layout *layout = &image->planes[image_plane].layout;
+   struct hk_image_plane *plane = &image->planes[image_plane];
+   struct ail_layout *layout = &plane->layout;
    uint64_t base_addr = hk_image_base_address(image, image_plane);
 
    bool cubes_to_2d = usage != HK_DESC_USAGE_SAMPLED;
@@ -282,16 +287,52 @@ pack_texture(struct hk_image_view *view, unsigned view_plane,
          cfg.last_level = level + view->vk.level_count - 1;
       }
 
+      /* To implement sparse resident textures, the hardware texture descriptor
+       * can instead point to a secondary page table controlled in userspace.
+       * This allows remapping pages and - crucially - disabling unmapped pages
+       * to read zero and report non-resident with shader residency queries.
+       * When we have a sparse map, we need to point to it here.
+       *
+       * However, there's a wrinkle: when handling uncompressed views of
+       * compressed images in the above code, we need to offset the image
+       * address to point to the specific mip level rather than use the hardware
+       * "first level" field. This ensures the layouts are consistent despite us
+       * munging the image dimensions. In that case, we need to also offset the
+       * sparse page table accordingly. Of course, the sparse page table is in
+       * terms of pages, so this trick only works when the mip level is
+       * page-aligned.
+       *
+       * However, if the mip level is NOT page-aligned, it is in the mip tail by
+       * definition. As the mip tail is always resident, there is no need for a
+       * sparse page table. So either:
+       *
+       * 1. We are in the mip tail and don't need a sparse map, or
+       * 2. We are not but the level is page-aligned in the sparse map.
+       *
+       * Either way we're okay.
+       */
+      if (plane->sparse_map && level < layout->mip_tail_first_lod) {
+         unsigned page = 0;
+         if (denom.x > 1) {
+            page = ail_bytes_to_pages(layout->level_offsets_B[level]);
+         }
+
+         cfg.mode = AGX_IMAGE_MODE_SPARSE;
+         cfg.address = plane->sparse_map->va->addr +
+                       ail_page_to_sparse_index_el(layout, layer, page) *
+                          AIL_SPARSE_ELSIZE_B;
+      }
+
       cfg.srgb = (desc->colorspace == UTIL_FORMAT_COLORSPACE_SRGB);
       cfg.unk_mipmapped = layout->levels > 1;
       cfg.srgb_2_channel = cfg.srgb && util_format_colormask(desc) == 0x3;
 
-      if (ail_is_compressed(layout)) {
-         cfg.compressed_1 = true;
+      if (layout->compressed) {
+         cfg.compressed = true;
          cfg.extended = true;
       }
 
-      if (ail_is_compressed(layout)) {
+      if (layout->compressed) {
          cfg.acceleration_buffer = base_addr + layout->metadata_offset_B +
                                    (layer * layout->compression_layer_stride_B);
       }
@@ -314,9 +355,6 @@ pack_texture(struct hk_image_view *view, unsigned view_plane,
       if (layout->tiling == AIL_TILING_LINEAR) {
          cfg.stride = ail_get_linear_stride_B(layout, 0) - 16;
       } else {
-         assert(layout->tiling == AIL_TILING_TWIDDLED ||
-                layout->tiling == AIL_TILING_TWIDDLED_COMPRESSED);
-
          cfg.page_aligned_layers = layout->page_aligned_layers;
       }
    }
@@ -443,8 +481,8 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
             cfg.samples = agx_translate_sample_count(image->vk.samples);
       }
 
-      if (ail_is_compressed(layout) && usage != HK_DESC_USAGE_EMRT) {
-         cfg.compressed_1 = true;
+      if (layout->compressed && usage != HK_DESC_USAGE_EMRT) {
+         cfg.compressed = true;
          cfg.extended = true;
 
          cfg.acceleration_buffer = base_addr + layout->metadata_offset_B +
@@ -463,11 +501,11 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
             cfg.aligned_width_msaa_sw =
                align(u_minify(layout->width_px, level),
                      layout->tilesize_el[level].width_el);
+
+            cfg.sample_count_log2_sw = util_logbase2(image->vk.samples);
          } else {
             cfg.level_offset_sw = ail_get_level_offset_B(layout, cfg.level);
          }
-
-         cfg.sample_count_log2_sw = util_logbase2(image->vk.samples);
 
          if (layout->tiling != AIL_TILING_LINEAR) {
             struct ail_tile tile_size = layout->tilesize_el[level];
@@ -481,43 +519,13 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
 }
 
 static VkResult
-add_descriptor(struct hk_device *dev, struct hk_image_view *view,
-               struct agx_texture_packed *desc,
-               struct agx_texture_packed *cached, uint32_t *index)
-{
-   /* First, look for a descriptor we already uploaded */
-   for (unsigned i = 0; i < view->descriptor_count; ++i) {
-      if (memcmp(&cached[i], desc, sizeof *desc) == 0) {
-         *index = view->descriptor_index[i];
-         return VK_SUCCESS;
-      }
-   }
-
-   /* Else, add a new descriptor */
-   VkResult result =
-      hk_descriptor_table_add(dev, &dev->images, desc, sizeof *desc, index);
-   if (result != VK_SUCCESS)
-      return result;
-
-   uint32_t local_index = view->descriptor_count++;
-   assert(local_index < HK_MAX_IMAGE_DESCS);
-
-   cached[local_index] = *desc;
-   view->descriptor_index[local_index] = *index;
-   return VK_SUCCESS;
-}
-
-static VkResult
 hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
-                   bool driver_internal,
                    const VkImageViewCreateInfo *pCreateInfo)
 {
    VK_FROM_HANDLE(hk_image, image, pCreateInfo->image);
-   VkResult result;
-
    memset(view, 0, sizeof(*view));
 
-   vk_image_view_init(&dev->vk, &view->vk, driver_internal, pCreateInfo);
+   vk_image_view_init(&dev->vk, &view->vk, pCreateInfo);
 
    /* First, figure out which image planes we need. For depth/stencil, we only
     * have one aspect viewed at a time.
@@ -537,75 +545,26 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
              vk_format_get_plane_count(view->vk.format));
       view->plane_count = 0;
       u_foreach_bit(aspect_bit, view->vk.aspects) {
-         uint8_t image_plane =
+         view->planes[view->plane_count++].image_plane =
             hk_image_aspects_to_plane(image, 1u << aspect_bit);
-         view->planes[view->plane_count++].image_plane = image_plane;
       }
    }
 
-   struct agx_texture_packed cached[HK_MAX_IMAGE_DESCS];
+   /* Fill in each view plane separately */
+   for (unsigned p = 0; p < view->plane_count; p++) {
+      pack_texture(view, p, HK_DESC_USAGE_SAMPLED, &view->planes[p].sampled);
+      pack_texture(view, p, HK_DESC_USAGE_STORAGE, &view->planes[p].ro_storage);
+      pack_texture(view, p, HK_DESC_USAGE_INPUT, &view->planes[p].ia);
+      pack_texture(view, p, HK_DESC_USAGE_EMRT, &view->planes[p].emrt_texture);
+      pack_texture(view, p, HK_DESC_USAGE_BG_EOT, &view->planes[p].background);
+      pack_texture(view, p, HK_DESC_USAGE_LAYERED_BG_EOT,
+                   &view->planes[p].layered_background);
 
-   /* Finally, fill in each view plane separately */
-   for (unsigned view_plane = 0; view_plane < view->plane_count; view_plane++) {
-      const struct {
-         VkImageUsageFlagBits flag;
-         enum hk_desc_usage usage;
-         uint32_t *tex;
-         uint32_t *pbe;
-      } descriptors[] = {
-         {VK_IMAGE_USAGE_SAMPLED_BIT, HK_DESC_USAGE_SAMPLED,
-          &view->planes[view_plane].sampled_desc_index},
-
-         {VK_IMAGE_USAGE_STORAGE_BIT, HK_DESC_USAGE_STORAGE,
-          &view->planes[view_plane].ro_storage_desc_index,
-          &view->planes[view_plane].storage_desc_index},
-
-         {VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT, HK_DESC_USAGE_INPUT,
-          &view->planes[view_plane].ia_desc_index},
-
-         {VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, HK_DESC_USAGE_BG_EOT,
-          &view->planes[view_plane].background_desc_index,
-          &view->planes[view_plane].eot_pbe_desc_index},
-
-         {VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, HK_DESC_USAGE_LAYERED_BG_EOT,
-          &view->planes[view_plane].layered_background_desc_index,
-          &view->planes[view_plane].layered_eot_pbe_desc_index},
-      };
-
-      for (unsigned i = 0; i < ARRAY_SIZE(descriptors); ++i) {
-         if (!(view->vk.usage & descriptors[i].flag))
-            continue;
-
-         for (unsigned is_pbe = 0; is_pbe < 2; ++is_pbe) {
-            struct agx_texture_packed desc;
-            uint32_t *out = is_pbe ? descriptors[i].pbe : descriptors[i].tex;
-
-            if (!out)
-               continue;
-
-            if (is_pbe) {
-               static_assert(sizeof(struct agx_pbe_packed) ==
-                             sizeof(struct agx_texture_packed));
-
-               pack_pbe(dev, view, view_plane, descriptors[i].usage,
-                        (struct agx_pbe_packed *)&desc);
-            } else {
-               pack_texture(view, view_plane, descriptors[i].usage, &desc);
-            }
-
-            result = add_descriptor(dev, view, &desc, cached, out);
-            if (result != VK_SUCCESS)
-               return result;
-         }
-      }
-
-      if (view->vk.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) {
-         pack_texture(view, view_plane, HK_DESC_USAGE_EMRT,
-                      &view->planes[view_plane].emrt_texture);
-
-         pack_pbe(dev, view, view_plane, HK_DESC_USAGE_EMRT,
-                  &view->planes[view_plane].emrt_pbe);
-      }
+      pack_pbe(dev, view, p, HK_DESC_USAGE_STORAGE, &view->planes[p].storage);
+      pack_pbe(dev, view, p, HK_DESC_USAGE_BG_EOT, &view->planes[p].eot);
+      pack_pbe(dev, view, p, HK_DESC_USAGE_EMRT, &view->planes[p].emrt_pbe);
+      pack_pbe(dev, view, p, HK_DESC_USAGE_LAYERED_BG_EOT,
+               &view->planes[p].layered_eot);
    }
 
    return VK_SUCCESS;
@@ -620,10 +579,6 @@ hk_DestroyImageView(VkDevice _device, VkImageView imageView,
 
    if (!view)
       return;
-
-   for (uint8_t d = 0; d < view->descriptor_count; ++d) {
-      hk_descriptor_table_remove(dev, &dev->images, view->descriptor_index[d]);
-   }
 
    vk_image_view_finish(&view->vk);
    vk_free2(&dev->vk.alloc, pAllocator, view);
@@ -642,10 +597,7 @@ hk_CreateImageView(VkDevice _device, const VkImageViewCreateInfo *pCreateInfo,
    if (!view)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   result = hk_image_view_init(
-      dev, view,
-      pCreateInfo->flags & VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
-      pCreateInfo);
+   result = hk_image_view_init(dev, view, pCreateInfo);
    if (result != VK_SUCCESS) {
       hk_DestroyImageView(_device, hk_image_view_to_handle(view), pAllocator);
       return result;

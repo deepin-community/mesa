@@ -91,20 +91,12 @@ TEST_F(nir_opt_varyings_test_prop_ubo, \
    \
    nir_io_xfb xfb; \
    memset(&xfb, 0, sizeof(xfb)); \
-   xfb.out[comp % 2].num_components = 1; \
-   if (comp <= 1) { \
-      nir_intrinsic_set_io_xfb(store, xfb); \
-      if (store2) \
-         nir_intrinsic_set_io_xfb(store2, xfb); \
-      if (store3) \
-         nir_intrinsic_set_io_xfb(store3, xfb); \
-   } else { \
-      nir_intrinsic_set_io_xfb2(store, xfb); \
-      if (store2) \
-         nir_intrinsic_set_io_xfb2(store2, xfb); \
-      if (store3) \
-         nir_intrinsic_set_io_xfb2(store3, xfb); \
-   } \
+   xfb.out[comp].num_components = 1; \
+   nir_intrinsic_set_io_xfb(store, xfb); \
+   if (store2) \
+      nir_intrinsic_set_io_xfb(store2, xfb); \
+   if (store3) \
+      nir_intrinsic_set_io_xfb(store3, xfb); \
    \
    ASSERT_TRUE(opt_varyings() == nir_progress_consumer); \
    ASSERT_TRUE(b1->shader->info.outputs_written == BITFIELD64_BIT(pindex)); \
@@ -372,7 +364,7 @@ TEST_UBO_PROP(MESH, FRAGMENT, CLIP_DIST0, 0, float, 32)
 TEST_UBO_PROP(MESH, FRAGMENT, CLIP_DIST1, 0, float, 32)
 TEST_UBO_PROP(MESH, FRAGMENT, CULL_DIST0, 0, float, 32)
 TEST_UBO_PROP(MESH, FRAGMENT, CULL_DIST1, 0, float, 32)
-TEST_UBO_KEPT(MESH, FRAGMENT, LAYER, 0, float, 32) /* RADV mesh multiview workaround */
+TEST_UBO_PROP(MESH, FRAGMENT, LAYER, 0, float, 32)
 TEST_UBO_PROP(MESH, FRAGMENT, VIEWPORT, 0, float, 32)
 TEST_UBO_PROP(MESH, FRAGMENT, VAR0, 0, float, 32)
 TEST_UBO_PROP(MESH, FRAGMENT, VAR0, 0, float, 16)

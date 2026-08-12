@@ -6,11 +6,11 @@
  */
 #include "hk_physical_device.h"
 
+#include "asahi/compiler/agx_nir_texture.h"
 #include "asahi/lib/agx_device.h"
 #include "asahi/lib/agx_nir_lower_vbo.h"
-#include "asahi/lib/agx_nir_passes.h"
 #include "util/disk_cache.h"
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 #include "git_sha1.h"
 #include "hk_buffer.h"
 #include "hk_entrypoints.h"
@@ -21,10 +21,8 @@
 #include "hk_wsi.h"
 
 #include "util/simple_mtx.h"
-#include "util/u_debug.h"
 #include "vulkan/vulkan_core.h"
 #include "vulkan/wsi/wsi_common.h"
-#include "vk_device.h"
 #include "vk_drm_syncobj.h"
 #include "vk_shader_module.h"
 
@@ -42,7 +40,7 @@ hk_get_vk_version()
    if (version_override)
       return version_override;
 
-   return VK_MAKE_VERSION(1, 3, VK_HEADER_VERSION);
+   return VK_MAKE_VERSION(1, 4, VK_HEADER_VERSION);
 }
 
 static void
@@ -54,7 +52,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_16bit_storage = true,
       .KHR_bind_memory2 = true,
       .KHR_buffer_device_address = true,
-      .KHR_calibrated_timestamps = false,
+      .KHR_calibrated_timestamps = true,
       .KHR_copy_commands2 = true,
       .KHR_create_renderpass2 = true,
       .KHR_dedicated_allocation = true,
@@ -69,11 +67,8 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_external_fence_fd = true,
       .KHR_external_memory = true,
       .KHR_external_memory_fd = true,
-      /* XXX: External timeline semaphores maybe broken in kernel, see
-       * dEQP-VK.synchronization.signal_order.shared_timeline_semaphore.write_copy_buffer_to_image_read_image_compute.image_128_r32_uint_opaque_fd
-       */
-      .KHR_external_semaphore = false,
-      .KHR_external_semaphore_fd = false,
+      .KHR_external_semaphore = true,
+      .KHR_external_semaphore_fd = true,
       .KHR_format_feature_flags2 = true,
       .KHR_fragment_shader_barycentric = false,
       .KHR_get_memory_requirements2 = true,
@@ -92,12 +87,23 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_maintenance4 = true,
       .KHR_maintenance5 = true,
       .KHR_maintenance6 = true,
+      .KHR_maintenance7 = true,
+      .KHR_maintenance8 = true,
+      .KHR_maintenance9 = true,
       .KHR_map_memory2 = true,
       .KHR_multiview = true,
+      .KHR_pipeline_binary = true,
       .KHR_pipeline_executable_properties = true,
       .KHR_pipeline_library = true,
+#ifdef HK_USE_WSI_PLATFORM
+      .KHR_present_id = true,
+      .KHR_present_id2 = true,
+      .KHR_present_wait = true,
+      .KHR_present_wait2 = true,
+#endif
       .KHR_push_descriptor = true,
       .KHR_relaxed_block_layout = true,
+      .KHR_robustness2 = true,
       .KHR_sampler_mirror_clamp_to_edge = true,
       .KHR_sampler_ycbcr_conversion = true,
       .KHR_separate_depth_stencil_layouts = true,
@@ -106,12 +112,12 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_shader_draw_parameters = true,
       .KHR_shader_expect_assume = true,
       .KHR_shader_float_controls = true,
-      // TODO: wait for nvk
       .KHR_shader_float_controls2 = true,
       .KHR_shader_float16_int8 = true,
       .KHR_shader_integer_dot_product = true,
       .KHR_shader_maximal_reconvergence = true,
       .KHR_shader_non_semantic_info = true,
+      .KHR_shader_quad_control = true,
       .KHR_shader_relaxed_extended_instruction = true,
       .KHR_shader_subgroup_extended_types = true,
       .KHR_shader_subgroup_rotate = true,
@@ -122,6 +128,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_timeline_semaphore = true,
 #ifdef HK_USE_WSI_PLATFORM
       .KHR_swapchain = true,
+      .KHR_swapchain_maintenance1 = true,
       .KHR_swapchain_mutable_format = true,
 #endif
       .KHR_synchronization2 = true,
@@ -133,13 +140,14 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_zero_initialize_workgroup_memory = true,
       .EXT_4444_formats = true,
       .EXT_attachment_feedback_loop_layout = true,
+      .EXT_blend_operation_advanced = true,
       .EXT_border_color_swizzle = true,
       .EXT_buffer_device_address = true,
-      .EXT_calibrated_timestamps = false,
+      .EXT_calibrated_timestamps = true,
       .EXT_conditional_rendering = false,
       .EXT_color_write_enable = true,
       .EXT_custom_border_color = true,
-      .EXT_depth_bias_control = false,
+      .EXT_depth_bias_control = true,
       .EXT_depth_clip_control = false,
       .EXT_depth_clip_enable = true,
       .EXT_descriptor_indexing = true,
@@ -154,18 +162,19 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .EXT_global_priority = true,
       .EXT_global_priority_query = true,
       .EXT_graphics_pipeline_library = true,
+      .EXT_hdr_metadata = true,
       .EXT_host_query_reset = true,
       .EXT_host_image_copy = true,
       .EXT_image_2d_view_of_3d = true,
       .EXT_image_drm_format_modifier = true,
       .EXT_image_robustness = true,
       .EXT_image_sliced_view_of_3d = false,
-      .EXT_image_view_min_lod = false,
+      .EXT_image_view_min_lod = instance->image_view_min_lod,
       .EXT_index_type_uint8 = true,
       .EXT_inline_uniform_block = true,
       .EXT_line_rasterization = true,
       .EXT_load_store_op_none = true,
-      .EXT_map_memory_placed = false,
+      .EXT_map_memory_placed = true,
       .EXT_memory_budget = false,
       .EXT_multi_draw = true,
       .EXT_mutable_descriptor_type = true,
@@ -175,10 +184,14 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .EXT_pipeline_protected_access = true,
       .EXT_pipeline_robustness = true,
       .EXT_physical_device_drm = true,
+#ifdef HK_USE_WSI_PLATFORM
+      .EXT_present_timing = true,
+#endif
       .EXT_primitive_topology_list_restart = true,
       .EXT_private_data = true,
       .EXT_primitives_generated_query = false,
       .EXT_provoking_vertex = true,
+      .EXT_queue_family_foreign = true,
       .EXT_robustness2 = true,
       .EXT_sample_locations = true,
       .EXT_sampler_filter_minmax = false,
@@ -192,6 +205,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .EXT_shader_stencil_export = true,
       .EXT_shader_subgroup_ballot = true,
       .EXT_shader_subgroup_vote = true,
+      .EXT_shader_uniform_buffer_unsized_array = true,
       .EXT_shader_viewport_index_layer = true,
       .EXT_subgroup_size_control = true,
 #ifdef HK_USE_WSI_PLATFORM
@@ -213,6 +227,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
 
 static void
 hk_get_device_features(
+   const struct agx_device *dev, const struct hk_instance *instance,
    const struct vk_device_extension_table *supported_extensions,
    struct vk_features *features)
 {
@@ -238,12 +253,12 @@ hk_get_device_features(
       .alphaToOne = true,
       .multiViewport = true,
       .samplerAnisotropy = true,
-      .textureCompressionETC2 = false,
+      .textureCompressionETC2 = true,
       .textureCompressionBC = true,
-      .textureCompressionASTC_LDR = false,
+      .textureCompressionASTC_LDR = true,
       .occlusionQueryPrecise = true,
       .pipelineStatisticsQuery = true,
-      .vertexPipelineStoresAndAtomics = true,
+      .vertexPipelineStoresAndAtomics = instance->vertex_stores,
       .fragmentStoresAndAtomics = true,
       .shaderTessellationAndGeometryPointSize = true,
       .shaderImageGatherExtended = true,
@@ -261,15 +276,21 @@ hk_get_device_features(
       .shaderFloat64 = false,
       .shaderInt64 = true,
       .shaderInt16 = true,
-      .shaderResourceResidency = false,
+      .shaderResourceResidency = true,
       .shaderResourceMinLod = true,
-      .sparseBinding = false,
+      .sparseBinding = true,
+
+      /* We probably could advertise multisampled sparse but we don't have a use
+       * case yet and it isn't trivial.
+       */
       .sparseResidency2Samples = false,
       .sparseResidency4Samples = false,
       .sparseResidency8Samples = false,
-      .sparseResidencyAliased = false,
-      .sparseResidencyBuffer = false,
-      .sparseResidencyImage2D = false,
+      .sparseResidencyAliased = true,
+      .sparseResidencyImage2D = true,
+      .sparseResidencyBuffer = true,
+
+      /* This needs investigation. */
       .sparseResidencyImage3D = false,
       .variableMultisampleRate = false,
       .inheritedQueries = true,
@@ -318,7 +339,7 @@ hk_get_device_features(
       .descriptorBindingPartiallyBound = true,
       .descriptorBindingVariableDescriptorCount = true,
       .runtimeDescriptorArray = true,
-      .samplerFilterMinmax = false,
+      .samplerFilterMinmax = instance->fake_minmax,
       .scalarBlockLayout = true,
       .imagelessFramebuffer = true,
       .uniformBufferStandardLayout = true,
@@ -327,7 +348,7 @@ hk_get_device_features(
       .hostQueryReset = true,
       .timelineSemaphore = true,
       .bufferDeviceAddress = true,
-      .bufferDeviceAddressCaptureReplay = false,
+      .bufferDeviceAddressCaptureReplay = true,
       .bufferDeviceAddressMultiDevice = false,
       .vulkanMemoryModel = true,
       .vulkanMemoryModelDeviceScope = true,
@@ -351,6 +372,9 @@ hk_get_device_features(
       .dynamicRendering = true,
       .shaderIntegerDotProduct = true,
       .maintenance4 = true,
+
+      /* Vulkan 1.4 */
+      .pushDescriptor = true,
 
       /* VK_KHR_dynamic_rendering_local_read */
       .dynamicRenderingLocalRead = true,
@@ -378,14 +402,32 @@ hk_get_device_features(
       /* VK_KHR_maintenance6 */
       .maintenance6 = true,
 
+      /* VK_KHR_maintenance7 */
+      .maintenance7 = true,
+
+      /* VK_KHR_maintenance8 */
+      .maintenance8 = true,
+
+      /* VK_KHR_maintenance9 */
+      .maintenance9 = true,
+
+      /* VK_KHR_pipeline_binary */
+      .pipelineBinaries = true,
+
       /* VK_KHR_pipeline_executable_properties */
       .pipelineExecutableInfo = true,
 
       /* VK_KHR_present_id */
-      .presentId = false,
+      .presentId = true,
+
+      /* VK_KHR_present_id2 */
+      .presentId2 = true,
 
       /* VK_KHR_present_wait */
-      .presentWait = false,
+      .presentWait = true,
+
+      /* VK_KHR_present_wait2 */
+      .presentWait2 = true,
 
       /* VK_KHR_shader_clock */
       .shaderSubgroupClock = false,
@@ -399,6 +441,9 @@ hk_get_device_features(
 
       /* VK_KHR_shader_maximal_reconvergence */
       .shaderMaximalReconvergence = true,
+
+      /* VK_KHR_shader_quad_control */
+      .shaderQuadControl = true,
 
       /* VK_KHR_shader_subgroup_rotate */
       .shaderSubgroupRotate = true,
@@ -426,7 +471,7 @@ hk_get_device_features(
       .borderColorSwizzleFromImage = false,
 
       /* VK_EXT_buffer_device_address */
-      .bufferDeviceAddressCaptureReplayEXT = false,
+      .bufferDeviceAddressCaptureReplayEXT = true,
 
       /* VK_EXT_color_write_enable */
       .colorWriteEnable = true,
@@ -440,10 +485,10 @@ hk_get_device_features(
       .customBorderColorWithoutFormat = true,
 
       /* VK_EXT_depth_bias_control */
-      .depthBiasControl = false,
-      .leastRepresentableValueForceUnormRepresentation = false,
+      .depthBiasControl = true,
+      .leastRepresentableValueForceUnormRepresentation = true,
       .floatRepresentation = false,
-      .depthBiasExact = false,
+      .depthBiasExact = true,
 
       /* VK_EXT_depth_clip_control */
       .depthClipControl = false,
@@ -474,11 +519,11 @@ hk_get_device_features(
       .extendedDynamicState3ColorBlendEnable = true,
       .extendedDynamicState3ColorBlendEquation = true,
       .extendedDynamicState3ColorWriteMask = true,
-      .extendedDynamicState3RasterizationStream = false,
+      .extendedDynamicState3RasterizationStream = true,
       .extendedDynamicState3ConservativeRasterizationMode = false,
       .extendedDynamicState3ExtraPrimitiveOverestimationSize = false,
       .extendedDynamicState3DepthClipEnable = true,
-      .extendedDynamicState3SampleLocationsEnable = false,
+      .extendedDynamicState3SampleLocationsEnable = true,
       .extendedDynamicState3ColorBlendAdvanced = false,
       .extendedDynamicState3ProvokingVertexMode = true,
       .extendedDynamicState3LineRasterizationMode = true,
@@ -509,17 +554,17 @@ hk_get_device_features(
       .imageSlicedViewOf3D = false,
 
 #ifdef HK_USE_WSI_PLATFORM
-      /* VK_EXT_swapchain_maintenance1 */
-      .swapchainMaintenance1 = false,
+      /* VK_KHR_swapchain_maintenance1 */
+      .swapchainMaintenance1 = true,
 #endif
 
       /* VK_EXT_image_view_min_lod */
-      .minLod = false,
+      .minLod = instance->image_view_min_lod,
 
       /* VK_EXT_map_memory_placed */
-      .memoryMapPlaced = false,
+      .memoryMapPlaced = true,
       .memoryMapRangePlaced = false,
-      .memoryUnmapReserve = false,
+      .memoryUnmapReserve = true,
 
       /* VK_EXT_multi_draw */
       .multiDraw = true,
@@ -549,7 +594,7 @@ hk_get_device_features(
       .provokingVertexLast = true,
       .transformFeedbackPreservesProvokingVertex = true,
 
-      /* VK_EXT_robustness2 */
+      /* VK_KHR_robustness2 */
       .robustBufferAccess2 = true,
       .robustImageAccess2 = true,
       .nullDescriptor = true,
@@ -570,6 +615,9 @@ hk_get_device_features(
       /* VK_KHR_shader_subgroup_uniform_control_flow */
       .shaderSubgroupUniformControlFlow = true,
 
+      /* VK_EXT_shader_uniform_buffer_unsized_array */
+      .shaderUniformBufferUnsizedArray = true,
+
       /* VK_EXT_texel_buffer_alignment */
       .texelBufferAlignment = true,
 
@@ -588,6 +636,16 @@ hk_get_device_features(
 
       /* VK_KHR_shader_relaxed_extended_instruction */
       .shaderRelaxedExtendedInstruction = true,
+
+      /* VK_EXT_blend_operation_advanced */
+      .advancedBlendCoherentOperations = true,
+
+#ifdef HK_USE_WSI_PLATFORM
+      /* VK_EXT_present_timing */
+      .presentTiming = true,
+      .presentAtRelativeTime = true,
+      .presentAtAbsoluteTime = true,
+#endif
    };
 }
 
@@ -596,11 +654,20 @@ hk_get_device_properties(const struct agx_device *dev,
                          const struct hk_instance *instance,
                          struct vk_properties *properties)
 {
+   /* Note: update nir_shader_compiler_options.max_samples when changing this. */
    const VkSampleCountFlagBits sample_counts =
       VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
 
    uint64_t os_page_size = 16384;
    os_get_page_size(&os_page_size);
+
+   /* The hardware limit is 128. However, we need to set a lower limit to
+    * account for duplicated system values: clip/cull and viewport targets.
+    * There are up to 8 combined clip/cull planes and only 1 viewport target,
+    * giving a theoretical limit of 119. We round down to 116 to give a sensible
+    * limit in vec4s.
+    */
+   unsigned max_vgt_output_components = 116;
 
    *properties = (struct vk_properties){
       .apiVersion = hk_get_vk_version(),
@@ -617,7 +684,16 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxImageArrayLayers = 2048,
       .maxTexelBufferElements = AGX_TEXTURE_BUFFER_MAX_SIZE,
       .maxUniformBufferRange = 65536,
-      .maxStorageBufferRange = UINT32_MAX,
+
+      /* From a hardware perspective, storage buffers are lowered to global
+       * address arithmetic so there is no hard limit. However, making efficient
+       * use of the hardware addressing modes depends on no signed wrapping in
+       * any `amul` operations, which are themselves bounded by
+       * maxStorageBufferRange. Therefore, limit storage buffers to INT32_MAX
+       * bytes instead of UINT32_MAX. This is believed to be acceptable for
+       * Direct3D.
+       */
+      .maxStorageBufferRange = INT32_MAX,
       .maxPushConstantsSize = HK_MAX_PUSH_SIZE,
       .maxMemoryAllocationCount = 4096,
       .maxSamplerAllocationCount = 4000,
@@ -644,13 +720,10 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxVertexInputAttributeOffset = 65535,
       .maxVertexInputBindingStride = 2048,
 
-      /* Hardware limit is 128 but we need to reserve some for internal purposes
-       * (like cull distance emulation). Set 96 to be safe.
-       */
-      .maxVertexOutputComponents = 96,
+      .maxVertexOutputComponents = max_vgt_output_components,
       .maxGeometryShaderInvocations = 32,
       .maxGeometryInputComponents = 128,
-      .maxGeometryOutputComponents = 128,
+      .maxGeometryOutputComponents = max_vgt_output_components,
       .maxGeometryOutputVertices = 1024,
       .maxGeometryTotalOutputComponents = 1024,
       .maxTessellationGenerationLevel = 64,
@@ -660,13 +733,13 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxTessellationControlPerPatchOutputComponents = 120,
       .maxTessellationControlTotalOutputComponents = 4216,
       .maxTessellationEvaluationInputComponents = 128,
-      .maxTessellationEvaluationOutputComponents = 128,
+      .maxTessellationEvaluationOutputComponents = max_vgt_output_components,
 
       /* Set to match maxVertexOutputComponents, hardware limit is higher. */
-      .maxFragmentInputComponents = 96,
+      .maxFragmentInputComponents = max_vgt_output_components,
       .maxFragmentOutputAttachments = HK_MAX_RTS,
       .maxFragmentDualSrcAttachments = 1,
-      .maxFragmentCombinedOutputResources = 16,
+      .maxFragmentCombinedOutputResources = HK_MAX_RTS + HK_MAX_DESCRIPTORS,
       .maxComputeSharedMemorySize = HK_MAX_SHARED_SIZE,
       .maxComputeWorkGroupCount = {0x7fffffff, 65535, 65535},
       .maxComputeWorkGroupInvocations = 1024,
@@ -707,8 +780,9 @@ hk_get_device_properties(const struct agx_device *dev,
       .sampledImageStencilSampleCounts = sample_counts,
       .storageImageSampleCounts = sample_counts,
       .maxSampleMaskWords = 1,
-      .timestampComputeAndGraphics = false,
-      .timestampPeriod = 1,
+      .timestampComputeAndGraphics = true,
+      /* FIXME: Is timestamp period actually 1? */
+      .timestampPeriod = 1.0f,
       .maxClipDistances = 8,
       .maxCullDistances = 8,
       .maxCombinedClipAndCullDistances = 8,
@@ -724,10 +798,18 @@ hk_get_device_properties(const struct agx_device *dev,
       .nonCoherentAtomSize = 64,
 
       /* Vulkan 1.0 sparse properties */
-      .sparseResidencyNonResidentStrict = false,
+      .sparseResidencyNonResidentStrict = true,
       .sparseResidencyAlignedMipSize = false,
-      .sparseResidencyStandard2DBlockShape = false,
+      .sparseResidencyStandard2DBlockShape = true,
+
+      /* We can implement the standard block size for MSAA 4x but maybe not MSAA
+       * 2x?
+       */
       .sparseResidencyStandard2DMultisampleBlockShape = false,
+
+      /* As far as I can tell, there is no way to implement this on G13. This
+       * is a shame because D3D12 requires it for FL12.2.
+       */
       .sparseResidencyStandard3DBlockShape = false,
 
       /* Vulkan 1.1 properties */
@@ -748,7 +830,7 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxMultiviewViewCount = HK_MAX_MULTIVIEW_VIEW_COUNT,
       .maxMultiviewInstanceIndex = UINT32_MAX,
       .maxPerSetDescriptors = UINT32_MAX,
-      .maxMemoryAllocationSize = (1u << 31),
+      .maxMemoryAllocationSize = (1ull << 37),
 
       /* Vulkan 1.2 properties */
       .supportedDepthResolveModes =
@@ -760,7 +842,7 @@ hk_get_device_properties(const struct agx_device *dev,
       .independentResolveNone = true,
       .independentResolve = true,
       .driverID = VK_DRIVER_ID_MESA_HONEYKRISP,
-      .conformanceVersion = (VkConformanceVersion){1, 3, 8, 3},
+      .conformanceVersion = (VkConformanceVersion){1, 4, 0, 0},
       .denormBehaviorIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL,
       .roundingModeIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL,
       .shaderSignedZeroInfNanPreserveFloat16 = true,
@@ -804,7 +886,7 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxDescriptorSetUpdateAfterBindSampledImages = HK_MAX_DESCRIPTORS,
       .maxDescriptorSetUpdateAfterBindStorageImages = HK_MAX_DESCRIPTORS,
       .maxDescriptorSetUpdateAfterBindInputAttachments = HK_MAX_DESCRIPTORS,
-      .filterMinmaxSingleComponentFormats = false,
+      .filterMinmaxSingleComponentFormats = instance->fake_minmax,
       .filterMinmaxImageComponentMapping = false,
       .maxTimelineSemaphoreValueDifference = UINT64_MAX,
       .framebufferIntegerColorSampleCounts = sample_counts,
@@ -814,7 +896,7 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxSubgroupSize = 32,
       .maxComputeWorkgroupSubgroups = 1024 / 32,
       .requiredSubgroupSizeStages = 0,
-      .maxInlineUniformBlockSize = 1 << 16,
+      .maxInlineUniformBlockSize = HK_MAX_INLINE_UNIFORM_BLOCK_SIZE,
       .maxPerStageDescriptorInlineUniformBlocks = 32,
       .maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks = 32,
       .maxDescriptorSetInlineUniformBlocks = 6 * 32,
@@ -828,6 +910,10 @@ hk_get_device_properties(const struct agx_device *dev,
       .uniformTexelBufferOffsetAlignmentBytes = HK_MIN_TEXEL_BUFFER_ALIGNMENT,
       .uniformTexelBufferOffsetSingleTexelAlignment = true,
       .maxBufferSize = HK_MAX_BUFFER_SIZE,
+
+      /* Vulkan 1.4 properties */
+      .dynamicRenderingLocalReadDepthStencilAttachments = false,
+      .dynamicRenderingLocalReadMultisampledAttachments = true,
 
       /* VK_KHR_push_descriptor */
       .maxPushDescriptors = HK_MAX_PUSH_DESCRIPTORS,
@@ -860,11 +946,36 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxCombinedImageSamplerDescriptorCount = 3,
       .fragmentShadingRateClampCombinerInputs = false,
 
+      /* VK_KHR_maintenance7 */
+      .robustFragmentShadingRateAttachmentAccess = false,
+      .separateDepthStencilAttachmentAccess = false, /* TODO */
+      .maxDescriptorSetTotalUniformBuffersDynamic = HK_MAX_DYNAMIC_BUFFERS / 2,
+      .maxDescriptorSetTotalStorageBuffersDynamic = HK_MAX_DYNAMIC_BUFFERS / 2,
+      .maxDescriptorSetTotalBuffersDynamic = HK_MAX_DYNAMIC_BUFFERS,
+      .maxDescriptorSetUpdateAfterBindTotalUniformBuffersDynamic =
+         HK_MAX_DYNAMIC_BUFFERS / 2,
+      .maxDescriptorSetUpdateAfterBindTotalStorageBuffersDynamic =
+         HK_MAX_DYNAMIC_BUFFERS / 2,
+      .maxDescriptorSetUpdateAfterBindTotalBuffersDynamic =
+         HK_MAX_DYNAMIC_BUFFERS,
+
+      /* VK_KHR_maintenance9 */
+      .image2DViewOf3DSparse = false,
+      .defaultVertexAttributeValue =
+         VK_DEFAULT_VERTEX_ATTRIBUTE_VALUE_ZERO_ZERO_ZERO_ONE_KHR,
+
       /* VK_EXT_map_memory_placed */
       .minPlacedMemoryMapAlignment = os_page_size,
 
       /* VK_EXT_multi_draw */
       .maxMultiDrawCount = UINT16_MAX,
+
+      /* VK_KHR_pipeline_binary
+       *
+       * InternalCache properties are set by
+       * hk_physical_device_init_pipeline_cache()
+       */
+      .pipelineBinaryCompressedData = false,
 
       /* VK_EXT_pipeline_robustness */
       .defaultRobustnessStorageBuffers =
@@ -882,12 +993,12 @@ hk_get_device_properties(const struct agx_device *dev,
       .provokingVertexModePerPipeline = true,
       .transformFeedbackPreservesTriangleFanProvokingVertex = true,
 
-      /* VK_EXT_robustness2 */
+      /* VK_KHR_robustness2 */
       .robustStorageBufferAccessSizeAlignment = HK_SSBO_BOUNDS_CHECK_ALIGNMENT,
       .robustUniformBufferAccessSizeAlignment = HK_MIN_UBO_ALIGNMENT,
 
       /* VK_EXT_sample_locations */
-      .sampleLocationSampleCounts = sample_counts,
+      .sampleLocationSampleCounts = sample_counts & ~VK_SAMPLE_COUNT_1_BIT,
       .maxSampleLocationGridSize = (VkExtent2D){1, 1},
       .sampleLocationCoordinateRange[0] = 0.0f,
       .sampleLocationCoordinateRange[1] = 0.9375f,
@@ -905,8 +1016,8 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxTransformFeedbackBufferDataSize = 512,
       .maxTransformFeedbackBufferDataStride = 2048,
       .transformFeedbackQueries = true,
-      .transformFeedbackStreamsLinesTriangles = false,
-      .transformFeedbackRasterizationStreamSelect = false,
+      .transformFeedbackStreamsLinesTriangles = true,
+      .transformFeedbackRasterizationStreamSelect = true,
       .transformFeedbackDraw = false,
 
       /* VK_KHR_vertex_attribute_divisor */
@@ -915,6 +1026,14 @@ hk_get_device_properties(const struct agx_device *dev,
 
       /* VK_KHR_fragment_shader_barycentric */
       .triStripVertexOrderIndependentOfProvokingVertex = false,
+
+      /* VK_EXT_blend_operation_advanced */
+      .advancedBlendMaxColorAttachments = HK_MAX_RTS,
+      .advancedBlendIndependentBlend = true,
+      .advancedBlendNonPremultipliedSrcColor = true,
+      .advancedBlendNonPremultipliedDstColor = true,
+      .advancedBlendCorrelatedOverlap = true,
+      .advancedBlendAllOperations = true,
    };
 
    strncpy(properties->deviceName, dev->name, sizeof(properties->deviceName));
@@ -970,16 +1089,16 @@ hk_get_device_properties(const struct agx_device *dev,
    properties->identicalMemoryTypeRequirements = true;
 
    {
-      struct mesa_sha1 sha1_ctx;
-      uint8_t sha1[20];
+      blake3_hasher blake3_ctx;
+      uint8_t blake3[BLAKE3_KEY_LEN];
 
-      _mesa_sha1_init(&sha1_ctx);
+      _mesa_blake3_init(&blake3_ctx);
       /* Make sure we don't match with other vendors */
       const char *driver = "honeykrisp-v1";
-      _mesa_sha1_update(&sha1_ctx, driver, strlen(driver));
-      _mesa_sha1_final(&sha1_ctx, sha1);
+      _mesa_blake3_update(&blake3_ctx, driver, strlen(driver));
+      _mesa_blake3_final(&blake3_ctx, blake3);
 
-      memcpy(properties->optimalTilingLayoutUUID, sha1, VK_UUID_SIZE);
+      memcpy(properties->optimalTilingLayoutUUID, blake3, VK_UUID_SIZE);
    }
 }
 
@@ -988,21 +1107,21 @@ hk_physical_device_init_pipeline_cache(struct hk_physical_device *pdev)
 {
    struct hk_instance *instance = hk_physical_device_instance(pdev);
 
-   struct mesa_sha1 sha_ctx;
-   _mesa_sha1_init(&sha_ctx);
+   blake3_hasher blake3_ctx;
+   _mesa_blake3_init(&blake3_ctx);
 
-   _mesa_sha1_update(&sha_ctx, instance->driver_build_sha,
+   _mesa_blake3_update(&blake3_ctx, instance->driver_build_sha,
                      sizeof(instance->driver_build_sha));
 
    const uint64_t compiler_flags = hk_physical_device_compiler_flags(pdev);
-   _mesa_sha1_update(&sha_ctx, &compiler_flags, sizeof(compiler_flags));
+   _mesa_blake3_update(&blake3_ctx, &compiler_flags, sizeof(compiler_flags));
 
-   unsigned char sha[SHA1_DIGEST_LENGTH];
-   _mesa_sha1_final(&sha_ctx, sha);
+   unsigned char blake3[BLAKE3_KEY_LEN];
+   _mesa_blake3_final(&blake3_ctx, blake3);
 
-   static_assert(SHA1_DIGEST_LENGTH >= VK_UUID_SIZE);
-   memcpy(pdev->vk.properties.pipelineCacheUUID, sha, VK_UUID_SIZE);
-   memcpy(pdev->vk.properties.shaderBinaryUUID, sha, VK_UUID_SIZE);
+   static_assert(BLAKE3_KEY_LEN >= VK_UUID_SIZE);
+   memcpy(pdev->vk.properties.pipelineCacheUUID, blake3, VK_UUID_SIZE);
+   memcpy(pdev->vk.properties.shaderBinaryUUID, blake3, VK_UUID_SIZE);
 
 #ifdef ENABLE_SHADER_CACHE
    char renderer[10];
@@ -1012,11 +1131,17 @@ hk_physical_device_init_pipeline_cache(struct hk_physical_device *pdev)
 
    assert(len == sizeof(renderer) - 2);
 
-   char timestamp[41];
-   _mesa_sha1_format(timestamp, instance->driver_build_sha);
+   char timestamp[BLAKE3_HEX_LEN];
+   _mesa_blake3_format(timestamp, instance->driver_build_sha);
 
    const uint64_t driver_flags = hk_physical_device_compiler_flags(pdev);
    pdev->vk.disk_cache = disk_cache_create(renderer, timestamp, driver_flags);
+   if (pdev->vk.disk_cache != NULL) {
+      pdev->vk.properties.pipelineBinaryInternalCache = true;
+      pdev->vk.properties.pipelineBinaryInternalCacheControl = true;
+      pdev->vk.properties.pipelineBinaryPrefersInternalCache = true;
+      pdev->vk.properties.pipelineBinaryPrecompiledInternalCache = true;
+   }
 #endif
 }
 
@@ -1078,9 +1203,6 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
 {
    struct hk_instance *instance = (struct hk_instance *)_instance;
    VkResult result;
-
-   /* Blanket refusal to probe due to unstable UAPI. */
-   return VK_ERROR_INCOMPATIBLE_DRIVER;
 
    if (!(drm_device->available_nodes & (1 << DRM_NODE_RENDER)) ||
        drm_device->bustype != DRM_BUS_PLATFORM)
@@ -1150,7 +1272,8 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    hk_get_device_extensions(instance, &supported_extensions);
 
    struct vk_features supported_features;
-   hk_get_device_features(&supported_extensions, &supported_features);
+   hk_get_device_features(&pdev->dev, instance, &supported_extensions,
+                          &supported_features);
 
    struct vk_properties properties;
    hk_get_device_properties(&pdev->dev, instance, &properties);
@@ -1167,7 +1290,7 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
 
    hk_physical_device_init_pipeline_cache(pdev);
 
-   const char *hk_sysmem = getenv("HK_SYSMEM");
+   const char *hk_sysmem = os_get_option("HK_SYSMEM");
    if (hk_sysmem) {
       uint64_t sysmem = strtoll(hk_sysmem, NULL, 10);
       if (sysmem != LLONG_MIN && sysmem != LLONG_MAX) {
@@ -1197,13 +1320,19 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
       .heapIndex = sysmem_heap_idx,
    };
 
+   pdev->mem_types[pdev->mem_type_count++] = (VkMemoryType){
+      .propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                       VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+      .heapIndex = sysmem_heap_idx,
+   };
+
    assert(pdev->mem_heap_count <= ARRAY_SIZE(pdev->mem_heaps));
    assert(pdev->mem_type_count <= ARRAY_SIZE(pdev->mem_types));
 
-   /* TODO: VK_QUEUE_SPARSE_BINDING_BIT*/
    pdev->queue_families[pdev->queue_family_count++] = (struct hk_queue_family){
-      .queue_flags =
-         VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
+      .queue_flags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT |
+                     VK_QUEUE_TRANSFER_BIT | VK_QUEUE_SPARSE_BINDING_BIT,
 
       .queue_count = 1,
    };
@@ -1234,7 +1363,7 @@ fail_pdev_alloc:
    if (pdev->master_fd)
       close(pdev->master_fd);
 
-   vk_free(&pdev->vk.instance->alloc, pdev);
+   vk_free(&instance->vk.alloc, pdev);
 fail_fd:
    close(fd);
    return result;
@@ -1371,7 +1500,7 @@ hk_GetPhysicalDeviceQueueFamilyProperties2(
       {
          p->queueFamilyProperties.queueFlags = queue_family->queue_flags;
          p->queueFamilyProperties.queueCount = queue_family->queue_count;
-         p->queueFamilyProperties.timestampValidBits = 0; // TODO 64;
+         p->queueFamilyProperties.timestampValidBits = 64;
          p->queueFamilyProperties.minImageTransferGranularity =
             (VkExtent3D){1, 1, 1};
 
@@ -1386,31 +1515,6 @@ hk_GetPhysicalDeviceQueueFamilyProperties2(
          }
       }
    }
-}
-
-static const VkTimeDomainKHR hk_time_domains[] = {
-   VK_TIME_DOMAIN_DEVICE_KHR,
-   VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR,
-#ifdef CLOCK_MONOTONIC_RAW
-   VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_KHR,
-#endif
-};
-
-VKAPI_ATTR VkResult VKAPI_CALL
-hk_GetPhysicalDeviceCalibrateableTimeDomainsKHR(VkPhysicalDevice physicalDevice,
-                                                uint32_t *pTimeDomainCount,
-                                                VkTimeDomainKHR *pTimeDomains)
-{
-   VK_OUTARRAY_MAKE_TYPED(VkTimeDomainKHR, out, pTimeDomains, pTimeDomainCount);
-
-   for (int d = 0; d < ARRAY_SIZE(hk_time_domains); d++) {
-      vk_outarray_append_typed(VkTimeDomainKHR, &out, i)
-      {
-         *i = hk_time_domains[d];
-      }
-   }
-
-   return vk_outarray_status(&out);
 }
 
 VKAPI_ATTR void VKAPI_CALL

@@ -12,7 +12,6 @@
 #ifndef RADV_AMDGPU_CS_H
 #define RADV_AMDGPU_CS_H
 
-#include <amdgpu.h>
 #include <assert.h>
 #include <stdint.h>
 #include <string.h>
@@ -28,7 +27,7 @@ struct radv_amdgpu_fence {
 
 struct radv_amdgpu_ctx {
    struct radv_amdgpu_winsys *ws;
-   amdgpu_context_handle ctx;
+   uint32_t ctx_handle;
    struct radv_amdgpu_fence last_submission[AMDGPU_HW_IP_NUM + 1][MAX_RINGS_PER_TYPE];
 
    struct radeon_winsys_bo *fence_bo;

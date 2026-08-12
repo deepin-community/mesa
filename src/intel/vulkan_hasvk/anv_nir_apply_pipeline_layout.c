@@ -24,7 +24,7 @@
 #include "anv_nir.h"
 #include "nir/nir_builder.h"
 #include "compiler/elk/elk_nir.h"
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 #include "util/set.h"
 
 /* Sampler tables don't actually have a maximum size but we pick one just so
@@ -59,23 +59,18 @@ struct apply_pipeline_layout_state {
 };
 
 static nir_address_format
-addr_format_for_desc_type(VkDescriptorType desc_type,
+addr_format_for_desc_type(nir_descriptor_type desc_type,
                           struct apply_pipeline_layout_state *state)
 {
    switch (desc_type) {
-   case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
-   case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+   case nir_descriptor_type_storage_buffer:
       return state->ssbo_addr_format;
 
-   case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
-   case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+   case nir_descriptor_type_uniform_buffer:
       return state->ubo_addr_format;
 
-   case VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK:
-      return nir_address_format_32bit_index_offset;
-
    default:
-      unreachable("Unsupported descriptor type");
+      UNREACHABLE("Unsupported descriptor type");
    }
 }
 
@@ -227,7 +222,7 @@ nir_deref_find_descriptor(nir_deref_instr *deref,
 
    nir_intrinsic_instr *intrin = nir_src_as_intrinsic(deref->parent);
    if (!intrin || intrin->intrinsic != nir_intrinsic_load_vulkan_descriptor)
-      return false;
+      return NULL;
 
    return find_descriptor_for_index_src(intrin->src[0], state);
 }
@@ -318,7 +313,7 @@ build_res_index(nir_builder *b, uint32_t set, uint32_t binding,
    }
 
    default:
-      unreachable("Unsupported address format");
+      UNREACHABLE("Unsupported address format");
    }
 }
 
@@ -372,7 +367,7 @@ build_res_reindex(nir_builder *b, nir_def *orig, nir_def *delta,
                          nir_channel(b, orig, 1));
 
    default:
-      unreachable("Unhandled address format");
+      UNREACHABLE("Unhandled address format");
    }
 }
 
@@ -417,7 +412,7 @@ build_desc_addr(nir_builder *b,
       return index;
 
    default:
-      unreachable("Unhandled address format");
+      UNREACHABLE("Unhandled address format");
    }
 }
 
@@ -728,7 +723,7 @@ lower_direct_buffer_instr(nir_builder *b, nir_instr *instr, void *_state)
 
    case nir_intrinsic_load_vulkan_descriptor:
       if (nir_intrinsic_desc_type(intrin) ==
-          VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
+          nir_descriptor_type_acceleration_structure)
          return lower_load_accel_struct_desc(b, intrin, state);
       return false;
 
@@ -780,17 +775,33 @@ lower_res_reindex_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin,
    return true;
 }
 
+static VkDescriptorType
+nir_to_vk_descriptor_type(nir_descriptor_type type)
+{
+   switch (type) {
+   case nir_descriptor_type_uniform_buffer:
+      return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+   case nir_descriptor_type_storage_buffer:
+      return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+   case nir_descriptor_type_acceleration_structure:
+      return VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+   default:
+      UNREACHABLE("Invalid nir_descriptor_type");
+   }
+}
+
 static bool
 lower_load_vulkan_descriptor(nir_builder *b, nir_intrinsic_instr *intrin,
                              struct apply_pipeline_layout_state *state)
 {
    b->cursor = nir_before_instr(&intrin->instr);
 
-   const VkDescriptorType desc_type = nir_intrinsic_desc_type(intrin);
+   const nir_descriptor_type desc_type = nir_intrinsic_desc_type(intrin);
+   const VkDescriptorType vk_desc_type = nir_to_vk_descriptor_type(desc_type);
    nir_address_format addr_format = addr_format_for_desc_type(desc_type, state);
 
    nir_def *desc =
-      build_buffer_addr_for_res_index(b, desc_type, intrin->src[0].ssa,
+      build_buffer_addr_for_res_index(b, vk_desc_type, intrin->src[0].ssa,
                                       addr_format, state);
 
    assert(intrin->def.bit_size == desc->bit_size);
@@ -810,7 +821,7 @@ lower_get_ssbo_size(nir_builder *b, nir_intrinsic_instr *intrin,
    b->cursor = nir_before_instr(&intrin->instr);
 
    nir_address_format addr_format =
-      addr_format_for_desc_type(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, state);
+      addr_format_for_desc_type(nir_descriptor_type_storage_buffer, state);
 
    nir_def *desc =
       build_buffer_addr_for_res_index(b, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -832,7 +843,7 @@ lower_get_ssbo_size(nir_builder *b, nir_intrinsic_instr *intrin,
       break;
 
    default:
-      unreachable("Unsupported address format");
+      UNREACHABLE("Unsupported address format");
    }
 
    return true;
@@ -879,7 +890,7 @@ lower_image_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin,
       }
 
       index = nir_iadd_imm(b, index, binding_offset);
-      nir_rewrite_image_intrinsic(intrin, index, false);
+      nir_rewrite_image_intrinsic(intrin, index, nir_image_intrinsic_type_default);
    }
 
    return true;
@@ -902,21 +913,19 @@ lower_load_constant(nir_builder *b, nir_intrinsic_instr *intrin,
    if (!anv_use_relocations(state->pdevice)) {
       unsigned load_size = intrin->def.num_components *
                            intrin->def.bit_size / 8;
-      unsigned load_align = intrin->def.bit_size / 8;
 
       assert(load_size < b->shader->constant_data_size);
       unsigned max_offset = b->shader->constant_data_size - load_size;
       offset = nir_umin(b, offset, nir_imm_int(b, max_offset));
 
       nir_def *const_data_base_addr = nir_pack_64_2x32_split(b,
-         nir_load_reloc_const_intel(b, ELK_SHADER_RELOC_CONST_DATA_ADDR_LOW),
-         nir_load_reloc_const_intel(b, ELK_SHADER_RELOC_CONST_DATA_ADDR_HIGH));
+         nir_load_reloc_const_intel(b, INTEL_SHADER_RELOC_CONST_DATA_ADDR_LOW),
+         nir_load_reloc_const_intel(b, INTEL_SHADER_RELOC_CONST_DATA_ADDR_HIGH));
 
-      data = nir_load_global_constant(b, nir_iadd(b, const_data_base_addr,
-                                                     nir_u2u64(b, offset)),
-                                      load_align,
-                                      intrin->def.num_components,
-                                      intrin->def.bit_size);
+      data = nir_load_global_constant(b, intrin->def.num_components,
+                                      intrin->def.bit_size,
+                                      nir_iadd(b, const_data_base_addr,
+                                               nir_u2u64(b, offset)));
    } else {
       nir_def *index = nir_imm_int(b, state->constants_offset);
 
@@ -1134,9 +1143,7 @@ lower_gfx7_tex_swizzle(nir_builder *b, nir_tex_instr *tex, unsigned plane,
    nir_def *swiz_tex_res = nir_vec(b, swiz_comps, 4);
 
    /* Rewrite uses before we insert so we don't rewrite this use */
-   nir_def_rewrite_uses_after(&tex->def,
-                                  swiz_tex_res,
-                                  swiz_tex_res->parent_instr);
+   nir_def_rewrite_uses_after(&tex->def, swiz_tex_res);
 }
 
 static bool
@@ -1224,7 +1231,7 @@ compare_binding_infos(const void *_a, const void *_b)
    return a->binding - b->binding;
 }
 
-void
+bool
 anv_nir_apply_pipeline_layout(nir_shader *shader,
                               const struct anv_physical_device *pdevice,
                               enum elk_robustness_flags robust_flags,
@@ -1468,10 +1475,11 @@ anv_nir_apply_pipeline_layout(nir_shader *shader,
     * bind map, hash them.  This lets us quickly determine if the actual
     * mapping has changed and not just a no-op pipeline change.
     */
-   _mesa_sha1_compute(map->surface_to_descriptor,
+   _mesa_blake3_compute(map->surface_to_descriptor,
                       map->surface_count * sizeof(struct anv_pipeline_binding),
-                      map->surface_sha1);
-   _mesa_sha1_compute(map->sampler_to_descriptor,
+                      map->surface_blake3);
+   _mesa_blake3_compute(map->sampler_to_descriptor,
                       map->sampler_count * sizeof(struct anv_pipeline_binding),
-                      map->sampler_sha1);
+                      map->sampler_blake3);
+   return true;
 }

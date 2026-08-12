@@ -163,8 +163,8 @@ draw_init(struct draw_context *draw)
    if (!draw_gs_init(draw))
       return false;
 
-   draw->quads_always_flatshade_last = !draw->pipe->screen->get_param(
-      draw->pipe->screen, PIPE_CAP_QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION);
+   draw->quads_always_flatshade_last =
+      !draw->pipe->screen->caps.quads_follow_provoking_vertex_convention;
 
    draw->floating_point_depth = false;
 
@@ -417,7 +417,7 @@ draw_set_vertex_buffers(struct draw_context *draw,
 
    util_set_vertex_buffers_count(draw->pt.vertex_buffer,
                                  &draw->pt.nr_vertex_buffers,
-                                 buffers, count, false);
+                                 buffers, count);
 }
 
 
@@ -454,15 +454,15 @@ draw_set_mapped_vertex_buffer(struct draw_context *draw,
 
 void
 draw_set_mapped_constant_buffer(struct draw_context *draw,
-                                enum pipe_shader_type shader_type,
+                                mesa_shader_stage shader_type,
                                 unsigned slot,
                                 const void *buffer,
                                 unsigned size)
 {
-   assert(shader_type == PIPE_SHADER_VERTEX ||
-                shader_type == PIPE_SHADER_GEOMETRY ||
-                shader_type == PIPE_SHADER_TESS_CTRL ||
-                shader_type == PIPE_SHADER_TESS_EVAL);
+   assert(shader_type == MESA_SHADER_VERTEX ||
+                shader_type == MESA_SHADER_GEOMETRY ||
+                shader_type == MESA_SHADER_TESS_CTRL ||
+                shader_type == MESA_SHADER_TESS_EVAL);
    assert(slot < PIPE_MAX_CONSTANT_BUFFERS);
 
    draw_do_flush(draw, DRAW_FLUSH_PARAMETER_CHANGE);
@@ -473,15 +473,15 @@ draw_set_mapped_constant_buffer(struct draw_context *draw,
 
 void
 draw_set_mapped_shader_buffer(struct draw_context *draw,
-                              enum pipe_shader_type shader_type,
+                              mesa_shader_stage shader_type,
                               unsigned slot,
                               const void *buffer,
                               unsigned size)
 {
-   assert(shader_type == PIPE_SHADER_VERTEX ||
-                shader_type == PIPE_SHADER_GEOMETRY ||
-                shader_type == PIPE_SHADER_TESS_CTRL ||
-                shader_type == PIPE_SHADER_TESS_EVAL);
+   assert(shader_type == MESA_SHADER_VERTEX ||
+                shader_type == MESA_SHADER_GEOMETRY ||
+                shader_type == MESA_SHADER_TESS_CTRL ||
+                shader_type == MESA_SHADER_TESS_EVAL);
    assert(slot < PIPE_MAX_SHADER_BUFFERS);
 
    draw_do_flush(draw, DRAW_FLUSH_PARAMETER_CHANGE);
@@ -756,14 +756,14 @@ draw_total_tes_outputs(const struct draw_context *draw)
  */
 void
 draw_texture_sampler(struct draw_context *draw,
-                     enum pipe_shader_type shader,
+                     mesa_shader_stage shader,
                      struct tgsi_sampler *sampler)
 {
    switch (shader) {
-   case PIPE_SHADER_VERTEX:
+   case MESA_SHADER_VERTEX:
       draw->vs.tgsi.sampler = sampler;
       break;
-   case PIPE_SHADER_GEOMETRY:
+   case MESA_SHADER_GEOMETRY:
       draw->gs.tgsi.sampler = sampler;
       break;
    default:
@@ -780,14 +780,14 @@ draw_texture_sampler(struct draw_context *draw,
  */
 void
 draw_image(struct draw_context *draw,
-           enum pipe_shader_type shader,
+           mesa_shader_stage shader,
            struct tgsi_image *image)
 {
    switch (shader) {
-   case PIPE_SHADER_VERTEX:
+   case MESA_SHADER_VERTEX:
       draw->vs.tgsi.image = image;
       break;
-   case PIPE_SHADER_GEOMETRY:
+   case MESA_SHADER_GEOMETRY:
       draw->gs.tgsi.image = image;
       break;
    default:
@@ -804,14 +804,14 @@ draw_image(struct draw_context *draw,
  */
 void
 draw_buffer(struct draw_context *draw,
-            enum pipe_shader_type shader,
+            mesa_shader_stage shader,
             struct tgsi_buffer *buffer)
 {
    switch (shader) {
-   case PIPE_SHADER_VERTEX:
+   case MESA_SHADER_VERTEX:
       draw->vs.tgsi.buffer = buffer;
       break;
-   case PIPE_SHADER_GEOMETRY:
+   case MESA_SHADER_GEOMETRY:
       draw->gs.tgsi.buffer = buffer;
       break;
    default:
@@ -1051,7 +1051,7 @@ draw_set_mapped_so_targets(struct draw_context *draw,
 
 void
 draw_set_sampler_views(struct draw_context *draw,
-                       enum pipe_shader_type shader_stage,
+                       mesa_shader_stage shader_stage,
                        struct pipe_sampler_view **views,
                        unsigned num)
 {
@@ -1071,7 +1071,7 @@ draw_set_sampler_views(struct draw_context *draw,
 
 void
 draw_set_samplers(struct draw_context *draw,
-                  enum pipe_shader_type shader_stage,
+                  mesa_shader_stage shader_stage,
                   struct pipe_sampler_state **samplers,
                   unsigned num)
 {
@@ -1096,7 +1096,7 @@ draw_set_samplers(struct draw_context *draw,
 
 void
 draw_set_images(struct draw_context *draw,
-                enum pipe_shader_type shader_stage,
+                mesa_shader_stage shader_stage,
                 struct pipe_image_view *views,
                 unsigned num)
 {
@@ -1116,7 +1116,7 @@ draw_set_images(struct draw_context *draw,
 
 void
 draw_set_mapped_texture(struct draw_context *draw,
-                        enum pipe_shader_type shader_stage,
+                        mesa_shader_stage shader_stage,
                         unsigned sview_idx,
                         uint32_t width, uint32_t height, uint32_t depth,
                         uint32_t first_level, uint32_t last_level,
@@ -1141,7 +1141,7 @@ draw_set_mapped_texture(struct draw_context *draw,
 
 void
 draw_set_mapped_image(struct draw_context *draw,
-                      enum pipe_shader_type shader_stage,
+                      mesa_shader_stage shader_stage,
                       unsigned idx,
                       uint32_t width, uint32_t height, uint32_t depth,
                       const void *base_ptr,
@@ -1162,49 +1162,21 @@ draw_set_mapped_image(struct draw_context *draw,
 #endif
 }
 
-
 /**
- * XXX: Results for PIPE_SHADER_CAP_MAX_TEXTURE_SAMPLERS because there are two
- * different ways of setting textures, and drivers typically only support one.
- */
-int
-draw_get_shader_param_no_llvm(enum pipe_shader_type shader,
-                              enum pipe_shader_cap param)
-{
-   switch(shader) {
-   case PIPE_SHADER_VERTEX:
-   case PIPE_SHADER_GEOMETRY:
-      return tgsi_exec_get_shader_param(param);
-   default:
-      return 0;
-   }
-}
-
-
-/**
- * XXX: Results for PIPE_SHADER_CAP_MAX_TEXTURE_SAMPLERS because there are two
+ * XXX: Results for pipe_shader_caps.max_texture_samplers because there are two
  * different ways of setting textures, and drivers typically only support one.
  * Drivers requesting a draw context explicitly without llvm must call
- * draw_get_shader_param_no_llvm instead.
+ * tgsi_exec_init_shader_caps instead.
  */
-int
-draw_get_shader_param(enum pipe_shader_type shader, enum pipe_shader_cap param)
+void
+draw_init_shader_caps(struct pipe_shader_caps *caps)
 {
 #if DRAW_LLVM_AVAILABLE
-   if (draw_get_option_use_llvm()) {
-      switch(shader) {
-      case PIPE_SHADER_VERTEX:
-      case PIPE_SHADER_GEOMETRY:
-      case PIPE_SHADER_TESS_CTRL:
-      case PIPE_SHADER_TESS_EVAL:
-         return gallivm_get_shader_param(param);
-      default:
-         return 0;
-      }
-   }
+   if (draw_get_option_use_llvm())
+      gallivm_init_shader_caps(caps);
+   else
 #endif
-
-   return draw_get_shader_param_no_llvm(shader, param);
+      tgsi_exec_init_shader_caps(caps);
 }
 
 
@@ -1271,7 +1243,10 @@ draw_stats_clipper_primitives(struct draw_context *draw,
 bool
 draw_will_inject_frontface(const struct draw_context *draw)
 {
-   unsigned reduced_prim = u_reduced_prim(draw->pt.prim);
+   /* The geometry shader can change the primitive type. */
+   enum mesa_prim prim = draw->gs.geometry_shader ?
+      draw->gs.geometry_shader->output_primitive : draw->pt.prim;
+   enum mesa_prim reduced_prim = u_reduced_prim(prim);
    const struct pipe_rasterizer_state *rast = draw->rasterizer;
 
    if (reduced_prim != MESA_PRIM_TRIANGLES) {
@@ -1301,10 +1276,10 @@ draw_set_disk_cache_callbacks(struct draw_context *draw,
                               void *data_cookie,
                               void (*find_shader)(void *cookie,
                                                   struct lp_cached_code *cache,
-                                                  unsigned char ir_sha1_cache_key[20]),
+                                                  unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN]),
                               void (*insert_shader)(void *cookie,
                                                     struct lp_cached_code *cache,
-                                                    unsigned char ir_sha1_cache_key[20]))
+                                                    unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN]))
 {
    draw->disk_cache_find_shader = find_shader;
    draw->disk_cache_insert_shader = insert_shader;

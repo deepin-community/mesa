@@ -1,33 +1,10 @@
 /*
- Copyright (C) Intel Corp.  2006.  All Rights Reserved.
- Intel funded Tungsten Graphics to
- develop this 3D driver.
-
- Permission is hereby granted, free of charge, to any person obtaining
- a copy of this software and associated documentation files (the
- "Software"), to deal in the Software without restriction, including
- without limitation the rights to use, copy, modify, merge, publish,
- distribute, sublicense, and/or sell copies of the Software, and to
- permit persons to whom the Software is furnished to do so, subject to
- the following conditions:
-
- The above copyright notice and this permission notice (including the
- next paragraph) shall be included in all copies or substantial
- portions of the Software.
-
- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
- IN NO EVENT SHALL THE COPYRIGHT OWNER(S) AND/OR ITS SUPPLIERS BE
- LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
- WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
- **********************************************************************/
- /*
-  * Authors:
-  *   Keith Whitwell <keithw@vmware.com>
-  */
+ * Copyright © 2006 Intel Corporation
+ * SPDX-License-Identifier: MIT
+ *
+ * Intel funded Tungsten Graphics to develop this 3D driver.
+ * File originally authored by: Keith Whitwell <keithw@vmware.com>
+ */
 
 /** @file elk_reg.h
  *
@@ -39,8 +16,7 @@
  * the abstract elk_reg type into the actual hardware instruction encoding.
  */
 
-#ifndef ELK_REG_H
-#define ELK_REG_H
+#pragma once
 
 #include <stdbool.h>
 #include "util/compiler.h"
@@ -83,6 +59,7 @@ struct intel_device_info;
 
 /** Number of message register file registers */
 #define ELK_MAX_MRF(gen) (gen == 6 ? 24 : 16)
+#define ELK_MAX_MRF_ALL  24
 
 #define ELK_SWIZZLE4(a,b,c,d) (((a)<<0) | ((b)<<2) | ((c)<<4) | ((d)<<6))
 #define ELK_GET_SWZ(swz, idx) (((swz) >> ((idx)*2)) & 0x3)
@@ -317,7 +294,7 @@ elk_regs_negative_equal(const struct elk_reg *a, const struct elk_reg *b)
       case ELK_REGISTER_TYPE_B:
       case ELK_REGISTER_TYPE_NF:
       default:
-         unreachable("not reached");
+         UNREACHABLE("not reached");
       }
    } else {
       struct elk_reg tmp = *a;
@@ -360,7 +337,7 @@ type_sz(unsigned type)
    case ELK_REGISTER_TYPE_B:
       return 1;
    default:
-      unreachable("not reached");
+      UNREACHABLE("not reached");
    }
 }
 
@@ -397,7 +374,7 @@ elk_int_type(unsigned sz, bool is_signed)
    case 8:
       return (is_signed ? ELK_REGISTER_TYPE_Q : ELK_REGISTER_TYPE_UQ);
    default:
-      unreachable("Not reached.");
+      UNREACHABLE("Not reached.");
    }
 }
 
@@ -564,7 +541,7 @@ elk_vecn_reg(unsigned width, enum elk_reg_file file,
    case 16:
       return elk_vec16_reg(file, nr, subnr);
    default:
-      unreachable("Invalid register width");
+      UNREACHABLE("Invalid register width");
    }
 }
 
@@ -1359,6 +1336,4 @@ elk_type_is_float(enum elk_reg_type type)
 
 #ifdef __cplusplus
 }
-#endif
-
 #endif

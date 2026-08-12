@@ -160,7 +160,7 @@ i915_gem_close(struct anv_device *device, struct anv_bo *bo)
 
 static void *
 i915_gem_mmap_offset(struct anv_device *device, struct anv_bo *bo,
-                     uint64_t size, uint32_t flags,
+                     uint64_t offset, uint64_t size, uint32_t flags,
                      void *placed_addr)
 {
    struct drm_i915_gem_mmap_offset gem_mmap = {
@@ -170,9 +170,39 @@ i915_gem_mmap_offset(struct anv_device *device, struct anv_bo *bo,
    if (intel_ioctl(device->fd, DRM_IOCTL_I915_GEM_MMAP_OFFSET, &gem_mmap))
       return MAP_FAILED;
 
-   return mmap(placed_addr, size, PROT_READ | PROT_WRITE,
-               (placed_addr != NULL ? MAP_FIXED : 0) | MAP_SHARED,
-               device->fd, gem_mmap.offset);
+   if (placed_addr != NULL) {
+      const uint64_t placed_num = (uintptr_t)placed_addr;
+
+      assert(placed_num >= offset);
+      if (placed_num < offset)
+         return NULL;
+
+      placed_addr -= offset;
+   }
+
+   /* The Kernel uAPI doesn't allow us to map with an offset. To work around,
+    * overallocate and then unmap the unneeded region
+    */
+   void *ptr;
+
+   if (device->physical->info.is_virtio)
+      ptr = intel_virtio_bo_mmap(device->fd, bo->gem_handle,
+                                 offset + size, placed_addr);
+   else
+      ptr = mmap(placed_addr, offset + size,
+                 PROT_READ | PROT_WRITE,
+                 (placed_addr != NULL ? MAP_FIXED : 0) | MAP_SHARED,
+                 device->fd, gem_mmap.offset);
+
+   if (ptr == MAP_FAILED)
+      return ptr;
+
+   void *ret = ptr + offset;
+
+   if (offset != 0)
+      munmap(ptr, offset);
+
+   return ret;
 }
 
 static void *
@@ -191,6 +221,40 @@ i915_gem_mmap_legacy(struct anv_device *device, struct anv_bo *bo, uint64_t offs
    return (void *)(uintptr_t) gem_mmap.addr_ptr;
 }
 
+static enum intel_device_info_mmap_mode
+anv_bo_get_mmap_mode(struct anv_device *device, struct anv_bo *bo)
+{
+   enum anv_bo_alloc_flags alloc_flags = bo->alloc_flags;
+
+   if (device->info->has_set_pat_uapi)
+      return anv_device_get_pat_entry(device, alloc_flags)->mmap;
+
+   if (anv_physical_device_has_vram(device->physical)) {
+      if ((alloc_flags & ANV_BO_ALLOC_NO_LOCAL_MEM) ||
+          (alloc_flags & ANV_BO_ALLOC_IMPORTED))
+         return INTEL_DEVICE_INFO_MMAP_MODE_WB;
+
+      return INTEL_DEVICE_INFO_MMAP_MODE_WC;
+   }
+
+   /* gfx9 atom */
+   if (!device->info->has_llc) {
+      /* user wants a cached and coherent memory but to achieve it without
+       * LLC in older platforms DRM_IOCTL_I915_GEM_SET_CACHING needs to be
+       * supported and set.
+       */
+      if (alloc_flags & ANV_BO_ALLOC_HOST_CACHED)
+         return INTEL_DEVICE_INFO_MMAP_MODE_WB;
+
+      return INTEL_DEVICE_INFO_MMAP_MODE_WC;
+   }
+
+   if (alloc_flags & (ANV_BO_ALLOC_SCANOUT | ANV_BO_ALLOC_EXTERNAL))
+      return INTEL_DEVICE_INFO_MMAP_MODE_WC;
+
+   return INTEL_DEVICE_INFO_MMAP_MODE_WB;
+}
+
 static uint32_t
 mmap_calc_flags(struct anv_device *device, struct anv_bo *bo)
 {
@@ -202,8 +266,6 @@ mmap_calc_flags(struct anv_device *device, struct anv_bo *bo)
    case INTEL_DEVICE_INFO_MMAP_MODE_WC:
       flags = I915_MMAP_WC;
       break;
-   case INTEL_DEVICE_INFO_MMAP_MODE_UC:
-      unreachable("Missing");
    default:
       /* no flags == WB */
       flags = 0;
@@ -221,7 +283,7 @@ i915_gem_mmap(struct anv_device *device, struct anv_bo *bo, uint64_t offset,
    const uint32_t flags = mmap_calc_flags(device, bo);
 
    if (likely(device->physical->info.has_mmap_offset))
-      return i915_gem_mmap_offset(device, bo, size, flags, placed_addr);
+      return i915_gem_mmap_offset(device, bo, offset, size, flags, placed_addr);
    assert(placed_addr == NULL);
    return i915_gem_mmap_legacy(device, bo, offset, size, flags);
 }
@@ -262,16 +324,13 @@ static uint32_t
 i915_bo_alloc_flags_to_bo_flags(struct anv_device *device,
                                 enum anv_bo_alloc_flags alloc_flags)
 {
-   struct anv_physical_device *pdevice = device->physical;
-
    uint64_t bo_flags = EXEC_OBJECT_PINNED;
 
    if (!(alloc_flags & ANV_BO_ALLOC_32BIT_ADDRESS))
       bo_flags |= EXEC_OBJECT_SUPPORTS_48B_ADDRESS;
 
-   if (((alloc_flags & ANV_BO_ALLOC_CAPTURE) ||
-        INTEL_DEBUG(DEBUG_CAPTURE_ALL)) &&
-       pdevice->has_exec_capture)
+   if ((alloc_flags & ANV_BO_ALLOC_CAPTURE) ||
+        INTEL_DEBUG(DEBUG_CAPTURE_ALL))
       bo_flags |= EXEC_OBJECT_CAPTURE;
 
    if (alloc_flags & ANV_BO_ALLOC_IMPLICIT_WRITE) {
@@ -279,7 +338,7 @@ i915_bo_alloc_flags_to_bo_flags(struct anv_device *device,
       bo_flags |= EXEC_OBJECT_WRITE;
    }
 
-   if (!(alloc_flags & ANV_BO_ALLOC_IMPLICIT_SYNC) && pdevice->has_exec_async)
+   if (!(alloc_flags & ANV_BO_ALLOC_IMPLICIT_SYNC))
       bo_flags |= EXEC_OBJECT_ASYNC;
 
    return bo_flags;

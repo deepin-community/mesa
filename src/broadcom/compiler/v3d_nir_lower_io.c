@@ -86,7 +86,8 @@ v3d_nir_store_output(nir_builder *b, int base, nir_def *offset,
         }
 
         nir_store_output(b, chan, offset, .base = base, .write_mask = 0x1, .component = 0,
-                         .src_type = nir_type_uint | chan->bit_size);
+                         .src_type = nir_type_uint | chan->bit_size,
+                         .io_semantics.no_validate = 1);
 }
 
 static int
@@ -104,7 +105,7 @@ v3d_varying_slot_vpm_offset(struct v3d_compile *c, unsigned location, unsigned c
                 used_outputs = c->gs_key->used_outputs;
                 break;
         default:
-                unreachable("Unsupported shader stage");
+                UNREACHABLE("Unsupported shader stage");
         }
 
         for (int i = 0; i < num_used_outputs; i++) {
@@ -572,7 +573,7 @@ v3d_nir_emit_ff_vpm_outputs(struct v3d_compile *c, nir_builder *b,
                 num_used_outputs = c->gs_key->num_used_outputs;
                 break;
         default:
-                unreachable("Unsupported shader stage");
+                UNREACHABLE("Unsupported shader stage");
         }
 
         for (int i = 0; i < num_used_outputs; i++) {
@@ -673,8 +674,7 @@ v3d_nir_lower_io(nir_shader *s, struct v3d_compile *c)
                         emit_gs_vpm_output_header_prolog(c, &b, &state);
                 }
 
-                nir_metadata_preserve(impl,
-                                      nir_metadata_control_flow);
+                nir_progress(true, impl, nir_metadata_control_flow);
         }
 
         if (s->info.stage != MESA_SHADER_COMPUTE)

@@ -46,7 +46,7 @@ vk_object_to_physical_device(struct vk_object_base *obj)
 {
    switch (obj->type) {
    case VK_OBJECT_TYPE_INSTANCE:
-      unreachable("Unsupported object type");
+      UNREACHABLE("Unsupported object type");
    case VK_OBJECT_TYPE_PHYSICAL_DEVICE:
       return container_of(obj, struct vk_physical_device, base);
    case VK_OBJECT_TYPE_SURFACE_KHR:
@@ -54,7 +54,7 @@ vk_object_to_physical_device(struct vk_object_base *obj)
    case VK_OBJECT_TYPE_DISPLAY_MODE_KHR:
    case VK_OBJECT_TYPE_DEBUG_REPORT_CALLBACK_EXT:
    case VK_OBJECT_TYPE_DEBUG_UTILS_MESSENGER_EXT:
-      unreachable("Unsupported object type");
+      UNREACHABLE("Unsupported object type");
    default:
       return vk_object_to_device(obj)->physical;
    }
@@ -113,7 +113,8 @@ __vk_log_impl(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
 
 #if !MESA_DEBUG
    if (unlikely(!instance) ||
-       (likely(list_is_empty(&instance->debug_utils.callbacks)) &&
+       (likely(!instance->enable_debug_logging) &&
+        likely(list_is_empty(&instance->debug_utils.callbacks)) &&
         likely(list_is_empty(&instance->debug_report.callbacks))))
       return;
 #endif
@@ -127,26 +128,30 @@ __vk_log_impl(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
 
    char *message_idname = ralloc_asprintf(NULL, "%s:%d", file, line);
 
-#if MESA_DEBUG
-   switch (severity) {
-   case VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT:
-      mesa_logd("%s: %s", message_idname, message);
-      break;
-   case VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT:
-      mesa_logi("%s: %s", message_idname, message);
-      break;
-   case VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT:
-      if (types & VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT)
-         mesa_logw("%s: PERF: %s", message_idname, message);
-      else
-         mesa_logw("%s: %s", message_idname, message);
-      break;
-   case VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT:
-      mesa_loge("%s: %s", message_idname, message);
-      break;
-   default:
-      unreachable("Invalid debug message severity");
-      break;
+   const bool do_log = MESA_VK_LOG ||
+                       (instance && instance->enable_debug_logging);
+
+   if (do_log) {
+      switch (severity) {
+      case VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT:
+         mesa_logd("%s: %s", message_idname, message);
+         break;
+      case VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT:
+         mesa_logi("%s: %s", message_idname, message);
+         break;
+      case VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT:
+         if (types & VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT)
+            mesa_logw("%s: PERF: %s", message_idname, message);
+         else
+            mesa_logw("%s: %s", message_idname, message);
+         break;
+      case VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT:
+         mesa_loge("%s: %s", message_idname, message);
+         break;
+      default:
+         UNREACHABLE("Invalid debug message severity");
+         break;
+      }
    }
 
    if (!instance) {
@@ -154,7 +159,6 @@ __vk_log_impl(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
       ralloc_free(message_idname);
       return;
    }
-#endif
 
    if (!instance->base.client_visible) {
       vk_debug_message_instance(instance, severity, types,
@@ -250,7 +254,7 @@ __vk_log_impl(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
          flags |= VK_DEBUG_REPORT_ERROR_BIT_EXT;
          break;
       default:
-         unreachable("Invalid debug message severity");
+         UNREACHABLE("Invalid debug message severity");
          break;
       }
 
@@ -259,8 +263,8 @@ __vk_log_impl(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
        * decreasing order of importance, we're forwarding the first
        * one.
        */
-      vk_debug_report(instance, flags, object_count ? objects[0] : NULL, 0,
-                      0, message_idname, message);
+      vk_debug_report(&instance->debug_report, flags, object_count ? objects[0] : NULL,
+                      0, 0, message_idname, message);
    }
 
    ralloc_free(message);

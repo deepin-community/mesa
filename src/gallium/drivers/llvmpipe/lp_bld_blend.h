@@ -31,7 +31,7 @@
 #include "pipe/p_defines.h"
 #include "gallivm/lp_bld.h"
 #include "gallivm/lp_bld_init.h"
- 
+
 #include "util/format/u_formats.h"
 
 
@@ -104,6 +104,7 @@ lp_build_alpha_to_coverage(struct gallivm_state *gallivm,
                            struct lp_type type,
                            struct lp_build_mask_context *mask,
                            LLVMValueRef alpha,
+                           bool dither,
                            bool do_branch);
 
 #endif /* !LP_BLD_BLEND_H */

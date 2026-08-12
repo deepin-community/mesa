@@ -60,7 +60,9 @@ static void
 emit_base_vertex_instance_bo(struct anv_cmd_buffer *cmd_buffer,
                              struct anv_address addr)
 {
-   emit_vertex_bo(cmd_buffer, addr, addr.bo ? 8 : 0, ANV_SVGS_VB_INDEX);
+   emit_vertex_bo(cmd_buffer, addr,
+                  anv_address_is_null(addr) ? 0 : 8,
+                  ANV_SVGS_VB_INDEX);
 }
 
 static void
@@ -106,9 +108,8 @@ update_dirty_vbs_for_gfx8_vb_flush(struct anv_cmd_buffer *cmd_buffer,
 #if GFX_VER == 9
    const struct vk_dynamic_graphics_state *dyn =
       &cmd_buffer->vk.dynamic_graphics_state;
-   struct anv_graphics_pipeline *pipeline =
-      anv_pipeline_to_graphics(cmd_buffer->state.gfx.base.pipeline);
-   const struct brw_vs_prog_data *vs_prog_data = get_vs_prog_data(pipeline);
+   const struct anv_cmd_graphics_state *gfx = &cmd_buffer->state.gfx;
+   const struct brw_vs_prog_data *vs_prog_data = get_gfx_vs_prog_data(gfx);
 
    uint64_t vb_used = dyn->vi->bindings_valid;
    if (vs_prog_data->uses_firstvertex ||

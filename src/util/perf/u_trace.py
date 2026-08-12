@@ -89,7 +89,7 @@ class Tracepoint(object):
         indirect_sizes = []
         for indirect in self.indirect_args:
             indirect.indirect_offset = ' + '.join(indirect_sizes) if len(indirect_sizes) > 0 else 0
-            indirect_sizes.append(f"sizeof({indirect.type}")
+            indirect_sizes.append(f"sizeof({indirect.type})")
 
         self.tp_perfetto = tp_perfetto
         self.tp_markers = tp_markers
@@ -133,6 +133,7 @@ class TracepointArgStruct():
         self.c_format = c_format
         self.fields = fields
         self.to_prim_type = None
+        self.perfetto_field = None
 
         if self.is_indirect:
             self.func_param = f"struct u_trace_address {self.var}"
@@ -154,7 +155,7 @@ class TracepointArg(object):
     """Class that represents either an argument being passed or a field in a struct
     """
     def __init__(self, type, var, c_format=None, name=None, to_prim_type=None,
-                 length_arg=None, copy_func=None, is_indirect=False):
+                 length_arg=None, copy_func=None, is_indirect=False, perfetto_field=None):
         """Parameters:
 
         - type: argument's C type.
@@ -165,6 +166,8 @@ class TracepointArg(object):
         - to_prim_type: (optional) C function to convert from arg's type to a type
           compatible with c_format.
         - length_arg: whether this argument is a variable length array
+        - perfetto_field: Whether the argument should be set to a perfetto field
+          with the given name, as opposed to attached with add_extra_data().
         """
         assert isinstance(type, str)
         assert isinstance(var, str)
@@ -178,6 +181,7 @@ class TracepointArg(object):
         self.to_prim_type = to_prim_type
         self.length_arg = length_arg
         self.copy_func = copy_func
+        self.perfetto_field = perfetto_field
 
         self.is_struct = False
         self.is_indirect = is_indirect
@@ -424,7 +428,7 @@ ${trace_toggle_name}_variable_once(void)
      ;
 
    ${trace_toggle_name} =
-      parse_enable_string(getenv("${trace_toggle_name.upper()}"),
+      parse_enable_string(os_get_option("${trace_toggle_name.upper()}"),
                           default_value,
                           config_control);
 }
@@ -509,13 +513,13 @@ __attribute__((format(printf, 3, 4))) void ${trace.tp_markers}(struct u_trace_co
 static void __emit_label_${trace_name}(struct u_trace_context *utctx, void *cs, struct trace_${trace_name} *entry) {
    ${trace.tp_markers}(utctx, cs, "${trace_name}("
    % for idx,arg in enumerate(trace.tp_print):
-   % if not arg.is_indirect:
+   % if not arg.is_indirect and (arg.length_arg is None or arg.length_arg.isdigit()):
       "${"," if idx != 0 else ""}${arg.name}=${arg.c_format}"
    % endif
    % endfor
       ")"
    % for arg in trace.tp_print:
-   % if not arg.is_indirect:
+   % if not arg.is_indirect and (arg.length_arg is None or arg.length_arg.isdigit()):
       ,${arg.value_expr('entry')}
    % endif
    % endfor
@@ -564,8 +568,9 @@ void __trace_${trace_name}(
   % endfor
    };
  % endif
+   const bool queueing = enabled_traces & U_TRACE_TYPE_REQUIRE_QUEUING;
    UNUSED struct trace_${trace_name} *__entry =
-      enabled_traces & U_TRACE_TYPE_REQUIRE_QUEUING ?
+      queueing ?
       (struct trace_${trace_name} *)u_trace_appendv(ut, ${"cs," if trace.need_cs_param else "NULL,"} &__tp_${trace_name},
                                                     0
   % for arg in trace.tp_struct:
@@ -584,8 +589,13 @@ void __trace_${trace_name}(
  % for arg in trace.tp_struct:
   % if arg.copy_func is None:
    __entry->${arg.name} = ${arg.var};
+  % elif arg.length_arg is None:
+     ${arg.copy_func}(__entry->${arg.name}, ${arg.var});
   % else:
-   ${arg.copy_func}(__entry->${arg.name}, ${arg.var}, ${arg.length_arg});
+   % if not arg.length_arg.isdigit():
+   if (queueing)
+   % endif
+     ${arg.copy_func}(__entry->${arg.name}, ${arg.var}, ${arg.length_arg});
   % endif
  % endfor
  % if trace.tp_markers is not None:
@@ -667,7 +677,14 @@ perfetto_utils_hdr_template = """\
 #ifndef ${guard_name}
 #define ${guard_name}
 
+#ifndef ANDROID_LIBPERFETTO
 #include <perfetto.h>
+#else
+#include <perfetto/tracing.h>
+#include <perfetto/trace/clock_snapshot.pbzero.h>
+#include <perfetto/trace/gpu/gpu_render_stage_event.pbzero.h>
+#include <perfetto/trace/gpu/vulkan_api_event.pbzero.h>
+#endif
 
 % for header in HEADERS:
 #include "${header.hdr}"
@@ -688,20 +705,26 @@ trace_payload_as_extra_${trace_name}(perfetto::protos::pbzero::GpuRenderStageEve
                                      const void *indirect_data)
 {
  % if trace.tp_perfetto is not None and len(trace.tp_print) > 0:
+ % if any(not arg.perfetto_field for arg in trace.tp_print):
    char buf[128];
+ % endif
 
   % for arg in trace.tp_print:
+   % if arg.perfetto_field:
+   event->set_${arg.name}(${arg.value_expr("payload")});
+   % else:
    {
       auto data = event->add_extra_data();
-      data->set_name("${arg.name}");
+      data->set_name("${arg.name}", ${len(arg.name)});
 
-   % if arg.is_indirect:
+    % if arg.is_indirect:
       const ${arg.type}* __${arg.var} = (const ${arg.type}*)((uint8_t *)indirect_data + ${arg.indirect_offset});
-   % endif
-      sprintf(buf, "${arg.c_format}", ${arg.value_expr("payload")});
+    % endif
+      const int slen = sprintf(buf, "${arg.c_format}", ${arg.value_expr("payload")});
 
-      data->set_value(buf);
+      data->set_value(buf, slen);
    }
+   % endif
   % endfor
 
  % endif

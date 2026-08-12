@@ -1,26 +1,7 @@
 /*
  * Copyright © 2017 Intel Corporation
+ * SPDX-License-Identifier: MIT
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
-
-/**
  * @file iris_formats.c
  *
  * Converts Gallium formats (PIPE_FORMAT_*) to hardware ones (ISL_FORMAT_*).
@@ -112,7 +93,7 @@ iris_is_format_supported(struct pipe_screen *pscreen,
 {
    struct iris_screen *screen = (struct iris_screen *) pscreen;
    const struct intel_device_info *devinfo = screen->devinfo;
-   uint32_t max_samples = devinfo->ver == 8 ? 8 : 16;
+   uint32_t max_samples = devinfo->ver == 8 || devinfo->ver >= 30 ? 8 : 16;
 
    if (sample_count > max_samples ||
        !util_is_power_of_two_or_zero(sample_count))

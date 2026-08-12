@@ -52,10 +52,6 @@
 #include "loader_dri3_helper.h"
 #endif
 
-static struct dri_drawable *
-kopper_create_drawable(struct dri_screen *screen, const struct gl_config *visual,
-                       bool isPixmap, void *loaderPrivate);
-
 struct pipe_screen *
 kopper_init_screen(struct dri_screen *screen, bool driver_name_is_inferred)
 {
@@ -86,8 +82,8 @@ kopper_init_screen(struct dri_screen *screen, bool driver_name_is_inferred)
    if (!pscreen)
       return NULL;
 
-   assert(pscreen->get_param(pscreen, PIPE_CAP_DEVICE_RESET_STATUS_QUERY));
-   screen->is_sw = zink_kopper_is_cpu(pscreen);
+   assert(pscreen->caps.device_reset_status_query);
+   screen->is_sw = zink_kopper_is_cpu(kopper_get_zink_screen(pscreen));
 
    return pscreen;
 }
@@ -156,8 +152,12 @@ kopper_get_pixmap_buffer(struct dri_drawable *drawable,
     */
    struct dri_screen *screen = drawable->screen;
 
+#ifndef GLX_USE_APPLEGL
    drawable->image = loader_dri3_get_pixmap_buffer(conn, pixmap, screen,
-                                                   fourcc, drawable->screen->dmabuf_import, &width, &height, drawable);
+                                                   fourcc, drawable->screen->has_multibuffer, &width, &height, drawable);
+#else
+   drawable->image = NULL;
+#endif
    if (!drawable->image)
       return NULL;
 
@@ -347,13 +347,12 @@ XXX do this once swapinterval is hooked up
 }
 
 static inline void
-get_drawable_info(struct dri_drawable *drawable, int *x, int *y, int *w, int *h)
+get_drawable_info(struct dri_drawable *drawable, int *w, int *h)
 {
-   const __DRIswrastLoaderExtension *loader = drawable->screen->swrast_loader;
+   const __DRIkopperLoaderExtension *loader = drawable->screen->kopper_loader;
 
    if (loader)
-      loader->getDrawableInfo(drawable, x, y, w, h,
-                              drawable->loaderPrivate);
+      loader->GetDrawableInfo(drawable, w, h, drawable->loaderPrivate);
 }
 
 static void
@@ -361,7 +360,6 @@ kopper_update_drawable_info(struct dri_drawable *drawable)
 {
    struct dri_screen *screen = drawable->screen;
    bool is_window = drawable->info.bos.sType != 0;
-   int x, y;
    struct pipe_resource *ptex = drawable->textures[ST_ATTACHMENT_BACK_LEFT] ?
                                 drawable->textures[ST_ATTACHMENT_BACK_LEFT] :
                                 drawable->textures[ST_ATTACHMENT_FRONT_LEFT];
@@ -370,7 +368,7 @@ kopper_update_drawable_info(struct dri_drawable *drawable)
    if (drawable->info.bos.sType == VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR && do_kopper_update)
       zink_kopper_update(kopper_get_zink_screen(screen->base.screen), ptex, &drawable->w, &drawable->h);
    else
-      get_drawable_info(drawable, &x, &y, &drawable->w, &drawable->h);
+      get_drawable_info(drawable, &drawable->w, &drawable->h);
 }
 
 static inline void
@@ -447,37 +445,6 @@ kopper_flush_frontbuffer(struct dri_context *ctx,
    return true;
 }
 
-static inline void
-get_image(struct dri_drawable *drawable, int x, int y, int width, int height, void *data)
-{
-   const __DRIswrastLoaderExtension *loader = drawable->screen->swrast_loader;
-
-   loader->getImage(drawable, x, y, width, height,
-                    data, drawable->loaderPrivate);
-}
-
-static inline bool
-get_image_shm(struct dri_drawable *drawable, int x, int y, int width, int height,
-              struct pipe_resource *res)
-{
-   const __DRIswrastLoaderExtension *loader = drawable->screen->swrast_loader;
-   struct winsys_handle whandle;
-
-   whandle.type = WINSYS_HANDLE_TYPE_SHMID;
-
-   if (loader->base.version < 4 || !loader->getImageShm)
-      return false;
-
-   if (!res->screen->resource_get_handle(res->screen, NULL, res, &whandle, PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE))
-      return false;
-
-   if (loader->base.version > 5 && loader->getImageShm2)
-      return loader->getImageShm2(drawable, x, y, width, height, whandle.handle, drawable->loaderPrivate);
-
-   loader->getImageShm(drawable, x, y, width, height, whandle.handle, drawable->loaderPrivate);
-   return true;
-}
-
 static void
 kopper_update_tex_buffer(struct dri_drawable *drawable,
                          struct dri_context *ctx,
@@ -519,6 +486,37 @@ kopper_init_drawable(struct dri_drawable *drawable, bool isPixmap, int alphaBits
       screen->kopper_loader->SetSurfaceCreateInfo(drawable->loaderPrivate,
                                                   &drawable->info);
    drawable->is_window = !isPixmap && drawable->info.bos.sType != 0;
+
+#ifdef VK_USE_PLATFORM_XCB_KHR
+   if (drawable->info.bos.sType == VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR) {
+      VkXcbSurfaceCreateInfoKHR *xcb = (VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos;
+      xcb_connection_t *conn = xcb->connection;
+
+      int32_t eid = xcb_generate_id(conn);
+      if (drawable->is_window) {
+         xcb_present_select_input(conn, eid, xcb->window,
+                                  XCB_PRESENT_EVENT_MASK_COMPLETE_NOTIFY);
+      }
+
+      drawable->special_event =
+         xcb_register_for_special_xge(conn, &xcb_present_id, eid, NULL);
+   }
+#endif
+}
+
+void
+kopper_destroy_drawable(struct dri_drawable *drawable)
+{
+#ifdef VK_USE_PLATFORM_XCB_KHR
+   if (drawable->info.bos.sType == VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR) {
+      VkXcbSurfaceCreateInfoKHR *xcb = (VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos;
+      xcb_connection_t *conn = xcb->connection;
+      xcb_unregister_for_special_event(conn, drawable->special_event);
+   }
+
+   FREE(drawable->image);
+   drawable->image = NULL;
+#endif
 }
 
 int64_t
@@ -538,15 +536,10 @@ kopperSwapBuffersWithDamage(struct dri_drawable *drawable, uint32_t flush_flags,
    if (flush_flags & __DRI2_FLUSH_INVALIDATE_ANCILLARY)
       _mesa_glthread_invalidate_zsbuf(ctx->st->ctx);
 
-   /* Wait for glthread to finish because we can't use pipe_context from
-    * multiple threads.
-    */
-   _mesa_glthread_finish(ctx->st->ctx);
-
    drawable->texture_stamp = drawable->lastStamp - 1;
 
    dri_flush(ctx, drawable,
-             __DRI2_FLUSH_DRAWABLE | __DRI2_FLUSH_CONTEXT | flush_flags,
+             __DRI2_FLUSH_DRAWABLE | flush_flags,
              __DRI2_THROTTLE_SWAPBUFFER);
 
    struct pipe_box stack_boxes[64];
@@ -601,6 +594,7 @@ kopperSetSwapInterval(struct dri_drawable *drawable, int interval)
                                 drawable->textures[ST_ATTACHMENT_BACK_LEFT] :
                                 drawable->textures[ST_ATTACHMENT_FRONT_LEFT];
 
+   drawable->info.initial_swap_interval = interval;
    /* can't set swap interval on non-windows */
    if (!drawable->window_valid)
       return;
@@ -612,7 +606,6 @@ kopperSetSwapInterval(struct dri_drawable *drawable, int interval)
       struct pipe_screen *pscreen = kopper_get_zink_screen(screen->base.screen);
       zink_kopper_set_swap_interval(pscreen, ptex, interval);
    }
-   drawable->info.initial_swap_interval = interval;
 }
 
 int
@@ -635,5 +628,62 @@ kopperQueryBufferAge(struct dri_drawable *drawable)
    return zink_kopper_query_buffer_age(ctx->st->pipe, ptex);
 }
 
+void
+kopperQuerySurfaceSize(struct dri_drawable *drawable, int *width, int *height)
+{
+   *width = drawable->w;
+   *height = drawable->h;
+}
+
+int
+kopperGetSyncValues(struct dri_drawable *drawable, int64_t target_msc, int64_t divisor,
+                    int64_t remainder, int64_t *ust, int64_t *msc, int64_t *sbc)
+{
+#ifdef VK_USE_PLATFORM_XCB_KHR
+   struct kopper_loader_info *info = &drawable->info;
+
+   assert(info->bos.sType == VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR);
+
+   VkXcbSurfaceCreateInfoKHR *xcb = (VkXcbSurfaceCreateInfoKHR *)&info->bos;
+   xcb_connection_t *conn = xcb->connection;
+
+   xcb_void_cookie_t cookie =
+      xcb_present_notify_msc(conn, xcb->window, 0, target_msc, divisor, remainder);
+
+   xcb_generic_event_t *event;
+   int ret = 0;
+
+   xcb_flush(conn);
+
+   while ((event = xcb_wait_for_special_event(conn, drawable->special_event)) != NULL) {
+      xcb_present_generic_event_t *ev = (xcb_present_generic_event_t *)event;
+      if (ev->evtype == XCB_PRESENT_COMPLETE_NOTIFY) {
+         xcb_present_complete_notify_event_t *ce =
+            (xcb_present_complete_notify_event_t *) event;
+
+         if (ce->kind == XCB_PRESENT_COMPLETE_KIND_NOTIFY_MSC) {
+            *ust = ce->ust;
+            *msc = ce->msc;
+            *sbc = ce->serial;
+
+            if (event->full_sequence != cookie.sequence) {
+               free(event);
+               continue;
+            }
+
+            ret = 1;
+            free(event);
+            break;
+         }
+      }
+
+      free(event);
+   }
+
+   return ret;
+#else
+   return 0;
+#endif
+}
 
 /* vim: set sw=3 ts=8 sts=3 expandtab: */

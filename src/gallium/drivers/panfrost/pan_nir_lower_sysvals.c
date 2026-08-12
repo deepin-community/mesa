@@ -1,24 +1,6 @@
 /*
  * Copyright (C) 2020-2023 Collabora, Ltd.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "compiler/nir/nir_builder.h"
@@ -28,7 +10,6 @@ struct ctx {
    unsigned arch;
    struct panfrost_sysvals *sysvals;
    struct hash_table_u64 *sysval_to_id;
-   unsigned sysval_ubo;
 };
 
 static unsigned
@@ -68,7 +49,7 @@ sysval_for_intrinsic(unsigned arch, nir_intrinsic_instr *intr, unsigned *offset)
       *offset = 8;
       return PAN_SYSVAL(SSBO, nir_src_as_uint(intr->src[0]));
 
-   case nir_intrinsic_load_sampler_lod_parameters_pan:
+   case nir_intrinsic_load_sampler_lod_parameters:
       /* This is only used for a workaround on Mali-T720, where we don't
        * support dynamic samplers.
        */
@@ -86,7 +67,7 @@ sysval_for_intrinsic(unsigned arch, nir_intrinsic_instr *intr, unsigned *offset)
    case nir_intrinsic_load_num_vertices:
       return PAN_SYSVAL_NUM_VERTICES;
 
-   case nir_intrinsic_load_first_vertex:
+   case nir_intrinsic_load_raw_vertex_offset_pan:
       return PAN_SYSVAL_VERTEX_INSTANCE_OFFSETS;
    case nir_intrinsic_load_base_vertex:
       *offset = 4;
@@ -116,6 +97,12 @@ sysval_for_intrinsic(unsigned arch, nir_intrinsic_instr *intr, unsigned *offset)
    case nir_intrinsic_load_workgroup_size:
       return PAN_SYSVAL_LOCAL_GROUP_SIZE;
 
+   case nir_intrinsic_load_printf_buffer_address:
+      return PAN_SYSVAL_PRINTF_BUFFER;
+
+   case nir_intrinsic_load_blend_const_color_rgba:
+      return PAN_SYSVAL_BLEND_CONSTANTS;
+
    case nir_intrinsic_load_rt_conversion_pan: {
       unsigned size = nir_alu_type_get_type_size(nir_intrinsic_src_type(intr));
       unsigned rt = nir_intrinsic_base(intr);
@@ -123,6 +110,13 @@ sysval_for_intrinsic(unsigned arch, nir_intrinsic_instr *intr, unsigned *offset)
       return PAN_SYSVAL(RT_CONVERSION, rt | (size << 4));
    }
 
+   case nir_intrinsic_image_samples: {
+      uint32_t uindex = nir_src_as_uint(intr->src[0]);
+      bool is_array = nir_intrinsic_image_array(intr);
+      unsigned dim = nir_intrinsic_dest_components(intr) - is_array;
+
+      return PAN_SYSVAL(IMAGE_SAMPLES, PAN_TXS_SYSVAL_ID(uindex, dim, is_array));
+   }
    case nir_intrinsic_image_size: {
       uint32_t uindex = nir_src_as_uint(intr->src[0]);
       bool is_array = nir_intrinsic_image_array(intr);
@@ -137,6 +131,52 @@ sysval_for_intrinsic(unsigned arch, nir_intrinsic_instr *intr, unsigned *offset)
 }
 
 static bool
+uses_sysvals(unsigned arch, nir_shader *shader)
+{
+   /* Fragment shaders always use the blend constant sysval */
+   if (shader->info.stage == MESA_SHADER_FRAGMENT)
+      return true;
+
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic) {
+               nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+               unsigned offset;
+               if (sysval_for_intrinsic(arch, intr, &offset) != ~0)
+                  return true;
+            } else if (instr->type == nir_instr_type_tex) {
+               nir_tex_instr *tex = nir_instr_as_tex(instr);
+               if (tex->op == nir_texop_txs)
+                  return true;
+            }
+         }
+      }
+   }
+   return false;
+}
+
+/* Move all UBO indexes after PAN_UBO_SYSVALS up by one to make space for the
+ * sysval UBO */
+static bool
+remap_load_ubo(nir_builder *b, nir_intrinsic_instr *intr)
+{
+   nir_src *old_idx = &intr->src[0];
+
+   if (nir_src_is_const(*old_idx)) {
+      if (nir_src_as_uint(*old_idx) < PAN_UBO_SYSVALS)
+         return false;
+   } else {
+      /* Assume that all dynamic indices are into normal UBOs, not the default
+       * UBO0, and so should be adjusted */
+      assert(b->shader->info.first_ubo_is_default_ubo);
+   }
+
+   nir_src_rewrite(old_idx, nir_iadd_imm(b, old_idx->ssa, 1));
+   return true;
+}
+
+static bool
 lower(nir_builder *b, nir_instr *instr, void *data)
 {
    struct ctx *ctx = data;
@@ -146,6 +186,11 @@ lower(nir_builder *b, nir_instr *instr, void *data)
 
    if (instr->type == nir_instr_type_intrinsic) {
       nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+
+      if (intr->intrinsic == nir_intrinsic_load_ubo) {
+         return remap_load_ubo(b, intr);
+      }
+
       old = &intr->def;
       sysval = sysval_for_intrinsic(ctx->arch, intr, &offset);
 
@@ -168,16 +213,12 @@ lower(nir_builder *b, nir_instr *instr, void *data)
       return false;
    }
 
-   /* Allocate a UBO for the sysvals if we haven't yet */
-   if (ctx->sysvals->sysval_count == 0)
-      ctx->sysval_ubo = b->shader->info.num_ubos++;
-
    unsigned vec4_index = lookup_sysval(ctx->sysval_to_id, ctx->sysvals, sysval);
    unsigned ubo_offset = (vec4_index * 16) + offset;
 
    b->cursor = nir_after_instr(instr);
    nir_def *val = nir_load_ubo(
-      b, old->num_components, old->bit_size, nir_imm_int(b, ctx->sysval_ubo),
+      b, old->num_components, old->bit_size, nir_imm_int(b, PAN_UBO_SYSVALS),
       nir_imm_int(b, ubo_offset), .align_mul = old->bit_size / 8,
       .align_offset = 0, .range_base = offset, .range = old->bit_size / 8);
    nir_def_rewrite_uses(old, val);
@@ -194,10 +235,13 @@ panfrost_nir_lower_sysvals(nir_shader *shader, unsigned arch,
    do {
       progress = false;
 
-      NIR_PASS(progress, shader, nir_copy_prop);
+      NIR_PASS(progress, shader, nir_opt_copy_prop);
       NIR_PASS(progress, shader, nir_opt_constant_folding);
       NIR_PASS(progress, shader, nir_opt_dce);
    } while (progress);
+
+   if (!uses_sysvals(arch, shader))
+      return progress;
 
    struct ctx ctx = {
       .arch = arch,
@@ -206,6 +250,15 @@ panfrost_nir_lower_sysvals(nir_shader *shader, unsigned arch,
    };
 
    memset(sysvals, 0, sizeof(*sysvals));
+
+   /* If we don't have any UBOs, we need to insert an empty UBO0 to put the
+    * sysval at UBO1 */
+   shader->info.num_ubos = MAX2(PAN_UBO_SYSVALS, shader->info.num_ubos) + 1;
+
+   /* Reserve the first slot for blend constants, so that they can be accessed
+    * from a fixed offset in the blend shader */
+   if (shader->info.stage == MESA_SHADER_FRAGMENT)
+      lookup_sysval(ctx.sysval_to_id, ctx.sysvals, PAN_SYSVAL_BLEND_CONSTANTS);
 
    nir_shader_instructions_pass(
       shader, lower, nir_metadata_control_flow, &ctx);

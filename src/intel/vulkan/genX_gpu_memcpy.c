@@ -77,6 +77,16 @@ emit_common_so_memcpy(struct anv_memcpy_state *state,
       vfi.InstancingEnable = false;
       vfi.VertexElementIndex = 0;
    }
+   anv_batch_emit(batch, GENX(3DSTATE_VF_STATISTICS), vfs);
+   anv_batch_emit(batch, GENX(3DSTATE_VF), vf) {
+#if GFX_VERx10 >= 125
+      /* Memcpy has no requirement that we need to disable geometry
+       * distribution.
+       */
+      vf.GeometryDistributionEnable =
+         device->physical->instance->enable_vf_distribution;
+#endif
+   }
    anv_batch_emit(batch, GENX(3DSTATE_VF_SGVS), sgvs);
 #if GFX_VER >= 11
    anv_batch_emit(batch, GENX(3DSTATE_VF_SGVS_2), sgvs);
@@ -100,12 +110,6 @@ emit_common_so_memcpy(struct anv_memcpy_state *state,
    }
 #endif
 
-#if INTEL_WA_16013994831_GFX_VER
-   /* Wa_16013994831 - Disable preemption during streamout. */
-   if (intel_needs_workaround(device->info, 16013994831))
-      genX(batch_set_preemption)(batch, device->info, _3D, false);
-#endif
-
    anv_batch_emit(batch, GENX(3DSTATE_SBE), sbe) {
       sbe.VertexURBEntryReadOffset = 1;
       sbe.NumberofSFOutputAttributes = 1;
@@ -121,12 +125,16 @@ emit_common_so_memcpy(struct anv_memcpy_state *state,
     * allocate space for the VS.  Even though one isn't run, we need VUEs to
     * store the data that VF is going to pass to SOL.
     */
-   const unsigned entry_size[4] = { DIV_ROUND_UP(32, 64), 1, 1, 1 };
-   memcpy(state->urb_cfg.size, &entry_size, sizeof(entry_size));
+   state->urb_cfg = (struct intel_urb_config) {
+      .size = { DIV_ROUND_UP(32, 64), 1, 1, 1 },
+   };
+   UNUSED bool constrained;
+   intel_get_urb_config(device->info, l3_config, false, false,
+                        &state->urb_cfg, &constrained);
 
-   genX(emit_urb_setup)(device, batch, l3_config,
-                        VK_SHADER_STAGE_VERTEX_BIT, urb_cfg_in, &state->urb_cfg,
-                        NULL);
+   if (genX(need_wa_16014912113)(urb_cfg_in, &state->urb_cfg))
+      genX(batch_emit_wa_16014912113)(batch, urb_cfg_in);
+   genX(emit_urb_setup)(batch, device, &state->urb_cfg);
 
 #if GFX_VER >= 12
    /* Disable Primitive Replication. */
@@ -160,7 +168,7 @@ emit_so_memcpy(struct anv_memcpy_state *state,
    case 8:  format = ISL_FORMAT_R32G32_UINT;       break;
    case 16: format = ISL_FORMAT_R32G32B32A32_UINT; break;
    default:
-      unreachable("Invalid size");
+      UNREACHABLE("Invalid size");
    }
 
    uint32_t *dw;
@@ -198,8 +206,11 @@ emit_so_memcpy(struct anv_memcpy_state *state,
     * 3dstate_so_buffer_index_0/1/2/3 states to ensure so_buffer_index_*
     * state is not combined with other state changes.
     */
-   if (intel_needs_workaround(device->info, 16011411144))
-      genx_batch_emit_pipe_control(batch, device->info, _3D, ANV_PIPE_CS_STALL_BIT);
+   if (intel_needs_workaround(device->info, 16011411144)) {
+      genX(batch_emit_pipe_control)(batch, device->info, _3D,
+                                    ANV_PIPE_CS_STALL_BIT,
+                                    "Wa_16011411144 (gpu_memcpy pre SO_BUFFER)");
+   }
 
    anv_batch_emit(batch, GENX(3DSTATE_SO_BUFFER), sob) {
 #if GFX_VER < 12
@@ -224,8 +235,11 @@ emit_so_memcpy(struct anv_memcpy_state *state,
    }
 
    /* Wa_16011411144: also CS_STALL after touching SO_BUFFER change */
-   if (intel_needs_workaround(device->info, 16011411144))
-      genx_batch_emit_pipe_control(batch, device->info, _3D, ANV_PIPE_CS_STALL_BIT);
+   if (intel_needs_workaround(device->info, 16011411144)) {
+      genX(batch_emit_pipe_control)(batch, device->info, _3D,
+                                    ANV_PIPE_CS_STALL_BIT,
+                                    "Wa_16011411144 (gpu_memcpy post SO_BUFFER)");
+   }
 
    dw = anv_batch_emitn(batch, 5, GENX(3DSTATE_SO_DECL_LIST),
                         .StreamtoBufferSelects0 = (1 << 0),
@@ -240,8 +254,10 @@ emit_so_memcpy(struct anv_memcpy_state *state,
       });
 
 #if GFX_VERx10 == 125
-      /* Wa_14015946265: Send PC with CS stall after SO_DECL. */
-      genx_batch_emit_pipe_control(batch, device->info, _3D, ANV_PIPE_CS_STALL_BIT);
+   /* Wa_14015946265: Send PC with CS stall after SO_DECL. */
+   genX(batch_emit_pipe_control)(batch, device->info, _3D,
+                                 ANV_PIPE_CS_STALL_BIT,
+                                 "Wa_14015946265 (gpu_memcpy)");
 #endif
 
    anv_batch_emit(batch, GENX(3DSTATE_STREAMOUT), so) {
@@ -282,6 +298,9 @@ genX(emit_so_memcpy_init)(struct anv_memcpy_state *state,
    state->device = device;
 
    if (state->cmd_buffer) {
+      /* Wa_16013994831 - Disable preemption during streamout. */
+      genX(cmd_buffer_set_preemption)(cmd_buffer, false);
+
       if (!cmd_buffer->state.current_l3_config) {
          genX(cmd_buffer_config_l3)(cmd_buffer,
                                     intel_get_default_l3_config(device->info));
@@ -290,9 +309,15 @@ genX(emit_so_memcpy_init)(struct anv_memcpy_state *state,
                             &state->cmd_buffer->state.gfx.urb_cfg,
                             cmd_buffer->state.current_l3_config);
    } else {
+#if INTEL_WA_16013994831_GFX_VER
+      /* Wa_16013994831 - Disable preemption during streamout. */
+      if (intel_needs_workaround(device->info, 16013994831))
+         genX(batch_set_preemption)(batch, device, _3D, false);
+#endif
+
       const struct intel_l3_config *cfg = intel_get_default_l3_config(device->info);
       genX(emit_l3_config)(batch, device, cfg);
-      genX(emit_pipeline_select)(batch, _3D, device);
+      genX(emit_pipeline_select)(batch, _3D, device, false);
 
       /* Dummy URB config, will trigger URB reemission */
       struct intel_urb_config urb_cfg_in = { 0 };
@@ -301,11 +326,14 @@ genX(emit_so_memcpy_init)(struct anv_memcpy_state *state,
 }
 
 void
-genX(emit_so_memcpy_fini)(struct anv_memcpy_state *state)
+genX(emit_so_memcpy_fini)(struct anv_memcpy_state *state,
+                          bool wait_completion)
 {
-   genX(emit_apply_pipe_flushes)(state->batch, state->device, _3D,
-                                 ANV_PIPE_END_OF_PIPE_SYNC_BIT,
-                                 NULL);
+   if (wait_completion) {
+      genX(batch_emit_pipe_control)(state->batch, state->device->info, _3D,
+                                    ANV_PIPE_END_OF_PIPE_SYNC_BIT,
+                                    "Post GPU memcpy wait");
+   }
 
    if (state->cmd_buffer) {
       /* Flag all the instructions emitted by the memcpy. */
@@ -316,37 +344,39 @@ genX(emit_so_memcpy_fini)(struct anv_memcpy_state *state)
       genX(cmd_buffer_ensure_wa_14018283232)(state->cmd_buffer, false);
 #endif
 
-      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_URB);
-      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_VF_STATISTICS);
-      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_VF);
-      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_VF_TOPOLOGY);
-      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_VERTEX_INPUT);
-      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_VF_SGVS);
+      BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_URB);
+      BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_VF_STATISTICS);
+      BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_VF);
+      BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_VF_TOPOLOGY);
+      BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_VERTEX_INPUT);
+      BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_VF_SGVS);
 #if GFX_VER >= 11
-      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_VF_SGVS_2);
+      BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_VF_SGVS_2);
 #endif
 #if GFX_VER >= 12
-      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_PRIMITIVE_REPLICATION);
+      BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_PRIMITIVE_REPLICATION);
 #endif
-      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_SO_DECL_LIST);
-      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_STREAMOUT);
-      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_SAMPLE_MASK);
-      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_MULTISAMPLE);
-      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_SF);
-      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_SBE);
-      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_VS);
-      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_HS);
-      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_DS);
-      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_TE);
-      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_GS);
-      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_PS);
+      BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_SO_DECL_LIST);
+      BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_STREAMOUT);
+      BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_SAMPLE_MASK);
+      BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_MULTISAMPLE);
+      BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_SF);
+      BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_SBE);
+      BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_VS);
+      BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_HS);
+      BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_DS);
+      BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_TE);
+      BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_GS);
+      BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_PS);
       if (state->cmd_buffer->device->vk.enabled_extensions.EXT_mesh_shader) {
-         BITSET_SET(hw_state->dirty, ANV_GFX_STATE_MESH_CONTROL);
-         BITSET_SET(hw_state->dirty, ANV_GFX_STATE_TASK_CONTROL);
+         BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_MESH_CONTROL);
+         BITSET_SET(hw_state->emit_dirty, ANV_GFX_STATE_TASK_CONTROL);
       }
 
-      state->cmd_buffer->state.gfx.dirty |= ~(ANV_CMD_DIRTY_PIPELINE |
-                                              ANV_CMD_DIRTY_INDEX_BUFFER);
+      state->cmd_buffer->state.gfx.dirty |=
+         ~(ANV_CMD_DIRTY_ALL_SHADERS(state->device) |
+           ANV_CMD_DIRTY_INDEX_BUFFER |
+           ANV_CMD_DIRTY_INDEX_TYPE);
 
       memcpy(&state->cmd_buffer->state.gfx.urb_cfg, &state->urb_cfg,
              sizeof(struct intel_urb_config));
@@ -356,8 +386,15 @@ genX(emit_so_memcpy_fini)(struct anv_memcpy_state *state)
 void
 genX(emit_so_memcpy_end)(struct anv_memcpy_state *state)
 {
+   genX(batch_emit_pipe_control)(state->batch, state->device->info, _3D,
+                                 ANV_PIPE_END_OF_PIPE_SYNC_BIT,
+                                 "Post GPU memcpy wait");
+
+ #if INTEL_WA_16013994831_GFX_VER
+   /* Turn preemption back on when we're done */
    if (intel_needs_workaround(state->device->info, 16013994831))
-      genX(batch_set_preemption)(state->batch, state->device->info, _3D, true);
+      genX(batch_set_preemption)(state->batch, state->device, _3D, true);
+#endif
 
    anv_batch_emit(state->batch, GENX(MI_BATCH_BUFFER_END), end);
 
@@ -374,29 +411,12 @@ genX(emit_so_memcpy)(struct anv_memcpy_state *state,
        anv_gfx8_9_vb_cache_range_needs_workaround(&state->vb_bound,
                                                   &state->vb_dirty,
                                                   src, size)) {
-      genX(emit_apply_pipe_flushes)(state->batch, state->device, _3D,
+      genX(batch_emit_pipe_control)(state->batch, state->device->info, _3D,
                                     ANV_PIPE_CS_STALL_BIT |
                                     ANV_PIPE_VF_CACHE_INVALIDATE_BIT,
-                                    NULL);
+                                    "Gfx9 VB cache workaround");
       memset(&state->vb_dirty, 0, sizeof(state->vb_dirty));
    }
 
    emit_so_memcpy(state, dst, src, size);
-}
-
-void
-genX(cmd_buffer_so_memcpy)(struct anv_cmd_buffer *cmd_buffer,
-                           struct anv_address dst, struct anv_address src,
-                           uint32_t size)
-{
-   if (size == 0)
-      return;
-
-   struct anv_memcpy_state state;
-   genX(emit_so_memcpy_init)(&state,
-                             cmd_buffer->device,
-                             cmd_buffer,
-                             &cmd_buffer->batch);
-   emit_so_memcpy(&state, dst, src, size);
-   genX(emit_so_memcpy_fini)(&state);
 }

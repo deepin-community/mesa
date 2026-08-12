@@ -67,7 +67,7 @@ static enum radeon_value_id winsys_id_from_type(unsigned type)
 	case R600_QUERY_CURRENT_GPU_SCLK: return RADEON_CURRENT_SCLK;
 	case R600_QUERY_CURRENT_GPU_MCLK: return RADEON_CURRENT_MCLK;
 	case R600_QUERY_CS_THREAD_BUSY: return RADEON_CS_THREAD_TIME;
-	default: unreachable("query type does not correspond to winsys id");
+	default: UNREACHABLE("query type does not correspond to winsys id");
 	}
 }
 
@@ -215,7 +215,7 @@ static bool r600_query_sw_begin(struct r600_common_context *rctx,
 	case R600_QUERY_GPIN_NUM_SE:
 		break;
 	default:
-		unreachable("r600_query_sw_begin: bad query type");
+		UNREACHABLE("r600_query_sw_begin: bad query type");
 	}
 
 	return true;
@@ -367,7 +367,7 @@ static bool r600_query_sw_end(struct r600_common_context *rctx,
 	case R600_QUERY_GPIN_NUM_SE:
 		break;
 	default:
-		unreachable("r600_query_sw_end: bad query type");
+		UNREACHABLE("r600_query_sw_end: bad query type");
 	}
 
 	return true;
@@ -489,9 +489,9 @@ static struct r600_resource *r600_new_query_buffer(struct r600_common_screen *rs
 	 * being written by the gpu, hence staging is probably a good
 	 * usage pattern.
 	 */
-	struct r600_resource *buf = (struct r600_resource*)
-		pipe_buffer_create(&rscreen->b, 0,
-				   PIPE_USAGE_STAGING, buf_size);
+	struct r600_resource *buf =
+		r600_as_resource(pipe_buffer_create(&rscreen->b, 0,
+						 PIPE_USAGE_STAGING, buf_size));
 	if (!buf)
 		return NULL;
 
@@ -728,9 +728,12 @@ static void r600_query_hw_do_emit_start(struct r600_common_context *ctx,
 		emit_sample_streamout(cs, va, query->stream);
 		break;
 	case PIPE_QUERY_SO_OVERFLOW_ANY_PREDICATE:
-		for (unsigned stream = 0; stream < R600_MAX_STREAMS; ++stream)
+		for (unsigned stream = 0; stream < R600_MAX_STREAMS; ++stream) {
 			emit_sample_streamout(cs, va + 32 * stream, stream);
-		break;
+			r600_emit_reloc(ctx, &ctx->gfx, query->buffer.buf, RADEON_USAGE_WRITE |
+					RADEON_PRIO_QUERY);
+		}
+		return;
 	case PIPE_QUERY_TIME_ELAPSED:
 		/* Write the timestamp after the last draw is done.
 		 * (bottom-of-pipe)
@@ -814,9 +817,12 @@ static void r600_query_hw_do_emit_stop(struct r600_common_context *ctx,
 		break;
 	case PIPE_QUERY_SO_OVERFLOW_ANY_PREDICATE:
 		va += 16;
-		for (unsigned stream = 0; stream < R600_MAX_STREAMS; ++stream)
+		for (unsigned stream = 0; stream < R600_MAX_STREAMS; ++stream) {
 			emit_sample_streamout(cs, va + 32 * stream, stream);
-		break;
+			r600_emit_reloc(ctx, &ctx->gfx, query->buffer.buf, RADEON_USAGE_WRITE |
+					RADEON_PRIO_QUERY);
+		}
+		return;
 	case PIPE_QUERY_TIME_ELAPSED:
 		va += 8;
 		FALLTHROUGH;
@@ -1128,7 +1134,7 @@ static void r600_get_hw_query_params(struct r600_common_context *rctx,
 		break;
 	}
 	default:
-		unreachable("r600_get_hw_query_params unsupported");
+		UNREACHABLE("r600_get_hw_query_params unsupported");
 	}
 }
 
@@ -1573,8 +1579,8 @@ static void r600_restore_qbo_state(struct r600_common_context *rctx,
 				   struct r600_qbo_state *st)
 {
 	rctx->b.bind_compute_state(&rctx->b, st->saved_compute);
-	rctx->b.set_constant_buffer(&rctx->b, PIPE_SHADER_COMPUTE, 0, true, &st->saved_const0);
-	rctx->b.set_shader_buffers(&rctx->b, PIPE_SHADER_COMPUTE, 0, 3, st->saved_ssbo, ~0);
+	rctx->b.set_constant_buffer(&rctx->b, MESA_SHADER_COMPUTE, 0, &st->saved_const0);
+	rctx->b.set_shader_buffers(&rctx->b, MESA_SHADER_COMPUTE, 0, 3, st->saved_ssbo, ~0);
 	for (unsigned i = 0; i < 3; ++i)
 		pipe_resource_reference(&st->saved_ssbo[i].buffer, NULL);
 }
@@ -1706,9 +1712,9 @@ static void r600_query_hw_get_result_resource(struct r600_common_context *rctx,
 		} else
 			consts.buffer_offset = 0;
 
-		rctx->b.set_constant_buffer(&rctx->b, PIPE_SHADER_COMPUTE, 0, false, &constant_buffer);
+		rctx->b.set_constant_buffer(&rctx->b, MESA_SHADER_COMPUTE, 0, &constant_buffer);
 
-		rctx->b.set_shader_buffers(&rctx->b, PIPE_SHADER_COMPUTE, 0, 3, ssbo, ~0);
+		rctx->b.set_shader_buffers(&rctx->b, MESA_SHADER_COMPUTE, 0, 3, ssbo, ~0);
 
 		if ((flags & PIPE_QUERY_WAIT) && qbuf == &query->buffer) {
 			uint64_t va;
@@ -1868,9 +1874,8 @@ void r600_query_fix_enabled_rb_mask(struct r600_common_screen *rscreen)
 	/* otherwise backup path for older kernels */
 
 	/* create buffer for event data */
-	buffer = (struct r600_resource*)
-		pipe_buffer_create(ctx->b.screen, 0,
-				   PIPE_USAGE_STAGING, max_rbs * 16);
+	buffer = r600_as_resource(pipe_buffer_create(ctx->b.screen, 0,
+						  PIPE_USAGE_STAGING, max_rbs * 16));
 	if (!buffer)
 		return;
 

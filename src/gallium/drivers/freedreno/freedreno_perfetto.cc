@@ -22,12 +22,8 @@ static uint64_t next_clock_sync_ns; /* cpu time of next clk sync */
  */
 static uint64_t sync_gpu_ts;
 
-struct FdRenderpassIncrementalState {
-   bool was_cleared = true;
-};
-
 struct FdRenderpassTraits : public perfetto::DefaultDataSourceTraits {
-   using IncrementalStateType = FdRenderpassIncrementalState;
+   using IncrementalStateType = MesaRenderpassIncrementalState;
 };
 
 class FdRenderpassDataSource : public MesaRenderpassDataSource<FdRenderpassDataSource, FdRenderpassTraits> {
@@ -265,10 +261,13 @@ extern "C" {
 void
 fd_perfetto_init(void)
 {
-   util_perfetto_init();
-
    perfetto::DataSourceDescriptor dsd;
+#if DETECT_OS_ANDROID
+   // Android tooling expects this data source name
+   dsd.set_name("gpu.renderstages");
+#else
    dsd.set_name("gpu.renderstages.msm");
+#endif
    FdRenderpassDataSource::Register(dsd);
 }
 
@@ -290,6 +289,7 @@ sync_timestamp(struct fd_context *ctx)
    }
 
    /* get cpu timestamp again because FD_TIMESTAMP can take >100us */
+   uint32_t cpu_clock_id = perfetto::protos::pbzero::BUILTIN_CLOCK_BOOTTIME;
    cpu_ts = perfetto::base::GetBootTimeNs().count();
 
    /* convert GPU ts into ns: */
@@ -298,7 +298,8 @@ sync_timestamp(struct fd_context *ctx)
    FdRenderpassDataSource::Trace([=](auto tctx) {
       MesaRenderpassDataSource<FdRenderpassDataSource,
                                FdRenderpassTraits>::EmitClockSync(tctx, cpu_ts,
-                                                                  gpu_ts, gpu_clock_id);
+                                                                  gpu_ts, cpu_clock_id,
+                                                                  gpu_clock_id);
    });
 
    sync_gpu_ts = gpu_ts;

@@ -48,9 +48,12 @@ struct vn_device_memory {
    uint64_t bo_roundtrip_seqno;
 
    VkDeviceSize map_end;
+
+   /* only valid when wsi platform is used */
+   struct vn_image *dedicated_img;
 };
 VK_DEFINE_NONDISP_HANDLE_CASTS(vn_device_memory,
-                               base.base.base,
+                               base.vk.base,
                                VkDeviceMemory,
                                VK_OBJECT_TYPE_DEVICE_MEMORY)
 
@@ -58,13 +61,11 @@ VkResult
 vn_device_memory_import_dma_buf(struct vn_device *dev,
                                 struct vn_device_memory *mem,
                                 const VkMemoryAllocateInfo *alloc_info,
-                                bool force_unmappable,
                                 int fd);
 
 VkResult
 vn_get_memory_dma_buf_properties(struct vn_device *dev,
                                  int fd,
-                                 uint64_t *out_alloc_size,
                                  uint32_t *out_mem_type_bits);
 
 #endif /* VN_DEVICE_MEMORY_H */

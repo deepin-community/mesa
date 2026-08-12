@@ -76,8 +76,8 @@ protected:
       return UINT_MAX;
    }
 
-   void create_shaders(gl_shader_stage producer_stage,
-                       gl_shader_stage consumer_stage)
+   void create_shaders(mesa_shader_stage producer_stage,
+                       mesa_shader_stage consumer_stage)
    {
       _producer_builder =
          nir_builder_init_simple_shader(producer_stage, &options,
@@ -268,11 +268,11 @@ protected:
 
    void optimize()
    {
-      NIR_PASS(_, b1->shader, nir_copy_prop);
+      NIR_PASS(_, b1->shader, nir_opt_copy_prop);
       NIR_PASS(_, b1->shader, nir_opt_dce);
       NIR_PASS(_, b1->shader, nir_opt_cse);
 
-      NIR_PASS(_, b2->shader, nir_copy_prop);
+      NIR_PASS(_, b2->shader, nir_opt_copy_prop);
       NIR_PASS(_, b2->shader, nir_opt_dce);
       NIR_PASS(_, b2->shader, nir_opt_cse);
    }
@@ -289,7 +289,7 @@ protected:
       }
 
       nir_opt_varyings_progress progress =
-         nir_opt_varyings(b1->shader, b2->shader, true, 4096, 15);
+         nir_opt_varyings(b1->shader, b2->shader, true, 4096, 15, true);
       nir_validate_shader(b1->shader, "validate producer shader");
       nir_validate_shader(b2->shader, "validate consumer shader");
 
@@ -325,7 +325,7 @@ shader_contains_instr(nir_builder *b, nir_instr *i)
 static inline bool
 shader_contains_def(nir_builder *b, nir_def *def)
 {
-   return shader_contains_instr(b, def->parent_instr);
+   return shader_contains_instr(b, nir_def_instr(def));
 }
 
 static inline bool
@@ -377,19 +377,24 @@ is_per_vertex(nir_builder *b, gl_varying_slot slot, bool is_input)
 
 static inline nir_def *
 load_input_output(nir_builder *b, gl_varying_slot slot, unsigned component,
-                  nir_alu_type type, unsigned vertex_index, bool output)
+                  nir_alu_type type, int vertex_index, bool output)
 {
    unsigned bit_size = type & ~(nir_type_float | nir_type_int | nir_type_uint);
    nir_def *zero = nir_imm_int(b, 0);
-   nir_def *def;
+   nir_def *def, *vertex_index_def;
 
    if (is_per_vertex(b, slot, true)) {
       if (output) {
          def = nir_load_per_vertex_output(b, 1, bit_size,
                                           nir_imm_int(b, vertex_index), zero);
       } else {
+         if (b->shader->info.stage == MESA_SHADER_TESS_CTRL && vertex_index < 0)
+            vertex_index_def = nir_load_invocation_id(b);
+         else
+            vertex_index_def = nir_imm_int(b, vertex_index);
+
          def = nir_load_per_vertex_input(b, 1, bit_size,
-                                         nir_imm_int(b, vertex_index), zero);
+                                         vertex_index_def, zero);
       }
    } else {
       if (output)
@@ -398,7 +403,7 @@ load_input_output(nir_builder *b, gl_varying_slot slot, unsigned component,
          def = nir_load_input(b, 1, bit_size, zero);
    }
 
-   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(def->parent_instr);
+   nir_intrinsic_instr *intr = nir_def_as_intrinsic(def);
    nir_intrinsic_set_base(intr, 0); /* we don't care */
    nir_intrinsic_set_range(intr, 1);
    nir_intrinsic_set_component(intr, component);
@@ -448,7 +453,7 @@ load_input_interp(nir_builder *b, gl_varying_slot slot, unsigned component,
       baryc = nir_load_barycentric_at_offset(b, 32, nir_imm_ivec2(b, 1, 2));
       break;
    default:
-      unreachable("invalid interp mode");
+      UNREACHABLE("invalid interp mode");
    }
 
    switch (interp) {
@@ -456,30 +461,30 @@ load_input_interp(nir_builder *b, gl_varying_slot slot, unsigned component,
    case INTERP_PERSP_CENTROID:
    case INTERP_PERSP_SAMPLE:
    case INTERP_PERSP_AT_OFFSET:
-      nir_intrinsic_set_interp_mode(nir_instr_as_intrinsic(baryc->parent_instr),
+      nir_intrinsic_set_interp_mode(nir_def_as_intrinsic(baryc),
                                     INTERP_MODE_SMOOTH);
       break;
    case INTERP_LINEAR_PIXEL:
    case INTERP_LINEAR_CENTROID:
    case INTERP_LINEAR_SAMPLE:
    case INTERP_LINEAR_AT_OFFSET:
-      nir_intrinsic_set_interp_mode(nir_instr_as_intrinsic(baryc->parent_instr),
+      nir_intrinsic_set_interp_mode(nir_def_as_intrinsic(baryc),
                                     INTERP_MODE_NOPERSPECTIVE);
       break;
    case INTERP_COLOR_PIXEL:
    case INTERP_COLOR_CENTROID:
    case INTERP_COLOR_SAMPLE:
    case INTERP_COLOR_AT_OFFSET:
-      nir_intrinsic_set_interp_mode(nir_instr_as_intrinsic(baryc->parent_instr),
+      nir_intrinsic_set_interp_mode(nir_def_as_intrinsic(baryc),
                                     INTERP_MODE_NONE);
       break;
    default:
-      unreachable("invalid interp mode");
+      UNREACHABLE("invalid interp mode");
    }
 
    nir_def *def = nir_load_interpolated_input(b, 1, bit_size, baryc, zero);
 
-   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(def->parent_instr);
+   nir_intrinsic_instr *intr = nir_def_as_intrinsic(def);
    nir_intrinsic_set_base(intr, 0); /* we don't care */
    nir_intrinsic_set_component(intr, component);
    nir_intrinsic_set_dest_type(intr, type);
@@ -522,7 +527,7 @@ load_interpolated_input_tes(nir_builder *b, gl_varying_slot slot,
       remap = remap_wuv;
       break;
    default:
-      unreachable("unexpected TES interp mode");
+      UNREACHABLE("unexpected TES interp mode");
    }
 
    bool use_ffma = interp == INTERP_TES_TRIANGLE_UVW_FFMA ||
@@ -532,7 +537,7 @@ load_interpolated_input_tes(nir_builder *b, gl_varying_slot slot,
       def[i] = nir_load_per_vertex_input(b, 1, bit_size, nir_imm_int(b, i),
                                          zero);
 
-      nir_intrinsic_instr *intr = nir_instr_as_intrinsic(def[i]->parent_instr);
+      nir_intrinsic_instr *intr = nir_def_as_intrinsic(def[i]);
       nir_intrinsic_set_base(intr, 0); /* we don't care */
       nir_intrinsic_set_range(intr, 1);
       nir_intrinsic_set_component(intr, component);
@@ -563,7 +568,7 @@ load_interpolated_input_tes(nir_builder *b, gl_varying_slot slot,
 
 static inline nir_def *
 load_input(nir_builder *b, gl_varying_slot slot, unsigned component,
-           nir_alu_type type, unsigned vertex_index, unsigned interp)
+           nir_alu_type type, int vertex_index, unsigned interp)
 {
    if (b->shader->info.stage == MESA_SHADER_FRAGMENT && interp != INTERP_FLAT) {
       return load_input_interp(b, slot, component, type, interp);
@@ -578,7 +583,7 @@ load_input(nir_builder *b, gl_varying_slot slot, unsigned component,
 
 static inline nir_def *
 load_output(nir_builder *b, gl_varying_slot slot, unsigned component,
-            nir_alu_type type, unsigned vertex_index)
+            nir_alu_type type, int vertex_index)
 {
    return load_input_output(b, slot, component, type, vertex_index, true);
 }

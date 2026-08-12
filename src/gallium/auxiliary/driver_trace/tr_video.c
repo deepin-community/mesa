@@ -51,13 +51,6 @@ unwrap_refrence_frames(struct pipe_picture_desc **picture)
         *picture = (struct pipe_picture_desc*)copied;
         return true;
     }
-    case PIPE_VIDEO_FORMAT_MPEG4: {
-        struct pipe_mpeg4_picture_desc *copied = mem_dup(*picture, sizeof(struct pipe_mpeg4_picture_desc));
-        assert(copied);
-        unwrap_refrence_frames_in_place(copied->ref, ARRAY_SIZE(copied->ref));
-        *picture = (struct pipe_picture_desc*)copied;
-        return true;
-    }
     case PIPE_VIDEO_FORMAT_VC1:{
         struct pipe_vc1_picture_desc *copied = mem_dup(*picture, sizeof(struct pipe_vc1_picture_desc));
         assert(copied);
@@ -98,7 +91,7 @@ unwrap_refrence_frames(struct pipe_picture_desc **picture)
     }
     case PIPE_VIDEO_FORMAT_UNKNOWN:
     default:
-        unreachable("unknown video format");
+        UNREACHABLE("unknown video format");
     }
 }
 
@@ -202,7 +195,7 @@ trace_video_codec_encode_bitstream(struct pipe_video_codec *_codec,
     codec->encode_bitstream(codec, source, destination, feedback);
 }
 
-static void
+static int
 trace_video_codec_process_frame(struct pipe_video_codec *_codec,
                         struct pipe_video_buffer *_source,
                         const struct pipe_vpp_desc *process_properties)
@@ -219,6 +212,7 @@ trace_video_codec_process_frame(struct pipe_video_codec *_codec,
     trace_dump_call_end();
 
     codec->process_frame(codec, source, process_properties);
+    return 0;
 }
 
 static int
@@ -296,27 +290,6 @@ trace_video_codec_fence_wait(struct pipe_video_codec *_codec,
     return ret;
 }
 
-static void
-trace_video_codec_update_decoder_target(struct pipe_video_codec *_codec,
-                                struct pipe_video_buffer *_old,
-                                struct pipe_video_buffer *_updated)
-{
-    struct trace_video_codec *tr_vcodec = trace_video_codec(_codec);
-    struct pipe_video_codec *codec = tr_vcodec->video_codec;
-    struct trace_video_buffer *tr_old = trace_video_buffer(_old);
-    struct pipe_video_buffer *old = tr_old->video_buffer;
-    struct trace_video_buffer *tr_updated = trace_video_buffer(_updated);
-    struct pipe_video_buffer *updated = tr_updated->video_buffer;
-
-    trace_dump_call_begin("pipe_video_codec", "update_decoder_target");
-    trace_dump_arg(ptr, codec);
-    trace_dump_arg(ptr, old);
-    trace_dump_arg(ptr, updated);
-    trace_dump_call_end();
-
-    codec->update_decoder_target(codec, old, updated);
-}
-
 struct pipe_video_codec *
 trace_video_codec_create(struct trace_context *tr_ctx,
                          struct pipe_video_codec *video_codec)
@@ -349,7 +322,6 @@ trace_video_codec_create(struct trace_context *tr_ctx,
     TR_VC_INIT(flush);
     TR_VC_INIT(get_feedback);
     TR_VC_INIT(fence_wait);
-    TR_VC_INIT(update_decoder_target);
 
 #undef TR_VC_INIT
 
@@ -375,9 +347,6 @@ trace_video_buffer_destroy(struct pipe_video_buffer *_buffer)
     for (int i=0; i < VL_NUM_COMPONENTS; i++) {
         pipe_sampler_view_reference(&tr_vbuffer->sampler_view_planes[i], NULL);
         pipe_sampler_view_reference(&tr_vbuffer->sampler_view_components[i], NULL);
-    }
-    for (int i=0; i < VL_MAX_SURFACES; i++) {
-        pipe_surface_reference(&tr_vbuffer->surfaces[i], NULL);
     }
     video_buffer->destroy(video_buffer);
 
@@ -452,30 +421,21 @@ trace_video_buffer_get_sampler_view_components(struct pipe_video_buffer *_buffer
     return view_components ? tr_vbuffer->sampler_view_components : NULL;
 }
 
-static struct pipe_surface **
+static struct pipe_surface *
 trace_video_buffer_get_surfaces(struct pipe_video_buffer *_buffer)
 {
-    struct trace_context *tr_ctx = trace_context(_buffer->context);
-    struct trace_video_buffer *tr_vbuffer = trace_video_buffer(_buffer);
-    struct pipe_video_buffer *buffer = tr_vbuffer->video_buffer;
+   struct trace_video_buffer *tr_vbuffer = trace_video_buffer(_buffer);
+   struct pipe_video_buffer *buffer = tr_vbuffer->video_buffer;
 
-    trace_dump_call_begin("pipe_video_buffer", "get_surfaces");
-    trace_dump_arg(ptr, buffer);
+   trace_dump_call_begin("pipe_video_buffer", "get_surfaces");
+   trace_dump_arg(ptr, buffer);
 
-    struct pipe_surface **surfaces = buffer->get_surfaces(buffer);
+   struct pipe_surface *surfaces = buffer->get_surfaces(buffer);
 
-    trace_dump_ret_array(ptr, surfaces, VL_MAX_SURFACES);
-    trace_dump_call_end();
+   trace_dump_array_impl(surface, surfaces, VL_MAX_SURFACES, &);
+   trace_dump_call_end();
 
-    for (int i=0; i < VL_MAX_SURFACES; i++) {
-        if (!surfaces || !surfaces[i]) {
-            pipe_surface_reference(&tr_vbuffer->surfaces[i], NULL);
-        } else if (tr_vbuffer->surfaces[i] == NULL || (trace_surface(tr_vbuffer->surfaces[i])->surface != surfaces[i])){
-            pipe_surface_reference(&tr_vbuffer->surfaces[i], trace_surf_create(tr_ctx, surfaces[i]->texture, surfaces[i]));
-        }
-    }
-
-    return surfaces ? tr_vbuffer->surfaces : NULL;
+   return surfaces;
 }
 
 

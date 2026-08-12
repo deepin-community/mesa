@@ -6,15 +6,20 @@
 #include "VirtioGpuPipeStream.h"
 
 #include <errno.h>
+
+#include "util/detect_os.h"
+#if DETECT_OS_LINUX
 #include <sys/mman.h>
-#include <sys/types.h>
 #include <unistd.h>
+#endif
+#include <sys/types.h>
 
 #include <cstring>
 #include <string>
 
 #include "VirtGpu.h"
 #include "util/log.h"
+#include "virtio/virtio-gpu/virgl_hw.h"
 
 static const size_t kTransferBufferSize = (1048576);
 
