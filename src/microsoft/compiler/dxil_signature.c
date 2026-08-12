@@ -181,10 +181,10 @@ get_additional_semantic_info(nir_shader *s, nir_variable *var, struct semantic_i
    return next_row;
 }
 
-typedef void (*semantic_info_proc)(nir_variable *var, struct semantic_info *info, gl_shader_stage stage);
+typedef void (*semantic_info_proc)(nir_variable *var, struct semantic_info *info, mesa_shader_stage stage);
 
 static void
-get_semantic_vs_in_name(nir_variable *var, struct semantic_info *info, gl_shader_stage stage)
+get_semantic_vs_in_name(nir_variable *var, struct semantic_info *info, mesa_shader_stage stage)
 {
    strcpy(info->name, "TEXCOORD");
    info->index = var->data.driver_location;
@@ -192,7 +192,7 @@ get_semantic_vs_in_name(nir_variable *var, struct semantic_info *info, gl_shader
 }
 
 static void
-get_semantic_sv_name(nir_variable *var, struct semantic_info *info, gl_shader_stage stage)
+get_semantic_sv_name(nir_variable *var, struct semantic_info *info, mesa_shader_stage stage)
 {
    if (stage != MESA_SHADER_VERTEX)
       info->interpolation = get_interpolation(var);
@@ -211,7 +211,7 @@ get_semantic_sv_name(nir_variable *var, struct semantic_info *info, gl_shader_st
       info->kind = DXIL_SEM_SAMPLE_INDEX;
       break;
    default:
-      unreachable("unsupported system value");
+      UNREACHABLE("unsupported system value");
    }
    strncpy(info->name, var->name, ARRAY_SIZE(info->name) - 1);
 }
@@ -327,7 +327,7 @@ get_semantic_name(nir_variable *var, struct semantic_info *info,
 }
 
 static void
-get_semantic_in_name(nir_variable *var, struct semantic_info *info, gl_shader_stage stage)
+get_semantic_in_name(nir_variable *var, struct semantic_info *info, mesa_shader_stage stage)
 {
    const struct glsl_type *type = var->type;
    if (nir_is_arrayed_io(var, stage) &&
@@ -372,14 +372,14 @@ prog_semantic_from_kind(enum dxil_semantic_kind kind, unsigned num_vals, unsigne
          DXIL_PROG_SEM_FINAL_LINE_DENSITY_TESSFACTOR :
          DXIL_PROG_SEM_FINAL_LINE_DETAIL_TESSFACTOR;
       default:
-         unreachable("Invalid row count for tess factor");
+         UNREACHABLE("Invalid row count for tess factor");
       }
    case DXIL_SEM_INSIDE_TESS_FACTOR:
       switch (num_vals) {
       case 2: return DXIL_PROG_SEM_FINAL_QUAD_INSIDE_EDGE_TESSFACTOR;
       case 1: return DXIL_PROG_SEM_FINAL_TRI_INSIDE_EDGE_TESSFACTOR;
       default:
-         unreachable("Invalid row count for inner tess factor");
+         UNREACHABLE("Invalid row count for inner tess factor");
       }
    default:
        return DXIL_PROG_SEM_UNDEFINED;
@@ -669,7 +669,7 @@ process_output_signature(struct dxil_module *mod, nir_shader *s)
           base_var->data.stream == var->data.stream)
          /* Combine fractional vars into any already existing row */
          get_additional_semantic_info(s, var, &semantic,
-                                      mod->psv_outputs[base_var->data.driver_location].start_row,
+                                      mod->psv_outputs[mod->output_mappings[base_var->data.driver_location]].start_row,
                                       s->info.clip_distance_array_size);
       else
          next_row = get_additional_semantic_info(s, var, &semantic, next_row, s->info.clip_distance_array_size);
@@ -677,6 +677,7 @@ process_output_signature(struct dxil_module *mod, nir_shader *s)
       mod->info.has_out_position |= semantic.kind== DXIL_SEM_POSITION;
       mod->info.has_out_depth |= semantic.kind == DXIL_SEM_DEPTH;
 
+      mod->output_mappings[var->data.driver_location] = num_outputs;
       struct dxil_psv_signature_element *psv_elm = &mod->psv_outputs[num_outputs];
 
       if (!fill_io_signature(mod, num_outputs, &semantic,
@@ -714,7 +715,7 @@ patch_sysvalue_name(nir_variable *var)
          return var->data.location_frac == 0 ?
             "LINEDET" : "LINEDEN";
       default:
-         unreachable("Unexpected outer tess factor array size");
+         UNREACHABLE("Unexpected outer tess factor array size");
       }
       break;
    case VARYING_SLOT_TESS_LEVEL_INNER:
@@ -724,7 +725,7 @@ patch_sysvalue_name(nir_variable *var)
       case 1:
          return "TRIINT";
       default:
-         unreachable("Unexpected inner tess factory array size");
+         UNREACHABLE("Unexpected inner tess factory array size");
       }
       break;
    default:
@@ -752,8 +753,18 @@ process_patch_const_signature(struct dxil_module *mod, nir_shader *s)
       get_semantic_name(var, &semantic, type);
 
       mod->patch_consts[num_consts].sysvalue = patch_sysvalue_name(var);
-      next_row = get_additional_semantic_info(s, var, &semantic, next_row, 0);
+      nir_variable *base_var = var;
+      if (var->data.location_frac)
+         base_var = nir_find_variable_with_location(s, mode, var->data.location);
+      if (base_var != var)
+         /* Combine fractional vars into any already existing row */
+         get_additional_semantic_info(s, var, &semantic,
+                                      mod->psv_patch_consts[mod->patch_mappings[base_var->data.driver_location]].start_row,
+                                      0);
+      else
+         next_row = get_additional_semantic_info(s, var, &semantic, next_row, 0);
 
+      mod->patch_mappings[var->data.driver_location] = num_consts;
       struct dxil_psv_signature_element *psv_elm = &mod->psv_patch_consts[num_consts];
 
       if (!fill_io_signature(mod, num_consts, &semantic,

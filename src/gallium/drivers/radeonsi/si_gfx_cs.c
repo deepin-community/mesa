@@ -97,9 +97,9 @@ void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_h
    if (sscreen->info.is_amdgpu && sscreen->info.drm_minor >= 39)
       flags |= RADEON_FLUSH_START_NEXT_GFX_IB_NOW;
 
-   if (ctx->gfx_level == GFX6) {
-      /* The kernel flushes L2 before shaders are finished. */
-      wait_flags |= wait_ps_cs;
+   if (ctx->gfx_level <= GFX7) {
+      /* Random hangs without waiting for shaders and flushing cache */
+      wait_flags |= wait_ps_cs | SI_BARRIER_INV_L2;
    } else if (!(flags & RADEON_FLUSH_START_NEXT_GFX_IB_NOW) ||
               ((flags & RADEON_FLUSH_TOGGLE_SECURE_SUBMISSION) &&
                 !ws->cs_is_secure(cs))) {
@@ -132,7 +132,7 @@ void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_h
 
    ctx->gfx_flush_in_progress = true;
 
-   if (ctx->has_graphics) {
+   if (ctx->is_gfx_queue) {
       if (!list_is_empty(&ctx->active_queries))
          si_suspend_queries(ctx);
 
@@ -165,10 +165,8 @@ void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_h
    }
 
    /* Wait for draw calls to finish if needed. */
-   if (wait_flags) {
-      ctx->barrier_flags |= wait_flags;
-      si_emit_barrier_direct(ctx);
-   }
+   if (wait_flags)
+      si_emit_barrier_direct(ctx, wait_flags);
    ctx->gfx_last_ib_is_busy = (wait_flags & wait_ps_cs) != wait_ps_cs;
 
    if (ctx->current_saved_cs) {
@@ -192,7 +190,9 @@ void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_h
       flags |= RADEON_FLUSH_NOOP;
 
    uint64_t start_ts = 0, submission_id = 0;
-   if (u_trace_perfetto_active(&ctx->ds.trace_context)) {
+   const bool perfetto = ctx->perfetto_enabled;
+
+   if (unlikely(perfetto)) {
       start_ts = si_ds_begin_submit(&ctx->ds_queue);
       submission_id = ctx->ds_queue.submission_id;
    }
@@ -200,9 +200,8 @@ void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_h
    /* Flush the CS. */
    ws->cs_flush(cs, flags, &ctx->last_gfx_fence);
 
-   if (u_trace_perfetto_active(&ctx->ds.trace_context) && start_ts > 0) {
+   if (unlikely(perfetto))
       si_ds_end_submit(&ctx->ds_queue, start_ts);
-   }
 
    tc_driver_internal_flush_notify(ctx->tc);
    if (fence)
@@ -220,18 +219,18 @@ void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_h
       si_check_vm_faults(ctx, &ctx->current_saved_cs->gfx);
    }
 
-   if (unlikely(ctx->sqtt && (flags & PIPE_FLUSH_END_OF_FRAME))) {
-      si_handle_sqtt(ctx, &ctx->gfx_cs);
-   }
-
    if (ctx->current_saved_cs)
       si_saved_cs_reference(&ctx->current_saved_cs, NULL);
 
-   if (u_trace_perfetto_active(&ctx->ds.trace_context))
+   if (unlikely(perfetto))
       si_utrace_flush(ctx, submission_id);
 
    si_begin_new_gfx_cs(ctx, false);
    ctx->gfx_flush_in_progress = false;
+
+   if (unlikely(ctx->sqtt && (flags & PIPE_FLUSH_END_OF_FRAME))) {
+      si_handle_sqtt(ctx, &ctx->gfx_cs);
+   }
 
 #if SHADER_DEBUG_LOG
    if (debug_get_bool_option("shaderlog", false))
@@ -268,113 +267,6 @@ static void si_begin_gfx_cs_debug(struct si_context *ctx)
                              RADEON_USAGE_READWRITE | RADEON_PRIO_FENCE_TRACE);
 }
 
-static void si_add_gds_to_buffer_list(struct si_context *sctx)
-{
-}
-
-void si_set_tracked_regs_to_clear_state(struct si_context *ctx)
-{
-   assert(ctx->gfx_level < GFX12);
-   STATIC_ASSERT(SI_NUM_ALL_TRACKED_REGS <= sizeof(ctx->tracked_regs.reg_saved_mask) * 8);
-
-   ctx->tracked_regs.reg_value[SI_TRACKED_DB_RENDER_CONTROL] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_DB_COUNT_CONTROL] = 0;
-
-   ctx->tracked_regs.reg_value[SI_TRACKED_DB_DEPTH_CONTROL] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_DB_STENCIL_CONTROL] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_DB_DEPTH_BOUNDS_MIN] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_DB_DEPTH_BOUNDS_MAX] = 0;
-
-   ctx->tracked_regs.reg_value[SI_TRACKED_SPI_INTERP_CONTROL_0] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_SU_POINT_SIZE] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_SU_POINT_MINMAX] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_SU_LINE_CNTL] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_SC_MODE_CNTL_0] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_SU_SC_MODE_CNTL] = 0x4;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_SC_EDGERULE] = 0xaa99aaaa;
-
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_SU_POLY_OFFSET_DB_FMT_CNTL] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_SU_POLY_OFFSET_CLAMP] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_SU_POLY_OFFSET_FRONT_SCALE] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_SU_POLY_OFFSET_FRONT_OFFSET] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_SU_POLY_OFFSET_BACK_SCALE] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_SU_POLY_OFFSET_BACK_OFFSET] = 0;
-
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_SC_LINE_CNTL] = 0x1000;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_SC_AA_CONFIG] = 0;
-
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_SU_VTX_CNTL] = 0x5;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_CL_GB_VERT_CLIP_ADJ] = 0x3f800000;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_CL_GB_VERT_DISC_ADJ] = 0x3f800000;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_CL_GB_HORZ_CLIP_ADJ] = 0x3f800000;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_CL_GB_HORZ_DISC_ADJ] = 0x3f800000;
-
-   ctx->tracked_regs.reg_value[SI_TRACKED_SPI_SHADER_POS_FORMAT] = 0;
-
-   ctx->tracked_regs.reg_value[SI_TRACKED_SPI_SHADER_Z_FORMAT] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_SPI_SHADER_COL_FORMAT] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_SPI_BARYC_CNTL] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_SPI_PS_INPUT_ENA] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_SPI_PS_INPUT_ADDR] = 0;
-
-   ctx->tracked_regs.reg_value[SI_TRACKED_DB_EQAA] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_DB_RENDER_OVERRIDE2] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_DB_SHADER_CONTROL] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_CB_SHADER_MASK] = 0xffffffff;
-   ctx->tracked_regs.reg_value[SI_TRACKED_CB_TARGET_MASK] = 0xffffffff;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_CL_CLIP_CNTL] = 0x90000;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_CL_VS_OUT_CNTL] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_CL_VTE_CNTL] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_SC_CLIPRECT_RULE] = 0xffff;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_SC_LINE_STIPPLE] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_SC_MODE_CNTL_1] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_SU_HARDWARE_SCREEN_OFFSET] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_SPI_PS_IN_CONTROL] = 0x2;
-   ctx->tracked_regs.reg_value[SI_TRACKED_VGT_GS_INSTANCE_CNT] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_VGT_GS_MAX_VERT_OUT] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_VGT_SHADER_STAGES_EN] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_VGT_LS_HS_CONFIG] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_VGT_TF_PARAM] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_SU_SMALL_PRIM_FILTER_CNTL] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_SC_BINNER_CNTL_0] = 0x3;
-   ctx->tracked_regs.reg_value[SI_TRACKED_GE_MAX_OUTPUT_PER_SUBGROUP] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_GE_NGG_SUBGRP_CNTL] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_PA_CL_NGG_CNTL] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_DB_PA_SC_VRS_OVERRIDE_CNTL] = 0;
-
-   ctx->tracked_regs.reg_value[SI_TRACKED_SX_PS_DOWNCONVERT] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_SX_BLEND_OPT_EPSILON] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_SX_BLEND_OPT_CONTROL] = 0;
-
-   ctx->tracked_regs.reg_value[SI_TRACKED_VGT_ESGS_RING_ITEMSIZE] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_VGT_REUSE_OFF] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_IA_MULTI_VGT_PARAM] = 0xff;
-
-   ctx->tracked_regs.reg_value[SI_TRACKED_VGT_GS_MAX_PRIMS_PER_SUBGROUP] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_VGT_GS_ONCHIP_CNTL] = 0;
-
-   ctx->tracked_regs.reg_value[SI_TRACKED_VGT_GSVS_RING_ITEMSIZE] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_VGT_GS_MODE] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_VGT_VERTEX_REUSE_BLOCK_CNTL] = 0x1e;
-   ctx->tracked_regs.reg_value[SI_TRACKED_VGT_GS_OUT_PRIM_TYPE] = 0;
-
-   ctx->tracked_regs.reg_value[SI_TRACKED_VGT_GSVS_RING_OFFSET_1] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_VGT_GSVS_RING_OFFSET_2] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_VGT_GSVS_RING_OFFSET_3] = 0;
-
-   ctx->tracked_regs.reg_value[SI_TRACKED_VGT_GS_VERT_ITEMSIZE] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_VGT_GS_VERT_ITEMSIZE_1] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_VGT_GS_VERT_ITEMSIZE_2] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_VGT_GS_VERT_ITEMSIZE_3] = 0;
-
-   ctx->tracked_regs.reg_value[SI_TRACKED_SPI_VS_OUT_CONFIG] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_VGT_PRIMITIVEID_EN] = 0;
-   ctx->tracked_regs.reg_value[SI_TRACKED_CB_DCC_CONTROL] = 0;
-
-   /* Set all cleared context registers to saved. */
-   BITSET_SET_RANGE(ctx->tracked_regs.reg_saved_mask, 0, SI_NUM_TRACKED_CONTEXT_REGS - 1);
-}
-
 void si_install_draw_wrapper(struct si_context *sctx, pipe_draw_func wrapper,
                              pipe_draw_vertex_state_func vstate_wrapper)
 {
@@ -394,13 +286,14 @@ void si_install_draw_wrapper(struct si_context *sctx, pipe_draw_func wrapper,
    }
 }
 
-static void si_tmz_preamble(struct si_context *sctx)
+static int si_tmz_preamble(struct si_context *sctx)
 {
-   bool secure = si_gfx_resources_check_encrypted(sctx);
-   if (secure != sctx->ws->cs_is_secure(&sctx->gfx_cs)) {
+   int secure = si_gfx_resources_check_encrypted(sctx);
+   if ((secure == 1) != sctx->ws->cs_is_secure(&sctx->gfx_cs)) {
       si_flush_gfx_cs(sctx, RADEON_FLUSH_ASYNC_START_NEXT_GFX_IB_NOW |
                             RADEON_FLUSH_TOGGLE_SECURE_SUBMISSION, NULL);
    }
+   return secure;
 }
 
 static void si_draw_vbo_tmz_preamble(struct pipe_context *ctx,
@@ -411,8 +304,8 @@ static void si_draw_vbo_tmz_preamble(struct pipe_context *ctx,
                                      unsigned num_draws) {
    struct si_context *sctx = (struct si_context *)ctx;
 
-   si_tmz_preamble(sctx);
-   sctx->real_draw_vbo(ctx, info, drawid_offset, indirect, draws, num_draws);
+   if (si_tmz_preamble(sctx) >= 0)
+      sctx->real_draw_vbo(ctx, info, drawid_offset, indirect, draws, num_draws);
 }
 
 static void si_draw_vstate_tmz_preamble(struct pipe_context *ctx,
@@ -423,21 +316,37 @@ static void si_draw_vstate_tmz_preamble(struct pipe_context *ctx,
                                         unsigned num_draws) {
    struct si_context *sctx = (struct si_context *)ctx;
 
-   si_tmz_preamble(sctx);
-   sctx->real_draw_vertex_state(ctx, state, partial_velem_mask, info, draws, num_draws);
+   if (si_tmz_preamble(sctx) >= 0)
+      sctx->real_draw_vertex_state(ctx, state, partial_velem_mask, info, draws, num_draws);
 }
 
 void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
 {
+   unsigned new_barrier_flags;
    bool is_secure = false;
 
    if (!first_cs)
       u_trace_fini(&ctx->trace);
 
+   ctx->perfetto_enabled = u_trace_perfetto_active(&ctx->ds.trace_context);
+
    u_trace_init(&ctx->trace, &ctx->ds.trace_context);
 
    if (unlikely(radeon_uses_secure_bos(ctx->ws))) {
       is_secure = ctx->ws->cs_is_secure(&ctx->gfx_cs);
+
+      if (is_secure && !ctx->screen->attribute_pos_prim_ring_tmz) {
+         ctx->screen->attribute_pos_prim_ring_tmz =
+            si_aligned_buffer_create(&ctx->screen->b,
+                                     PIPE_RESOURCE_FLAG_UNMAPPABLE |
+                                     SI_RESOURCE_FLAG_32BIT |
+                                     SI_RESOURCE_FLAG_DRIVER_INTERNAL |
+                                     PIPE_RESOURCE_FLAG_ENCRYPTED |
+                                     SI_RESOURCE_FLAG_DISCARDABLE,
+                                     PIPE_USAGE_DEFAULT,
+                                     ctx->screen->info.total_attribute_pos_prim_ring_size,
+                                     2 * 1024 * 1024);
+      }
 
       si_install_draw_wrapper(ctx, si_draw_vbo_tmz_preamble,
                               si_draw_vstate_tmz_preamble);
@@ -462,16 +371,15 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
     *
     * TODO: Do we also need to invalidate CB & DB caches?
     */
-   ctx->barrier_flags |= SI_BARRIER_INV_L2;
+   new_barrier_flags = SI_BARRIER_INV_L2;
    if (ctx->gfx_level < GFX10)
-      ctx->barrier_flags |= SI_BARRIER_INV_ICACHE | SI_BARRIER_INV_SMEM | SI_BARRIER_INV_VMEM;
+      new_barrier_flags |= SI_BARRIER_INV_ICACHE | SI_BARRIER_INV_SMEM | SI_BARRIER_INV_VMEM;
 
    /* Disable pipeline stats if there are no active queries. */
-   ctx->barrier_flags &= ~SI_BARRIER_EVENT_PIPELINESTAT_START & ~SI_BARRIER_EVENT_PIPELINESTAT_STOP;
    if (ctx->num_hw_pipestat_streamout_queries)
-      ctx->barrier_flags |= SI_BARRIER_EVENT_PIPELINESTAT_START;
+      new_barrier_flags |= SI_BARRIER_EVENT_PIPELINESTAT_START;
    else
-      ctx->barrier_flags |= SI_BARRIER_EVENT_PIPELINESTAT_STOP;
+      new_barrier_flags |= SI_BARRIER_EVENT_PIPELINESTAT_STOP;
 
    ctx->pipeline_stats_enabled = -1; /* indicate that the current hw state is unknown */
 
@@ -479,20 +387,26 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
     * When switching NGG->legacy, we need to flush VGT for certain hw generations.
     */
    if (ctx->screen->info.has_vgt_flush_ngg_legacy_bug && !ctx->ngg)
-      ctx->barrier_flags |= SI_BARRIER_EVENT_VGT_FLUSH;
+      new_barrier_flags |= SI_BARRIER_EVENT_VGT_FLUSH;
 
-   si_mark_atom_dirty(ctx, &ctx->atoms.s.barrier);
+   si_clear_and_set_barrier_flags(ctx,
+                            SI_BARRIER_EVENT_PIPELINESTAT_START | SI_BARRIER_EVENT_PIPELINESTAT_STOP,
+                            new_barrier_flags);
    si_mark_atom_dirty(ctx, &ctx->atoms.s.spi_ge_ring_state);
 
-   if (ctx->screen->attribute_pos_prim_ring) {
+   if (ctx->screen->attribute_pos_prim_ring && !is_secure) {
       radeon_add_to_buffer_list(ctx, &ctx->gfx_cs, ctx->screen->attribute_pos_prim_ring,
+                                RADEON_USAGE_READWRITE | RADEON_PRIO_SHADER_RINGS);
+   }
+   if (ctx->screen->attribute_pos_prim_ring_tmz && is_secure) {
+      radeon_add_to_buffer_list(ctx, &ctx->gfx_cs, ctx->screen->attribute_pos_prim_ring_tmz,
                                 RADEON_USAGE_READWRITE | RADEON_PRIO_SHADER_RINGS);
    }
    if (ctx->border_color_buffer) {
       radeon_add_to_buffer_list(ctx, &ctx->gfx_cs, ctx->border_color_buffer,
                                 RADEON_USAGE_READ | RADEON_PRIO_BORDER_COLORS);
    }
-   if (ctx->shadowing.registers) {
+   if (ctx->uses_kernelq_reg_shadowing) {
       radeon_add_to_buffer_list(ctx, &ctx->gfx_cs, ctx->shadowing.registers,
                                 RADEON_USAGE_READWRITE | RADEON_PRIO_DESCRIPTORS);
 
@@ -504,6 +418,7 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
    si_add_all_descriptors_to_bo_list(ctx);
    si_shader_pointers_mark_dirty(ctx);
    ctx->cs_shader_state.emitted_program = NULL;
+   ctx->ts_shader_state.emitted_program = NULL;
 
    /* The CS initialization should be emitted before everything else. */
    if (ctx->cs_preamble_state) {
@@ -514,7 +429,7 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
       radeon_end();
    }
 
-   if (!ctx->has_graphics) {
+   if (!ctx->is_gfx_queue) {
       ctx->initial_gfx_cs_size = ctx->gfx_cs.current.cdw;
       return;
    }
@@ -548,11 +463,11 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
    bool has_clear_state = ctx->screen->info.has_clear_state;
    if (has_clear_state) {
       ctx->framebuffer.dirty_cbufs =
-            u_bit_consecutive(0, ctx->framebuffer.state.nr_cbufs);
+            BITFIELD_MASK(ctx->framebuffer.state.nr_cbufs);
       /* CLEAR_STATE disables the zbuffer, so only enable it if it's bound. */
-      ctx->framebuffer.dirty_zsbuf = ctx->framebuffer.state.zsbuf != NULL;
+      ctx->framebuffer.dirty_zsbuf = ctx->framebuffer.state.zsbuf.texture != NULL;
    } else {
-      ctx->framebuffer.dirty_cbufs = u_bit_consecutive(0, 8);
+      ctx->framebuffer.dirty_cbufs = BITFIELD_MASK(8);
       ctx->framebuffer.dirty_zsbuf = true;
    }
 
@@ -574,7 +489,7 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
    if (ctx->screen->use_ngg_culling)
       si_mark_atom_dirty(ctx, &ctx->atoms.s.ngg_cull_state);
 
-   if (first_cs || !ctx->shadowing.registers) {
+   if (first_cs || !ctx->uses_kernelq_reg_shadowing) {
       /* These don't add any buffers, so skip them with shadowing. */
       si_mark_atom_dirty(ctx, &ctx->atoms.s.clip_regs);
       /* CLEAR_STATE sets zeros. */
@@ -595,8 +510,7 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
          si_mark_atom_dirty(ctx, &ctx->atoms.s.dpbb_state);
       si_mark_atom_dirty(ctx, &ctx->atoms.s.stencil_ref);
       si_mark_atom_dirty(ctx, &ctx->atoms.s.spi_map);
-      if (ctx->gfx_level < GFX11)
-         si_mark_atom_dirty(ctx, &ctx->atoms.s.streamout_enable);
+      si_mark_atom_dirty(ctx, &ctx->atoms.s.streamout_enable);
       /* CLEAR_STATE disables all window rectangles. */
       if (!has_clear_state || ctx->num_window_rectangles > 0)
          si_mark_atom_dirty(ctx, &ctx->atoms.s.window_rectangles);
@@ -606,14 +520,7 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
       si_mark_atom_dirty(ctx, &ctx->atoms.s.vgt_pipeline_state);
       si_mark_atom_dirty(ctx, &ctx->atoms.s.tess_io_layout);
 
-      /* Set all register values to unknown. */
-      BITSET_ZERO(ctx->tracked_regs.reg_saved_mask);
-
-      if (has_clear_state)
-         si_set_tracked_regs_to_clear_state(ctx);
-
-      /* 0xffffffff is an impossible value for SPI_PS_INPUT_CNTL_n registers */
-      memset(ctx->tracked_regs.spi_ps_input_cntl, 0xff, sizeof(uint32_t) * 32);
+      ac_init_tracked_regs(&ctx->tracked_regs, &ctx->screen->info, true);
    }
 
    /* Invalidate various draw states so that they are emitted before
@@ -631,10 +538,10 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
    ctx->last_tes_sh_base = -1;
    ctx->last_num_tcs_input_cp = -1;
 
-   assert(ctx->num_buffered_gfx_sh_regs == 0);
-   assert(ctx->num_buffered_compute_sh_regs == 0);
-   ctx->num_buffered_gfx_sh_regs = 0;
-   ctx->num_buffered_compute_sh_regs = 0;
+   assert(ctx->buffered_gfx_sh_regs.num == 0);
+   assert(ctx->buffered_compute_sh_regs.num == 0);
+   ctx->buffered_gfx_sh_regs.num = 0;
+   ctx->buffered_compute_sh_regs.num = 0;
 
    if (ctx->scratch_buffer)
       si_mark_atom_dirty(ctx, &ctx->atoms.s.scratch_state);
@@ -657,6 +564,8 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
     */
    ctx->force_shader_coherency.with_cb = true;
    ctx->force_shader_coherency.with_db = true;
+
+   ctx->task_state_init_emitted = false;
 }
 
 void si_trace_emit(struct si_context *sctx)
@@ -664,12 +573,9 @@ void si_trace_emit(struct si_context *sctx)
    struct radeon_cmdbuf *cs = &sctx->gfx_cs;
    uint32_t trace_id = ++sctx->current_saved_cs->trace_id;
 
-   si_cp_write_data(sctx, sctx->current_saved_cs->trace_buf, 0, 4, V_370_MEM, V_370_ME, &trace_id);
+   si_cp_write_data(sctx, sctx->current_saved_cs->trace_buf, 0, 4, V_371_MEMORY, V_371_MICRO_ENGINE, &trace_id);
 
-   radeon_begin(cs);
-   radeon_emit(PKT3(PKT3_NOP, 0, 0));
-   radeon_emit(AC_ENCODE_TRACE_POINT(trace_id));
-   radeon_end();
+   ac_emit_cp_nop(&cs->current, AC_ENCODE_TRACE_POINT(trace_id));
 
    if (sctx->log)
       u_log_flush(sctx->log);

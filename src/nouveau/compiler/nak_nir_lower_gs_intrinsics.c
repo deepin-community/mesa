@@ -69,8 +69,7 @@ append_final_primitive_nv(nir_block *end_block, struct state *state)
 {
    nir_builder *b = state->builder;
 
-   set_foreach(end_block->predecessors, entry) {
-      nir_block *pred = (nir_block *)entry->key;
+   nir_foreach_pred(pred, end_block) {
       b->cursor = nir_after_block_before_jump(pred);
 
       nir_def *gs_handle = nir_load_var(b, state->handle_var);
@@ -119,7 +118,7 @@ nak_nir_lower_gs_intrinsics(nir_shader *nir)
 
    append_final_primitive_nv(impl->end_block, &state);
 
-   nir_metadata_preserve(impl, nir_metadata_none);
+   nir_progress(true, impl, nir_metadata_none);
 
    return state.progress;
 }

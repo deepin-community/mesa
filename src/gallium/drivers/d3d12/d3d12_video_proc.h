@@ -53,7 +53,7 @@ d3d12_video_processor_begin_frame(struct pipe_video_codec * codec,
 /**
  * Perform post-process effect
  */
-void
+int
 d3d12_video_processor_process_frame(struct pipe_video_codec *codec,
                         struct pipe_video_buffer *input_texture,
                         const struct pipe_vpp_desc *process_properties);
@@ -100,7 +100,9 @@ struct d3d12_video_processor
    const uint m_NodeIndex = 0u;
 
    ComPtr<ID3D12Fence> m_spFence;
+   ComPtr<ID3D12Fence> m_spResidencyFence;
    uint                m_fenceValue = 1u;
+   uint64_t            m_ResidencyFenceValue = 0u;
 
    ComPtr<ID3D12VideoDevice>             m_spD3D12VideoDevice;
    
@@ -110,10 +112,8 @@ struct d3d12_video_processor
    ComPtr<ID3D12VideoProcessor1>                      m_spVideoProcessor;
    ComPtr<ID3D12CommandQueue>                         m_spCommandQueue;
    std::vector<ComPtr<ID3D12CommandAllocator>>        m_spCommandAllocators;
-   std::vector<struct d3d12_fence>                    m_PendingFences;
+   std::vector<d3d12_unique_fence>                    m_PendingFences;
    ComPtr<ID3D12VideoProcessCommandList1>             m_spCommandList;
-
-   std::vector<D3D12_RESOURCE_BARRIER> m_transitionsBeforeCloseCmdList;
 
    // Current state between begin and end frame
    d3d12_video_processor_output_context m_OutputArguments;
@@ -126,6 +126,9 @@ struct d3d12_video_processor
    D3D12_FEATURE_DATA_VIDEO_PROCESS_MAX_INPUT_STREAMS m_vpMaxInputStreams = { };
 
    struct d3d12_fence* input_surface_fence = NULL;
+   uint64_t input_surface_fence_value;
+   std::vector<D3D12_RESOURCE_BARRIER> m_barrierTransitionsScratch;
+   std::vector<DXGI_FORMAT> m_inputFormatsScratch;
 };
 
 struct pipe_video_codec *
@@ -150,7 +153,7 @@ d3d12_video_processor_ensure_fence_finished(struct pipe_video_codec *codec, uint
 bool
 d3d12_video_processor_sync_completion(struct pipe_video_codec *codec, uint64_t fenceValueToWaitOn, uint64_t timeout_ns);
 
-uint64_t
+unsigned int
 d3d12_video_processor_pool_current_index(struct d3d12_video_processor *codec);
 
 int d3d12_video_processor_fence_wait(struct pipe_video_codec *codec,

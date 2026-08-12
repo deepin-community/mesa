@@ -1,8 +1,9 @@
 /*
  * Copyright © 2023 Collabora, Ltd.
- *
  * SPDX-License-Identifier: MIT
- *
+ */
+
+/*
  * This file exposes some core KMD functionalities in a driver-agnostic way.
  * The drivers are still assumed to be regular DRM drivers, such that some
  * operations can be handled generically.
@@ -18,11 +19,13 @@
 #pragma once
 
 #include <fcntl.h>
+#include <inttypes.h>
 #include <unistd.h>
 #include <xf86drm.h>
 
 #include "drm-uapi/drm.h"
 
+#include "util/cache_ops.h"
 #include "util/log.h"
 #include "util/macros.h"
 #include "util/os_file.h"
@@ -31,8 +34,10 @@
 #include "util/simple_mtx.h"
 #include "util/sparse_array.h"
 #include "util/u_atomic.h"
+#include "util/u_dynarray.h"
 
 #include "kmod/panthor_kmod.h"
+#include "pan_trace.h"
 
 #if defined(__cplusplus)
 extern "C" {
@@ -54,8 +59,14 @@ enum pan_kmod_vm_flags {
    PAN_KMOD_VM_FLAG_TRACK_ACTIVITY = BITFIELD_BIT(1),
 };
 
+#define PAN_PGSIZE_4K (uint64_t)0x1000
+#define PAN_PGSIZE_2M (uint64_t)0x200000
+
 /* Object representing a GPU VM. */
 struct pan_kmod_vm {
+   /* Page sizes supported by this VM. */
+   uint64_t pgsize_bitmap;
+
    /* Combination of pan_kmod_vm_flags flags. */
    uint32_t flags;
 
@@ -95,6 +106,19 @@ enum pan_kmod_bo_flags {
     * is called.
     */
    PAN_KMOD_BO_FLAG_GPU_UNCACHED = BITFIELD_BIT(5),
+
+   /* CPU map the buffer object in userspace by forcing the "Write-Back
+    * Cacheable" cacheability attribute. The mapping otherwise uses the
+    * "Non-Cacheable" attribute if the ACE-Lite coherency protocol isn't
+    * supported by the GPU.
+    */
+   PAN_KMOD_BO_FLAG_WB_MMAP = BITFIELD_BIT(6),
+
+   /* Set by default when the device is IO coherent. We might want to
+    * make it optional at some point and pass a NON_COHERENT flag to
+    * the KMD to force non-coherent mappings on IO coherent setup.
+    */
+   PAN_KMOD_BO_FLAG_IO_COHERENT = BITFIELD_BIT(7),
 };
 
 /* Allowed group priority flags. */
@@ -124,13 +148,16 @@ struct pan_kmod_bo {
    int32_t refcnt;
 
    /* Size of the buffer object. */
-   size_t size;
+   uint64_t size;
 
    /* Handle attached to the buffer object. */
    uint32_t handle;
 
    /* Combination of pan_kmod_bo_flags flags. */
    uint32_t flags;
+
+   /* True if some deferred syncs targetting this BO are pending. */
+   bool has_pending_deferred_syncs;
 
    /* If non-NULL, the buffer object can only by mapped on this VM. Typical
     * the case for all internal/non-shareable buffers. The backend can
@@ -148,11 +175,8 @@ struct pan_kmod_bo {
 
 /* List of GPU properties needed by the UMD. */
 struct pan_kmod_dev_props {
-   /* GPU product ID. */
-   uint32_t gpu_prod_id;
-
-   /* GPU revision. */
-   uint32_t gpu_revision;
+   /* GPU ID. */
+   uint64_t gpu_id;
 
    /* GPU variant. */
    uint32_t gpu_variant;
@@ -201,11 +225,25 @@ struct pan_kmod_dev_props {
    /* Support cycle count and timestamp propagation as job requirement */
    bool gpu_can_query_timestamp;
 
+   /* Cycle counter and timestamp device coherent propogation is enabled */
+   bool timestamp_device_coherent;
+
    /* GPU Timestamp frequency */
    uint64_t timestamp_frequency;
 
+   /* Extracted from timestamp_frequency. */
+   double timestamp_cycles_to_ns_factor;
+
    /* A mask of flags containing the allowed group priorities. */
    enum pan_kmod_group_allow_priority_flags allowed_group_priorities_mask;
+
+   /* Mask of BO flags supported by the KMD. */
+   uint32_t supported_bo_flags;
+
+   /* GPU is IO coherent, meaning BOs can be created with WB_MMAP without
+    * requiring explicit CPU cache maintenance.
+    */
+   bool is_io_coherent;
 };
 
 /* Memory allocator for kmod internal allocations. */
@@ -297,7 +335,7 @@ struct pan_kmod_vm_op {
       uint64_t start;
 
       /* Size of the VA range */
-      size_t size;
+      uint64_t size;
    } va;
 
    union {
@@ -335,6 +373,9 @@ enum pan_kmod_dev_flags {
     * owned by the device, iff the device creation succeeded.
     */
    PAN_KMOD_DEV_FLAG_OWNS_FD = (1 << 0),
+
+   /* Force BO syncs through the kernel. */
+   PAN_KMOD_DEV_FLAG_MMAP_SYNC_THROUGH_KERNEL = (1 << 1),
 };
 
 /* Encode a virtual address range. */
@@ -362,10 +403,6 @@ struct pan_kmod_ops {
    /* Destroy a pan_kmod_dev object. */
    void (*dev_destroy)(struct pan_kmod_dev *dev);
 
-   /* Query device properties. */
-   void (*dev_query_props)(const struct pan_kmod_dev *dev,
-                           struct pan_kmod_dev_props *props);
-
    /* Query the maxium user VA range.
     * Users are free to use a subset of this range if they need less VA space.
     * This method is optional, when not specified, kmod assumes the whole VA
@@ -379,7 +416,7 @@ struct pan_kmod_ops {
     */
    struct pan_kmod_bo *(*bo_alloc)(struct pan_kmod_dev *dev,
                                    struct pan_kmod_vm *exclusive_vm,
-                                   size_t size, uint32_t flags);
+                                   uint64_t size, uint32_t flags);
 
    /* Free buffer object. */
    void (*bo_free)(struct pan_kmod_bo *bo);
@@ -388,7 +425,7 @@ struct pan_kmod_ops {
     * Return NULL if the import fails for any reason.
     */
    struct pan_kmod_bo *(*bo_import)(struct pan_kmod_dev *dev, uint32_t handle,
-                                    size_t size, uint32_t flags);
+                                    uint64_t size);
 
    /* Post export operations.
     * Return 0 on success, -1 otherwise.
@@ -398,6 +435,9 @@ struct pan_kmod_ops {
 
    /* Get the file offset to use to mmap() a buffer object. */
    off_t (*bo_get_mmap_offset)(struct pan_kmod_bo *bo);
+
+   /* Flush the pending BO map syncs. */
+   int (*flush_bo_map_syncs)(struct pan_kmod_dev *dev);
 
    /* Wait for a buffer object to be ready for read or read/write accesses. */
    bool (*bo_wait)(struct pan_kmod_bo *bo, int64_t timeout_ns,
@@ -434,6 +474,9 @@ struct pan_kmod_ops {
 
    /* Query the current GPU timestamp */
    uint64_t (*query_timestamp)(const struct pan_kmod_dev *dev);
+
+   /* Label the BO */
+   void (*bo_set_label)(struct pan_kmod_dev *dev, struct pan_kmod_bo *bo, const char *label);
 };
 
 /* KMD information. */
@@ -443,6 +486,32 @@ struct pan_kmod_driver {
       uint32_t major;
       uint32_t minor;
    } version;
+};
+
+static inline bool
+pan_kmod_driver_version_at_least(const struct pan_kmod_driver *driver,
+                                 uint32_t major, uint32_t minor)
+{
+   if (driver->version.major < major)
+      return false;
+
+   if (driver->version.major > major)
+      return true;
+
+   return driver->version.minor >= minor;
+}
+
+enum pan_kmod_bo_sync_type {
+   PAN_KMOD_BO_SYNC_CPU_CACHE_FLUSH,
+   PAN_KMOD_BO_SYNC_CPU_CACHE_FLUSH_AND_INVALIDATE,
+};
+
+/* Used to queue BO sync operations. */
+struct pan_kmod_deferred_bo_sync {
+   struct pan_kmod_bo *bo;
+   uint64_t start;
+   uint64_t size;
+   enum pan_kmod_bo_sync_type type;
 };
 
 /* Device object. */
@@ -455,6 +524,9 @@ struct pan_kmod_dev {
 
    /* KMD backing this device. */
    struct pan_kmod_driver driver;
+
+   /* KMD-agnostic device properties. */
+   struct pan_kmod_dev_props props;
 
    /* kmod backend ops assigned at device creation. */
    const struct pan_kmod_ops *ops;
@@ -470,6 +542,13 @@ struct pan_kmod_dev {
       simple_mtx_t lock;
    } handle_to_bo;
 
+   /* Pending BO syncs. */
+   struct {
+      bool user_cache_ops_pending;
+      struct util_dynarray array;
+      simple_mtx_t lock;
+   } pending_bo_syncs;
+
    /* Allocator attached to the device. */
    const struct pan_kmod_allocator *allocator;
 
@@ -477,18 +556,17 @@ struct pan_kmod_dev {
    void *user_priv;
 };
 
+#define pan_kmod_ioctl(fd, op, arg)                                          \
+   ({                                                                        \
+      PAN_TRACE_SCOPE(PAN_TRACE_LIB_KMOD, "pan_kmod_ioctl op=" #op);         \
+      drmIoctl(fd, op, arg);                                                 \
+   })
+
 struct pan_kmod_dev *
 pan_kmod_dev_create(int fd, uint32_t flags,
                     const struct pan_kmod_allocator *allocator);
 
 void pan_kmod_dev_destroy(struct pan_kmod_dev *dev);
-
-static inline void
-pan_kmod_dev_query_props(const struct pan_kmod_dev *dev,
-                         struct pan_kmod_dev_props *props)
-{
-   dev->ops->dev_query_props(dev, props);
-}
 
 static inline struct pan_kmod_va_range
 pan_kmod_dev_query_user_va_range(const struct pan_kmod_dev *dev)
@@ -496,12 +574,9 @@ pan_kmod_dev_query_user_va_range(const struct pan_kmod_dev *dev)
    if (dev->ops->dev_query_user_va_range)
       return dev->ops->dev_query_user_va_range(dev);
 
-   struct pan_kmod_dev_props props;
-
-   pan_kmod_dev_query_props(dev, &props);
    return (struct pan_kmod_va_range){
       .start = 0,
-      .size = 1ull << MMU_FEATURES_VA_BITS(props.mmu_features),
+      .size = 1ull << MMU_FEATURES_VA_BITS(dev->props.mmu_features),
    };
 }
 
@@ -519,7 +594,7 @@ pan_kmod_dev_get_user_priv(struct pan_kmod_dev *dev)
 
 struct pan_kmod_bo *pan_kmod_bo_alloc(struct pan_kmod_dev *dev,
                                       struct pan_kmod_vm *exclusive_vm,
-                                      size_t size, uint32_t flags);
+                                      uint64_t size, uint32_t flags);
 
 static inline struct pan_kmod_bo *
 pan_kmod_bo_get(struct pan_kmod_bo *bo)
@@ -557,15 +632,17 @@ pan_kmod_bo_get_user_priv(const struct pan_kmod_bo *bo)
    return bo->user_priv;
 }
 
-struct pan_kmod_bo *pan_kmod_bo_import(struct pan_kmod_dev *dev, int fd,
-                                       uint32_t flags);
+struct pan_kmod_bo *pan_kmod_bo_import(struct pan_kmod_dev *dev, int fd);
 
 static inline int
 pan_kmod_bo_export(struct pan_kmod_bo *bo)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_LIB_KMOD);
+
    int fd;
 
-   if (drmPrimeHandleToFD(bo->dev->fd, bo->handle, DRM_CLOEXEC, &fd)) {
+   if (drmPrimeHandleToFD(bo->dev->fd, bo->handle, DRM_CLOEXEC | DRM_RDWR,
+                          &fd)) {
       mesa_loge("drmPrimeHandleToFD() failed (err=%d)", errno);
       return -1;
    }
@@ -583,6 +660,8 @@ static inline bool
 pan_kmod_bo_wait(struct pan_kmod_bo *bo, int64_t timeout_ns,
                  bool for_read_only_access)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_LIB_KMOD);
+
    return bo->dev->ops->bo_wait(bo, timeout_ns, for_read_only_access);
 }
 
@@ -603,27 +682,52 @@ pan_kmod_bo_make_unevictable(struct pan_kmod_bo *bo)
 }
 
 static inline void *
-pan_kmod_bo_mmap(struct pan_kmod_bo *bo, off_t bo_offset, size_t size, int prot,
-                 int flags, void *host_addr)
+pan_kmod_bo_mmap(struct pan_kmod_bo *bo, int prot, int flags, void *host_addr)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_LIB_KMOD);
+
    off_t mmap_offset;
 
-   if (bo_offset + size > bo->size)
+   /* Don't bother trying an mmap() if it's not allowed. */
+   if (bo->flags & PAN_KMOD_BO_FLAG_NO_MMAP)
       return MAP_FAILED;
 
    mmap_offset = bo->dev->ops->bo_get_mmap_offset(bo);
    if (mmap_offset < 0)
       return MAP_FAILED;
 
-   host_addr = os_mmap(host_addr, size, prot, flags, bo->dev->fd,
-                       mmap_offset + bo_offset);
+   host_addr =
+      os_mmap(host_addr, bo->size, prot, flags, bo->dev->fd, mmap_offset);
    if (host_addr == MAP_FAILED)
-      mesa_loge("mmap() failed (err=%d)", errno);
+      mesa_loge("mmap(..., size=%" PRIu64 ", prot=%d, flags=0x%x) failed: %s",
+                bo->size, prot, flags, strerror(errno));
 
    return host_addr;
 }
 
-static inline size_t
+static inline bool
+pan_kmod_can_sync_bo_map_from_userland(struct pan_kmod_dev *dev)
+{
+   return util_has_cache_ops() &&
+          !(dev->flags & PAN_KMOD_DEV_FLAG_MMAP_SYNC_THROUGH_KERNEL);
+}
+
+void pan_kmod_queue_bo_map_sync(struct pan_kmod_bo *bo, uint64_t bo_offset,
+                                void *cpu_ptr, uint64_t range,
+                                enum pan_kmod_bo_sync_type type);
+
+void pan_kmod_flush_bo_map_syncs(struct pan_kmod_dev *dev);
+
+static inline void
+pan_kmod_set_bo_label(struct pan_kmod_dev *dev, struct pan_kmod_bo *bo, const char *label)
+{
+   PAN_TRACE_FUNC(PAN_TRACE_LIB_KMOD);
+
+   if (dev->ops->bo_set_label)
+      dev->ops->bo_set_label(dev, bo, label);
+}
+
+static inline uint64_t
 pan_kmod_bo_size(struct pan_kmod_bo *bo)
 {
    return bo->size;
@@ -639,12 +743,16 @@ static inline struct pan_kmod_vm *
 pan_kmod_vm_create(struct pan_kmod_dev *dev, uint32_t flags, uint64_t va_start,
                    uint64_t va_range)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_LIB_KMOD);
+
    return dev->ops->vm_create(dev, flags, va_start, va_range);
 }
 
 static inline void
 pan_kmod_vm_destroy(struct pan_kmod_vm *vm)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_LIB_KMOD);
+
    vm->dev->ops->vm_destroy(vm);
 }
 
@@ -652,6 +760,8 @@ static inline int
 pan_kmod_vm_bind(struct pan_kmod_vm *vm, enum pan_kmod_vm_op_mode mode,
                  struct pan_kmod_vm_op *ops, uint32_t op_count)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_LIB_KMOD);
+
    return vm->dev->ops->vm_bind(vm, mode, ops, op_count);
 }
 
@@ -674,6 +784,13 @@ static inline uint64_t
 pan_kmod_query_timestamp(const struct pan_kmod_dev *dev)
 {
    return dev->ops->query_timestamp(dev);
+}
+
+static inline uint64_t
+pan_kmod_timestamp_cycles_to_ns(const struct pan_kmod_dev *dev,
+                                uint64_t cycles)
+{
+   return (uint64_t)(dev->props.timestamp_cycles_to_ns_factor * cycles);
 }
 
 #if defined(__cplusplus)

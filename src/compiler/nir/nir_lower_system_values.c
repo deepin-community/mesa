@@ -142,7 +142,7 @@ lower_system_value_instr(nir_builder *b, nir_instr *instr, void *_state)
          return nir_load_barycentric_coord_at_offset(b, 32, intrin->src[1].ssa,
                                                      .interp_mode = interp_mode);
       default:
-         unreachable("Bogus interpolateAt() intrinsic.");
+         UNREACHABLE("Bogus interpolateAt() intrinsic.");
       }
    }
 
@@ -193,15 +193,19 @@ lower_system_value_instr(nir_builder *b, nir_instr *instr, void *_state)
             break;
 
          default:
-            unreachable("unsupported system value array deref");
+            UNREACHABLE("unsupported system value array deref");
          }
       }
       nir_variable *var = deref->var;
 
       switch (var->data.location) {
       case SYSTEM_VALUE_INSTANCE_INDEX:
-         return nir_iadd(b, nir_load_instance_id(b),
-                         nir_load_base_instance(b));
+         if (b->shader->options->instance_id_includes_base_index) {
+            return nir_load_instance_id(b);
+         } else {
+            return nir_iadd(b, nir_load_instance_id(b),
+                            nir_load_base_instance(b));
+         }
 
       case SYSTEM_VALUE_GLOBAL_INVOCATION_ID: {
          return nir_iadd(b, nir_load_global_invocation_id(b, bit_size),
@@ -343,11 +347,14 @@ lower_system_value_instr(nir_builder *b, nir_instr *instr, void *_state)
 nir_def *
 nir_build_lowered_load_helper_invocation(nir_builder *b)
 {
-   nir_def *tmp;
-   tmp = nir_ishl(b, nir_imm_int(b, 1),
-                  nir_load_sample_id_no_per_sample(b));
-   tmp = nir_iand(b, nir_load_sample_mask_in(b), tmp);
-   return nir_inot(b, nir_i2b(b, tmp));
+   nir_def *mask = nir_load_sample_mask_in(b);
+
+   if (b->shader->info.fs.uses_sample_shading) {
+      nir_def *id = nir_load_sample_id(b);
+      mask = nir_iand(b, mask, nir_ishl(b, nir_imm_int(b, 1), id));
+   }
+
+   return nir_ieq_imm(b, mask, 0);
 }
 
 bool
@@ -527,9 +534,9 @@ lower_compute_system_value_instr(nir_builder *b,
              * this way we don't leave behind extra ALU instrs.
              */
 
-            uint32_t wg_size[3] = {b->shader->info.workgroup_size[0],
-                                   b->shader->info.workgroup_size[1],
-                                   b->shader->info.workgroup_size[2]};
+            uint32_t wg_size[3] = { b->shader->info.workgroup_size[0],
+                                    b->shader->info.workgroup_size[1],
+                                    b->shader->info.workgroup_size[2] };
             nir_def *val = try_lower_id_to_index_1d(b, local_index, wg_size);
             if (val)
                return val;
@@ -542,7 +549,7 @@ lower_compute_system_value_instr(nir_builder *b,
           b->shader->info.derivative_group == DERIVATIVE_GROUP_QUADS &&
           _mesa_set_search(state->lower_once_list, instr) == NULL) {
          nir_def *ids = nir_load_local_invocation_id(b);
-         _mesa_set_add(state->lower_once_list, ids->parent_instr);
+         _mesa_set_add(state->lower_once_list, nir_def_instr(ids));
 
          nir_def *x = nir_channel(b, ids, 0);
          nir_def *y = nir_channel(b, ids, 1);
@@ -569,48 +576,55 @@ lower_compute_system_value_instr(nir_builder *b,
           * That's the layout required by AMD hardware for derivatives to
           * work. Other hardware may work differently.
           *
-          * It's a classic tiling pattern that can be implemented by inserting
-          * bit y[0] between bits x[0] and x[1] like this:
+          * Map each thread to a 2x2 block by decomposing the linear index
+          * i = y * W + x into a block index and a within-block position:
           *
-          *    x[0],y[0],x[1],...x[last],y[1],...,y[last]
+          *    block     = i / 4
+          *    block_pos = i % 4     (0=(0,0) 1=(1,0) 2=(0,1) 3=(1,1))
           *
           * If the width is a power of two, use:
-          *    i = ((x & 1) | ((y & 1) << 1) | ((x & ~1) << 1)) | ((y & ~1) << logbase2(size_x))
+          *    block_x = block & ((W/2) - 1)
+          *    block_y = block >> (log2(W) - 1)
           *
           * If the width is not a power of two or the local size is variable, use:
-          *    i = ((x & 1) | ((y & 1) << 1) | ((x & ~1) << 1)) + ((y & ~1) * size_x)
+          *    block_x = block % (W/2)
+          *    block_y = block / (W/2)
+          *
+          * In both cases:
+          *    x' = block_x * 2 + (block_pos & 1)
+          *    y' = block_y * 2 + (block_pos >> 1)
           *
           * GL_NV_compute_shader_derivatives requires that the width and height
           * are a multiple of two, which is also a requirement for the second
           * expression to work.
-          *
-          * The 2D result is: (x,y) = (i % w, i / w)
           */
 
-         nir_def *one = nir_imm_int(b, 1);
-         nir_def *inv_one = nir_imm_int(b, ~1);
-         nir_def *x_bit0 = nir_iand(b, x, one);
-         nir_def *y_bit0 = nir_iand(b, y, one);
-         nir_def *x_bits_1n = nir_iand(b, x, inv_one);
-         nir_def *y_bits_1n = nir_iand(b, y, inv_one);
-         nir_def *bits_01 = nir_ior(b, x_bit0, nir_ishl(b, y_bit0, one));
-         nir_def *bits_01x = nir_ior(b, bits_01,
-                                     nir_ishl(b, x_bits_1n, one));
          nir_def *i;
 
          if (!b->shader->info.workgroup_size_variable &&
              util_is_power_of_two_nonzero(size_x)) {
-            nir_def *log2_size_x = nir_imm_int(b, util_logbase2(size_x));
-            i = nir_ior(b, bits_01x, nir_ishl(b, y_bits_1n, log2_size_x));
+            i = nir_ior(b, x, nir_ishl_imm(b, y, util_logbase2(size_x)));
          } else {
-            i = nir_iadd(b, bits_01x, nir_imul(b, y_bits_1n, size_x_imm));
+            i = nir_iadd(b, x, nir_imul(b, y, size_x_imm));
          }
 
-         /* This should be fast if size_x is an immediate or even a power
-          * of two.
-          */
-         x = nir_umod(b, i, size_x_imm);
-         y = nir_udiv(b, i, size_x_imm);
+         nir_def *block     = nir_ushr_imm(b, i, 2);
+         nir_def *block_pos = nir_iand_imm(b, i, 3);
+
+         nir_def *block_x, *block_y;
+         if (!b->shader->info.workgroup_size_variable &&
+             util_is_power_of_two_nonzero(size_x)) {
+            unsigned log2_half_size_x = util_logbase2(size_x) - 1;
+            block_x = nir_iand_imm(b, block, (size_x >> 1) - 1);
+            block_y = nir_ushr_imm(b, block, log2_half_size_x);
+         } else {
+            nir_def *half_size_x = nir_ushr_imm(b, size_x_imm, 1);
+            block_x = nir_umod(b, block, half_size_x);
+            block_y = nir_udiv(b, block, half_size_x);
+         }
+
+         x = nir_ior(b, nir_ishl_imm(b, block_x, 1), nir_iand_imm(b, block_pos, 1));
+         y = nir_ior(b, nir_ishl_imm(b, block_y, 1), nir_ushr_imm(b, block_pos, 1));
 
          return nir_vec3(b, x, y, z);
       }
@@ -682,17 +696,26 @@ lower_compute_system_value_instr(nir_builder *b,
       }
 
    case nir_intrinsic_load_global_invocation_id: {
-      if ((options && options->has_base_workgroup_id) ||
-          !b->shader->options->has_cs_global_id) {
+      if (!b->shader->options->has_cs_global_id) {
          nir_def *group_size = nir_load_workgroup_size(b);
          nir_def *group_id = nir_load_workgroup_id(b);
          nir_def *base_group_id = nir_load_base_workgroup_id(b, bit_size);
          nir_def *local_id = nir_load_local_invocation_id(b);
 
-         return nir_iadd(b, nir_imul(b, nir_iadd(b, nir_u2uN(b, group_id, bit_size),
-                                                 base_group_id),
-                                     nir_u2uN(b, group_size, bit_size)),
+         return nir_iadd(b, nir_imul(b, nir_iadd(b, nir_u2uN(b, group_id, bit_size), base_group_id), nir_u2uN(b, group_size, bit_size)),
                          nir_u2uN(b, local_id, bit_size));
+      } else if (options && options->has_base_workgroup_id &&
+                 _mesa_set_search(state->lower_once_list, instr) == NULL) {
+
+         nir_def *global_id = nir_load_global_invocation_id(b, bit_size);
+         nir_def *group_size = nir_u2uN(b, nir_load_workgroup_size(b), bit_size);
+         nir_def *base_group_id = nir_load_base_workgroup_id(b, bit_size);
+
+         _mesa_set_add(state->lower_once_list, nir_def_instr(global_id));
+
+         return nir_iadd(b, global_id, nir_imul(b, base_group_id, group_size));
+      } else if (options && options->global_id_is_32bit && bit_size > 32) {
+         return nir_u2uN(b, nir_load_global_invocation_id(b, 32), bit_size);
       } else {
          return NULL;
       }
@@ -787,7 +810,7 @@ bool
 nir_lower_compute_system_values(nir_shader *shader,
                                 const nir_lower_compute_system_values_options *options)
 {
-   if (!gl_shader_stage_uses_workgroup(shader->info.stage))
+   if (!mesa_shader_stage_uses_workgroup(shader->info.stage))
       return false;
 
    struct lower_sysval_state state;

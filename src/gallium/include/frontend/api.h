@@ -28,6 +28,7 @@
 #define _API_H_
 
 #include "util/format/u_formats.h"
+#include "util/mesa-blake3.h"
 
 struct st_context;
 
@@ -179,6 +180,7 @@ struct st_config_options
    bool allow_extra_pp_tokens;
    bool allow_glsl_extension_directive_midshader;
    bool allow_glsl_120_subset_in_110;
+   bool allow_glsl_embedded_structure_declarations;
    bool allow_glsl_builtin_const_expression;
    bool allow_glsl_relaxed_es;
    bool allow_glsl_builtin_variable_redeclaration;
@@ -194,19 +196,22 @@ struct st_config_options
    bool allow_draw_out_of_order;
    bool glthread_nop_check_framebuffer_status;
    bool ignore_map_unsynchronized;
+   bool zero_invalidated_buffers;
    bool ignore_discard_framebuffer;
    bool force_integer_tex_nearest;
-   bool force_gl_names_reuse;
    bool force_gl_map_buffer_synchronized;
+   bool force_gl_depth_component_type_int;
    bool transcode_etc;
    bool transcode_astc;
    bool allow_compressed_fallback;
+   char *force_explicit_uniform_loc_zero;
    char *force_gl_vendor;
    char *force_gl_renderer;
    char *mesa_extension_override;
    bool allow_multisampled_copyteximage;
+   bool vertex_program_default_out;
 
-   unsigned char config_options_sha1[20];
+   unsigned char config_options_blake3[BLAKE3_KEY_LEN];
 };
 
 struct pipe_frontend_screen;

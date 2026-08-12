@@ -30,7 +30,8 @@
 #include "nouveau/nvif/ioctl.h"
 #include "nouveau/nvif/cl0080.h"
 #include "drm-shim/drm_shim.h"
-#include "util//u_math.h"
+#include "util/os_misc.h"
+#include "util/u_math.h"
 
 #include "../../gallium/drivers/nouveau/nv_object.xml.h"
 bool drm_shim_driver_prefers_first_render_node = true;
@@ -173,6 +174,18 @@ nouveau_ioctl_get_param(int fd, unsigned long request, void *arg)
       return 0;
    case NOUVEAU_GETPARAM_GRAPH_UNITS:
       gp->value = 0x01000101;
+      return 0;
+   case NOUVEAU_GETPARAM_EXEC_PUSH_MAX:
+      gp->value = 510;
+      return 0;
+   case NOUVEAU_GETPARAM_VRAM_BAR_SIZE:
+      gp->value = 1L << 34;
+      return 0;
+   case NOUVEAU_GETPARAM_VRAM_USED:
+      gp->value = 4096;
+      return 0;
+   case NOUVEAU_GETPARAM_HAS_VMA_TILEMODE:
+      gp->value = 1;
       return 0;
    default:
       fprintf(stderr, "Unknown DRM_IOCTL_NOUVEAU_GETPARAM %llu\n",
@@ -409,12 +422,13 @@ static ioctl_fn_t driver_ioctls[] = {
    [DRM_NOUVEAU_VM_INIT] = nouveau_ioctl_noop,
    [DRM_NOUVEAU_VM_BIND] = nouveau_ioctl_noop,
    [DRM_NOUVEAU_EXEC] = nouveau_ioctl_noop,
+   [DRM_NOUVEAU_GET_ZCULL_INFO] = nouveau_ioctl_noop,
 };
 
 static void
 nouveau_driver_get_device_info(void)
 {
-   const char *env = getenv("NOUVEAU_CHIPSET");
+   const char *env = os_get_option("NOUVEAU_CHIPSET");
 
    if (!env) {
       device_info.chip_id = 0xf0;
@@ -439,7 +453,7 @@ drm_shim_driver_init(void)
    nouveau_driver_get_device_info();
 
    /* Ask userspace to consider all fences completed. */
-   setenv("NOUVEAU_DISABLE_FENCES", "true", true);
+   os_set_option("NOUVEAU_DISABLE_FENCES", "true", true);
 
    /* nothing looks at the pci id, so fix it to a GTX 780 */
    static const char uevent_content[] =

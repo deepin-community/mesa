@@ -519,7 +519,7 @@ static struct rnndelem *trydelem(struct rnndb *db, char *file, xmlNode *node) {
 					rnn_err(db, "%s:%d: invalid enum name \"%s\"\n", file, node->line, enumname);
 				}
 			} else if (!strcmp(attr->name, "usage")) {
-				// no-op
+				res->usage = strdup(getattrib(db, file, node->line, attr));
 			} else {
 				rnn_err(db, "%s:%d: wrong attribute \"%s\" for %s\n", file, node->line, attr->name, node->name);
 			}
@@ -589,7 +589,7 @@ static struct rnndelem *trydelem(struct rnndb *db, char *file, xmlNode *node) {
 			else
 				fprintf (stderr, "%s:%d: wrong access type \"%s\" for register\n", file, node->line, str);
 		} else if (!strcmp(attr->name, "usage")) {
-			// no-op
+			res->usage = strdup(getattrib(db, file, node->line, attr));
 		} else if (!trytypeattr(db, file, node, attr, &res->typeinfo)) {
 			rnn_err(db, "%s:%d: wrong attribute \"%s\" for register\n", file, node->line, attr->name);
 		}
@@ -712,6 +712,8 @@ static void parsedomain(struct rnndb *db, char *file, xmlNode *node) {
 		cur->varinfo.varsetstr = varsetstr;
 		cur->varinfo.variantsstr = variantsstr;
 		cur->file = file;
+		cur->maxoff = 0;
+		cur->minoff = ~0;
 		ADDARRAY(db->domains, cur);
 	}
 	xmlNode *chain = node->children;
@@ -720,6 +722,8 @@ static void parsedomain(struct rnndb *db, char *file, xmlNode *node) {
 		if (chain->type != XML_ELEMENT_NODE) {
 		} else if ((delem = trydelem(db, file, chain))) {
 			ADDARRAY(cur->subelems, delem);
+			cur->minoff = MIN2(cur->minoff, delem->offset);
+			cur->maxoff = MAX2(cur->maxoff, delem->offset + (delem->length * delem->stride));
 		} else if (!trytop(db, file, chain) && !trydoc(db, file, chain)) {
 			rnn_err(db, "%s:%d: wrong tag in domain: <%s>\n", file, chain->line, chain->name);
 		}
@@ -838,7 +842,7 @@ static int trytop (struct rnndb *db, char *file, xmlNode *node) {
 
 static char * find_file(const char *file_orig)
 {
-	const char *rnn_path = getenv("RNN_PATH");
+	const char *rnn_path = os_get_option("RNN_PATH");
 	char *fname;
 
 	if (!rnn_path)
@@ -968,7 +972,12 @@ static void copytypeinfo (struct rnntypeinfo *dst, struct rnntypeinfo *src, char
 	dst->min = src->min;
 	dst->max = src->max;
 	dst->align = src->align;
+	dst->radix = src->radix;
 	dst->addvariant = src->addvariant;
+	dst->minvalid = src->minvalid;
+	dst->maxvalid = src->maxvalid;
+	dst->alignvalid = src->alignvalid;
+	dst->radixvalid = src->radixvalid;
 	for (i = 0; i < src->valsnum; i++)
 		ADDARRAY(dst->vals, copyvalue(src->vals[i], file));
 	for (i = 0; i < src->bitfieldsnum; i++)

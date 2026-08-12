@@ -1,25 +1,6 @@
 /*
  * © Copyright 2017-2018 Alyssa Rosenzweig
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- *
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef __PAN_POOL_H__
@@ -30,13 +11,21 @@
 
 #include "util/u_dynarray.h"
 
-struct panfrost_ptr {
+struct pan_ptr {
    /* CPU address */
    void *cpu;
 
    /* GPU address */
-   mali_ptr gpu;
+   uint64_t gpu;
 };
+
+static inline struct pan_ptr
+pan_ptr_offset(struct pan_ptr ptr, int64_t offset)
+{
+   ptr.cpu = ((char *)ptr.cpu) + offset;
+   ptr.gpu += offset;
+   return ptr;
+}
 
 /* Represents grow-only memory. */
 
@@ -54,27 +43,30 @@ pan_pool_init(struct pan_pool *pool, size_t slab_size)
 /* Represents a fat pointer for GPU-mapped memory, returned from the transient
  * allocator and not used for much else */
 
-struct panfrost_ptr pan_pool_alloc_aligned(struct pan_pool *pool, size_t sz,
-                                           unsigned alignment);
+struct pan_ptr pan_pool_alloc_aligned(struct pan_pool *pool, size_t sz,
+                                      unsigned alignment);
 
 #define PAN_POOL_ALLOCATOR(pool_subclass, alloc_func)                          \
-   struct panfrost_ptr pan_pool_alloc_aligned(struct pan_pool *p, size_t sz,   \
-                                              unsigned alignment)              \
+   struct pan_ptr pan_pool_alloc_aligned(struct pan_pool *p, size_t sz,        \
+                                         unsigned alignment)                   \
    {                                                                           \
       pool_subclass *pool = container_of(p, pool_subclass, base);              \
       return alloc_func(pool, sz, alignment);                                  \
    }
 
-static inline mali_ptr
+static inline uint64_t
 pan_pool_upload_aligned(struct pan_pool *pool, const void *data, size_t sz,
                         unsigned alignment)
 {
-   struct panfrost_ptr transfer = pan_pool_alloc_aligned(pool, sz, alignment);
-   memcpy(transfer.cpu, data, sz);
+   struct pan_ptr transfer = pan_pool_alloc_aligned(pool, sz, alignment);
+
+   if (transfer.cpu)
+      memcpy(transfer.cpu, data, sz);
+
    return transfer.gpu;
 }
 
-static inline mali_ptr
+static inline uint64_t
 pan_pool_upload(struct pan_pool *pool, const void *data, size_t sz)
 {
    return pan_pool_upload_aligned(pool, data, sz, sz);
@@ -99,7 +91,7 @@ struct pan_desc_alloc_info {
       __VA_ARGS__, {0},                                                        \
    }
 
-static inline struct panfrost_ptr
+static inline struct pan_ptr
 pan_pool_alloc_descs(struct pan_pool *pool,
                      const struct pan_desc_alloc_info *descs)
 {

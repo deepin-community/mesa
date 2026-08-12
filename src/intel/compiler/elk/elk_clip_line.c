@@ -1,36 +1,13 @@
 /*
- Copyright (C) Intel Corp.  2006.  All Rights Reserved.
- Intel funded Tungsten Graphics to
- develop this 3D driver.
-
- Permission is hereby granted, free of charge, to any person obtaining
- a copy of this software and associated documentation files (the
- "Software"), to deal in the Software without restriction, including
- without limitation the rights to use, copy, modify, merge, publish,
- distribute, sublicense, and/or sell copies of the Software, and to
- permit persons to whom the Software is furnished to do so, subject to
- the following conditions:
-
- The above copyright notice and this permission notice (including the
- next paragraph) shall be included in all copies or substantial
- portions of the Software.
-
- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
- IN NO EVENT SHALL THE COPYRIGHT OWNER(S) AND/OR ITS SUPPLIERS BE
- LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
- WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
- **********************************************************************/
- /*
-  * Authors:
-  *   Keith Whitwell <keithw@vmware.com>
-  */
+ * Copyright © 2006 Intel Corporation
+ * SPDX-License-Identifier: MIT
+ *
+ * Intel funded Tungsten Graphics to develop this 3D driver.
+ * File originally authored by: Keith Whitwell <keithw@vmware.com>
+ */
 
 #include "elk_clip.h"
-#include "elk_prim.h"
+#include "compiler/intel_prim.h"
 
 static void elk_clip_line_alloc_regs( struct elk_clip_compile *c )
 {
@@ -143,7 +120,7 @@ static void clip_and_emit_line( struct elk_clip_compile *c )
    elk_clip_init_clipmask(c);
 
    /* -ve rhw workaround */
-   if (p->devinfo->has_negative_rhw_bug) {
+   if (c->has_negative_rhw_bug) {
       elk_AND(p, elk_null_reg(), get_element_ud(c->reg.R0, 2),
               elk_imm_ud(1<<20));
       elk_inst_set_cond_modifier(p->devinfo, elk_last_inst, ELK_CONDITIONAL_NZ);
@@ -201,7 +178,7 @@ static void clip_and_emit_line( struct elk_clip_compile *c )
               * Both can be negative on GM965/G965 due to RHW workaround
               * if so, this object should be rejected.
               */
-             if (p->devinfo->has_negative_rhw_bug) {
+             if (c->has_negative_rhw_bug) {
                  elk_CMP(p, vec1(elk_null_reg()), ELK_CONDITIONAL_LE, c->reg.dp0, elk_imm_f(0.0));
                  elk_IF(p, ELK_EXECUTE_1);
                  {
@@ -227,7 +204,7 @@ static void clip_and_emit_line( struct elk_clip_compile *c )
 
              /* If both are positive, do nothing */
              /* Only on GM965/G965 */
-             if (p->devinfo->has_negative_rhw_bug) {
+             if (c->has_negative_rhw_bug) {
                  elk_CMP(p, vec1(elk_null_reg()), ELK_CONDITIONAL_L, c->reg.dp0, elk_imm_f(0.0));
                  elk_IF(p, ELK_EXECUTE_1);
              }
@@ -243,7 +220,7 @@ static void clip_and_emit_line( struct elk_clip_compile *c )
                                            ELK_PREDICATE_NORMAL);
              }
 
-             if (p->devinfo->has_negative_rhw_bug) {
+             if (c->has_negative_rhw_bug) {
                  elk_ENDIF(p);
              }
          }

@@ -33,14 +33,14 @@ d3d12_video_encoder_calculate_metadata_resolved_buffer_size_av1(uint32_t maxSlic
 
 bool
 d3d12_video_encoder_update_current_encoder_config_state_av1(struct d3d12_video_encoder *pD3D12Enc,
-                                                            D3D12_VIDEO_SAMPLE srcTextureDesc,
+                                                            const D3D12_VIDEO_SAMPLE& srcTextureDesc,
                                                             struct pipe_picture_desc *picture);
 
 void
 d3d12_video_encoder_update_current_frame_pic_params_info_av1(struct d3d12_video_encoder *pD3D12Enc,
                                                              struct pipe_video_buffer *srcTexture,
                                                              struct pipe_picture_desc *picture,
-                                                             D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA &picParams,
+                                                             D3D12_VIDEO_ENCODER_AV1_PICTURE_CONTROL_CODEC_DATA* pAV1PicData,
                                                              bool &bUsedAsReference);
 
 unsigned

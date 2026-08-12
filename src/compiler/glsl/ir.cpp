@@ -22,6 +22,7 @@
  */
 #include <string.h>
 #include "ir.h"
+#include "util/compiler.h"
 #include "util/half_float.h"
 #include "util/bitscan.h"
 #include "compiler/glsl_types.h"
@@ -40,11 +41,6 @@ bool ir_rvalue::is_zero() const
 }
 
 bool ir_rvalue::is_one() const
-{
-   return false;
-}
-
-bool ir_rvalue::is_negative_one() const
 {
    return false;
 }
@@ -71,7 +67,6 @@ update_rhs_swizzle(ir_swizzle_mask &m, unsigned from, unsigned to)
 void
 ir_assignment::set_lhs(ir_rvalue *lhs)
 {
-   void *mem_ctx = this;
    bool swizzled = false;
 
    while (lhs != NULL) {
@@ -102,7 +97,7 @@ ir_assignment::set_lhs(ir_rvalue *lhs)
       this->write_mask = write_mask;
       lhs = swiz->val;
 
-      this->rhs = new(mem_ctx) ir_swizzle(this->rhs, rhs_swiz);
+      this->rhs = new(lhs->node_linalloc) ir_swizzle(this->rhs, rhs_swiz);
       swizzled = true;
    }
 
@@ -117,7 +112,7 @@ ir_assignment::set_lhs(ir_rvalue *lhs)
 	    update_rhs_swizzle(rhs_swiz, i, rhs_chan++);
       }
       rhs_swiz.num_components = rhs_chan;
-      this->rhs = new(mem_ctx) ir_swizzle(this->rhs, rhs_swiz);
+      this->rhs = new(lhs->node_linalloc) ir_swizzle(this->rhs, rhs_swiz);
    }
 
    assert((lhs == NULL) || lhs->as_dereference());
@@ -565,7 +560,7 @@ ir_expression::ir_expression(int op, ir_rvalue *op0, ir_rvalue *op1)
          base = GLSL_TYPE_UINT64;
          break;
       default:
-         unreachable("Invalid base type.");
+         UNREACHABLE("Invalid base type.");
       }
 
       this->type = glsl_simple_type(base, op0->type->vector_elements, 1);
@@ -638,7 +633,7 @@ ir_expression::get_num_operands(ir_expression_operation op)
    if (op <= ir_last_quadop)
       return 4;
 
-   unreachable("Could not calculate number of operands");
+   UNREACHABLE("Could not calculate number of operands");
 }
 
 #include "ir_expression_operation_strings.h"
@@ -657,16 +652,6 @@ depth_layout_string(ir_depth_layout layout)
       assert(0);
       return "";
    }
-}
-
-ir_expression_operation
-ir_expression::get_operator(const char *str)
-{
-   for (int op = 0; op <= int(ir_last_opcode); op++) {
-      if (strcmp(str, ir_expression_operation_strings[op]) == 0)
-	 return (ir_expression_operation) op;
-   }
-   return (ir_expression_operation) -1;
 }
 
 ir_variable *
@@ -877,7 +862,7 @@ ir_constant::ir_constant(const ir_constant *c, unsigned i)
    }
 }
 
-ir_constant::ir_constant(const struct glsl_type *type, exec_list *value_list)
+ir_constant::ir_constant(const struct glsl_type *type, ir_exec_list *value_list)
    : ir_rvalue(ir_type_constant)
 {
    this->const_elements = NULL;
@@ -892,9 +877,9 @@ ir_constant::ir_constant(const struct glsl_type *type, exec_list *value_list)
     * to the list in the ir_constant.
     */
    if (glsl_type_is_array(type) || glsl_type_is_struct(type)) {
-      this->const_elements = ralloc_array(this, ir_constant *, type->length);
+      this->const_elements = linear_alloc_array(this->node_linalloc, ir_constant *, type->length);
       unsigned i = 0;
-      foreach_in_list(ir_constant, value, value_list) {
+      ir_foreach_in_list(ir_constant, value, value_list) {
 	 assert(value->as_constant() != NULL);
 
 	 this->const_elements[i++] = value;
@@ -1063,28 +1048,28 @@ ir_constant::ir_constant(const struct glsl_type *type, exec_list *value_list)
 }
 
 ir_constant *
-ir_constant::zero(void *mem_ctx, const glsl_type *type)
+ir_constant::zero(linear_ctx *linalloc, const glsl_type *type)
 {
    assert(glsl_type_is_scalar(type) || glsl_type_is_vector(type) || glsl_type_is_matrix(type)
 	  || glsl_type_is_struct(type) || glsl_type_is_array(type));
 
-   ir_constant *c = new(mem_ctx) ir_constant;
+   ir_constant *c = new(linalloc) ir_constant;
    c->type = type;
    memset(&c->value, 0, sizeof(c->value));
 
    if (glsl_type_is_array(type)) {
-      c->const_elements = ralloc_array(c, ir_constant *, type->length);
+      c->const_elements = linear_alloc_array(linalloc, ir_constant *, type->length);
 
       for (unsigned i = 0; i < type->length; i++)
-	 c->const_elements[i] = ir_constant::zero(c, type->fields.array);
+	 c->const_elements[i] = ir_constant::zero(linalloc, type->fields.array);
    }
 
    if (glsl_type_is_struct(type)) {
-      c->const_elements = ralloc_array(c, ir_constant *, type->length);
+      c->const_elements = linear_alloc_array(linalloc, ir_constant *, type->length);
 
       for (unsigned i = 0; i < type->length; i++) {
          c->const_elements[i] =
-            ir_constant::zero(mem_ctx, type->fields.structure[i].type);
+            ir_constant::zero(linalloc, type->fields.structure[i].type);
       }
    }
 
@@ -1358,7 +1343,7 @@ ir_constant::get_record_field(int idx)
 }
 
 void
-ir_constant::copy_offset(ir_constant *src, int offset)
+ir_constant::copy_offset(linear_ctx *linalloc, ir_constant *src, int offset)
 {
    switch (this->type->base_type) {
    case GLSL_TYPE_UINT16:
@@ -1420,7 +1405,7 @@ ir_constant::copy_offset(ir_constant *src, int offset)
    case GLSL_TYPE_ARRAY: {
       assert (src->type == this->type);
       for (unsigned i = 0; i < this->type->length; i++) {
-	 this->const_elements[i] = src->const_elements[i]->clone(this, NULL);
+	 this->const_elements[i] = src->const_elements[i]->clone(linalloc, NULL);
       }
       break;
    }
@@ -1633,21 +1618,6 @@ ir_constant::is_one() const
    return is_value(1.0, 1);
 }
 
-bool
-ir_constant::is_negative_one() const
-{
-   return is_value(-1.0, -1);
-}
-
-bool
-ir_constant::is_uint16_constant() const
-{
-   if (!glsl_type_is_integer_32(type))
-      return false;
-
-   return value.u[0] < (1 << 16);
-}
-
 ir_loop::ir_loop()
    : ir_instruction(ir_type_loop)
 {
@@ -1677,10 +1647,9 @@ ir_dereference_array::ir_dereference_array(ir_variable *var,
 					   ir_rvalue *array_index)
    : ir_dereference(ir_type_dereference_array)
 {
-   void *ctx = ralloc_parent(var);
 
    this->array_index = array_index;
-   this->set_array(new(ctx) ir_dereference_variable(var));
+   this->set_array(new(var->node_linalloc) ir_dereference_variable(var));
 }
 
 
@@ -1719,9 +1688,7 @@ ir_dereference_record::ir_dereference_record(ir_variable *var,
 					     const char *field)
    : ir_dereference(ir_type_dereference_record)
 {
-   void *ctx = ralloc_parent(var);
-
-   this->record = new(ctx) ir_dereference_variable(var);
+   this->record = new(var->node_linalloc) ir_dereference_variable(var);
    this->type = glsl_get_field_type(this->record->type, field);
    this->field_idx = glsl_get_field_index(this->record->type, field);
 }
@@ -1770,18 +1737,6 @@ const char *ir_texture::opcode_string()
    assert((unsigned int) op < ARRAY_SIZE(tex_opcode_strs));
    return tex_opcode_strs[op];
 }
-
-ir_texture_opcode
-ir_texture::get_opcode(const char *str)
-{
-   const int count = sizeof(tex_opcode_strs) / sizeof(tex_opcode_strs[0]);
-   for (int op = 0; op < count; op++) {
-      if (strcmp(str, tex_opcode_strs[op]) == 0)
-	 return (ir_texture_opcode) op;
-   }
-   return (ir_texture_opcode) -1;
-}
-
 
 void
 ir_texture::set_sampler(ir_dereference *sampler, const glsl_type *type)
@@ -1835,18 +1790,21 @@ ir_swizzle::init_mask(const unsigned *comp, unsigned count)
       dup_mask |= (1U << comp[3])
 	 & ((1U << comp[0]) | (1U << comp[1]) | (1U << comp[2]));
       this->mask.w = comp[3];
+      FALLTHROUGH;
 
    case 3:
       assert(comp[2] <= 3);
       dup_mask |= (1U << comp[2])
 	 & ((1U << comp[0]) | (1U << comp[1]));
       this->mask.z = comp[2];
+      FALLTHROUGH;
 
    case 2:
       assert(comp[1] <= 3);
       dup_mask |= (1U << comp[1])
 	 & ((1U << comp[0]));
       this->mask.y = comp[1];
+      FALLTHROUGH;
 
    case 1:
       assert(comp[0] <= 3);
@@ -1891,8 +1849,6 @@ ir_swizzle::ir_swizzle(ir_rvalue *val, ir_swizzle_mask mask)
 ir_swizzle *
 ir_swizzle::create(ir_rvalue *val, const char *str, unsigned vector_length)
 {
-   void *ctx = ralloc_parent(val);
-
    /* For each possible swizzle character, this table encodes the value in
     * \c idx_map that represents the 0th element of the vector.  For invalid
     * swizzle characters (e.g., 'k'), a special value is used that will allow
@@ -1957,7 +1913,7 @@ ir_swizzle::create(ir_rvalue *val, const char *str, unsigned vector_length)
    if (str[i] != '\0')
 	 return NULL;
 
-   return new(ctx) ir_swizzle(val, swiz_idx[0], swiz_idx[1], swiz_idx[2],
+   return new(val->node_linalloc) ir_swizzle(val, swiz_idx[0], swiz_idx[1], swiz_idx[2],
 			      swiz_idx[3], i);
 }
 
@@ -2004,7 +1960,7 @@ ir_variable::ir_variable(const struct glsl_type *type, const char *name,
       strcpy(this->name_storage, name ? name : "");
       this->name = this->name_storage;
    } else {
-      this->name = ralloc_strdup(this, name);
+      this->name = linear_strdup(node_linalloc, name);
    }
 
    this->u.max_ifc_array_access = NULL;
@@ -2064,6 +2020,7 @@ ir_variable::ir_variable(const struct glsl_type *type, const char *name,
    this->data.xfb_buffer = -1;
    this->data.xfb_stride = -1;
    this->data.implicit_conversion_prohibited = false;
+   this->data.per_primitive = false;
 
    this->interface_type = NULL;
 
@@ -2093,13 +2050,6 @@ ir_variable::enable_extension_warning(const char *extension)
 
    assert(!"Should not get here.");
    this->data.warn_extension_index = 0;
-}
-
-const char *
-ir_variable::get_extension_warning() const
-{
-   return this->data.warn_extension_index == 0
-      ? NULL : warn_extension_table[this->data.warn_extension_index];
 }
 
 ir_function_signature::ir_function_signature(const glsl_type *return_type,
@@ -2153,10 +2103,10 @@ modes_match(unsigned a, unsigned b)
 
 
 const char *
-ir_function_signature::qualifiers_match(exec_list *params)
+ir_function_signature::qualifiers_match(ir_exec_list *params)
 {
    /* check that the qualifiers match. */
-   foreach_two_lists(a_node, &this->parameters, b_node, params) {
+   ir_foreach_two_lists(a_node, &this->parameters, b_node, params) {
       ir_variable *a = (ir_variable *) a_node;
       ir_variable *b = (ir_variable *) b_node;
 
@@ -2166,6 +2116,7 @@ ir_function_signature::qualifiers_match(exec_list *params)
 	  a->data.centroid != b->data.centroid ||
           a->data.sample != b->data.sample ||
           a->data.patch != b->data.patch ||
+          a->data.per_primitive != b->data.per_primitive ||
           a->data.memory_read_only != b->data.memory_read_only ||
           a->data.memory_write_only != b->data.memory_write_only ||
           a->data.memory_coherent != b->data.memory_coherent ||
@@ -2181,7 +2132,7 @@ ir_function_signature::qualifiers_match(exec_list *params)
 
 
 void
-ir_function_signature::replace_parameters(exec_list *new_params)
+ir_function_signature::replace_parameters(ir_exec_list *new_params)
 {
    /* Destroy all of the previous parameter information.  If the previous
     * parameter information comes from the function prototype, it may either
@@ -2195,14 +2146,14 @@ ir_function::ir_function(const char *name)
    : ir_instruction(ir_type_function)
 {
    this->subroutine_index = -1;
-   this->name = ralloc_strdup(this, name);
+   this->name = linear_strdup(this->node_linalloc, name);
 }
 
 
 bool
 ir_function::has_user_signature()
 {
-   foreach_in_list(ir_function_signature, sig, &this->signatures) {
+   ir_foreach_in_list(ir_function_signature, sig, &this->signatures) {
       if (!sig->is_builtin())
 	 return true;
    }
@@ -2211,9 +2162,9 @@ ir_function::has_user_signature()
 
 
 ir_rvalue *
-ir_rvalue::error_value(void *mem_ctx)
+ir_rvalue::error_value(linear_ctx *linalloc)
 {
-   ir_rvalue *v = new(mem_ctx) ir_rvalue(ir_type_error);
+   ir_rvalue *v = new(linalloc) ir_rvalue(ir_type_error);
 
    v->type = &glsl_type_builtin_error;
    return v;
@@ -2221,56 +2172,18 @@ ir_rvalue::error_value(void *mem_ctx)
 
 
 void
-visit_exec_list(exec_list *list, ir_visitor *visitor)
+visit_exec_list(ir_exec_list *list, ir_visitor *visitor)
 {
-   foreach_in_list(ir_instruction, node, list) {
+   ir_foreach_in_list(ir_instruction, node, list) {
       node->accept(visitor);
    }
 }
 
 void
-visit_exec_list_safe(exec_list *list, ir_visitor *visitor)
+visit_exec_list_safe(ir_exec_list *list, ir_visitor *visitor)
 {
-   foreach_in_list_safe(ir_instruction, node, list) {
+   ir_foreach_in_list_safe(ir_instruction, node, list) {
       node->accept(visitor);
-   }
-}
-
-
-static void
-steal_memory(ir_instruction *ir, void *new_ctx)
-{
-   ir_variable *var = ir->as_variable();
-   ir_function *fn = ir->as_function();
-   ir_constant *constant = ir->as_constant();
-   if (var != NULL && var->constant_value != NULL)
-      steal_memory(var->constant_value, ir);
-
-   if (var != NULL && var->constant_initializer != NULL)
-      steal_memory(var->constant_initializer, ir);
-
-   if (fn != NULL && fn->subroutine_types)
-      ralloc_steal(new_ctx, fn->subroutine_types);
-
-   /* The components of aggregate constants are not visited by the normal
-    * visitor, so steal their values by hand.
-    */
-   if (constant != NULL &&
-       (glsl_type_is_array(constant->type) || glsl_type_is_struct(constant->type))) {
-      for (unsigned int i = 0; i < constant->type->length; i++) {
-         steal_memory(constant->const_elements[i], ir);
-      }
-   }
-
-   ralloc_steal(new_ctx, ir);
-}
-
-
-void
-reparent_ir(exec_list *list, void *mem_ctx)
-{
-   foreach_in_list(ir_instruction, node, list) {
-      visit_tree(node, steal_memory, mem_ctx);
    }
 }
 

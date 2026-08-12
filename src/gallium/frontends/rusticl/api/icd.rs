@@ -1,3 +1,6 @@
+// Copyright 2020 Red Hat.
+// SPDX-License-Identifier: MIT
+
 #![allow(non_snake_case)]
 
 use crate::api::context::*;
@@ -9,8 +12,10 @@ use crate::api::platform;
 use crate::api::platform::*;
 use crate::api::program::*;
 use crate::api::queue::*;
+use crate::api::semaphore::*;
 use crate::api::types::*;
 use crate::api::util::*;
+use crate::core::platform::*;
 
 use mesa_rust_util::ptr::*;
 use rusticl_opencl_gen::*;
@@ -18,11 +23,63 @@ use rusticl_opencl_gen::*;
 use std::ffi::c_char;
 use std::ffi::c_void;
 use std::ffi::CStr;
+use std::mem;
 use std::ptr;
 use std::sync::Arc;
 
-pub static DISPATCH: cl_icd_dispatch = cl_icd_dispatch {
-    clGetPlatformIDs: Some(clGetPlatformIDs),
+// somehow bindgen ignores those
+#[cfg(target_pointer_width = "32")]
+const CL_ICD2_TAG_KHR: isize = 0x434C3331;
+
+#[cfg(target_pointer_width = "64")]
+const CL_ICD2_TAG_KHR: isize = 0x4F50454E434C3331;
+
+const fn cl_icd_dispatch_default() -> cl_icd_dispatch {
+    const ELEMS: usize = size_of::<cl_icd_dispatch>() / size_of::<Option<fn()>>();
+
+    // SAFETY: cl_icd_dispatch is a list of function pointers and we set them all to None
+    unsafe { mem::transmute([None::<fn()>; ELEMS]) }
+}
+
+macro_rules! cl_dispatch {
+    ([$($func:ident: Some($val:tt)),*$(,)?]) => {
+        pub static DISPATCH: cl_icd_dispatch = cl_icd_dispatch {
+            anon_1: _cl_icd_dispatch__bindgen_ty_1 {
+                clGetPlatformIDs_icd2_tag: CL_ICD2_TAG_KHR,
+            },
+            anon_2: _cl_icd_dispatch__bindgen_ty_2 {
+                clUnloadCompiler_icd2_tag: CL_ICD2_TAG_KHR,
+            },
+            $($func: Some($val)),*,
+            ..cl_icd_dispatch_default()
+        };
+
+        unsafe extern "C" fn clIcdGetFunctionAddressForPlatformKHR(
+            platform: cl_platform_id,
+            func_name: *const c_char,
+        ) -> *mut c_void {
+            // A return value of NULL indicates that [..] platform is not a valid platform for the
+            // implementation.
+            if platform.get_ref().is_err() {
+                return ptr::null_mut();
+            };
+
+            // SAFETY: func_name is a proper UTF-8 encoded nul terminated string.
+            let Ok(func_name) = unsafe { CStr::from_ptr(func_name) }.to_str() else {
+                return ptr::null_mut();
+            };
+
+            match func_name {
+                $(stringify!($func) => $val as _,)*
+                // A return value of NULL indicates that the specified function does not exist for
+                // platform.
+                _ => ptr::null_mut()
+            }
+        }
+    };
+}
+
+cl_dispatch!([
     clGetPlatformInfo: Some(clGetPlatformInfo),
     clGetDeviceIDs: Some(clGetDeviceIDs),
     clGetDeviceInfo: Some(clGetDeviceInfo),
@@ -53,7 +110,6 @@ pub static DISPATCH: cl_icd_dispatch = cl_icd_dispatch {
     clRetainProgram: Some(clRetainProgram),
     clReleaseProgram: Some(clReleaseProgram),
     clBuildProgram: Some(clBuildProgram),
-    clUnloadCompiler: None,
     clGetProgramInfo: Some(clGetProgramInfo),
     clGetProgramBuildInfo: Some(clGetProgramBuildInfo),
     clCreateKernel: Some(clCreateKernel),
@@ -83,9 +139,9 @@ pub static DISPATCH: cl_icd_dispatch = cl_icd_dispatch {
     clEnqueueUnmapMemObject: Some(clEnqueueUnmapMemObject),
     clEnqueueNDRangeKernel: Some(clEnqueueNDRangeKernel),
     clEnqueueTask: Some(clEnqueueTask),
-    clEnqueueNativeKernel: None,
+    // clEnqueueNativeKernel: None,
     clEnqueueMarker: Some(clEnqueueMarker),
-    clEnqueueWaitForEvents: None,
+    // clEnqueueWaitForEvents: None,
     clEnqueueBarrier: Some(clEnqueueBarrier),
     clGetExtensionFunctionAddress: Some(clGetExtensionFunctionAddress),
     clCreateFromGLBuffer: Some(clCreateFromGLBuffer),
@@ -97,12 +153,6 @@ pub static DISPATCH: cl_icd_dispatch = cl_icd_dispatch {
     clEnqueueAcquireGLObjects: Some(clEnqueueAcquireGLObjects),
     clEnqueueReleaseGLObjects: Some(clEnqueueReleaseGLObjects),
     clGetGLContextInfoKHR: Some(clGetGLContextInfoKHR),
-    clGetDeviceIDsFromD3D10KHR: ptr::null_mut(),
-    clCreateFromD3D10BufferKHR: ptr::null_mut(),
-    clCreateFromD3D10Texture2DKHR: ptr::null_mut(),
-    clCreateFromD3D10Texture3DKHR: ptr::null_mut(),
-    clEnqueueAcquireD3D10ObjectsKHR: ptr::null_mut(),
-    clEnqueueReleaseD3D10ObjectsKHR: ptr::null_mut(),
     clSetEventCallback: Some(clSetEventCallback),
     clCreateSubBuffer: Some(clCreateSubBuffer),
     clSetMemObjectDestructorCallback: Some(clSetMemObjectDestructorCallback),
@@ -111,15 +161,15 @@ pub static DISPATCH: cl_icd_dispatch = cl_icd_dispatch {
     clEnqueueReadBufferRect: Some(clEnqueueReadBufferRect),
     clEnqueueWriteBufferRect: Some(clEnqueueWriteBufferRect),
     clEnqueueCopyBufferRect: Some(clEnqueueCopyBufferRect),
-    clCreateSubDevicesEXT: None,
-    clRetainDeviceEXT: None,
-    clReleaseDeviceEXT: None,
-    clCreateEventFromGLsyncKHR: None,
+    // clCreateSubDevicesEXT: None,
+    // clRetainDeviceEXT: None,
+    // clReleaseDeviceEXT: None,
+    // clCreateEventFromGLsyncKHR: None,
     clCreateSubDevices: Some(clCreateSubDevices),
     clRetainDevice: Some(clRetainDevice),
     clReleaseDevice: Some(clReleaseDevice),
     clCreateImage: Some(clCreateImage),
-    clCreateProgramWithBuiltInKernels: None,
+    // clCreateProgramWithBuiltInKernels: None,
     clCompileProgram: Some(clCompileProgram),
     clLinkProgram: Some(clLinkProgram),
     clUnloadPlatformCompiler: Some(clUnloadPlatformCompiler),
@@ -131,20 +181,10 @@ pub static DISPATCH: cl_icd_dispatch = cl_icd_dispatch {
     clEnqueueBarrierWithWaitList: Some(clEnqueueBarrierWithWaitList),
     clGetExtensionFunctionAddressForPlatform: Some(clGetExtensionFunctionAddressForPlatform),
     clCreateFromGLTexture: Some(clCreateFromGLTexture),
-    clGetDeviceIDsFromD3D11KHR: ptr::null_mut(),
-    clCreateFromD3D11BufferKHR: ptr::null_mut(),
-    clCreateFromD3D11Texture2DKHR: ptr::null_mut(),
-    clCreateFromD3D11Texture3DKHR: ptr::null_mut(),
-    clCreateFromDX9MediaSurfaceKHR: ptr::null_mut(),
-    clEnqueueAcquireD3D11ObjectsKHR: ptr::null_mut(),
-    clEnqueueReleaseD3D11ObjectsKHR: ptr::null_mut(),
-    clGetDeviceIDsFromDX9MediaAdapterKHR: ptr::null_mut(),
-    clEnqueueAcquireDX9MediaSurfacesKHR: ptr::null_mut(),
-    clEnqueueReleaseDX9MediaSurfacesKHR: ptr::null_mut(),
-    clCreateFromEGLImageKHR: None,
-    clEnqueueAcquireEGLObjectsKHR: None,
-    clEnqueueReleaseEGLObjectsKHR: None,
-    clCreateEventFromEGLSyncKHR: None,
+    // clCreateFromEGLImageKHR: None,
+    // clEnqueueAcquireEGLObjectsKHR: None,
+    // clEnqueueReleaseEGLObjectsKHR: None,
+    // clCreateEventFromEGLSyncKHR: None,
     clCreateCommandQueueWithProperties: Some(clCreateCommandQueueWithProperties),
     clCreatePipe: Some(clCreatePipe),
     clGetPipeInfo: Some(clGetPipeInfo),
@@ -171,7 +211,7 @@ pub static DISPATCH: cl_icd_dispatch = cl_icd_dispatch {
     clCreateBufferWithProperties: Some(clCreateBufferWithProperties),
     clCreateImageWithProperties: Some(clCreateImageWithProperties),
     clSetContextDestructorCallback: Some(clSetContextDestructorCallback),
-};
+]);
 
 pub type CLError = cl_int;
 pub type CLResult<T> = Result<T, CLError>;
@@ -189,6 +229,7 @@ pub enum RusticlTypes {
     Program,
     Queue,
     Sampler,
+    Semaphore,
 }
 
 impl RusticlTypes {
@@ -207,6 +248,7 @@ impl RusticlTypes {
             0xec4cf9af => Self::Program,
             0xec4cf9b0 => Self::Queue,
             0xec4cf9b1 => Self::Sampler,
+            0xec4cf9b2 => Self::Semaphore,
             _ => return None,
         };
         debug_assert!(result.u32() == val);
@@ -217,6 +259,7 @@ impl RusticlTypes {
 #[repr(C)]
 pub struct CLObjectBase<const ERR: i32> {
     dispatch: &'static cl_icd_dispatch,
+    pub dispatch_data: usize,
     rusticl_type: u32,
 }
 
@@ -224,6 +267,15 @@ impl<const ERR: i32> CLObjectBase<ERR> {
     pub fn new(t: RusticlTypes) -> Self {
         Self {
             dispatch: &DISPATCH,
+            dispatch_data: Platform::get().dispatch_data,
+            rusticl_type: t.u32(),
+        }
+    }
+
+    pub fn new_no_dispatch(t: RusticlTypes) -> Self {
+        Self {
+            dispatch: &DISPATCH,
+            dispatch_data: 0,
             rusticl_type: t.u32(),
         }
     }
@@ -359,14 +411,14 @@ pub trait ArcedCLObject<'a, const ERR: i32, CL: ReferenceCountedAPIPointer<Self,
 macro_rules! impl_cl_type_trait_base {
     (@BASE $cl: ident, $t: ident, [$($types: ident),+], $err: ident, $($field:ident).+) => {
         impl $crate::api::icd::ReferenceCountedAPIPointer<$t, $err> for $cl {
-            fn get_ptr(&self) -> CLResult<*const $t> {
+            fn get_ptr(&self) -> $crate::api::icd::CLResult<*const $t> {
                 type Base = $crate::api::icd::CLObjectBase<$err>;
                 let t = Base::check_ptr(self.cast())?;
                 if ![$($crate::api::icd::RusticlTypes::$types),+].contains(&t) {
                     return Err($err);
                 }
 
-                let offset = ::mesa_rust_util::offset_of!($t, $($field).+);
+                let offset = ::std::mem::offset_of!($t, $($field).+);
                 // SAFETY: We offset the pointer back from the ICD specified base type to our
                 //         internal type.
                 let obj_ptr: *const $t = unsafe { self.byte_sub(offset) }.cast();
@@ -381,7 +433,7 @@ macro_rules! impl_cl_type_trait_base {
                 if ptr.is_null() {
                     return std::ptr::null_mut();
                 }
-                let offset = ::mesa_rust_util::offset_of!($t, $($field).+);
+                let offset = ::std::mem::offset_of!($t, $($field).+);
                 // SAFETY: The resulting pointer is safe as we simply offset into the ICD specified
                 //         base type.
                 unsafe { ptr.byte_add(offset) as Self }
@@ -435,32 +487,34 @@ macro_rules! impl_cl_type_trait {
     };
 }
 
-// We need those functions exported
-
-#[no_mangle]
-extern "C" fn clGetPlatformInfo(
+// SAFETY: The OpenCL spec demands this function to be exported with its plain C name
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clGetPlatformInfo(
     platform: cl_platform_id,
     param_name: cl_platform_info,
     param_value_size: usize,
     param_value: *mut ::std::ffi::c_void,
     param_value_size_ret: *mut usize,
 ) -> cl_int {
-    platform::clGetPlatformInfo(
-        platform,
-        param_name,
-        param_value_size,
-        param_value,
-        param_value_size_ret,
-    )
+    unsafe {
+        platform::clGetPlatformInfo(
+            platform,
+            param_name,
+            param_value_size,
+            param_value,
+            param_value_size_ret,
+        )
+    }
 }
 
-#[no_mangle]
-extern "C" fn clIcdGetPlatformIDsKHR(
+// SAFETY: The OpenCL spec demands this function to be exported with its plain C name
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clIcdGetPlatformIDsKHR(
     num_entries: cl_uint,
     platforms: *mut cl_platform_id,
     num_platforms: *mut cl_uint,
 ) -> cl_int {
-    clGetPlatformIDs(num_entries, platforms, num_platforms)
+    unsafe { clGetPlatformIDs(num_entries, platforms, num_platforms) }
 }
 
 macro_rules! cl_ext_func {
@@ -471,8 +525,9 @@ macro_rules! cl_ext_func {
 }
 
 #[rustfmt::skip]
-#[no_mangle]
-extern "C" fn clGetExtensionFunctionAddress(
+// SAFETY: The OpenCL spec demands this function to be exported with its plain C name
+#[unsafe(no_mangle)]
+pub extern "C" fn clGetExtensionFunctionAddress(
     function_name: *const c_char,
 ) -> *mut c_void {
     if function_name.is_null() {
@@ -482,41 +537,64 @@ extern "C" fn clGetExtensionFunctionAddress(
         // cl_khr_create_command_queue
         "clCreateCommandQueueWithPropertiesKHR" => cl_ext_func!(clCreateCommandQueueWithProperties: clCreateCommandQueueWithPropertiesKHR_fn),
 
+        // cl_khr_external_memory
+        "clEnqueueAcquireExternalMemObjectsKHR" => cl_ext_func!(clEnqueueAcquireExternalMemObjectsKHR: clEnqueueAcquireExternalMemObjectsKHR_fn),
+        "clEnqueueReleaseExternalMemObjectsKHR" => cl_ext_func!(clEnqueueReleaseExternalMemObjectsKHR: clEnqueueReleaseExternalMemObjectsKHR_fn),
+
+        // cl_khr_external_semaphore
+        "clGetSemaphoreHandleForTypeKHR" => cl_ext_func!(clGetSemaphoreHandleForTypeKHR: clGetSemaphoreHandleForTypeKHR_fn),
+
+        // cl_khr_external_semaphore_sync_fd
+        "clReImportSemaphoreSyncFdKHR" => cl_ext_func!(clReImportSemaphoreSyncFdKHR: clReImportSemaphoreSyncFdKHR_fn),
+
+        // cl_khr_gl_sharing
+        "clCreateFromGLBuffer" => cl_ext_func!(clCreateFromGLBuffer: clCreateFromGLBuffer_fn),
+        "clCreateFromGLRenderbuffer" => cl_ext_func!(clCreateFromGLRenderbuffer: clCreateFromGLRenderbuffer_fn),
+        "clCreateFromGLTexture" => cl_ext_func!(clCreateFromGLTexture: clCreateFromGLTexture_fn),
+        "clCreateFromGLTexture2D" => cl_ext_func!(clCreateFromGLTexture2D: clCreateFromGLTexture2D_fn),
+        "clCreateFromGLTexture3D" => cl_ext_func!(clCreateFromGLTexture3D: clCreateFromGLTexture3D_fn),
+        "clEnqueueAcquireGLObjects" => cl_ext_func!(clEnqueueAcquireGLObjects: clEnqueueAcquireGLObjects_fn),
+        "clEnqueueReleaseGLObjects" => cl_ext_func!(clEnqueueReleaseGLObjects: clEnqueueReleaseGLObjects_fn),
+        "clGetGLContextInfoKHR" => cl_ext_func!(clGetGLContextInfoKHR: clGetGLContextInfoKHR_fn),
+        "clGetGLObjectInfo" => cl_ext_func!(clGetGLObjectInfo: clGetGLObjectInfo_fn),
+        "clGetGLTextureInfo" => cl_ext_func!(clGetGLTextureInfo: clGetGLTextureInfo_fn),
+
         // cl_khr_icd
-        "clGetPlatformInfo" => cl_ext_func!(clGetPlatformInfo: cl_api_clGetPlatformInfo),
+        "clGetPlatformInfo" => cl_ext_func!(clGetPlatformInfo: clGetPlatformInfo_fn),
         "clIcdGetPlatformIDsKHR" => cl_ext_func!(clIcdGetPlatformIDsKHR: clIcdGetPlatformIDsKHR_fn),
+        "clIcdGetFunctionAddressForPlatformKHR" => cl_ext_func!(clIcdGetFunctionAddressForPlatformKHR: clIcdGetFunctionAddressForPlatformKHR_fn),
+        "clIcdSetPlatformDispatchDataKHR" => cl_ext_func!(clIcdSetPlatformDispatchDataKHR: clIcdSetPlatformDispatchDataKHR_fn),
 
         // cl_khr_il_program
         "clCreateProgramWithILKHR" => cl_ext_func!(clCreateProgramWithIL: clCreateProgramWithILKHR_fn),
 
-        // cl_khr_gl_sharing
-        "clCreateFromGLBuffer" => cl_ext_func!(clCreateFromGLBuffer: cl_api_clCreateFromGLBuffer),
-        "clCreateFromGLRenderbuffer" => cl_ext_func!(clCreateFromGLRenderbuffer: cl_api_clCreateFromGLRenderbuffer),
-        "clCreateFromGLTexture" => cl_ext_func!(clCreateFromGLTexture: cl_api_clCreateFromGLTexture),
-        "clCreateFromGLTexture2D" => cl_ext_func!(clCreateFromGLTexture2D: cl_api_clCreateFromGLTexture2D),
-        "clCreateFromGLTexture3D" => cl_ext_func!(clCreateFromGLTexture3D: cl_api_clCreateFromGLTexture3D),
-        "clEnqueueAcquireGLObjects" => cl_ext_func!(clEnqueueAcquireGLObjects: cl_api_clEnqueueAcquireGLObjects),
-        "clEnqueueReleaseGLObjects" => cl_ext_func!(clEnqueueReleaseGLObjects: cl_api_clEnqueueReleaseGLObjects),
-        "clGetGLContextInfoKHR" => cl_ext_func!(clGetGLContextInfoKHR: cl_api_clGetGLContextInfoKHR),
-        "clGetGLObjectInfo" => cl_ext_func!(clGetGLObjectInfo: cl_api_clGetGLObjectInfo),
-        "clGetGLTextureInfo" => cl_ext_func!(clGetGLTextureInfo: cl_api_clGetGLTextureInfo),
+        // cl_khr_semaphore
+        "clCreateSemaphoreWithPropertiesKHR" => cl_ext_func!(clCreateSemaphoreWithPropertiesKHR: clCreateSemaphoreWithPropertiesKHR_fn),
+        "clEnqueueSignalSemaphoresKHR" => cl_ext_func!(clEnqueueSignalSemaphoresKHR: clEnqueueSignalSemaphoresKHR_fn),
+        "clEnqueueWaitSemaphoresKHR" => cl_ext_func!(clEnqueueWaitSemaphoresKHR: clEnqueueWaitSemaphoresKHR_fn),
+        "clGetSemaphoreInfoKHR" => cl_ext_func!(clGetSemaphoreInfoKHR: clGetSemaphoreInfoKHR_fn),
+        "clReleaseSemaphoreKHR" => cl_ext_func!(clReleaseSemaphoreKHR: clReleaseSemaphoreKHR_fn),
+        "clRetainSemaphoreKHR" => cl_ext_func!(clRetainSemaphoreKHR: clRetainSemaphoreKHR_t),
 
         // cl_khr_suggested_local_work_size
         "clGetKernelSuggestedLocalWorkSizeKHR" => cl_ext_func!(clGetKernelSuggestedLocalWorkSizeKHR: clGetKernelSuggestedLocalWorkSizeKHR_fn),
 
+        // cl_ext_buffer_device_address
+        "clSetKernelArgDevicePointerEXT" => cl_ext_func!(clSetKernelArgDevicePointerEXT: clSetKernelArgDevicePointerEXT_fn),
+
         // cl_arm_shared_virtual_memory
-        "clEnqueueSVMFreeARM" => cl_ext_func!(clEnqueueSVMFreeARM: cl_api_clEnqueueSVMFree),
-        "clEnqueueSVMMapARM" => cl_ext_func!(clEnqueueSVMMapARM: cl_api_clEnqueueSVMMap),
-        "clEnqueueSVMMemcpyARM" => cl_ext_func!(clEnqueueSVMMemcpyARM: cl_api_clEnqueueSVMMemcpy),
-        "clEnqueueSVMMemFillARM" => cl_ext_func!(clEnqueueSVMMemFillARM: cl_api_clEnqueueSVMMemFill),
-        "clEnqueueSVMUnmapARM" => cl_ext_func!(clEnqueueSVMUnmapARM: cl_api_clEnqueueSVMUnmap),
-        "clSetKernelArgSVMPointerARM" => cl_ext_func!(clSetKernelArgSVMPointer: cl_api_clSetKernelArgSVMPointer),
-        "clSetKernelExecInfoARM" => cl_ext_func!(clSetKernelExecInfo: cl_api_clSetKernelExecInfo),
-        "clSVMAllocARM" => cl_ext_func!(clSVMAlloc: cl_api_clSVMAlloc),
-        "clSVMFreeARM" => cl_ext_func!(clSVMFree: cl_api_clSVMFree),
+        "clEnqueueSVMFreeARM" => cl_ext_func!(clEnqueueSVMFreeARM: clEnqueueSVMFreeARM_fn),
+        "clEnqueueSVMMapARM" => cl_ext_func!(clEnqueueSVMMapARM: clEnqueueSVMMapARM_fn),
+        "clEnqueueSVMMemcpyARM" => cl_ext_func!(clEnqueueSVMMemcpyARM: clEnqueueSVMMemcpyARM_fn),
+        "clEnqueueSVMMemFillARM" => cl_ext_func!(clEnqueueSVMMemFillARM: clEnqueueSVMMemFillARM_fn),
+        "clEnqueueSVMUnmapARM" => cl_ext_func!(clEnqueueSVMUnmapARM: clEnqueueSVMUnmapARM_fn),
+        "clSetKernelArgSVMPointerARM" => cl_ext_func!(clSetKernelArgSVMPointer: clSetKernelArgSVMPointerARM_fn),
+        "clSetKernelExecInfoARM" => cl_ext_func!(clSetKernelExecInfo: clSetKernelExecInfoARM_fn),
+        "clSVMAllocARM" => cl_ext_func!(clSVMAlloc: clSVMAllocARM_fn),
+        "clSVMFreeARM" => cl_ext_func!(clSVMFree: clSVMFreeARM_fn),
 
         // DPCPP bug https://github.com/intel/llvm/issues/9964
-        "clSetProgramSpecializationConstant" => cl_ext_func!(clSetProgramSpecializationConstant: cl_api_clSetProgramSpecializationConstant),
+        "clSetProgramSpecializationConstant" => cl_ext_func!(clSetProgramSpecializationConstant: clSetProgramSpecializationConstant_fn),
 
         _ => ptr::null_mut(),
     }
@@ -547,7 +625,12 @@ extern "C" fn clLinkProgram(
         Err(e) => (ptr::null_mut(), e),
     };
 
-    errcode_ret.write_checked(err);
+    // Correct behavior when `errcode_ret` is null is unspecified, but by
+    // analogy, we fail silently in that case.
+    // SAFETY: Caller is responsible for providing a pointer valid for a write
+    // of `size_of::<cl_int>()`.
+    unsafe { errcode_ret.write_checked(err) };
+
     ptr
 }
 
@@ -571,7 +654,7 @@ extern "C" fn clSVMFree(context: cl_context, svm_pointer: *mut ::std::os::raw::c
     svm_free(context, svm_pointer as usize).ok();
 }
 
-extern "C" fn clGetKernelSubGroupInfo(
+unsafe extern "C" fn clGetKernelSubGroupInfo(
     kernel: cl_kernel,
     device: cl_device_id,
     param_name: cl_kernel_sub_group_info,
@@ -581,13 +664,15 @@ extern "C" fn clGetKernelSubGroupInfo(
     param_value: *mut ::std::os::raw::c_void,
     param_value_size_ret: *mut usize,
 ) -> cl_int {
-    match kernel.get_info_obj(
-        (device, input_value_size, input_value, param_value_size),
-        param_name,
-        param_value_size,
-        param_value,
-        param_value_size_ret,
-    ) {
+    match unsafe {
+        kernel.get_info_obj(
+            (device, input_value_size, input_value, param_value_size),
+            param_name,
+            param_value_size,
+            param_value,
+            param_value_size_ret,
+        )
+    } {
         Ok(_) => CL_SUCCESS as cl_int,
         Err(e) => e,
     }

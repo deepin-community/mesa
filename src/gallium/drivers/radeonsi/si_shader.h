@@ -118,6 +118,11 @@
 #include "util/u_live_shader_cache.h"
 #include "util/u_queue.h"
 #include "si_pm4.h"
+#include "si_shader_info.h"
+#ifndef HAVE_GFX_COMPUTE
+#define __U_STUB__
+#endif
+#include "u_stub.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -126,10 +131,9 @@ extern "C" {
 struct nir_shader;
 struct nir_instr;
 
-#define SI_NUM_INTERP     32
 #define SI_MAX_ATTRIBS    16
 #define SI_MAX_VS_OUTPUTS 40
-#define SI_USER_CLIP_PLANE_MASK  0x3F
+#define SI_USER_CLIP_PLANE_MASK  BITFIELD_MASK(8)
 
 #define INTERP_MODE_COLOR  INTERP_MODE_COUNT
 
@@ -138,10 +142,6 @@ struct nir_instr;
 #define SI_PS_INPUT_CNTL_UNUSED        SI_PS_INPUT_CNTL_0000
 /* D3D9 behaviour for COLOR0 requires 0001. GL is undefined. */
 #define SI_PS_INPUT_CNTL_UNUSED_COLOR0 SI_PS_INPUT_CNTL_0001
-
-#define SI_VECTOR_ARG_IS_COLOR               BITFIELD_BIT(0)
-#define SI_VECTOR_ARG_COLOR_COMPONENT(x)     (((x) & 0x7) << 1)
-#define SI_GET_VECTOR_ARG_COLOR_COMPONENT(x) (((x) >> 1) & 0x7)
 
 /* SGPR user data indices */
 enum
@@ -189,8 +189,17 @@ enum
    GFX9_GS_NUM_USER_SGPR,
 
    /* PS only */
-   SI_SGPR_ALPHA_REF = SI_NUM_RESOURCE_SGPRS,
+   SI_SGPR_SAMPLE_LOCS0 = SI_NUM_RESOURCE_SGPRS,
+   SI_SGPR_SAMPLE_LOCS1,
+   SI_SGPR_ALPHA_REF,
    SI_PS_NUM_USER_SGPR,
+
+   /* TS only */
+   GFX10_SGPR_TS_TASK_RING_ADDR = SI_NUM_RESOURCE_SGPRS,
+   GFX10_SGPR_TS_TASK_RING_ENTRY,
+
+   /* MS only */
+   GFX11_SGPR_MS_ATTRIBUTE_RING_ADDR = SI_NUM_RESOURCE_SGPRS,
 
    /* The value has to be 12, because the hw requires that descriptors
     * are aligned to 4 SGPRs.
@@ -204,7 +213,9 @@ enum
    SI_NUM_RESOURCE_PARAMS = 4,
 
    /* PS only parameters */
-   SI_PARAM_ALPHA_REF = SI_NUM_RESOURCE_PARAMS,
+   SI_PARAM_SAMPLE_LOCS0 = SI_NUM_RESOURCE_PARAMS,
+   SI_PARAM_SAMPLE_LOCS1,
+   SI_PARAM_ALPHA_REF,
    SI_PARAM_PRIM_MASK,
    SI_PARAM_PERSP_SAMPLE,
    SI_PARAM_PERSP_CENTER,
@@ -238,12 +249,21 @@ enum
  * in the shader via vs_state_bits in legacy GS, the GS copy shader, and any NGG shader.
  */
 /* bit gap */
+/* The LDS size of ES outputs in bytes for NGG GS, in multiples of 256 (bits [8:15]).
+ * This is used to determine the LDS address of GS outputs, which is after ES outputs.
+ */
+#define GS_STATE_GS_OUT_LDS_OFFSET_256B__SHIFT  6
+#define GS_STATE_GS_OUT_LDS_OFFSET_256B__MASK   0xff
 /* The number of ES outputs is derived from the last output index of SI_UNIQUE_SLOT_* + 1, which
  * can be 55 at most. The ESGS vertex stride in dwords is: NUM_ES_OUTPUTS * 4 + 1
  * Only used by GFX9+ to compute LDS addresses of GS inputs.
  */
-#define GS_STATE_NUM_ES_OUTPUTS__SHIFT          13
+#define GS_STATE_NUM_ES_OUTPUTS__SHIFT          14
 #define GS_STATE_NUM_ES_OUTPUTS__MASK           0x3f
+#define GS_STATE_CULL_FACE_FRONT__SHIFT         20
+#define GS_STATE_CULL_FACE_FRONT__MASK          0x1
+#define GS_STATE_CULL_FACE_BACK__SHIFT          21
+#define GS_STATE_CULL_FACE_BACK__MASK           0x1
 /* Small prim filter precision = num_samples / quant_mode where num_samples is in {1, 2, 4, 8} and
  * quant_mode is in {256, 1024, 4096}, which is equal to 1/2^n where n is between 5 and 12.
  *
@@ -322,19 +342,19 @@ enum
 {
    /* These represent the number of SGPRs the shader uses. */
    SI_VS_BLIT_SGPRS_POS = 3,
-   SI_VS_BLIT_SGPRS_POS_COLOR = 7,
    SI_VS_BLIT_SGPRS_POS_TEXCOORD = 9,
 
    MAX_SI_VS_BLIT_SGPRS = 10, /* +1 for the attribute ring address */
 };
 
-#define SI_NGG_CULL_TRIANGLES                (1 << 0)   /* this implies W, view.xy, and small prim culling */
-#define SI_NGG_CULL_BACK_FACE                (1 << 1)   /* back faces */
-#define SI_NGG_CULL_FRONT_FACE               (1 << 2)   /* front faces */
-#define SI_NGG_CULL_LINES                    (1 << 3)   /* the primitive type is lines */
-#define SI_NGG_CULL_SMALL_LINES_DIAMOND_EXIT (1 << 4)   /* cull small lines according to the diamond exit rule */
-#define SI_NGG_CULL_CLIP_PLANE_ENABLE(enable) (((enable) & 0xff) << 5)
-#define SI_NGG_CULL_GET_CLIP_PLANE_ENABLE(x)  (((x) >> 5) & 0xff)
+/* The following two are only set for vertex shaders that cull.
+ * TES and GS get the primitive type from shader_info.
+ */
+#define SI_NGG_CULL_VS_TRIANGLES             (1 << 0)   /* this implies W, view.xy, and small prim culling */
+#define SI_NGG_CULL_VS_LINES                 (1 << 1)   /* this implies W and view.xy culling */
+#define SI_NGG_CULL_SMALL_LINES_DIAMOND_EXIT (1 << 2)   /* cull small lines according to the diamond exit rule */
+#define SI_NGG_CULL_CLIP_PLANE_ENABLE(enable) (((enable) & 0xff) << 3)
+#define SI_NGG_CULL_GET_CLIP_PLANE_ENABLE(x)  (((x) >> 3) & 0xff)
 
 struct si_shader_profile {
    uint32_t blake3[BLAKE3_OUT_LEN32];
@@ -441,136 +461,16 @@ struct si_compiler_ctx_state {
    bool is_debug_context;
 };
 
-enum si_color_output_type {
-   SI_TYPE_ANY32,
-   SI_TYPE_FLOAT16,
-   SI_TYPE_INT16,
-   SI_TYPE_UINT16,
-};
-
-union si_input_info {
-   struct {
-      uint8_t semantic;
-      uint8_t interpolate;
-      uint8_t fp16_lo_hi_valid;
-      uint8_t usage_mask;
-   };
-   uint32_t _unused; /* this just forces 4-byte alignment */
-};
-
-struct si_shader_info {
-   shader_info base;
-
-   uint32_t options; /* bitmask of SI_PROFILE_* */
-
-   uint8_t num_inputs;
-   uint8_t num_outputs;
-   union si_input_info input[PIPE_MAX_SHADER_INPUTS];
-   uint8_t output_semantic[PIPE_MAX_SHADER_OUTPUTS];
-   uint8_t output_usagemask[PIPE_MAX_SHADER_OUTPUTS];
-   uint8_t output_readmask[PIPE_MAX_SHADER_OUTPUTS];
-   uint8_t output_streams[PIPE_MAX_SHADER_OUTPUTS];
-   uint8_t output_type[PIPE_MAX_SHADER_OUTPUTS]; /* enum nir_alu_type */
-
-   uint8_t num_vs_inputs;
-   uint8_t num_vbos_in_user_sgprs;
-   uint8_t num_stream_output_components[4];
-   uint16_t enabled_streamout_buffer_mask;
-
-   uint64_t inputs_read; /* "get_unique_index" bits */
-   uint64_t tcs_vgpr_only_inputs; /* TCS inputs that are only in VGPRs, not LDS. */
-
-   uint64_t outputs_written_before_tes_gs; /* "get_unique_index" bits */
-   uint64_t outputs_written_before_ps; /* "get_unique_index" bits */
-   uint32_t patch_outputs_written;     /* "get_unique_index_patch" bits */
-
-   uint8_t clipdist_mask;
-   uint8_t culldist_mask;
-
-   uint16_t esgs_vertex_stride;
-   uint16_t gsvs_vertex_size;
-   uint8_t gs_input_verts_per_prim;
-   unsigned max_gsvs_emit_size;
-
-   /* Set 0xf or 0x0 (4 bits) per each written output.
-    * ANDed with spi_shader_col_format.
-    */
-   unsigned colors_written_4bit;
-
-   int constbuf0_num_slots;
-   uint num_memory_stores;
-   uint8_t color_attr_index[2];
-   uint8_t color_interpolate[2];
-   uint8_t color_interpolate_loc[2];
-   uint8_t colors_read; /**< which color components are read by the FS */
-   uint8_t colors_written;
-   uint16_t output_color_types; /**< Each bit pair is enum si_color_output_type */
-   bool color0_writes_all_cbufs; /**< gl_FragColor */
-   bool reads_samplemask;   /**< does fragment shader read sample mask? */
-   bool reads_tess_factors; /**< If TES reads TESSINNER or TESSOUTER */
-   bool writes_z;           /**< does fragment shader write Z value? */
-   bool writes_stencil;     /**< does fragment shader write stencil value? */
-   bool writes_samplemask;  /**< does fragment shader write sample mask? */
-   bool writes_edgeflag;    /**< vertex shader outputs edgeflag */
-   bool uses_interp_color;
-   bool uses_persp_center_color;
-   bool uses_persp_centroid_color;
-   bool uses_persp_sample_color;
-   bool uses_persp_center;
-   bool uses_persp_centroid;
-   bool uses_persp_sample;
-   bool uses_linear_center;
-   bool uses_linear_centroid;
-   bool uses_linear_sample;
-   bool uses_interp_at_sample;
-   bool uses_instanceid;
-   bool uses_base_vertex;
-   bool uses_base_instance;
-   bool uses_drawid;
-   bool uses_primid;
-   bool uses_frontface;
-   bool uses_invocationid;
-   bool uses_thread_id[3];
-   bool uses_block_id[3];
-   bool uses_variable_block_size;
-   bool uses_grid_size;
-   bool uses_tg_size;
-   bool uses_atomic_ordered_add;
-   bool writes_position;
-   bool writes_psize;
-   bool writes_clipvertex;
-   bool writes_primid;
-   bool writes_viewport_index;
-   bool writes_layer;
-   bool uses_bindless_samplers;
-   bool uses_bindless_images;
-   bool uses_indirect_descriptor;
-   bool has_divergent_loop;
-   bool uses_sampleid;
-   bool uses_layer_id;
-   bool has_non_uniform_tex_access;
-
-   bool uses_vmem_sampler_or_bvh;
-   bool uses_vmem_load_other; /* all other VMEM loads and atomics with return */
-
-   /** Whether all codepaths write tess factors in all invocations. */
-   bool tessfactors_are_def_in_all_invocs;
-
-   /* A flag to check if vrs2x2 can be enabled to reduce number of
-    * fragment shader invocations if flat shading.
-    */
-   bool allow_flat_shading;
-
-   /* Optimization: if the texture bound to this texunit has been cleared to 1,
-    * then the draw can be skipped (see si_draw_vbo_skip_noop). Initially the
-    * value is 0xff (undetermined) and can be later changed to 0 (= false) or
-    * texunit + 1.
-    */
-   uint8_t writes_1_if_tex_is_1;
-
-   /* frag coord and sample pos per component read mask. */
-   uint8_t reads_frag_coord_mask;
-   uint8_t reads_sample_pos_mask;
+union si_main_shader_parts {
+   struct si_main_shader_parts_named {
+      /* indices: [wave_size == 64][use_aco] */
+      struct si_shader *other[2][2];
+      struct si_shader *ls[2][2];     /* as_ls is set in the key */
+      struct si_shader *es[2];        /* as_es && !as_ngg in the key, always wave64 */
+      struct si_shader *ngg[2][2];    /* !as_es && as_ngg in the key */
+      struct si_shader *ngg_es[2][2]; /* as_es && as_ngg in the key */
+   } named;
+   struct si_shader *variants[sizeof(struct si_main_shader_parts_named) / sizeof(struct si_shader*)];
 };
 
 /* A shader selector is a gallium CSO and contains shader variants and
@@ -581,7 +481,7 @@ struct si_shader_selector {
    struct si_screen *screen;
    struct util_queue_fence ready;
    struct si_compiler_ctx_state compiler_ctx_state;
-   gl_shader_stage stage;
+   mesa_shader_stage stage;
 
    simple_mtx_t mutex;
    union si_shader_key *keys;
@@ -591,38 +491,14 @@ struct si_shader_selector {
 
    /* The compiled NIR shader without a prolog and/or epilog (not
     * uploaded to a buffer object).
-    *
-    * [0] for wave32, [1] for wave64.
     */
-   struct si_shader *main_shader_part[2];
-   struct si_shader *main_shader_part_ls[2];     /* as_ls is set in the key */
-   struct si_shader *main_shader_part_es;        /* as_es && !as_ngg in the key */
-   struct si_shader *main_shader_part_ngg[2];    /* !as_es && as_ngg in the key */
-   struct si_shader *main_shader_part_ngg_es[2]; /* as_es && as_ngg in the key */
+   union si_main_shader_parts main_parts;
 
    struct nir_shader *nir;
    void *nir_binary;
    unsigned nir_size;
 
    struct si_shader_info info;
-
-   enum pipe_shader_type pipe_shader_type;
-   uint8_t const_and_shader_buf_descriptors_index;
-   uint8_t sampler_and_images_descriptors_index;
-   uint8_t cs_shaderbufs_sgpr_index;
-   uint8_t cs_num_shaderbufs_in_user_sgprs;
-   uint8_t cs_images_sgpr_index;
-   uint8_t cs_images_num_sgprs;
-   uint8_t cs_num_images_in_user_sgprs;
-   unsigned ngg_cull_vert_threshold; /* UINT32_MAX = disabled */
-   enum mesa_prim rast_prim;
-
-   /* GS parameters. */
-   bool tess_turns_off_ngg;
-
-   /* bitmasks of used descriptor slots */
-   uint64_t active_const_and_shader_buffers;
-   uint64_t active_samplers_and_images;
 };
 
 /* Valid shader configurations:
@@ -662,7 +538,9 @@ struct si_ps_prolog_bits {
    unsigned force_linear_center_interp : 1;
    unsigned bc_optimize_for_persp : 1;
    unsigned bc_optimize_for_linear : 1;
-   unsigned samplemask_log_ps_iter : 3;
+   unsigned samplemask_log_ps_iter : 2;
+   unsigned get_frag_coord_from_pixel_coord : 1;
+   unsigned force_samplemask_to_helper_invocation : 1;
 };
 
 /* Common PS bits between the shader key and the epilog key. */
@@ -670,13 +548,14 @@ struct si_ps_epilog_bits {
    unsigned spi_shader_col_format;
    unsigned color_is_int8 : 8;
    unsigned color_is_int10 : 8;
-   unsigned last_cbuf : 3;
    unsigned alpha_func : 3;
    unsigned alpha_to_one : 1;
-   unsigned alpha_to_coverage_via_mrtz : 1;  /* gfx11+ */
+   unsigned alpha_to_coverage_via_mrtz : 1;  /* gfx11+ or alpha_to_one */
    unsigned clamp_color : 1;
-   unsigned dual_src_blend_swizzle : 1;      /* gfx11+ */
+   unsigned dual_src_blend : 1;
    unsigned rbplus_depth_only_opt:1;
+   unsigned kill_z:1;
+   unsigned kill_stencil:1;
    unsigned kill_samplemask:1;
 };
 
@@ -689,7 +568,8 @@ union si_shader_part_key {
       /* Color interpolation and two-side color selection. */
       unsigned colors_read : 8;       /* color input components read */
       unsigned num_interp_inputs : 5; /* BCOLOR is at this location */
-      unsigned num_fragcoord_components : 3;
+      unsigned fragcoord_usage_mask : 4;
+      unsigned pixel_center_integer : 1;
       unsigned wqm : 1;
       char color_attr_index[2];
       signed char color_interp_vgpr_index[2]; /* -1 == constant */
@@ -701,6 +581,7 @@ union si_shader_part_key {
       unsigned uses_discard : 1;
       unsigned colors_written : 8;
       unsigned color_types : 16;
+      unsigned writes_all_cbufs : 1;
       unsigned writes_z : 1;
       unsigned writes_stencil : 1;
       unsigned writes_samplemask : 1;
@@ -726,6 +607,7 @@ struct si_shader_key_ge {
    unsigned as_ls : 1;  /* whether it's VS before TCS */
    unsigned as_ngg : 1; /* whether it's the last GE stage and NGG is enabled,
                            also set for the stage right before GS */
+   unsigned use_aco : 1; /* whether the shader variant is using ACO */
 
    /* Flags for monolithic compilation only. */
    struct {
@@ -752,6 +634,11 @@ struct si_shader_key_ge {
 
       /* Gfx12: When no streamout buffers are bound, streamout must be disabled. */
       unsigned remove_streamout : 1;
+
+      /* Emulate 8 clip planes using the CLIP_VERTEX output. Only 6 clip planes are supported
+       * without this.
+       */
+      unsigned write_pos_to_clipvertex : 1;
    } mono;
 
    /* Optimization flags for asynchronous compilation only. */
@@ -764,8 +651,14 @@ struct si_shader_key_ge {
       unsigned remove_streamout : 1;
 
       /* For NGG VS and TES. */
-      unsigned ngg_culling : 13; /* SI_NGG_CULL_* */
+      unsigned ngg_culling : 11; /* SI_NGG_CULL_* */
 
+      /* If NGG VS streamout knows the number of vertices per primitive at compile time,
+       * it can put stores for all vertices in the same VMEM clause, instead of storing
+       * vertices for the 2nd and 3rd vertex conditionally because the primitive type is
+       * unknown.
+       */
+      unsigned ngg_vs_streamout_num_verts_per_prim : 2;
 
       /* For shaders where monolithic variants have better code.
        *
@@ -779,7 +672,7 @@ struct si_shader_key_ge {
       unsigned same_patch_vertices:1;
 
       /* For TCS. */
-      unsigned tes_prim_mode : 3;
+      unsigned tes_prim_mode : 2;
       unsigned tes_reads_tess_factors : 1;
 
       unsigned inline_uniforms:1;
@@ -800,6 +693,7 @@ struct si_shader_key_ps {
 
    /* Flags for monolithic compilation only. */
    struct {
+      unsigned force_mono : 1;
       unsigned poly_line_smoothing : 1;
       unsigned point_smoothing : 1;
       unsigned interpolate_at_sample_force_center : 1;
@@ -837,25 +731,6 @@ union si_shader_key {
 /* Restore the pack alignment to default. */
 #pragma pack(pop)
 
-/* GCN-specific shader info. */
-struct si_shader_binary_info {
-   uint8_t vs_output_param_offset[NUM_TOTAL_VARYING_SLOTS];
-   uint32_t vs_output_ps_input_cntl[NUM_TOTAL_VARYING_SLOTS];
-   union si_input_info ps_inputs[SI_NUM_INTERP];
-   uint8_t num_ps_inputs;
-   uint8_t ps_colors_read;
-   uint8_t num_input_sgprs;
-   uint8_t num_input_vgprs;
-   bool uses_vmem_load_other; /* all other VMEM loads and atomics with return */
-   bool uses_vmem_sampler_or_bvh;
-   uint8_t num_fragcoord_components;
-   bool uses_instanceid;
-   uint8_t nr_pos_exports;
-   uint8_t nr_param_exports;
-   unsigned private_mem_vgprs;
-   unsigned max_simd_waves;
-};
-
 enum si_shader_binary_type {
    SI_SHADER_BINARY_ELF,
    SI_SHADER_BINARY_RAW,
@@ -879,14 +754,6 @@ struct si_shader_binary {
 
    const unsigned *symbols;
    unsigned num_symbols;
-};
-
-struct gfx9_gs_info {
-   unsigned es_verts_per_subgroup;
-   unsigned gs_prims_per_subgroup;
-   unsigned gs_inst_prims_in_subgroup;
-   unsigned max_prims_per_subgroup;
-   unsigned esgs_ring_size; /* in bytes */
 };
 
 struct si_shader {
@@ -924,13 +791,7 @@ struct si_shader {
    /* The following data is all that's needed for binary shaders. */
    struct si_shader_binary binary;
    struct ac_shader_config config;
-   struct si_shader_binary_info info;
-
-   /* SI_SGPR_VS_STATE_BITS */
-   bool uses_vs_state_provoking_vertex;
-   bool uses_gs_state_outprim;
-
-   bool uses_base_instance;
+   struct si_shader_variant_info info;
 
    /* Shader key + LLVM IR + disassembly + statistics.
     * Generated for debug contexts only.
@@ -938,7 +799,7 @@ struct si_shader {
    char *shader_log;
    size_t shader_log_size;
 
-   struct gfx9_gs_info gs_info;
+   ac_legacy_gs_subgroup_info gs_info;
 
    /* Precomputed register values. */
    union {
@@ -961,12 +822,8 @@ struct si_shader {
       } gs;
 
       struct {
-         /* Computed by gfx10_ngg_calculate_subgroup_info. */
-         uint16_t ngg_emit_size; /* in dwords */
-         uint16_t hw_max_esverts;
-         uint16_t max_gsprims;
-         uint16_t max_out_verts;
-         bool max_vert_out_per_gs_instance;
+         /* Computed by ac_ngg_calculate_subgroup_info. */
+         ac_ngg_subgroup_info info;
          /* Register values. */
          unsigned ge_max_output_per_subgroup;
          unsigned ge_ngg_subgrp_cntl;
@@ -982,6 +839,9 @@ struct si_shader {
          unsigned spi_shader_pgm_rsrc3_gs;
          unsigned spi_shader_pgm_rsrc4_gs;
          unsigned vgt_shader_stages_en;
+         unsigned spi_shader_gs_meshlet_dim;
+         unsigned spi_shader_gs_meshlet_exp_alloc;
+         unsigned spi_shader_gs_meshlet_ctrl;
       } ngg;
 
       struct {
@@ -997,16 +857,12 @@ struct si_shader {
       struct {
          unsigned spi_ps_input_ena;
          unsigned spi_ps_input_addr;
-         unsigned spi_baryc_cntl;
          unsigned spi_ps_in_control;
-         unsigned spi_shader_z_format;
-         unsigned spi_shader_col_format;
          unsigned cb_shader_mask;
          unsigned db_shader_control;
          unsigned num_interp;
          unsigned spi_gs_out_config_ps;
          unsigned pa_sc_hisz_control;
-         bool writes_samplemask;
       } ps;
    };
 
@@ -1021,61 +877,61 @@ struct si_shader_part {
    struct si_shader_part *next;
    union si_shader_part_key key;
    struct si_shader_binary binary;
-   struct ac_shader_config config;
+   unsigned num_vgprs;
+   unsigned num_sgprs;
 };
 
 /* si_shader.c */
 struct ac_rtld_binary;
 
-void si_update_shader_binary_info(struct si_shader *shader, struct nir_shader *nir);
+unsigned si_map_io_driver_location(unsigned semantic);
 bool si_compile_shader(struct si_screen *sscreen, struct ac_llvm_compiler *compiler,
                        struct si_shader *shader, struct util_debug_callback *debug);
 bool si_create_shader_variant(struct si_screen *sscreen, struct ac_llvm_compiler *compiler,
                               struct si_shader *shader, struct util_debug_callback *debug);
 void si_shader_destroy(struct si_shader *shader);
 unsigned si_shader_io_get_unique_index(unsigned semantic);
-int si_shader_binary_upload(struct si_screen *sscreen, struct si_shader *shader,
-                            uint64_t scratch_va);
-int si_shader_binary_upload_at(struct si_screen *sscreen, struct si_shader *shader,
-                               uint64_t scratch_va, int64_t bo_offset);
-bool si_can_dump_shader(struct si_screen *sscreen, gl_shader_stage stage,
-                        enum si_shader_dump_type dump_type);
-void si_shader_dump(struct si_screen *sscreen, struct si_shader *shader,
-                    struct util_debug_callback *debug, FILE *f, bool check_debug_option);
-void si_shader_dump_stats_for_shader_db(struct si_screen *screen, struct si_shader *shader,
-                                        struct util_debug_callback *debug);
 void si_multiwave_lds_size_workaround(struct si_screen *sscreen, unsigned *lds_size);
-const char *si_get_shader_name(const struct si_shader *shader);
-void si_shader_binary_clean(struct si_shader_binary *binary);
 struct nir_shader *si_deserialize_shader(struct si_shader_selector *sel);
 unsigned si_get_ps_num_interp(struct si_shader *ps);
-bool si_shader_binary_open(struct si_screen *screen, struct si_shader *shader,
-                           struct ac_rtld_binary *rtld);
-bool si_get_external_symbol(enum amd_gfx_level gfx_level, void *data, const char *name,
-                            uint64_t *value);
 unsigned si_get_shader_prefetch_size(struct si_shader *shader);
-unsigned si_get_shader_binary_size(struct si_screen *screen, struct si_shader *shader);
+unsigned si_get_max_workgroup_size(const struct si_shader *shader);
+unsigned si_shader_encode_vgprs(struct si_shader *shader);
+unsigned si_shader_encode_sgprs(struct si_shader *shader);
 
 /* si_shader_info.c */
-void si_nir_scan_shader(struct si_screen *sscreen,  const struct nir_shader *nir,
-                        struct si_shader_info *info);
+void si_nir_gather_info(struct si_screen *sscreen, struct nir_shader *nir,
+                        struct si_shader_info *info, bool colors_lowered);
 
 /* si_shader_nir.c */
-void si_lower_mediump_io(struct nir_shader *nir);
-
-bool si_alu_to_scalar_packed_math_filter(const struct nir_instr *instr, const void *data);
-void si_nir_opts(struct si_screen *sscreen, struct nir_shader *nir, bool first);
+void si_nir_opts(struct si_screen *sscreen, struct nir_shader *nir, bool has_array_temps);
 void si_nir_late_opts(struct nir_shader *nir);
-char *si_finalize_nir(struct pipe_screen *screen, void *nirptr);
+PROC void si_finalize_nir(struct pipe_screen *screen, struct nir_shader *nir,
+                          bool optimize) TAILV;
 
 /* si_state_shaders.cpp */
 unsigned si_shader_num_alloc_param_exports(struct si_shader *shader);
 unsigned si_determine_wave_size(struct si_screen *sscreen, struct si_shader *shader);
-void gfx9_get_gs_info(struct si_shader_selector *es, struct si_shader_selector *gs,
-                      struct gfx9_gs_info *out);
 bool gfx10_is_ngg_passthrough(struct si_shader *shader);
 unsigned si_shader_lshs_vertex_stride(struct si_shader *ls);
 bool si_should_clear_lds(struct si_screen *sscreen, const struct nir_shader *shader);
+unsigned si_get_output_prim_simplified(const struct si_shader_selector *sel,
+                                       const union si_shader_key *key);
+
+/* si_shader_binary.c */
+unsigned si_get_shader_binary_size(struct si_screen *screen, struct si_shader *shader);
+int si_shader_binary_upload(struct si_screen *sscreen, struct si_shader *shader,
+                            uint64_t scratch_va);
+int si_shader_binary_upload_at(struct si_screen *sscreen, struct si_shader *shader,
+                               uint64_t scratch_va, int64_t bo_offset);
+void si_shader_dump_stats_for_shader_db(struct si_screen *screen, struct si_shader *shader,
+                                        struct util_debug_callback *debug);
+PROC void si_shader_binary_clean(struct si_shader_binary *binary) TAILV;
+const char *si_get_shader_name(const struct si_shader *shader);
+PROC bool si_can_dump_shader(struct si_screen *sscreen, mesa_shader_stage stage,
+                             enum si_shader_dump_type dump_type) TAILB;
+PROC void si_shader_dump(struct si_screen *sscreen, struct si_shader *shader,
+                         struct util_debug_callback *debug, FILE *f, bool check_debug_option) TAILV;
 
 /* Inline helpers. */
 
@@ -1085,65 +941,56 @@ static inline struct si_shader **si_get_main_shader_part(struct si_shader_select
                                                          unsigned wave_size)
 {
    assert(wave_size == 32 || wave_size == 64);
-   unsigned index = wave_size / 32 - 1;
+   unsigned wave_size_index = wave_size == 64;
 
    if (sel->stage <= MESA_SHADER_GEOMETRY) {
       if (key->ge.as_ls)
-         return &sel->main_shader_part_ls[index];
+         return &sel->main_parts.named.ls[wave_size_index][key->ge.use_aco];
       if (key->ge.as_es && key->ge.as_ngg)
-         return &sel->main_shader_part_ngg_es[index];
+         return &sel->main_parts.named.ngg_es[wave_size_index][key->ge.use_aco];
       if (key->ge.as_es) {
          /* legacy GS only support wave 64 */
          assert(wave_size == 64);
-         return &sel->main_shader_part_es;
+         return &sel->main_parts.named.es[key->ge.use_aco];
       }
       if (key->ge.as_ngg)
-         return &sel->main_shader_part_ngg[index];
+         return &sel->main_parts.named.ngg[wave_size_index][key->ge.use_aco];
+      return &sel->main_parts.named.other[wave_size_index][key->ge.use_aco];
    }
-   return &sel->main_shader_part[index];
+   return &sel->main_parts.named.other[wave_size_index][sel->info.base.use_aco_amd];
 }
 
-static inline bool si_shader_uses_bindless_samplers(struct si_shader_selector *selector)
+static inline bool gfx10_has_variable_edgeflags(struct si_shader *shader)
 {
-   return selector ? selector->info.uses_bindless_samplers : false;
+   unsigned output_prim = si_get_output_prim_simplified(shader->selector, &shader->key);
+
+   return shader->selector->stage == MESA_SHADER_VERTEX &&
+          (output_prim == MESA_PRIM_TRIANGLES || output_prim == MESA_PRIM_UNKNOWN);
 }
 
-static inline bool si_shader_uses_bindless_images(struct si_shader_selector *selector)
+static inline bool si_shader_culling_enabled(struct si_shader *shader)
 {
-   return selector ? selector->info.uses_bindless_images : false;
-}
+   /* Legacy VS/TES/GS and ES/MS don't cull in the shader. */
+   if (!shader->key.ge.as_ngg || shader->key.ge.as_es ||
+       shader->selector->stage == MESA_SHADER_MESH) {
+      assert(!shader->key.ge.opt.ngg_culling);
+      return false;
+   }
 
-static inline bool gfx10_edgeflags_have_effect(struct si_shader *shader)
-{
-   if (shader->selector->stage == MESA_SHADER_VERTEX &&
-       !shader->selector->info.base.vs.blit_sgprs_amd &&
-       !(shader->key.ge.opt.ngg_culling & SI_NGG_CULL_LINES))
+   if (shader->key.ge.opt.ngg_culling)
       return true;
 
-   return false;
+   unsigned output_prim = si_get_output_prim_simplified(shader->selector, &shader->key);
+
+   /* This enables NGG culling for non-monolithic TES and GS. */
+   return shader->selector->info.ngg_cull_vert_threshold == 0 &&
+          (output_prim == MESA_PRIM_TRIANGLES || output_prim == MESA_PRIM_LINES);
 }
 
-static inline bool gfx10_ngg_writes_user_edgeflags(struct si_shader *shader)
+static inline bool si_shader_uses_aco(struct si_shader *shader)
 {
-   return gfx10_edgeflags_have_effect(shader) &&
-          shader->selector->info.writes_edgeflag;
-}
-
-static inline bool si_shader_uses_streamout(const struct si_shader *shader)
-{
-   return shader->selector->stage <= MESA_SHADER_GEOMETRY &&
-          shader->selector->info.enabled_streamout_buffer_mask &&
-          !shader->key.ge.opt.remove_streamout &&
-          !shader->key.ge.mono.remove_streamout;
-}
-
-static inline bool si_shader_uses_discard(struct si_shader *shader)
-{
-   /* Changes to this should also update ps_modifies_zs. */
-   return shader->selector->info.base.fs.uses_discard ||
-          shader->key.ps.part.prolog.poly_stipple ||
-          shader->key.ps.mono.point_smoothing ||
-          shader->key.ps.part.epilog.alpha_func != PIPE_FUNC_ALWAYS;
+   return shader->selector->stage <= MESA_SHADER_GEOMETRY ?
+            shader->key.ge.use_aco : shader->selector->info.base.use_aco_amd;
 }
 
 #ifdef __cplusplus

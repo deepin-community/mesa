@@ -10,17 +10,25 @@
 #ifndef TU_BUFFER_H
 #define TU_BUFFER_H
 
-#include "tu_common.h"
+#include <stdint.h>
 
 #include "vk_buffer.h"
+#include "vk_object.h"
+#include "vulkan/vulkan_core.h"
+
+#include "tu_knl.h"
 
 struct tu_buffer
 {
    struct vk_buffer vk;
 
-   struct tu_bo *bo;
-   uint64_t iova;
-   uint64_t bo_size;
+   union {
+      struct {
+         struct tu_bo *bo;
+         uint64_t bo_size;
+      };
+      struct tu_sparse_vma vma;
+   };
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(tu_buffer, vk.base, VkBuffer,

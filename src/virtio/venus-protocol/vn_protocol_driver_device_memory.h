@@ -18,6 +18,7 @@
  *   vkMapMemory
  *   vkGetMemoryFdKHR
  *   vkGetMemoryFdPropertiesKHR
+ *   vkMapMemory2
  */
 
 /* struct VkExportMemoryAllocateInfo chain */
@@ -302,31 +303,31 @@ vn_sizeof_VkMemoryAllocateInfo_pnext(const void *val)
         case VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO:
             size += vn_sizeof_simple_pointer(pnext);
             size += vn_sizeof_VkStructureType(&pnext->sType);
-            size += vn_sizeof_VkMemoryAllocateInfo_pnext(pnext->pNext);
+            size += vn_sizeof_VkMemoryAllocateInfo_pnext(((const VkExportMemoryAllocateInfo *)pnext)->pNext);
             size += vn_sizeof_VkExportMemoryAllocateInfo_self((const VkExportMemoryAllocateInfo *)pnext);
             return size;
         case VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO:
             size += vn_sizeof_simple_pointer(pnext);
             size += vn_sizeof_VkStructureType(&pnext->sType);
-            size += vn_sizeof_VkMemoryAllocateInfo_pnext(pnext->pNext);
+            size += vn_sizeof_VkMemoryAllocateInfo_pnext(((const VkMemoryAllocateFlagsInfo *)pnext)->pNext);
             size += vn_sizeof_VkMemoryAllocateFlagsInfo_self((const VkMemoryAllocateFlagsInfo *)pnext);
             return size;
         case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO:
             size += vn_sizeof_simple_pointer(pnext);
             size += vn_sizeof_VkStructureType(&pnext->sType);
-            size += vn_sizeof_VkMemoryAllocateInfo_pnext(pnext->pNext);
+            size += vn_sizeof_VkMemoryAllocateInfo_pnext(((const VkMemoryDedicatedAllocateInfo *)pnext)->pNext);
             size += vn_sizeof_VkMemoryDedicatedAllocateInfo_self((const VkMemoryDedicatedAllocateInfo *)pnext);
             return size;
         case VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO:
             size += vn_sizeof_simple_pointer(pnext);
             size += vn_sizeof_VkStructureType(&pnext->sType);
-            size += vn_sizeof_VkMemoryAllocateInfo_pnext(pnext->pNext);
+            size += vn_sizeof_VkMemoryAllocateInfo_pnext(((const VkMemoryOpaqueCaptureAddressAllocateInfo *)pnext)->pNext);
             size += vn_sizeof_VkMemoryOpaqueCaptureAddressAllocateInfo_self((const VkMemoryOpaqueCaptureAddressAllocateInfo *)pnext);
             return size;
         case VK_STRUCTURE_TYPE_IMPORT_MEMORY_RESOURCE_INFO_MESA:
             size += vn_sizeof_simple_pointer(pnext);
             size += vn_sizeof_VkStructureType(&pnext->sType);
-            size += vn_sizeof_VkMemoryAllocateInfo_pnext(pnext->pNext);
+            size += vn_sizeof_VkMemoryAllocateInfo_pnext(((const VkImportMemoryResourceInfoMESA *)pnext)->pNext);
             size += vn_sizeof_VkImportMemoryResourceInfoMESA_self((const VkImportMemoryResourceInfoMESA *)pnext);
             return size;
         case VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR:
@@ -372,31 +373,31 @@ vn_encode_VkMemoryAllocateInfo_pnext(struct vn_cs_encoder *enc, const void *val)
         case VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO:
             vn_encode_simple_pointer(enc, pnext);
             vn_encode_VkStructureType(enc, &pnext->sType);
-            vn_encode_VkMemoryAllocateInfo_pnext(enc, pnext->pNext);
+            vn_encode_VkMemoryAllocateInfo_pnext(enc, ((const VkExportMemoryAllocateInfo *)pnext)->pNext);
             vn_encode_VkExportMemoryAllocateInfo_self(enc, (const VkExportMemoryAllocateInfo *)pnext);
             return;
         case VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO:
             vn_encode_simple_pointer(enc, pnext);
             vn_encode_VkStructureType(enc, &pnext->sType);
-            vn_encode_VkMemoryAllocateInfo_pnext(enc, pnext->pNext);
+            vn_encode_VkMemoryAllocateInfo_pnext(enc, ((const VkMemoryAllocateFlagsInfo *)pnext)->pNext);
             vn_encode_VkMemoryAllocateFlagsInfo_self(enc, (const VkMemoryAllocateFlagsInfo *)pnext);
             return;
         case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO:
             vn_encode_simple_pointer(enc, pnext);
             vn_encode_VkStructureType(enc, &pnext->sType);
-            vn_encode_VkMemoryAllocateInfo_pnext(enc, pnext->pNext);
+            vn_encode_VkMemoryAllocateInfo_pnext(enc, ((const VkMemoryDedicatedAllocateInfo *)pnext)->pNext);
             vn_encode_VkMemoryDedicatedAllocateInfo_self(enc, (const VkMemoryDedicatedAllocateInfo *)pnext);
             return;
         case VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO:
             vn_encode_simple_pointer(enc, pnext);
             vn_encode_VkStructureType(enc, &pnext->sType);
-            vn_encode_VkMemoryAllocateInfo_pnext(enc, pnext->pNext);
+            vn_encode_VkMemoryAllocateInfo_pnext(enc, ((const VkMemoryOpaqueCaptureAddressAllocateInfo *)pnext)->pNext);
             vn_encode_VkMemoryOpaqueCaptureAddressAllocateInfo_self(enc, (const VkMemoryOpaqueCaptureAddressAllocateInfo *)pnext);
             return;
         case VK_STRUCTURE_TYPE_IMPORT_MEMORY_RESOURCE_INFO_MESA:
             vn_encode_simple_pointer(enc, pnext);
             vn_encode_VkStructureType(enc, &pnext->sType);
-            vn_encode_VkMemoryAllocateInfo_pnext(enc, pnext->pNext);
+            vn_encode_VkMemoryAllocateInfo_pnext(enc, ((const VkImportMemoryResourceInfoMESA *)pnext)->pNext);
             vn_encode_VkImportMemoryResourceInfoMESA_self(enc, (const VkImportMemoryResourceInfoMESA *)pnext);
             return;
         case VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR:
@@ -537,6 +538,61 @@ vn_encode_VkDeviceMemoryOpaqueCaptureAddressInfo(struct vn_cs_encoder *enc, cons
     vn_encode_VkDeviceMemoryOpaqueCaptureAddressInfo_self(enc, val);
 }
 
+/* struct VkMemoryUnmapInfo chain */
+
+static inline size_t
+vn_sizeof_VkMemoryUnmapInfo_pnext(const void *val)
+{
+    /* no known/supported struct */
+    return vn_sizeof_simple_pointer(NULL);
+}
+
+static inline size_t
+vn_sizeof_VkMemoryUnmapInfo_self(const VkMemoryUnmapInfo *val)
+{
+    size_t size = 0;
+    /* skip val->{sType,pNext} */
+    size += vn_sizeof_VkFlags(&val->flags);
+    size += vn_sizeof_VkDeviceMemory(&val->memory);
+    return size;
+}
+
+static inline size_t
+vn_sizeof_VkMemoryUnmapInfo(const VkMemoryUnmapInfo *val)
+{
+    size_t size = 0;
+
+    size += vn_sizeof_VkStructureType(&val->sType);
+    size += vn_sizeof_VkMemoryUnmapInfo_pnext(val->pNext);
+    size += vn_sizeof_VkMemoryUnmapInfo_self(val);
+
+    return size;
+}
+
+static inline void
+vn_encode_VkMemoryUnmapInfo_pnext(struct vn_cs_encoder *enc, const void *val)
+{
+    /* no known/supported struct */
+    vn_encode_simple_pointer(enc, NULL);
+}
+
+static inline void
+vn_encode_VkMemoryUnmapInfo_self(struct vn_cs_encoder *enc, const VkMemoryUnmapInfo *val)
+{
+    /* skip val->{sType,pNext} */
+    vn_encode_VkFlags(enc, &val->flags);
+    vn_encode_VkDeviceMemory(enc, &val->memory);
+}
+
+static inline void
+vn_encode_VkMemoryUnmapInfo(struct vn_cs_encoder *enc, const VkMemoryUnmapInfo *val)
+{
+    assert(val->sType == VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO);
+    vn_encode_VkStructureType(enc, &(VkStructureType){ VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO });
+    vn_encode_VkMemoryUnmapInfo_pnext(enc, val->pNext);
+    vn_encode_VkMemoryUnmapInfo_self(enc, val);
+}
+
 /* struct VkMemoryResourceAllocationSizePropertiesMESA chain */
 
 static inline size_t
@@ -658,7 +714,7 @@ vn_sizeof_VkMemoryResourcePropertiesMESA_pnext(const void *val)
         case VK_STRUCTURE_TYPE_MEMORY_RESOURCE_ALLOCATION_SIZE_PROPERTIES_MESA:
             size += vn_sizeof_simple_pointer(pnext);
             size += vn_sizeof_VkStructureType(&pnext->sType);
-            size += vn_sizeof_VkMemoryResourcePropertiesMESA_pnext(pnext->pNext);
+            size += vn_sizeof_VkMemoryResourcePropertiesMESA_pnext(((const VkMemoryResourceAllocationSizePropertiesMESA *)pnext)->pNext);
             size += vn_sizeof_VkMemoryResourceAllocationSizePropertiesMESA_self((const VkMemoryResourceAllocationSizePropertiesMESA *)pnext);
             return size;
         default:
@@ -712,7 +768,7 @@ vn_decode_VkMemoryResourcePropertiesMESA_pnext(struct vn_cs_decoder *dec, const 
 
     switch ((int32_t)pnext->sType) {
     case VK_STRUCTURE_TYPE_MEMORY_RESOURCE_ALLOCATION_SIZE_PROPERTIES_MESA:
-        vn_decode_VkMemoryResourcePropertiesMESA_pnext(dec, pnext->pNext);
+        vn_decode_VkMemoryResourcePropertiesMESA_pnext(dec, ((VkMemoryResourceAllocationSizePropertiesMESA *)pnext)->pNext);
         vn_decode_VkMemoryResourceAllocationSizePropertiesMESA_self(dec, (VkMemoryResourceAllocationSizePropertiesMESA *)pnext);
         break;
     default:
@@ -751,7 +807,7 @@ vn_sizeof_VkMemoryResourcePropertiesMESA_pnext_partial(const void *val)
         case VK_STRUCTURE_TYPE_MEMORY_RESOURCE_ALLOCATION_SIZE_PROPERTIES_MESA:
             size += vn_sizeof_simple_pointer(pnext);
             size += vn_sizeof_VkStructureType(&pnext->sType);
-            size += vn_sizeof_VkMemoryResourcePropertiesMESA_pnext_partial(pnext->pNext);
+            size += vn_sizeof_VkMemoryResourcePropertiesMESA_pnext_partial(((const VkMemoryResourceAllocationSizePropertiesMESA *)pnext)->pNext);
             size += vn_sizeof_VkMemoryResourceAllocationSizePropertiesMESA_self_partial((const VkMemoryResourceAllocationSizePropertiesMESA *)pnext);
             return size;
         default:
@@ -795,7 +851,7 @@ vn_encode_VkMemoryResourcePropertiesMESA_pnext_partial(struct vn_cs_encoder *enc
         case VK_STRUCTURE_TYPE_MEMORY_RESOURCE_ALLOCATION_SIZE_PROPERTIES_MESA:
             vn_encode_simple_pointer(enc, pnext);
             vn_encode_VkStructureType(enc, &pnext->sType);
-            vn_encode_VkMemoryResourcePropertiesMESA_pnext_partial(enc, pnext->pNext);
+            vn_encode_VkMemoryResourcePropertiesMESA_pnext_partial(enc, ((const VkMemoryResourceAllocationSizePropertiesMESA *)pnext)->pNext);
             vn_encode_VkMemoryResourceAllocationSizePropertiesMESA_self_partial(enc, (const VkMemoryResourceAllocationSizePropertiesMESA *)pnext);
             return;
         default:
@@ -1231,6 +1287,59 @@ static inline uint64_t vn_decode_vkGetDeviceMemoryOpaqueCaptureAddress_reply(str
     return ret;
 }
 
+static inline size_t vn_sizeof_vkUnmapMemory2(VkDevice device, const VkMemoryUnmapInfo* pMemoryUnmapInfo)
+{
+    const VkCommandTypeEXT cmd_type = VK_COMMAND_TYPE_vkUnmapMemory2_EXT;
+    const VkFlags cmd_flags = 0;
+    size_t cmd_size = vn_sizeof_VkCommandTypeEXT(&cmd_type) + vn_sizeof_VkFlags(&cmd_flags);
+
+    cmd_size += vn_sizeof_VkDevice(&device);
+    cmd_size += vn_sizeof_simple_pointer(pMemoryUnmapInfo);
+    if (pMemoryUnmapInfo)
+        cmd_size += vn_sizeof_VkMemoryUnmapInfo(pMemoryUnmapInfo);
+
+    return cmd_size;
+}
+
+static inline void vn_encode_vkUnmapMemory2(struct vn_cs_encoder *enc, VkCommandFlagsEXT cmd_flags, VkDevice device, const VkMemoryUnmapInfo* pMemoryUnmapInfo)
+{
+    const VkCommandTypeEXT cmd_type = VK_COMMAND_TYPE_vkUnmapMemory2_EXT;
+
+    vn_encode_VkCommandTypeEXT(enc, &cmd_type);
+    vn_encode_VkFlags(enc, &cmd_flags);
+
+    vn_encode_VkDevice(enc, &device);
+    if (vn_encode_simple_pointer(enc, pMemoryUnmapInfo))
+        vn_encode_VkMemoryUnmapInfo(enc, pMemoryUnmapInfo);
+}
+
+static inline size_t vn_sizeof_vkUnmapMemory2_reply(VkDevice device, const VkMemoryUnmapInfo* pMemoryUnmapInfo)
+{
+    const VkCommandTypeEXT cmd_type = VK_COMMAND_TYPE_vkUnmapMemory2_EXT;
+    size_t cmd_size = vn_sizeof_VkCommandTypeEXT(&cmd_type);
+
+    VkResult ret;
+    cmd_size += vn_sizeof_VkResult(&ret);
+    /* skip device */
+    /* skip pMemoryUnmapInfo */
+
+    return cmd_size;
+}
+
+static inline VkResult vn_decode_vkUnmapMemory2_reply(struct vn_cs_decoder *dec, VkDevice device, const VkMemoryUnmapInfo* pMemoryUnmapInfo)
+{
+    VkCommandTypeEXT command_type;
+    vn_decode_VkCommandTypeEXT(dec, &command_type);
+    assert(command_type == VK_COMMAND_TYPE_vkUnmapMemory2_EXT);
+
+    VkResult ret;
+    vn_decode_VkResult(dec, &ret);
+    /* skip device */
+    /* skip pMemoryUnmapInfo */
+
+    return ret;
+}
+
 static inline size_t vn_sizeof_vkGetMemoryResourcePropertiesMESA(VkDevice device, uint32_t resourceId, VkMemoryResourcePropertiesMESA* pMemoryResourceProperties)
 {
     const VkCommandTypeEXT cmd_type = VK_COMMAND_TYPE_vkGetMemoryResourcePropertiesMESA_EXT;
@@ -1441,6 +1550,27 @@ static inline void vn_submit_vkGetDeviceMemoryOpaqueCaptureAddress(struct vn_rin
     }
 }
 
+static inline void vn_submit_vkUnmapMemory2(struct vn_ring *vn_ring, VkCommandFlagsEXT cmd_flags, VkDevice device, const VkMemoryUnmapInfo* pMemoryUnmapInfo, struct vn_ring_submit_command *submit)
+{
+    uint8_t local_cmd_data[VN_SUBMIT_LOCAL_CMD_SIZE];
+    void *cmd_data = local_cmd_data;
+    size_t cmd_size = vn_sizeof_vkUnmapMemory2(device, pMemoryUnmapInfo);
+    if (cmd_size > sizeof(local_cmd_data)) {
+        cmd_data = malloc(cmd_size);
+        if (!cmd_data)
+            cmd_size = 0;
+    }
+    const size_t reply_size = cmd_flags & VK_COMMAND_GENERATE_REPLY_BIT_EXT ? vn_sizeof_vkUnmapMemory2_reply(device, pMemoryUnmapInfo) : 0;
+
+    struct vn_cs_encoder *enc = vn_ring_submit_command_init(vn_ring, submit, cmd_data, cmd_size, reply_size);
+    if (cmd_size) {
+        vn_encode_vkUnmapMemory2(enc, cmd_flags, device, pMemoryUnmapInfo);
+        vn_ring_submit_command(vn_ring, submit);
+        if (cmd_data != local_cmd_data)
+            free(cmd_data);
+    }
+}
+
 static inline void vn_submit_vkGetMemoryResourcePropertiesMESA(struct vn_ring *vn_ring, VkCommandFlagsEXT cmd_flags, VkDevice device, uint32_t resourceId, VkMemoryResourcePropertiesMESA* pMemoryResourceProperties, struct vn_ring_submit_command *submit)
 {
     uint8_t local_cmd_data[VN_SUBMIT_LOCAL_CMD_SIZE];
@@ -1484,36 +1614,10 @@ static inline void vn_async_vkAllocateMemory(struct vn_ring *vn_ring, VkDevice d
     vn_submit_vkAllocateMemory(vn_ring, 0, device, pAllocateInfo, pAllocator, pMemory, &submit);
 }
 
-static inline void vn_call_vkFreeMemory(struct vn_ring *vn_ring, VkDevice device, VkDeviceMemory memory, const VkAllocationCallbacks* pAllocator)
-{
-    VN_TRACE_FUNC();
-
-    struct vn_ring_submit_command submit;
-    vn_submit_vkFreeMemory(vn_ring, VK_COMMAND_GENERATE_REPLY_BIT_EXT, device, memory, pAllocator, &submit);
-    struct vn_cs_decoder *dec = vn_ring_get_command_reply(vn_ring, &submit);
-    if (dec) {
-        vn_decode_vkFreeMemory_reply(dec, device, memory, pAllocator);
-        vn_ring_free_command_reply(vn_ring, &submit);
-    }
-}
-
 static inline void vn_async_vkFreeMemory(struct vn_ring *vn_ring, VkDevice device, VkDeviceMemory memory, const VkAllocationCallbacks* pAllocator)
 {
     struct vn_ring_submit_command submit;
     vn_submit_vkFreeMemory(vn_ring, 0, device, memory, pAllocator, &submit);
-}
-
-static inline void vn_call_vkUnmapMemory(struct vn_ring *vn_ring, VkDevice device, VkDeviceMemory memory)
-{
-    VN_TRACE_FUNC();
-
-    struct vn_ring_submit_command submit;
-    vn_submit_vkUnmapMemory(vn_ring, VK_COMMAND_GENERATE_REPLY_BIT_EXT, device, memory, &submit);
-    struct vn_cs_decoder *dec = vn_ring_get_command_reply(vn_ring, &submit);
-    if (dec) {
-        vn_decode_vkUnmapMemory_reply(dec, device, memory);
-        vn_ring_free_command_reply(vn_ring, &submit);
-    }
 }
 
 static inline void vn_async_vkUnmapMemory(struct vn_ring *vn_ring, VkDevice device, VkDeviceMemory memory)
@@ -1605,6 +1709,28 @@ static inline void vn_async_vkGetDeviceMemoryOpaqueCaptureAddress(struct vn_ring
 {
     struct vn_ring_submit_command submit;
     vn_submit_vkGetDeviceMemoryOpaqueCaptureAddress(vn_ring, 0, device, pInfo, &submit);
+}
+
+static inline VkResult vn_call_vkUnmapMemory2(struct vn_ring *vn_ring, VkDevice device, const VkMemoryUnmapInfo* pMemoryUnmapInfo)
+{
+    VN_TRACE_FUNC();
+
+    struct vn_ring_submit_command submit;
+    vn_submit_vkUnmapMemory2(vn_ring, VK_COMMAND_GENERATE_REPLY_BIT_EXT, device, pMemoryUnmapInfo, &submit);
+    struct vn_cs_decoder *dec = vn_ring_get_command_reply(vn_ring, &submit);
+    if (dec) {
+        const VkResult ret = vn_decode_vkUnmapMemory2_reply(dec, device, pMemoryUnmapInfo);
+        vn_ring_free_command_reply(vn_ring, &submit);
+        return ret;
+    } else {
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+}
+
+static inline void vn_async_vkUnmapMemory2(struct vn_ring *vn_ring, VkDevice device, const VkMemoryUnmapInfo* pMemoryUnmapInfo)
+{
+    struct vn_ring_submit_command submit;
+    vn_submit_vkUnmapMemory2(vn_ring, 0, device, pMemoryUnmapInfo, &submit);
 }
 
 static inline VkResult vn_call_vkGetMemoryResourcePropertiesMESA(struct vn_ring *vn_ring, VkDevice device, uint32_t resourceId, VkMemoryResourcePropertiesMESA* pMemoryResourceProperties)

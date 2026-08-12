@@ -16,6 +16,7 @@
 #include "util/u_dynarray.h"
 
 #include "vk_command_buffer.h"
+#include "clc597.h"
 
 #include <stdio.h>
 
@@ -46,28 +47,50 @@ struct nvk_root_descriptor_table {
       } cs;
    };
 
-   /* Client push constants */
-   uint8_t push[NVK_MAX_PUSH_SIZE];
-
    /* Descriptor set addresses */
    struct nvk_buffer_address sets[NVK_MAX_SETS];
 
    /* For each descriptor set, the index in dynamic_buffers where that set's
-    * the dynamic buffers start. This is maintained for every set, regardless
-    * of whether or not anything is bound there.
+    * dynamic buffers start.
     */
    uint8_t set_dynamic_buffer_start[NVK_MAX_SETS];
 
-   /* Dynamic buffer bindings */
-   union nvk_buffer_descriptor dynamic_buffers[NVK_MAX_DYNAMIC_BUFFERS];
+   uint64_t printf_buffer_addr;
 
-   /* enfore alignment to 0x100 as needed pre pascal */
-   uint8_t __padding[0x38];
+   /* enfore total structure alignment to 0x100 as needed pre pascal */
+   uint8_t __padding[0xb0];
+
+   /*
+    * Arrays with dynamic (shader-provided) indices need to fit in a single
+    * 256-byte bank for gpus with ROOT_TABLE. We place them here after the
+    * padding so they're appropriately aligned.
+    */
+
+   /* Dynamic buffer bindings (swizzled form of nvk_buffer_descriptor) */
+   uint32_t dynamic_buffers[4][NVK_MAX_DYNAMIC_BUFFERS];
+
+   /* Client push constants */
+   uint8_t push[NVK_MAX_PUSH_SIZE];
 };
 
 /* helper macro for computing root descriptor byte offsets */
 #define nvk_root_descriptor_offset(member)\
    offsetof(struct nvk_root_descriptor_table, member)
+
+/* Push constants should be aligned properly */
+static_assert(nvk_root_descriptor_offset(push) % 8 == 0,
+              "Push constants should be aligned properly");
+
+#define nvk_hw_root_table_index(member)\
+   (nvk_root_descriptor_offset(member) / NVK_HW_ROOT_TABLE_SIZE)
+#define nvk_hw_root_table_offset(member)\
+   (nvk_root_descriptor_offset(member) % NVK_HW_ROOT_TABLE_SIZE)
+
+static inline bool nvk_use_hw_root_table(const struct nv_device_info *info,
+                                         bool is_gfx)
+{
+   return is_gfx && info->cls_eng3d >= TURING_A;
+}
 
 enum ENUM_PACKED nvk_descriptor_set_type {
    NVK_DESCRIPTOR_SET_TYPE_NONE,
@@ -105,8 +128,8 @@ struct nvk_descriptor_state {
    unsigned _start = start; \
    unsigned _count = count; \
    assert(_start + _count <= ARRAY_SIZE(root->member)); \
-   for (unsigned i = 0; i < _count; i++) \
-      (dst)[i] = root->member[i + _start]; \
+   for (unsigned _index = 0; _index < _count; _index++) \
+      (dst)[_index] = root->member[_index + _start]; \
 } while (0)
 
 #define nvk_descriptor_state_set_root(cmd, desc, member, src) do { \
@@ -128,8 +151,8 @@ struct nvk_descriptor_state {
    unsigned _start = start; \
    unsigned _count = count; \
    assert(_start + _count <= ARRAY_SIZE(root->member)); \
-   for (unsigned i = 0; i < _count; i++) \
-      root->member[i + _start] = (src)[i]; \
+   for (unsigned _index = 0; _index < _count; _index++) \
+      root->member[_index + _start] = (src)[_index]; \
    if (_desc->flush_root != NULL) { \
       size_t offset = (char *)&root->member[_start] - (char *)root; \
       _desc->flush_root((cmd), _desc, offset, \
@@ -138,6 +161,8 @@ struct nvk_descriptor_state {
 } while (0)
 
 struct nvk_attachment {
+   VkRenderingAttachmentFlagBitsKHR flags;
+
    VkFormat vk_format;
    struct nvk_image_view *iview;
 
@@ -163,7 +188,8 @@ struct nvk_rendering_state {
    struct nvk_attachment stencil_att;
    struct nvk_attachment fsr_att;
 
-   bool all_linear;
+   /* True if all the conditions are met to allow rendering to linear */
+   bool linear;
 };
 
 struct nvk_graphics_state {
@@ -195,6 +221,7 @@ struct nvk_cmd_push {
    void *map;
    uint64_t addr;
    uint32_t range;
+   bool incomplete;
    bool no_prefetch;
 };
 
@@ -215,12 +242,14 @@ struct nvk_cmd_buffer {
     */
    struct list_head owned_mem;
    struct list_head owned_gart_mem;
+   struct list_head owned_qmd;
 
    struct nvk_cmd_mem *upload_mem;
    uint32_t upload_offset;
 
-   struct nvk_cmd_mem *cond_render_gart_mem;
-   uint32_t cond_render_gart_offset;
+   struct nvk_cmd_mem *cond_render_mem;
+   /** Array of struct nvk_cmd_mem* */
+   struct util_dynarray copy_memory_indirect_temps;
 
    struct nvk_cmd_mem *push_mem;
    uint32_t *push_mem_limit;
@@ -233,7 +262,7 @@ struct nvk_cmd_buffer {
     */
    struct util_dynarray pushes;
 
-   uint64_t tls_space_needed;
+   uint8_t prev_subc;
 };
 
 VK_DEFINE_HANDLE_CASTS(nvk_cmd_buffer, vk.base, VkCommandBuffer,
@@ -285,11 +314,11 @@ void nvk_cmd_invalidate_compute_state(struct nvk_cmd_buffer *cmd);
 
 void nvk_cmd_bind_shaders(struct vk_command_buffer *vk_cmd,
                           uint32_t stage_count,
-                          const gl_shader_stage *stages,
+                          const mesa_shader_stage *stages,
                           struct vk_shader ** const shaders);
 
 void nvk_cmd_bind_graphics_shader(struct nvk_cmd_buffer *cmd,
-                                  const gl_shader_stage stage,
+                                  const mesa_shader_stage stage,
                                   struct nvk_shader *shader);
 
 void nvk_cmd_bind_compute_shader(struct nvk_cmd_buffer *cmd,
@@ -297,8 +326,7 @@ void nvk_cmd_bind_compute_shader(struct nvk_cmd_buffer *cmd,
 
 void nvk_cmd_dirty_cbufs_for_descriptors(struct nvk_cmd_buffer *cmd,
                                          VkShaderStageFlags stages,
-                                         uint32_t sets_start, uint32_t sets_end,
-                                         uint32_t dyn_start, uint32_t dyn_end);
+                                         uint32_t sets_start, uint32_t sets_end);
 void nvk_cmd_bind_vertex_buffer(struct nvk_cmd_buffer *cmd, uint32_t vb_idx,
                                 struct nvk_addr_range addr_range);
 
@@ -312,7 +340,7 @@ nvk_get_descriptors_state(struct nvk_cmd_buffer *cmd,
    case VK_PIPELINE_BIND_POINT_COMPUTE:
       return &cmd->state.cs.descriptors;
    default:
-      unreachable("Unhandled bind point");
+      UNREACHABLE("Unhandled bind point");
    }
 }
 
@@ -327,9 +355,31 @@ nvk_get_descriptor_state_for_stages(struct nvk_cmd_buffer *cmd,
       assert(!(stages & ~NVK_SHADER_STAGE_GRAPHICS_BITS));
       return &cmd->state.gfx.descriptors;
    } else {
-      unreachable("Unknown shader stage");
+      UNREACHABLE("Unknown shader stage");
    }
 }
+
+/**
+ * Gets the most recently used subchannel in the nvk_cmd_buffer, or a valid
+ * default subchannel if none has been used.
+ *
+ * Note that this isn't guaranteed to be the subchannel that the hardware is
+ * actually using (eg. at the beginning of the command buffer or after an
+ * indirect) so callers cannot rely on this value for correctness.
+ */
+static inline uint8_t
+nvk_cmd_buffer_last_subchannel(const struct nvk_cmd_buffer *cmd)
+{
+   if (cmd->push.last_hdr_dw) {
+      return NVC0_FIFO_SUBC_FROM_PKHDR(cmd->push.last_hdr_dw);
+   } else {
+      return cmd->prev_subc;
+   }
+}
+
+VkResult nvk_cmd_buffer_alloc_mem(struct nvk_cmd_buffer *cmd,
+                                  bool force_gart,
+                                  struct nvk_cmd_mem **mem_out);
 
 VkResult nvk_cmd_buffer_upload_alloc(struct nvk_cmd_buffer *cmd,
                                      uint32_t size, uint32_t alignment,
@@ -339,8 +389,9 @@ VkResult nvk_cmd_buffer_upload_data(struct nvk_cmd_buffer *cmd,
                                     const void *data, uint32_t size,
                                     uint32_t alignment, uint64_t *addr);
 
-VkResult nvk_cmd_buffer_cond_render_alloc(struct nvk_cmd_buffer *cmd,
-					  uint64_t *addr);
+VkResult nvk_cmd_buffer_alloc_qmd(struct nvk_cmd_buffer *cmd,
+                                  uint32_t size, uint32_t alignment,
+                                  uint64_t *addr, void **ptr);
 
 void nvk_cmd_flush_wait_dep(struct nvk_cmd_buffer *cmd,
                             const VkDependencyInfo *dep,
@@ -354,6 +405,10 @@ void
 nvk_cmd_buffer_flush_push_descriptors(struct nvk_cmd_buffer *cmd,
                                       struct nvk_descriptor_state *desc);
 
+void
+nvk_cmd_buffer_flush_printf_buffer(struct nvk_cmd_buffer *cmd,
+                                   struct nvk_descriptor_state *desc);
+
 bool
 nvk_cmd_buffer_get_cbuf_addr(struct nvk_cmd_buffer *cmd,
                              const struct nvk_descriptor_state *desc,
@@ -366,6 +421,7 @@ nvk_cmd_buffer_get_cbuf_descriptor_addr(struct nvk_cmd_buffer *cmd,
                                         const struct nvk_cbuf *cbuf);
 
 VkResult nvk_cmd_flush_cs_qmd(struct nvk_cmd_buffer *cmd,
+                              const struct nvk_cmd_state *state,
                               uint32_t global_size[3],
                               uint64_t *qmd_addr_out,
                               uint64_t *root_desc_addr_out);
@@ -383,8 +439,6 @@ void nvk_cmd_dispatch_shader(struct nvk_cmd_buffer *cmd,
 
 void nvk_meta_resolve_rendering(struct nvk_cmd_buffer *cmd,
                                 const VkRenderingInfo *pRenderingInfo);
-
-void nvk_cmd_buffer_dump(struct nvk_cmd_buffer *cmd, FILE *fp);
 
 void nvk_linear_render_copy(struct nvk_cmd_buffer *cmd,
                             const struct nvk_image_view *iview,

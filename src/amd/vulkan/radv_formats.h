@@ -20,7 +20,7 @@
 #include "vk_format.h"
 
 static inline enum pipe_format
-radv_format_to_pipe_format(enum VkFormat vkformat)
+radv_format_to_pipe_format(VkFormat vkformat)
 {
    switch (vkformat) {
    case VK_FORMAT_R10X6_UNORM_PACK16:
@@ -29,9 +29,17 @@ radv_format_to_pipe_format(enum VkFormat vkformat)
    case VK_FORMAT_R10X6G10X6_UNORM_2PACK16:
    case VK_FORMAT_R12X4G12X4_UNORM_2PACK16:
       return PIPE_FORMAT_R16G16_UNORM;
+   case VK_FORMAT_R10X6G10X6B10X6A10X6_UNORM_4PACK16:
+      return PIPE_FORMAT_NONE;
    default:
       return vk_format_to_pipe_format(vkformat);
    }
+}
+
+static inline const struct util_format_description *
+radv_format_description(VkFormat format)
+{
+   return util_format_description(radv_format_to_pipe_format(format));
 }
 
 /**
@@ -60,7 +68,7 @@ radv_swizzle_conv(VkComponentSwizzle component, const unsigned char chan[4], VkC
    case VK_COMPONENT_SWIZZLE_A:
       return (enum pipe_swizzle)chan[vk_swiz - VK_COMPONENT_SWIZZLE_R];
    default:
-      unreachable("Illegal swizzle");
+      UNREACHABLE("Illegal swizzle");
    }
 }
 
@@ -77,6 +85,13 @@ static inline bool
 vk_format_is_subsampled(VkFormat format)
 {
    return util_format_is_subsampled_422(radv_format_to_pipe_format(format));
+}
+
+static inline bool
+vk_format_is_96bit(VkFormat format)
+{
+   return format == VK_FORMAT_R32G32B32_UINT || format == VK_FORMAT_R32G32B32_SINT ||
+          format == VK_FORMAT_R32G32B32_SFLOAT;
 }
 
 static inline VkFormat

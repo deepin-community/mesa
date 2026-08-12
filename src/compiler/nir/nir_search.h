@@ -26,9 +26,10 @@
 
 #include "util/u_dynarray.h"
 #include "nir.h"
+#include "nir_range_analysis.h"
 #include "nir_worklist.h"
 
-#define NIR_SEARCH_MAX_VARIABLES 16
+#define NIR_SEARCH_MAX_VARIABLES 24
 
 struct nir_builder;
 
@@ -71,18 +72,6 @@ typedef struct {
     * given variable is only allowed to match constant values.
     */
    bool is_constant : 1;
-
-   /** Indicates that the given variable must have a certain type
-    *
-    * This is only allowed in search expressions and indicates that the
-    * given variable is only allowed to match values that come from an ALU
-    * instruction with the given output type.  A type of nir_type_void
-    * means it can match any type.
-    *
-    * Note: A variable that is both constant and has a non-void type will
-    * never match anything.
-    */
-   nir_alu_type type;
 
    /** Optional table->variable_cond[] fxn ptr index
     *
@@ -128,25 +117,19 @@ typedef struct {
    nir_search_value value;
 
    /* When set on a search expression, the expression will only match an SSA
-    * value that does *not* have the exact bit set.  If unset, the exact bit
-    * on the SSA value is ignored.
+    * value that does *not* have these float control bits set.  If unset,
+    * the bits on the instruction are ignored for matching.
     */
-   bool inexact : 1;
+   unsigned fp_math_ctrl_exclude : NIR_FP_MATH_CONTROL_BIT_COUNT;
 
-   /** In a replacement, requests that the instruction be marked exact. */
-   bool exact : 1;
+   /** In a replacement, add these fp_math_ctrl flags to the instruction. */
+   unsigned fp_math_ctrl_add : NIR_FP_MATH_CONTROL_BIT_COUNT;
 
-   /** Don't make the replacement exact if the search expression is exact. */
-   bool ignore_exact : 1;
+   /** Whether the second source is a nir_search_value_constant */
+   bool src1_is_const : 1;
 
-   /** Replacement does not preserve signed of zero. */
-   bool nsz : 1;
-
-   /** Replacement does not preserve NaN. */
-   bool nnan : 1;
-
-   /** Replacement does not preserve infinities. */
-   bool ninf : 1;
+   /** Whether the use of the instruction should have a swizzle. */
+   int16_t swizzle : 5;
 
    /* One of nir_op or nir_search_op */
    uint16_t opcode : 13;
@@ -195,8 +178,13 @@ typedef union {
    nir_search_expression expression;
 } nir_search_value_union;
 
+typedef struct {
+   nir_fp_analysis_state *range_ht;
+   struct hash_table *numlsb_ht;
+} nir_search_state;
+
 typedef bool (*nir_search_expression_cond)(const nir_alu_instr *instr);
-typedef bool (*nir_search_variable_cond)(struct hash_table *range_ht,
+typedef bool (*nir_search_variable_cond)(const nir_search_state *state,
                                          const nir_alu_instr *instr,
                                          unsigned src, unsigned num_components,
                                          const uint8_t *swizzle);

@@ -7,8 +7,6 @@
  *    Rob Clark <robclark@freedesktop.org>
  */
 
-#define FD_BO_NO_HARDPIN 1
-
 #include "pipe/p_state.h"
 
 #include "freedreno_resource.h"
@@ -31,32 +29,59 @@ rsc_iova(struct pipe_resource *prsc, unsigned offset)
    return fd_bo_get_iova(fd_resource(prsc)->bo) + offset;
 }
 
+template <chip CHIP>
 static void
 fd6_ssbo_descriptor(struct fd_context *ctx,
                     const struct pipe_shader_buffer *buf, uint32_t *descriptor)
 {
-   fdl6_buffer_view_init(
+   fdl6_buffer_view_init<CHIP>(
       descriptor,
       PIPE_FORMAT_R32_UINT,
       swiz_identity, rsc_iova(buf->buffer, buf->buffer_offset),
       buf->buffer_size);
 }
 
+template <chip CHIP>
 static void
 fd6_image_descriptor(struct fd_context *ctx, const struct pipe_image_view *buf,
                      uint32_t *descriptor)
 {
-   if (buf->resource->target == PIPE_BUFFER) {
+   if (buf->access & PIPE_IMAGE_ACCESS_TEX2D_FROM_BUFFER) {
+      struct fdl_view_args args = {
+         .iova = rsc_iova(buf->resource, 0),
+         .base_miplevel = 0,
+         .level_count = 1,
+         .base_array_layer = 0,
+         .layer_count = 1,
+         .swiz = {PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y, PIPE_SWIZZLE_Z,
+                  PIPE_SWIZZLE_W},
+         .format = buf->format,
+
+         .type = FDL_VIEW_TYPE_2D,
+         .chroma_offsets = {FDL_CHROMA_LOCATION_COSITED_EVEN,
+                            FDL_CHROMA_LOCATION_COSITED_EVEN},
+      };
+
+      struct fdl_layout layout;
+      const struct fdl_layout *layouts = &layout;
+
+      fd6_layout_tex2d_from_buf(&layout, ctx->screen->info, buf->format,
+                                &buf->u.tex2d_from_buf);
+
+      struct fdl6_view view;
+      fdl6_view_init<CHIP>(&view, &layouts, &args,
+                           ctx->screen->info->props.has_z24uint_s8uint);
+
+      memcpy(descriptor, view.storage_descriptor, sizeof(view.storage_descriptor));
+   } else if (buf->resource->target == PIPE_BUFFER) {
       uint32_t size = fd_clamp_buffer_size(buf->format, buf->u.buf.size,
                                            A4XX_MAX_TEXEL_BUFFER_ELEMENTS_UINT);
 
-      fdl6_buffer_view_init(descriptor, buf->format, swiz_identity,
-                            rsc_iova(buf->resource, buf->u.buf.offset),
-                            size);
+      fdl6_buffer_view_init<CHIP>(descriptor, buf->format, swiz_identity,
+                                  rsc_iova(buf->resource, buf->u.buf.offset),
+                                  size);
    } else {
       struct fdl_view_args args = {
-         .chip = ctx->screen->gen,
-
          .iova = rsc_iova(buf->resource, 0),
 
          .base_miplevel = buf->u.tex.level,
@@ -72,7 +97,6 @@ fd6_image_descriptor(struct fd_context *ctx, const struct pipe_image_view *buf,
          .type = fdl_type_from_pipe_target(buf->resource->target),
          .chroma_offsets = {FDL_CHROMA_LOCATION_COSITED_EVEN,
                             FDL_CHROMA_LOCATION_COSITED_EVEN},
-         .ubwc_fc_mutable = false,
       };
 
       /* fdl6_view makes the storage descriptor treat cubes like a 2D array (so
@@ -85,20 +109,20 @@ fd6_image_descriptor(struct fd_context *ctx, const struct pipe_image_view *buf,
       struct fdl6_view view;
       struct fd_resource *rsc = fd_resource(buf->resource);
       const struct fdl_layout *layouts[3] = { &rsc->layout, NULL, NULL };
-      fdl6_view_init(&view, layouts, &args,
-                     ctx->screen->info->a6xx.has_z24uint_s8uint);
+      fdl6_view_init<CHIP>(&view, layouts, &args,
+                           ctx->screen->info->props.has_z24uint_s8uint);
 
       memcpy(descriptor, view.storage_descriptor, sizeof(view.storage_descriptor));
    }
 }
 
 static struct fd6_descriptor_set *
-descriptor_set(struct fd_context *ctx, enum pipe_shader_type shader)
+descriptor_set(struct fd_context *ctx, mesa_shader_stage shader)
    assert_dt
 {
    struct fd6_context *fd6_ctx = fd6_context(ctx);
 
-   if (shader == PIPE_SHADER_COMPUTE)
+   if (shader == MESA_SHADER_COMPUTE)
       return &fd6_ctx->cs_descriptor_set;
 
    unsigned idx = ir3_shader_descriptor_set(shader);
@@ -112,7 +136,7 @@ clear_descriptor(struct fd6_descriptor_set *set, unsigned slot)
    /* The 2nd dword of the descriptor contains the width and height.
     * so a non-zero value means the slot was previously valid and
     * must be cleared.  We can't leave dangling descriptors as the
-    * shader could use variable indexing into the set of IBOs to
+    * shader could use variable indexing into the set of UAVs to
     * get at them.  See piglit arb_shader_image_load_store-invalid.
     */
    if (!set->descriptor[slot][1])
@@ -123,6 +147,7 @@ clear_descriptor(struct fd6_descriptor_set *set, unsigned slot)
    memset(set->descriptor[slot], 0, sizeof(set->descriptor[slot]));
 }
 
+template <chip CHIP>
 static void
 validate_image_descriptor(struct fd_context *ctx, struct fd6_descriptor_set *set,
                           unsigned slot, struct pipe_image_view *img)
@@ -134,10 +159,11 @@ validate_image_descriptor(struct fd_context *ctx, struct fd6_descriptor_set *set
 
    fd6_descriptor_set_invalidate(set);
 
-   fd6_image_descriptor(ctx, img, set->descriptor[slot]);
+   fd6_image_descriptor<CHIP>(ctx, img, set->descriptor[slot]);
    set->seqno[slot] = rsc->seqno;
 }
 
+template <chip CHIP>
 static void
 validate_buffer_descriptor(struct fd_context *ctx, struct fd6_descriptor_set *set,
                            unsigned slot, struct pipe_shader_buffer *buf)
@@ -149,22 +175,21 @@ validate_buffer_descriptor(struct fd_context *ctx, struct fd6_descriptor_set *se
 
    fd6_descriptor_set_invalidate(set);
 
-   fd6_ssbo_descriptor(ctx, buf, set->descriptor[slot]);
+   fd6_ssbo_descriptor<CHIP>(ctx, buf, set->descriptor[slot]);
    set->seqno[slot] = rsc->seqno;
 }
 
 /* Build bindless descriptor state, returns ownership of state reference */
 template <chip CHIP>
 struct fd_ringbuffer *
-fd6_build_bindless_state(struct fd_context *ctx, enum pipe_shader_type shader,
+fd6_build_bindless_state(struct fd_context *ctx, mesa_shader_stage shader,
                          bool append_fb_read)
 {
    struct fd_shaderbuf_stateobj *bufso = &ctx->shaderbuf[shader];
    struct fd_shaderimg_stateobj *imgso = &ctx->shaderimg[shader];
    struct fd6_descriptor_set *set = descriptor_set(ctx, shader);
 
-   struct fd_ringbuffer *ring = fd_submit_new_ringbuffer(
-      ctx->batch->submit, 16 * 4, FD_RINGBUFFER_STREAMING);
+   fd_cs cs(ctx->batch->submit, 19 * 4);
 
    /* Don't re-use a previous descriptor set if appending the
     * fb-read descriptor, as that can change across batches.
@@ -186,13 +211,13 @@ fd6_build_bindless_state(struct fd_context *ctx, enum pipe_shader_type shader,
    u_foreach_bit (b, bufso->enabled_mask) {
       struct pipe_shader_buffer *buf = &bufso->sb[b];
       unsigned idx = b + IR3_BINDLESS_SSBO_OFFSET;
-      validate_buffer_descriptor(ctx, set, idx, buf);
+      validate_buffer_descriptor<CHIP>(ctx, set, idx, buf);
    }
 
    u_foreach_bit (b, imgso->enabled_mask) {
       struct pipe_image_view *img = &imgso->si[b];
       unsigned idx = b + IR3_BINDLESS_IMAGE_OFFSET;
-      validate_image_descriptor(ctx, set, idx, img);
+      validate_image_descriptor<CHIP>(ctx, set, idx, img);
    }
 
    if (!set->bo) {
@@ -222,8 +247,7 @@ fd6_build_bindless_state(struct fd_context *ctx, enum pipe_shader_type shader,
                .cs = &desc_buf[(idx + i) * FDL6_TEX_CONST_DWORDS],
                .val = i,
             };
-            util_dynarray_append(&ctx->batch->fb_read_patches,
-                                 __typeof__(patch), patch);
+            util_dynarray_append(&ctx->batch->fb_read_patches, patch);
          }
       }
    }
@@ -233,121 +257,116 @@ fd6_build_bindless_state(struct fd_context *ctx, enum pipe_shader_type shader,
     * set and CP_LOAD_STATE packets to preload the state.
     *
     * Note that unless the app is using the max # of SSBOs there will
-    * be a gap between the IBO descriptors used for SSBOs and for images,
+    * be a gap between the UAV descriptors used for SSBOs and for images,
     * so emit this as two CP_LOAD_STATE packets:
     */
 
    unsigned idx = ir3_shader_descriptor_set(shader);
 
-   fd_ringbuffer_attach_bo(ring, set->bo);
+   cs.attach_bo(set->bo);
 
-   if (shader == PIPE_SHADER_COMPUTE) {
-      OUT_REG(ring,
-         HLSQ_INVALIDATE_CMD(
-            CHIP,
+   if (shader == MESA_SHADER_COMPUTE) {
+      with_crb (cs, 5) {
+         crb.add(SP_UPDATE_CNTL(CHIP,
             .cs_bindless = CHIP == A6XX ? 0x1f : 0xff,
-         )
-      );
-      OUT_REG(ring, SP_CS_BINDLESS_BASE_DESCRIPTOR(CHIP,
-            idx, .desc_size = BINDLESS_DESCRIPTOR_64B, .bo = set->bo,
-      ));
-
-      if (CHIP == A6XX) {
-         OUT_REG(ring, A6XX_HLSQ_CS_BINDLESS_BASE_DESCRIPTOR(
-               idx, .desc_size = BINDLESS_DESCRIPTOR_64B, .bo = set->bo,
          ));
+         crb.add(SP_CS_BINDLESS_BASE_DESCRIPTOR(CHIP,
+            idx, .desc_size = BINDLESS_DESCRIPTOR_64B, .bo = set->bo,
+         ));
+
+         if (CHIP == A6XX) {
+            crb.add(HLSQ_CS_BINDLESS_BASE_DESCRIPTOR(CHIP,
+               idx, .desc_size = BINDLESS_DESCRIPTOR_64B, .bo = set->bo,
+            ));
+         }
       }
 
-      if (bufso->enabled_mask) {
-         OUT_PKT(ring, CP_LOAD_STATE6_FRAG,
-            CP_LOAD_STATE6_0(
-                  .dst_off     = IR3_BINDLESS_SSBO_OFFSET,
-                  .state_type  = ST6_IBO,
-                  .state_src   = SS6_BINDLESS,
-                  .state_block = SB6_CS_SHADER,
-                  .num_unit    = util_last_bit(bufso->enabled_mask),
-            ),
-            CP_LOAD_STATE6_EXT_SRC_ADDR(
-                  /* This isn't actually an address: */
-                  .qword = (idx << 28) |
-                     IR3_BINDLESS_SSBO_OFFSET * FDL6_TEX_CONST_DWORDS,
-            ),
-         );
+      if ((CHIP < A8XX) && bufso->enabled_mask) {
+         fd_pkt7(cs, CP_LOAD_STATE6_FRAG, 3)
+            .add(CP_LOAD_STATE6_0(
+               .dst_off     = IR3_BINDLESS_SSBO_OFFSET,
+               .state_type  = ST6_UAV,
+               .state_src   = SS6_BINDLESS,
+               .state_block = SB6_CS_SHADER,
+               .num_unit    = util_last_bit(bufso->enabled_mask),
+            ))
+            .add(CP_LOAD_STATE6_EXT_SRC_ADDR(
+               /* This isn't actually an address: */
+               .qword = (idx << 28) |
+                  IR3_BINDLESS_SSBO_OFFSET * FDL6_TEX_CONST_DWORDS,
+            ));
       }
 
-      if (imgso->enabled_mask) {
-         OUT_PKT(ring, CP_LOAD_STATE6_FRAG,
-            CP_LOAD_STATE6_0(
-                  .dst_off     = IR3_BINDLESS_IMAGE_OFFSET,
-                  .state_type  = ST6_IBO,
-                  .state_src   = SS6_BINDLESS,
-                  .state_block = SB6_CS_SHADER,
-                  .num_unit    = util_last_bit(imgso->enabled_mask),
-            ),
-            CP_LOAD_STATE6_EXT_SRC_ADDR(
-                  /* This isn't actually an address: */
-                  .qword = (idx << 28) |
-                     IR3_BINDLESS_IMAGE_OFFSET * FDL6_TEX_CONST_DWORDS,
-            ),
-         );
+      if ((CHIP < A8XX) && imgso->enabled_mask) {
+         fd_pkt7(cs, CP_LOAD_STATE6_FRAG, 3)
+            .add(CP_LOAD_STATE6_0(
+               .dst_off     = IR3_BINDLESS_IMAGE_OFFSET,
+               .state_type  = ST6_UAV,
+               .state_src   = SS6_BINDLESS,
+               .state_block = SB6_CS_SHADER,
+               .num_unit    = util_last_bit(imgso->enabled_mask),
+            ))
+            .add(CP_LOAD_STATE6_EXT_SRC_ADDR(
+               /* This isn't actually an address: */
+               .qword = (idx << 28) |
+                  IR3_BINDLESS_IMAGE_OFFSET * FDL6_TEX_CONST_DWORDS,
+            ));
       }
    } else {
-      OUT_REG(ring,
-         HLSQ_INVALIDATE_CMD(
-            CHIP,
+      with_crb (cs, 5) {
+         crb.add(SP_UPDATE_CNTL(CHIP,
             .gfx_bindless = CHIP == A6XX ? 0x1f : 0xff,
-         )
-      );
-      OUT_REG(ring, SP_BINDLESS_BASE_DESCRIPTOR(CHIP,
-            idx, .desc_size = BINDLESS_DESCRIPTOR_64B, .bo = set->bo,
-      ));
-      if (CHIP == A6XX) {
-         OUT_REG(ring, A6XX_HLSQ_BINDLESS_BASE_DESCRIPTOR(
-               idx, .desc_size = BINDLESS_DESCRIPTOR_64B, .bo = set->bo,
          ));
+         crb.add(SP_GFX_BINDLESS_BASE_DESCRIPTOR(CHIP,
+            idx, .desc_size = BINDLESS_DESCRIPTOR_64B, .bo = set->bo,
+         ));
+         if (CHIP == A6XX) {
+            crb.add(HLSQ_BINDLESS_BASE_DESCRIPTOR(CHIP,
+               idx, .desc_size = BINDLESS_DESCRIPTOR_64B, .bo = set->bo,
+            ));
+         }
       }
 
-      if (bufso->enabled_mask) {
-         OUT_PKT(ring, CP_LOAD_STATE6,
-            CP_LOAD_STATE6_0(
-                  .dst_off     = IR3_BINDLESS_SSBO_OFFSET,
-                  .state_type  = ST6_SHADER,
-                  .state_src   = SS6_BINDLESS,
-                  .state_block = SB6_IBO,
-                  .num_unit    = util_last_bit(bufso->enabled_mask),
-            ),
-            CP_LOAD_STATE6_EXT_SRC_ADDR(
-                  /* This isn't actually an address: */
-                  .qword = (idx << 28) |
-                     IR3_BINDLESS_SSBO_OFFSET * FDL6_TEX_CONST_DWORDS,
-            ),
-         );
+      if ((CHIP < A8XX) && bufso->enabled_mask) {
+         fd_pkt7(cs, CP_LOAD_STATE6, 3)
+            .add(CP_LOAD_STATE6_0(
+               .dst_off     = IR3_BINDLESS_SSBO_OFFSET,
+               .state_type  = ST6_SHADER,
+               .state_src   = SS6_BINDLESS,
+               .state_block = SB6_UAV,
+               .num_unit    = util_last_bit(bufso->enabled_mask),
+            ))
+            .add(CP_LOAD_STATE6_EXT_SRC_ADDR(
+               /* This isn't actually an address: */
+               .qword = (idx << 28) |
+                  IR3_BINDLESS_SSBO_OFFSET * FDL6_TEX_CONST_DWORDS,
+            ));
       }
 
-      if (imgso->enabled_mask) {
-         OUT_PKT(ring, CP_LOAD_STATE6,
-            CP_LOAD_STATE6_0(
-                  .dst_off     = IR3_BINDLESS_IMAGE_OFFSET,
-                  .state_type  = ST6_SHADER,
-                  .state_src   = SS6_BINDLESS,
-                  .state_block = SB6_IBO,
-                  .num_unit    = util_last_bit(imgso->enabled_mask),
-            ),
-            CP_LOAD_STATE6_EXT_SRC_ADDR(
-                  /* This isn't actually an address: */
-                  .qword = (idx << 28) |
-                     IR3_BINDLESS_IMAGE_OFFSET * FDL6_TEX_CONST_DWORDS,
-            ),
-         );
+      if ((CHIP < A8XX) && imgso->enabled_mask) {
+         fd_pkt7(cs, CP_LOAD_STATE6, 3)
+            .add(CP_LOAD_STATE6_0(
+               .dst_off     = IR3_BINDLESS_IMAGE_OFFSET,
+               .state_type  = ST6_SHADER,
+               .state_src   = SS6_BINDLESS,
+               .state_block = SB6_UAV,
+               .num_unit    = util_last_bit(imgso->enabled_mask),
+            ))
+            .add(CP_LOAD_STATE6_EXT_SRC_ADDR(
+               /* This isn't actually an address: */
+               .qword = (idx << 28) |
+                  IR3_BINDLESS_IMAGE_OFFSET * FDL6_TEX_CONST_DWORDS,
+            ));
       }
    }
 
-   return ring;
+   return cs;
 }
 FD_GENX(fd6_build_bindless_state);
 
+template <chip CHIP>
 static void
-fd6_set_shader_buffers(struct pipe_context *pctx, enum pipe_shader_type shader,
+fd6_set_shader_buffers(struct pipe_context *pctx, mesa_shader_stage shader,
                        unsigned start, unsigned count,
                        const struct pipe_shader_buffer *buffers,
                        unsigned writable_bitmask)
@@ -373,12 +392,13 @@ fd6_set_shader_buffers(struct pipe_context *pctx, enum pipe_shader_type shader,
       }
 
       /* update descriptor: */
-      validate_buffer_descriptor(ctx, set, slot, buf);
+      validate_buffer_descriptor<CHIP>(ctx, set, slot, buf);
    }
 }
 
+template <chip CHIP>
 static void
-fd6_set_shader_images(struct pipe_context *pctx, enum pipe_shader_type shader,
+fd6_set_shader_images(struct pipe_context *pctx, mesa_shader_stage shader,
                       unsigned start, unsigned count,
                       unsigned unbind_num_trailing_slots,
                       const struct pipe_image_view *images)
@@ -427,7 +447,7 @@ fd6_set_shader_images(struct pipe_context *pctx, enum pipe_shader_type shader,
       }
 
       /* update descriptor: */
-      validate_image_descriptor(ctx, set, slot, buf);
+      validate_image_descriptor<CHIP>(ctx, set, slot, buf);
    }
 
    for (unsigned i = 0; i < unbind_num_trailing_slots; i++) {
@@ -438,9 +458,11 @@ fd6_set_shader_images(struct pipe_context *pctx, enum pipe_shader_type shader,
    }
 }
 
+template <chip CHIP>
 void
 fd6_image_init(struct pipe_context *pctx)
 {
-   pctx->set_shader_buffers = fd6_set_shader_buffers;
-   pctx->set_shader_images = fd6_set_shader_images;
+   pctx->set_shader_buffers = fd6_set_shader_buffers<CHIP>;
+   pctx->set_shader_images = fd6_set_shader_images<CHIP>;
 }
+FD_GENX(fd6_image_init);

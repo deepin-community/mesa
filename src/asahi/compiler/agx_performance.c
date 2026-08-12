@@ -29,7 +29,7 @@ agx_occupancy_for_register_count(unsigned halfregs)
          return occupancies[i];
    }
 
-   unreachable("Register count must be less than the maximum");
+   UNREACHABLE("Register count must be less than the maximum");
 }
 
 unsigned
@@ -85,6 +85,7 @@ struct alu_timing op_timings[] = {
 
    [AGX_OPCODE_IMAD]          = { IC, 3, 2 },
    [AGX_OPCODE_BFI]           = { IC, 3, 2 },
+   [AGX_OPCODE_BFEIL]         = { IC, 3, 2 },
    [AGX_OPCODE_EXTR]          = { IC, 3, 2 },
    [AGX_OPCODE_ASR]           = { IC, 3, 2 },
    [AGX_OPCODE_FLOOR]         = { IC, 3, 2 },
@@ -111,6 +112,19 @@ struct alu_timing op_timings[] = {
 };
 /* clang-format on */
 
+static struct alu_timing
+alu_timing(const agx_instr *I)
+{
+   return I->op < ARRAY_SIZE(op_timings) ? op_timings[I->op]
+                                         : (struct alu_timing){0};
+}
+
+bool
+agx_is_alu(const agx_instr *I)
+{
+   return alu_timing(I).unit != NONE;
+}
+
 /*
  * TODO: Model non-ALU instructions, latency, register cache, 64-bit, etc.
  */
@@ -120,12 +134,15 @@ agx_estimate_cycles(agx_context *ctx)
    struct agx_cycle_estimate est = {0};
 
    agx_foreach_instr_global(ctx, I) {
-      struct alu_timing alu = I->op < ARRAY_SIZE(op_timings)
-                                 ? op_timings[I->op]
-                                 : (struct alu_timing){0};
+      struct alu_timing alu = alu_timing(I);
 
       if (alu.unit == IC) {
          est.ic += alu.tp * 2;
+
+         /* In addition to the IC work, IC ops appear to be dispatched along
+          * with SCIB.
+          */
+         est.f_scib += 1;
       } else if (alu.unit) {
          est.f_scib += alu.tp;
       } else {

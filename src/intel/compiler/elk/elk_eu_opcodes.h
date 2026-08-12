@@ -3,8 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef ELK_EU_OPCODES_H
-#define ELK_EU_OPCODES_H
+#pragma once
 
 #ifdef __cplusplus
 extern "C" {
@@ -146,10 +145,8 @@ enum elk_opcode {
    ELK_SHADER_OPCODE_TXD_LOGICAL,
    ELK_SHADER_OPCODE_TXF,
    ELK_SHADER_OPCODE_TXF_LOGICAL,
-   ELK_SHADER_OPCODE_TXF_LZ,
    ELK_SHADER_OPCODE_TXL,
    ELK_SHADER_OPCODE_TXL_LOGICAL,
-   ELK_SHADER_OPCODE_TXL_LZ,
    ELK_SHADER_OPCODE_TXS,
    ELK_SHADER_OPCODE_TXS_LOGICAL,
    ELK_FS_OPCODE_TXB,
@@ -607,6 +604,3 @@ enum elk_opcode {
 #ifdef __cplusplus
 }
 #endif
-
-#endif
-

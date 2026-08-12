@@ -1,24 +1,6 @@
 /*
- * Copyright © 2012, 2013, 2014 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * Copyright © 2012-2014 Intel Corporation
+ * SPDX-License-Identifier: MIT
  */
 
 #include "elk_vec4.h"
@@ -36,7 +18,7 @@ using namespace elk;
  */
 
 namespace {
-struct aeb_entry : public exec_node {
+struct aeb_entry : public brw_exec_node {
    /** The instruction that generates the expression value. */
    vec4_instruction *generator;
 
@@ -166,7 +148,7 @@ bool
 vec4_visitor::opt_cse_local(elk_bblock_t *block, const vec4_live_variables &live)
 {
    bool progress = false;
-   exec_list aeb;
+   brw_exec_list aeb;
 
    void *cse_ctx = ralloc_context(NULL);
 
@@ -179,7 +161,7 @@ vec4_visitor::opt_cse_local(elk_bblock_t *block, const vec4_live_variables &live
       {
          bool found = false;
 
-         foreach_in_list_use_after(aeb_entry, entry, &aeb) {
+         brw_foreach_in_list_use_after(aeb_entry, entry, &aeb) {
             /* Match current instruction's expression against those in AEB. */
             if (!(entry->generator->dst.is_null() && !inst->dst.is_null()) &&
                 instructions_match(inst, entry->generator)) {
@@ -257,7 +239,7 @@ vec4_visitor::opt_cse_local(elk_bblock_t *block, const vec4_live_variables &live
          }
       }
 
-      foreach_in_list_safe(aeb_entry, entry, &aeb) {
+      brw_foreach_in_list_safe(aeb_entry, entry, &aeb) {
          /* Kill all AEB entries that write a different value to or read from
           * the flag register if we just wrote it.
           */

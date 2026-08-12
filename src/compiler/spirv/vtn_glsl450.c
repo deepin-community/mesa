@@ -1,24 +1,6 @@
 /*
  * Copyright © 2015 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include <math.h>
@@ -37,21 +19,6 @@
 #ifndef M_PI_4f
 #define M_PI_4f ((float) M_PI_4)
 #endif
-
-/**
- * Some fp16 instructions (i.e., asin and acos) are lowered as fp32. In these cases the
- * generated fp32 instructions need the same fp_fast_math settings as fp16.
- */
-static void
-propagate_fp16_fast_math_to_fp32(struct nir_builder *b)
-{
-   static_assert(FLOAT_CONTROLS_SIGNED_ZERO_INF_NAN_PRESERVE_FP32 ==
-                 (FLOAT_CONTROLS_SIGNED_ZERO_INF_NAN_PRESERVE_FP16 << 1),
-                 "FLOAT_CONTROLS_SIGNED_ZERO_INF_NAN_PRESERVE_FP32 is not "
-                 "FLOAT_CONTROLS_SIGNED_ZERO_INF_NAN_PRESERVE_FP16 << 1.");
-
-   b->fp_fast_math |= (b->fp_fast_math & FLOAT_CONTROLS_SIGNED_ZERO_INF_NAN_PRESERVE_FP16) << 1;
-}
 
 static nir_def *build_det(nir_builder *b, nir_def **col, unsigned cols);
 
@@ -178,13 +145,9 @@ build_asin(nir_builder *b, nir_def *x, float p0, float p1, bool piecewise)
        * approximation in 32-bit math and then we convert the result back to
        * 16-bit.
        */
-      const uint32_t save = b->fp_fast_math;
-      propagate_fp16_fast_math_to_fp32(b);
-
       nir_def *result =
          nir_f2f16(b, build_asin(b, nir_f2f32(b, x), p0, p1, piecewise));
 
-      b->fp_fast_math = save;
       return result;
    }
    nir_def *one = nir_imm_floatN_t(b, 1.0f, x->bit_size);
@@ -228,10 +191,31 @@ static nir_op
 vtn_nir_alu_op_for_spirv_glsl_opcode(struct vtn_builder *b,
                                      enum GLSLstd450 opcode,
                                      unsigned execution_mode,
-                                     bool *exact)
+                                     unsigned *extra_fp_math_ctrl)
 {
-   *exact = false;
+   *extra_fp_math_ctrl = nir_fp_fast_math;
    switch (opcode) {
+   case GLSLstd450NMin:
+   case GLSLstd450NMax:
+      *extra_fp_math_ctrl |= nir_fp_preserve_nan;
+      FALLTHROUGH;
+   case GLSLstd450FMax:
+   case GLSLstd450FMin: {
+      /* We don't have to preserve infinities according to the VK spec,
+       * but games break without it. Both Unity and Unreal Engine
+       * are affected.
+       */
+      *extra_fp_math_ctrl |= nir_fp_preserve_inf;
+      if (b->options->workarounds.force_nan_preserve_min_max)
+         *extra_fp_math_ctrl |= nir_fp_preserve_nan;
+      switch (opcode) {
+      case GLSLstd450FMin:
+      case GLSLstd450NMin: return nir_op_fmin;
+      case GLSLstd450FMax:
+      case GLSLstd450NMax: return nir_op_fmax;
+      default: UNREACHABLE("unhandled");
+      }
+   }
    case GLSLstd450Round:         return nir_op_fround_even;
    case GLSLstd450RoundEven:     return nir_op_fround_even;
    case GLSLstd450Trunc:         return nir_op_ftrunc;
@@ -249,17 +233,12 @@ vtn_nir_alu_op_for_spirv_glsl_opcode(struct vtn_builder *b,
    case GLSLstd450Log2:          return nir_op_flog2;
    case GLSLstd450Sqrt:          return nir_op_fsqrt;
    case GLSLstd450InverseSqrt:   return nir_op_frsq;
-   case GLSLstd450NMin:          *exact = true; return nir_op_fmin;
-   case GLSLstd450FMin:          return nir_op_fmin;
    case GLSLstd450UMin:          return nir_op_umin;
    case GLSLstd450SMin:          return nir_op_imin;
-   case GLSLstd450NMax:          *exact = true; return nir_op_fmax;
-   case GLSLstd450FMax:          return nir_op_fmax;
    case GLSLstd450UMax:          return nir_op_umax;
    case GLSLstd450SMax:          return nir_op_imax;
    case GLSLstd450FMix:          return nir_op_flrp;
    case GLSLstd450Fma:           return nir_op_ffma;
-   case GLSLstd450Ldexp:         return nir_op_ldexp;
    case GLSLstd450FindILsb:      return nir_op_find_lsb;
    case GLSLstd450FindSMsb:      return nir_op_ifind_msb;
    case GLSLstd450FindUMsb:      return nir_op_ufind_msb;
@@ -323,7 +302,8 @@ handle_glsl450_alu(struct vtn_builder *b, enum GLSLstd450 entrypoint,
       break;
 
    default:
-      mediump_16bit = b->options->mediump_16bit_alu && vtn_value_is_relaxed_precision(b, dest_val);
+      mediump_16bit = b->options->mediump_16bit_alu &&
+                      vtn_has_decoration(b, dest_val, SpvDecorationRelaxedPrecision);
       break;
    }
 
@@ -344,7 +324,6 @@ handle_glsl450_alu(struct vtn_builder *b, enum GLSLstd450 entrypoint,
 
    struct vtn_ssa_value *dest = vtn_create_ssa_value(b, dest_type);
 
-   vtn_handle_no_contraction(b, vtn_untyped_value(b, w[2]));
    switch (entrypoint) {
    case GLSLstd450Radians:
       dest->def = nir_radians(nb, src[0]);
@@ -412,12 +391,12 @@ handle_glsl450_alu(struct vtn_builder *b, enum GLSLstd450 entrypoint,
        * implemented using sge(src1, src0), but that produces incorrect
        * results for NaN.  Instead, we use the identity b2f(!x) = 1 - b2f(x).
        */
-      const bool exact = nb->exact;
-      nb->exact = true;
+      const unsigned save_math_ctrl = nb->fp_math_ctrl;
+      nb->fp_math_ctrl |= nir_fp_preserve_nan | nir_fp_preserve_inf;
 
       nir_def *cmp = nir_slt(nb, src[1], src[0]);
 
-      nb->exact = exact;
+      nb->fp_math_ctrl = save_math_ctrl;
       dest->def = nir_fsub_imm(nb, 1.0f, cmp);
       break;
    }
@@ -440,14 +419,30 @@ handle_glsl450_alu(struct vtn_builder *b, enum GLSLstd450 entrypoint,
       dest->def = nir_flog(nb, src[0]);
       break;
 
-   case GLSLstd450FClamp:
+   case GLSLstd450FClamp: {
+      /* We don't have to preserve infinities according to the VK spec,
+       * but games break without it. Both Unity and Unreal Engine
+       * are affected.
+       */
+      const unsigned save_math_ctrl = nb->fp_math_ctrl;
+      b->nb.fp_math_ctrl = nir_fp_preserve_inf;
+      if (b->options->workarounds.force_nan_preserve_min_max)
+         b->nb.fp_math_ctrl |= nir_fp_preserve_nan;
+
       dest->def = nir_fclamp(nb, src[0], src[1], src[2]);
+
+      nb->fp_math_ctrl = save_math_ctrl;
       break;
-   case GLSLstd450NClamp:
-      nb->exact = true;
+   }
+   case GLSLstd450NClamp: {
+      const unsigned save_math_ctrl = nb->fp_math_ctrl;
+      nb->fp_math_ctrl |= nir_fp_preserve_nan | nir_fp_preserve_inf;
+
       dest->def = nir_fclamp(nb, src[0], src[1], src[2]);
-      nb->exact = false;
+
+      nb->fp_math_ctrl = save_math_ctrl;
       break;
+   }
    case GLSLstd450UClamp:
       dest->def = nir_uclamp(nb, src[0], src[1], src[2]);
       break;
@@ -550,12 +545,14 @@ handle_glsl450_alu(struct vtn_builder *b, enum GLSLstd450 entrypoint,
        *
        *    result = abs(s) > 0.0 ? ... : s;
        */
-      const bool exact = nb->exact;
+      const unsigned save_math_ctrl = nb->fp_math_ctrl;
 
-      nb->exact = true;
+      nb->fp_math_ctrl |= nir_fp_preserve_nan | nir_fp_preserve_inf;
       nir_def *is_regular = nir_flt(nb,
                                         nir_imm_floatN_t(nb, 0, bit_size),
                                         nir_fabs(nb, src[0]));
+
+      nb->fp_math_ctrl = save_math_ctrl;
 
       /* The extra 1.0*s ensures that subnormal inputs are flushed to zero
        * when that is selected by the shader.
@@ -563,7 +560,6 @@ handle_glsl450_alu(struct vtn_builder *b, enum GLSLstd450 entrypoint,
       nir_def *flushed = nir_fmul(nb,
                                       src[0],
                                       nir_imm_floatN_t(nb, 1.0, bit_size));
-      nb->exact = exact;
 
       dest->def = nir_bcsel(nb,
                             is_regular,
@@ -610,6 +606,18 @@ handle_glsl450_alu(struct vtn_builder *b, enum GLSLstd450 entrypoint,
       dest->def = nir_atan2(nb, src[0], src[1]);
       break;
 
+   case GLSLstd450Ldexp: {
+      nir_def *exp = src[1];
+
+      if (exp->bit_size == 64) {
+         exp = nir_iclamp(nb, exp, nir_imm_intN_t(nb, INT32_MIN, 64),
+                                   nir_imm_intN_t(nb, INT32_MAX, 64));
+      }
+
+      dest->def = nir_ldexp(nb, src[0], nir_i2i32(nb, exp));
+      break;
+   }
+
    case GLSLstd450Frexp: {
       dest->def = nir_frexp_sig(nb, src[0]);
 
@@ -630,18 +638,16 @@ handle_glsl450_alu(struct vtn_builder *b, enum GLSLstd450 entrypoint,
    default: {
       unsigned execution_mode =
          b->shader->info.float_controls_execution_mode;
-      bool exact;
-      nir_op op = vtn_nir_alu_op_for_spirv_glsl_opcode(b, entrypoint, execution_mode, &exact);
-      /* don't override explicit decoration */
-      b->nb.exact |= exact;
+      unsigned extra_fp_math_ctrl;
+      nir_op op = vtn_nir_alu_op_for_spirv_glsl_opcode(b, entrypoint, execution_mode, &extra_fp_math_ctrl);
+      b->nb.fp_math_ctrl |= extra_fp_math_ctrl;
       dest->def = nir_build_alu(&b->nb, op, src[0], src[1], src[2], NULL);
       break;
    }
    }
-   b->nb.exact = false;
 
    if (mediump_16bit)
-      vtn_mediump_upconvert_value(b, dest);
+      dest = vtn_mediump_upconvert_value(b, dest);
 
    vtn_push_ssa_value(b, w[2], dest);
 }
@@ -715,7 +721,7 @@ bool
 vtn_handle_glsl450_instruction(struct vtn_builder *b, SpvOp ext_opcode,
                                const uint32_t *w, unsigned count)
 {
-   vtn_handle_fp_fast_math(b, vtn_untyped_value(b, w[2]));
+   vtn_handle_fp_fast_math(b, vtn_untyped_value(b, w[2]), vtn_untyped_value(b, w[5]));
    switch ((enum GLSLstd450)ext_opcode) {
    case GLSLstd450Determinant: {
       vtn_push_nir_ssa(b, w[2], build_mat_det(b, vtn_ssa_value(b, w[5])));
@@ -735,7 +741,9 @@ vtn_handle_glsl450_instruction(struct vtn_builder *b, SpvOp ext_opcode,
 
    default:
       handle_glsl450_alu(b, (enum GLSLstd450)ext_opcode, w, count);
+      break;
    }
 
+   b->nb.fp_math_ctrl = nir_fp_fast_math;
    return true;
 }

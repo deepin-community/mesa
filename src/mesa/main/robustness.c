@@ -27,7 +27,7 @@
 #include "get.h"
 #include "mtypes.h"
 #include "macros.h"
-#include "main/dispatch.h" /* for _gloffset_COUNT */
+#include "dispatch.h" /* for _gloffset_COUNT */
 #include "api_exec_decl.h"
 #include "glthread_marshal.h"
 
@@ -68,7 +68,7 @@ void
 _mesa_set_context_lost_dispatch(struct gl_context *ctx)
 {
    if (ctx->Dispatch.ContextLost == NULL) {
-      int numEntries = MAX2(_glapi_get_dispatch_table_size(), _gloffset_COUNT);
+      int numEntries = MAX2(_mesa_glapi_get_dispatch_table_size(), _gloffset_COUNT);
 
       ctx->Dispatch.ContextLost = malloc(numEntries * sizeof(_glapi_proc));
       if (!ctx->Dispatch.ContextLost)
@@ -104,7 +104,7 @@ _mesa_set_context_lost_dispatch(struct gl_context *ctx)
    }
 
    ctx->Dispatch.Current = ctx->Dispatch.ContextLost;
-   _glapi_set_dispatch(ctx->Dispatch.Current);
+   _mesa_glapi_set_dispatch(ctx->Dispatch.Current);
 }
 
 /**
@@ -139,11 +139,6 @@ _mesa_GetGraphicsResetStatusARB( void )
 
    if (status != GL_NO_ERROR)
       _mesa_set_context_lost_dispatch(ctx);
-
-   if (!ctx->Driver.GetGraphicsResetStatus && (MESA_VERBOSE & VERBOSE_API))
-      _mesa_debug(ctx,
-                  "glGetGraphicsResetStatusARB always returns GL_NO_ERROR "
-                  "because the driver doesn't track reset status.\n");
 
    return status;
 }

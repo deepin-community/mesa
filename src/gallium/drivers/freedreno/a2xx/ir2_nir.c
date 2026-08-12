@@ -23,10 +23,8 @@ static const nir_shader_compiler_options options = {
    .fuse_ffma32 = true,
    .fuse_ffma64 = true,
    /* .fdot_replicates = true, it is replicated, but it makes things worse */
-   .lower_all_io_to_temps = true,
    .vertex_id_zero_based = true, /* its not implemented anyway */
    .lower_bitops = true,
-   .lower_vector_cmp = true,
    .lower_fdph = true,
    .has_fsub = true,
    .has_isub = true,
@@ -50,7 +48,7 @@ ir2_get_compiler_options(void)
       NIR_PASS(this_progress, nir, pass, ##__VA_ARGS__);                       \
       this_progress;                                                           \
    })
-#define OPT_V(nir, pass, ...) NIR_PASS_V(nir, pass, ##__VA_ARGS__)
+#define OPT_V(nir, pass, ...) NIR_PASS(_, nir, pass, ##__VA_ARGS__)
 
 static void
 ir2_optimize_loop(nir_shader *s)
@@ -61,11 +59,16 @@ ir2_optimize_loop(nir_shader *s)
 
       OPT_V(s, nir_lower_vars_to_ssa);
       progress |= OPT(s, nir_opt_copy_prop_vars);
-      progress |= OPT(s, nir_copy_prop);
+      progress |= OPT(s, nir_opt_copy_prop);
       progress |= OPT(s, nir_opt_dce);
       progress |= OPT(s, nir_opt_cse);
       /* progress |= OPT(s, nir_opt_gcm, true); */
-      progress |= OPT(s, nir_opt_peephole_select, UINT_MAX, true, true);
+      nir_opt_peephole_select_options peephole_select_options = {
+         .limit = UINT_MAX,
+         .indirect_load_ok = true,
+         .expensive_alu_ok = true,
+      };
+      progress |= OPT(s, nir_opt_peephole_select, &peephole_select_options);
       progress |= OPT(s, nir_opt_intrinsics);
       progress |= OPT(s, nir_opt_algebraic);
       progress |= OPT(s, nir_opt_constant_folding);
@@ -76,7 +79,7 @@ ir2_optimize_loop(nir_shader *s)
           * things up if we want any hope of nir_opt_if or nir_opt_loop_unroll
           * to make progress.
           */
-         OPT(s, nir_copy_prop);
+         OPT(s, nir_opt_copy_prop);
          OPT(s, nir_opt_dce);
       }
       progress |= OPT(s, nir_opt_loop_unroll);
@@ -106,8 +109,8 @@ ir2_optimize_nir(nir_shader *s, bool lower)
    }
 
    OPT_V(s, nir_lower_vars_to_ssa);
-   OPT_V(s, nir_lower_indirect_derefs, nir_var_shader_in | nir_var_shader_out,
-         UINT32_MAX);
+   OPT_V(s, nir_lower_indirect_derefs_to_if_else_trees,
+         nir_var_shader_in | nir_var_shader_out, UINT32_MAX);
 
    if (lower) {
       OPT_V(s, ir3_nir_apply_trig_workarounds);
@@ -134,7 +137,9 @@ static struct ir2_src
 load_const(struct ir2_context *ctx, float *value_f, unsigned ncomp)
 {
    struct fd2_shader_stateobj *so = ctx->so;
-   unsigned imm_ncomp, swiz, idx, i, j;
+   unsigned idx, i, j;
+   unsigned imm_ncomp = 0;
+   unsigned swiz = 0;
    uint32_t *value = (uint32_t *)value_f;
 
    /* try to merge with existing immediate (TODO: try with neg) */
@@ -664,7 +669,7 @@ emit_intrinsic(struct ir2_context *ctx, nir_intrinsic_instr *intr)
          ir2_src(ctx->f->inputs_count, IR2_SWIZZLE_ZW, IR2_SRC_INPUT);
       break;
    default:
-      compile_error(ctx, "unimplemented intr %d\n", intr->intrinsic);
+      compile_error(ctx, "unimplemented intr %s\n", nir_intrinsic_infos[intr->intrinsic].name);
       break;
    }
 }
@@ -1091,6 +1096,18 @@ ir2_alu_to_scalar_filter_cb(const nir_instr *instr, const void *data)
 
    nir_alu_instr *alu = nir_instr_as_alu(instr);
    switch (alu->op) {
+   case nir_op_ball_fequal2:
+   case nir_op_ball_fequal3:
+   case nir_op_ball_fequal4:
+   case nir_op_bany_fnequal2:
+   case nir_op_bany_fnequal3:
+   case nir_op_bany_fnequal4:
+   case nir_op_ball_iequal2:
+   case nir_op_ball_iequal3:
+   case nir_op_ball_iequal4:
+   case nir_op_bany_inequal2:
+   case nir_op_bany_inequal3:
+   case nir_op_bany_inequal4:
    case nir_op_frsq:
    case nir_op_frcp:
    case nir_op_flog2:
@@ -1118,18 +1135,18 @@ ir2_nir_compile(struct ir2_context *ctx, bool binning)
    if (binning)
       cleanup_binning(ctx);
 
-   OPT_V(ctx->nir, nir_copy_prop);
+   OPT_V(ctx->nir, nir_opt_copy_prop);
    OPT_V(ctx->nir, nir_opt_dce);
    OPT_V(ctx->nir, nir_opt_move, nir_move_comparisons);
 
    OPT_V(ctx->nir, nir_lower_int_to_float);
+   OPT_V(ctx->nir, nir_lower_alu_to_scalar, ir2_alu_to_scalar_filter_cb, NULL);
    OPT_V(ctx->nir, nir_lower_bool_to_float, true);
    while (OPT(ctx->nir, nir_opt_algebraic))
       ;
    OPT_V(ctx->nir, nir_opt_algebraic_late);
-   OPT_V(ctx->nir, nir_lower_alu_to_scalar, ir2_alu_to_scalar_filter_cb, NULL);
 
-   OPT_V(ctx->nir, nir_convert_from_ssa, true);
+   OPT_V(ctx->nir, nir_convert_from_ssa, true, false);
 
    OPT_V(ctx->nir, nir_move_vec_src_uses_to_dest, false);
    OPT_V(ctx->nir, nir_lower_vec_to_regs, NULL, NULL);

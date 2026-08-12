@@ -1,16 +1,62 @@
-KHR-GL46.shader_image_load_store.basic-allTargets-store,Fail
 KHR-GL46.shader_subroutine.control_flow_and_returned_subroutine_values_used_as_subroutine_input,Fail
 
-dEQP-GLES31.functional.texture.border_clamp.range_clamp.linear_float_color,Fail
-
 #glcts update
-dEQP-GLES2.functional.texture.mipmap.cube.projected.nearest_linear,Fail
 KHR-GLES3.framebuffer_blit.framebuffer_blit_functionality_multisampled_to_singlesampled_blit,Fail
-KHR-GL46.texture_lod_basic.lod_selection,Fail
 KHR-GL46.texture_lod_bias.texture_lod_bias_all,Fail
+
+# New failures with ES CTS 3.2.12.0
+KHR-GLES3.framebuffer_blit.multisampled_to_singlesampled_blit_depth_config_test,Fail
+KHR-GLES31.core.texture_stencil8.multisample,Fail
+KHR-GL46.texture_stencil8.multisample,Fail
 
 # GL tests above, Vulkan tests below
 
+# New fails in 1.4.1.1
+gmem-dEQP-VK.dynamic_rendering.primary_cmd_buff.local_read.input_attachments_without_mapping,Fail
+gmem-dEQP-VK.spirv_assembly.instruction.graphics.16bit_storage.uniform_32struct_to_16struct.uniform_geom,Fail
+
+# New fails in 1.4.3.3
+dEQP-VK.memory.concurrent_access.shader_and_host,Fail
+dEQP-VK.transform_feedback.simple.draw_indirect_counter_offset_16,Fail
+dEQP-VK.transform_feedback.simple.draw_indirect_counter_offset_244,Fail
+dEQP-VK.transform_feedback.simple.draw_indirect_counter_offset_508,Fail
+dEQP-VK.transform_feedback.simple.draw_indirect_multiview_counter_offset_16,Fail
+dEQP-VK.transform_feedback.simple.draw_indirect_multiview_counter_offset_244,Fail
+dEQP-VK.transform_feedback.simple.draw_indirect_multiview_counter_offset_508,Fail
+dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_16,Fail
+dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_244,Fail
+dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_508,Fail
+dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_multiview_counter_offset_16,Fail
+dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_multiview_counter_offset_244,Fail
+dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_multiview_counter_offset_508,Fail
+dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_counter_offset_16,Fail
+dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_counter_offset_244,Fail
+dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_counter_offset_508,Fail
+dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_multiview_counter_offset_16,Fail
+dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_multiview_counter_offset_244,Fail
+dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_multiview_counter_offset_508,Fail
+gmem-dEQP-VK.transform_feedback.simple.draw_indirect_multiview_counter_offset_16,Fail
+gmem-dEQP-VK.transform_feedback.simple.draw_indirect_multiview_counter_offset_244,Fail
+nobin-dEQP-VK.transform_feedback.simple.draw_indirect_multiview_counter_offset_16,Fail
+
+# New failures with VKCTS 1.4.4.0
+dEQP-VK.pipeline.monolithic.misc.identically_defined_layout,Fail
+dEQP-VK.tessellation.misc_draw.tess_factor_barrier_bug,Crash
+gmem-dEQP-VK.transform_feedback.simple.draw_indirect_counter_offset_16,Fail
+gmem-dEQP-VK.transform_feedback.simple.draw_indirect_multiview_counter_offset_508,Fail
+gmem-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_244,Fail
+gmem-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_508,Fail
+gmem-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_multiview_counter_offset_508,Fail
+nobin-dEQP-VK.transform_feedback.simple.draw_indirect_counter_offset_16,Fail
+nobin-dEQP-VK.transform_feedback.simple.draw_indirect_multiview_counter_offset_508,Fail
+nobin-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_244,Fail
+nobin-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_508,Fail
+nobin-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_multiview_counter_offset_508,Fail
+
+
+# Bad assumptions in piglit about layout of multiplanar formats,
+# it should use separate buffers per plane:
+spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_yvu420,Fail
 
 # OpenCL tests below
 #
@@ -66,6 +112,9 @@ api@clgetdeviceinfo,Fail
 # CL_QUEUE_SIZE Unexpected CL error: CL_INVALID_COMMAND_QUEUE -36
 api@clgetcommandqueueinfo,Fail
 
+# Piglit doesn't check subbuffer alignment requirements
+api@clgetmemobjectinfo,Fail
+
 # broken piglit test (doesn't account for FTZ)
 program@execute@builtin@builtin-float-nextafter-1.0.generated,Fail
 program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float1,Fail
@@ -73,3 +122,9 @@ program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float16,
 program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float2,Fail
 program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float4,Fail
 program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float8,Fail
+
+# (file=input,line=0,column=0,index=0): Unresolved external reference to "_Z21convert_char4_sat_rteDv4_i".
+program@execute@vector-conversion,Fail
+
+# Initial ANGLE failures
+angle-dEQP-GLES2.functional.shaders.algorithm.rgb_to_hsl_vertex,Fail

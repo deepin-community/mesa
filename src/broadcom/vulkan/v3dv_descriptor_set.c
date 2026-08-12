@@ -24,7 +24,13 @@
 #include "vk_descriptors.h"
 #include "vk_util.h"
 
-#include "v3dv_private.h"
+#include "v3dv_device.h"
+#include "v3dv_cmd_buffer.h"
+#include "v3dv_image.h"
+#include "v3dv_entrypoints.h"
+#include "v3dv_version_dispatch.h"
+#include "vk_ycbcr_conversion.h"
+#include "vk_descriptor_update_template.h"
 
 /*
  * For a given descriptor defined by the descriptor_set it belongs, its
@@ -41,26 +47,13 @@ descriptor_bo_map(struct v3dv_device *device,
     * descriptor data, so their descriptor BO size is 0 even though they
     * do use BO memory.
     */
-   uint32_t bo_size = v3dv_X(device, descriptor_bo_size)(binding_layout->type);
+   uint32_t bo_size = v3d_X((&device->devinfo), descriptor_bo_size)(binding_layout->type);
    assert(bo_size > 0 ||
           binding_layout->type == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK);
 
    return set->pool->bo->map +
       set->base_offset + binding_layout->descriptor_offset +
       array_index * binding_layout->plane_stride * bo_size;
-}
-
-static bool
-descriptor_type_is_dynamic(VkDescriptorType type)
-{
-   switch (type) {
-   case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
-   case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
-      return true;
-      break;
-   default:
-      return false;
-   }
 }
 
 /*
@@ -92,7 +85,8 @@ v3dv_descriptor_map_get_descriptor(struct v3dv_descriptor_state *descriptor_stat
    uint32_t array_index = map->array_index[index];
    assert(array_index < binding_layout->array_size);
 
-   if (descriptor_type_is_dynamic(binding_layout->type)) {
+   if (vk_descriptor_type_is_dynamic(binding_layout->type)) {
+      assert(dynamic_offset);
       uint32_t dynamic_offset_index =
          pipeline_layout->set[set_number].dynamic_offset_start +
          binding_layout->dynamic_offset_index + array_index;
@@ -133,7 +127,7 @@ v3dv_descriptor_map_get_descriptor_bo(struct v3dv_device *device,
       &set->layout->binding[binding_number];
 
 
-   uint32_t bo_size = v3dv_X(device, descriptor_bo_size)(binding_layout->type);
+   uint32_t bo_size = v3d_X((&device->devinfo), descriptor_bo_size)(binding_layout->type);
 
    assert(binding_layout->type == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK ||
           bo_size > 0);
@@ -225,7 +219,7 @@ v3dv_descriptor_map_get_sampler_state(struct v3dv_device *device,
           type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
 
    if (type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
-      reloc.offset += v3dv_X(device, combined_image_sampler_sampler_state_offset)(map->plane[index]);
+      reloc.offset += v3d_X((&device->devinfo), combined_image_sampler_sampler_state_offset)(map->plane[index]);
 
    return reloc;
 }
@@ -257,7 +251,7 @@ v3dv_descriptor_map_get_texture_bo(struct v3dv_descriptor_state *descriptor_stat
       return image->planes[map->plane[index]].mem->bo;
    }
    default:
-      unreachable("descriptor type doesn't has a texture bo");
+      UNREACHABLE("descriptor type doesn't has a texture bo");
    }
 }
 
@@ -283,38 +277,38 @@ v3dv_descriptor_map_get_texture_shader_state(struct v3dv_device *device,
           type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER);
 
    if (type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
-      reloc.offset += v3dv_X(device, combined_image_sampler_texture_state_offset)(map->plane[index]);
+      reloc.offset += v3d_X((&device->devinfo), combined_image_sampler_texture_state_offset)(map->plane[index]);
 
    return reloc;
 }
 
-#define SHA1_UPDATE_VALUE(ctx, x) _mesa_sha1_update(ctx, &(x), sizeof(x));
+#define BLAKE3_UPDATE_VALUE(ctx, x) _mesa_blake3_update(ctx, &(x), sizeof(x));
 
 static void
-sha1_update_ycbcr_conversion(struct mesa_sha1 *ctx,
+blake3_update_ycbcr_conversion(blake3_hasher *ctx,
                              const struct vk_ycbcr_conversion_state *conversion)
 {
-   SHA1_UPDATE_VALUE(ctx, conversion->format);
-   SHA1_UPDATE_VALUE(ctx, conversion->ycbcr_model);
-   SHA1_UPDATE_VALUE(ctx, conversion->ycbcr_range);
-   SHA1_UPDATE_VALUE(ctx, conversion->mapping);
-   SHA1_UPDATE_VALUE(ctx, conversion->chroma_offsets);
-   SHA1_UPDATE_VALUE(ctx, conversion->chroma_reconstruction);
+   BLAKE3_UPDATE_VALUE(ctx, conversion->format);
+   BLAKE3_UPDATE_VALUE(ctx, conversion->ycbcr_model);
+   BLAKE3_UPDATE_VALUE(ctx, conversion->ycbcr_range);
+   BLAKE3_UPDATE_VALUE(ctx, conversion->mapping);
+   BLAKE3_UPDATE_VALUE(ctx, conversion->chroma_offsets);
+   BLAKE3_UPDATE_VALUE(ctx, conversion->chroma_reconstruction);
 }
 
 static void
-sha1_update_descriptor_set_binding_layout(struct mesa_sha1 *ctx,
+blake3_update_descriptor_set_binding_layout(blake3_hasher *ctx,
                                           const struct v3dv_descriptor_set_binding_layout *layout,
                                           const struct v3dv_descriptor_set_layout *set_layout)
 {
-   SHA1_UPDATE_VALUE(ctx, layout->type);
-   SHA1_UPDATE_VALUE(ctx, layout->array_size);
-   SHA1_UPDATE_VALUE(ctx, layout->descriptor_index);
-   SHA1_UPDATE_VALUE(ctx, layout->dynamic_offset_count);
-   SHA1_UPDATE_VALUE(ctx, layout->dynamic_offset_index);
-   SHA1_UPDATE_VALUE(ctx, layout->descriptor_offset);
-   SHA1_UPDATE_VALUE(ctx, layout->immutable_samplers_offset);
-   SHA1_UPDATE_VALUE(ctx, layout->plane_stride);
+   BLAKE3_UPDATE_VALUE(ctx, layout->type);
+   BLAKE3_UPDATE_VALUE(ctx, layout->array_size);
+   BLAKE3_UPDATE_VALUE(ctx, layout->descriptor_index);
+   BLAKE3_UPDATE_VALUE(ctx, layout->dynamic_offset_count);
+   BLAKE3_UPDATE_VALUE(ctx, layout->dynamic_offset_index);
+   BLAKE3_UPDATE_VALUE(ctx, layout->descriptor_offset);
+   BLAKE3_UPDATE_VALUE(ctx, layout->immutable_samplers_offset);
+   BLAKE3_UPDATE_VALUE(ctx, layout->plane_stride);
 
    if (layout->immutable_samplers_offset) {
       const struct v3dv_sampler *immutable_samplers =
@@ -323,23 +317,23 @@ sha1_update_descriptor_set_binding_layout(struct mesa_sha1 *ctx,
       for (unsigned i = 0; i < layout->array_size; i++) {
          const struct v3dv_sampler *sampler = &immutable_samplers[i];
          if (sampler->conversion)
-            sha1_update_ycbcr_conversion(ctx, &sampler->conversion->state);
+            blake3_update_ycbcr_conversion(ctx, &sampler->conversion->state);
       }
    }
 }
 
 static void
-sha1_update_descriptor_set_layout(struct mesa_sha1 *ctx,
+blake3_update_descriptor_set_layout(blake3_hasher *ctx,
                                   const struct v3dv_descriptor_set_layout *layout)
 {
-   SHA1_UPDATE_VALUE(ctx, layout->flags);
-   SHA1_UPDATE_VALUE(ctx, layout->binding_count);
-   SHA1_UPDATE_VALUE(ctx, layout->shader_stages);
-   SHA1_UPDATE_VALUE(ctx, layout->descriptor_count);
-   SHA1_UPDATE_VALUE(ctx, layout->dynamic_offset_count);
+   BLAKE3_UPDATE_VALUE(ctx, layout->flags);
+   BLAKE3_UPDATE_VALUE(ctx, layout->binding_count);
+   BLAKE3_UPDATE_VALUE(ctx, layout->shader_stages);
+   BLAKE3_UPDATE_VALUE(ctx, layout->descriptor_count);
+   BLAKE3_UPDATE_VALUE(ctx, layout->dynamic_offset_count);
 
    for (uint16_t i = 0; i < layout->binding_count; i++)
-      sha1_update_descriptor_set_binding_layout(ctx, &layout->binding[i], layout);
+      blake3_update_descriptor_set_binding_layout(ctx, &layout->binding[i], layout);
 }
 
 
@@ -396,15 +390,15 @@ v3dv_CreatePipelineLayout(VkDevice _device,
 
    layout->dynamic_offset_count = dynamic_offset_count;
 
-   struct mesa_sha1 ctx;
-   _mesa_sha1_init(&ctx);
+   blake3_hasher ctx;
+   _mesa_blake3_init(&ctx);
    for (unsigned s = 0; s < layout->num_sets; s++) {
-      sha1_update_descriptor_set_layout(&ctx, layout->set[s].layout);
-      _mesa_sha1_update(&ctx, &layout->set[s].dynamic_offset_start,
+      blake3_update_descriptor_set_layout(&ctx, layout->set[s].layout);
+      _mesa_blake3_update(&ctx, &layout->set[s].dynamic_offset_start,
                         sizeof(layout->set[s].dynamic_offset_start));
    }
-   _mesa_sha1_update(&ctx, &layout->num_sets, sizeof(layout->num_sets));
-   _mesa_sha1_final(&ctx, layout->sha1);
+   _mesa_blake3_update(&ctx, &layout->num_sets, sizeof(layout->num_sets));
+   _mesa_blake3_final(&ctx, layout->blake3);
 
    *pPipelineLayout = v3dv_pipeline_layout_to_handle(layout);
 
@@ -478,7 +472,7 @@ v3dv_CreateDescriptorPool(VkDevice _device,
       case VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK:
          break;
       default:
-         unreachable("Unimplemented descriptor type");
+         UNREACHABLE("Unimplemented descriptor type");
          break;
       }
 
@@ -493,7 +487,7 @@ v3dv_CreateDescriptorPool(VkDevice _device,
          bo_size += pCreateInfo->pPoolSizes[i].descriptorCount;
       } else {
          descriptor_count += pCreateInfo->pPoolSizes[i].descriptorCount;
-         bo_size += v3dv_X(device, descriptor_bo_size)(pCreateInfo->pPoolSizes[i].type) *
+         bo_size += v3d_X((&device->devinfo), descriptor_bo_size)(pCreateInfo->pPoolSizes[i].type) *
             pCreateInfo->pPoolSizes[i].descriptorCount;
       }
    }
@@ -726,7 +720,8 @@ v3dv_CreateDescriptorSetLayout(VkDevice _device,
 
    VkDescriptorSetLayoutBinding *bindings = NULL;
    VkResult result = vk_create_sorted_bindings(pCreateInfo->pBindings,
-                                               pCreateInfo->bindingCount, &bindings);
+                                               pCreateInfo->bindingCount, &bindings,
+                                               NULL, NULL);
    if (result != VK_SUCCESS) {
       v3dv_descriptor_set_layout_destroy(device, set_layout);
       return vk_error(device, result);
@@ -764,7 +759,7 @@ v3dv_CreateDescriptorSetLayout(VkDevice _device,
          /* Nothing here, just to keep the descriptor type filtering below */
          break;
       default:
-         unreachable("Unknown descriptor type\n");
+         UNREACHABLE("Unknown descriptor type\n");
          break;
       }
 
@@ -800,7 +795,7 @@ v3dv_CreateDescriptorSetLayout(VkDevice _device,
          set_layout->binding[binding_number].descriptor_offset =
             set_layout->bo_size;
          set_layout->bo_size +=
-            v3dv_X(device, descriptor_bo_size)(set_layout->binding[binding_number].type) *
+            v3d_X((&device->devinfo), descriptor_bo_size)(set_layout->binding[binding_number].type) *
             binding->descriptorCount * set_layout->binding[binding_number].plane_stride;
       } else {
          /* We align all our buffers, inline buffers too. We made sure to take
@@ -957,7 +952,7 @@ descriptor_set_create(struct v3dv_device *device,
          for (uint8_t plane = 0; plane < samplers[i].plane_count; plane++) {
             uint32_t combined_offset =
                layout->binding[b].type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ?
-               v3dv_X(device, combined_image_sampler_sampler_state_offset)(plane) : 0;
+               v3d_X((&device->devinfo), combined_image_sampler_sampler_state_offset)(plane) : 0;
             void *desc_map =
                descriptor_bo_map(device, set, &layout->binding[b], i);
             desc_map += combined_offset;
@@ -1051,7 +1046,7 @@ descriptor_bo_copy(struct v3dv_device *device,
                                      src_array_index);
 
    memcpy(dst_map, src_map,
-          v3dv_X(device, descriptor_bo_size)(src_binding_layout->type) *
+          v3d_X((&device->devinfo), descriptor_bo_size)(src_binding_layout->type) *
           src_binding_layout->plane_stride);
 }
 
@@ -1096,7 +1091,7 @@ write_image_descriptor(struct v3dv_device *device,
    for (uint8_t plane = 0; plane < plane_count; plane++) {
       if (iview) {
          uint32_t offset = desc_type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ?
-            v3dv_X(device, combined_image_sampler_texture_state_offset)(plane) : 0;
+            v3d_X((&device->devinfo), combined_image_sampler_texture_state_offset)(plane) : 0;
 
          void *plane_desc_map = desc_map + offset;
 
@@ -1110,7 +1105,7 @@ write_image_descriptor(struct v3dv_device *device,
 
       if (sampler && !binding_layout->immutable_samplers_offset) {
          uint32_t offset = desc_type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ?
-            v3dv_X(device, combined_image_sampler_sampler_state_offset)(plane) : 0;
+            v3d_X((&device->devinfo), combined_image_sampler_sampler_state_offset)(plane) : 0;
 
          void *plane_desc_map = desc_map + offset;
          /* For immutable samplers this was already done as part of the
@@ -1278,7 +1273,7 @@ v3dv_UpdateDescriptorSets(VkDevice  _device,
             break;
          }
          default:
-            unreachable("unimplemented descriptor type");
+            UNREACHABLE("unimplemented descriptor type");
             break;
          }
          descriptor++;
@@ -1329,7 +1324,7 @@ v3dv_UpdateDescriptorSets(VkDevice  _device,
          dst_descriptor++;
          src_descriptor++;
 
-         if (v3dv_X(device, descriptor_bo_size)(src_binding_layout->type) > 0) {
+         if (v3d_X((&device->devinfo), descriptor_bo_size)(src_binding_layout->type) > 0) {
             descriptor_bo_copy(device,
                                dst_set, dst_binding_layout,
                                j + copyset->dstArrayElement,
@@ -1350,7 +1345,7 @@ v3dv_GetDescriptorSetLayoutSupport(
    V3DV_FROM_HANDLE(v3dv_device, device, _device);
    VkDescriptorSetLayoutBinding *bindings = NULL;
    VkResult result = vk_create_sorted_bindings(
-      pCreateInfo->pBindings, pCreateInfo->bindingCount, &bindings);
+      pCreateInfo->pBindings, pCreateInfo->bindingCount, &bindings, NULL, NULL);
    if (result != VK_SUCCESS) {
       pSupport->supported = false;
       return;
@@ -1369,7 +1364,7 @@ v3dv_GetDescriptorSetLayoutSupport(
          break;
       }
 
-      uint32_t desc_bo_size = v3dv_X(device, descriptor_bo_size)(binding->descriptorType);
+      uint32_t desc_bo_size = v3d_X((&device->devinfo), descriptor_bo_size)(binding->descriptorType);
       if (desc_bo_size > 0 &&
           (UINT32_MAX - bo_size) / desc_bo_size < binding->descriptorCount) {
          supported = false;
@@ -1460,7 +1455,7 @@ v3dv_UpdateDescriptorSetWithTemplate(
       }
 
       default:
-         unreachable("Unsupported descriptor type");
+         UNREACHABLE("Unsupported descriptor type");
       }
    }
 }

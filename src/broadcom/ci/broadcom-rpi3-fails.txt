@@ -21,6 +21,9 @@ dEQP-GLES2.functional.depth_stencil_clear.depth_stencil_masked,Fail
 dEQP-GLES2.functional.uniform_api.random.3,Fail
 dEQP-GLES2.functional.uniform_api.random.79,Fail
 
+dEQP-GLES2.functional.clipping.triangle_vertex.clip_three.clip_neg_x_and_pos_x_and_pos_y_pos_z,Fail
+dEQP-GLES2.functional.clipping.triangle_vertex.clip_three.clip_neg_x_and_pos_x_neg_y_pos_z_and_neg_x_pos_y_neg_z,Fail
+
 # Sampling grid slightly off in test 2?
 dEQP-GLES2.functional.texture.filtering.2d.nearest_mipmap_linear_linear_mirror_rgba8888,Fail
 dEQP-GLES2.functional.texture.filtering.2d.nearest_mipmap_linear_linear_repeat_rgba8888,Fail
@@ -39,6 +42,14 @@ dEQP-GLES2.functional.texture.mipmap.2d.basic.nearest_linear_repeat_non_square,F
 # One of the pixels on the left edge near the bottom is wrong for both min and
 # mag.  Also a line of pixels through the image in minification.
 dEQP-GLES2.functional.texture.wrap.clamp_clamp_nearest_npot_etc1,Fail
+
+# VC4 hardware doesn't have support for non-uniform loops in the vertex shader.
+# The execution of non-uniform loops in VS can cause infinite loops and lead
+# to GPU hangs. Therefore, the compiler fails shader linking in the presence of
+# divergent loops.
+spec@glsl-1.10@execution@glsl-vs-if-nested-loop,Fail
+shaders@glsl-vs-loop,Fail
+shaders@glsl-vs-loop-nested,Fail
 
 # Despite exposing GL 2.1, the HW doesn't actually support 3D textures so we set
 # 0 max levels.  These tests fail (or assertion fail) as a result.
@@ -96,9 +107,8 @@ spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj(bias) 3d,Fail
 spec@khr_texture_compression_astc@basic-gl,Fail
 
 glx@glx-make-current,Fail
+glx@glx-multi-window-single-context,Fail
 glx@glx-swap-pixmap-bad,Fail
-glx@glx_arb_create_context_es2_profile@invalid opengl es version,Fail
-glx@glx_arb_create_context_no_error@no error,Fail
 
 # piglit: error: Test timed out.
 glx@glx_arb_sync_control@waitformsc,Fail
@@ -106,11 +116,12 @@ glx@glx_arb_sync_control@waitformsc,Fail
 glslparsertest@glsl2@gst-gl-text-download-i420-yv12.frag,Fail
 shaders@glsl-arb-fragment-coord-conventions,Fail
 shaders@glsl-max-vertex-attrib,Fail
+spec@!opengl 1.0@depth-clear-precision-check,Fail
+spec@!opengl 1.0@depth-clear-precision-check@depth16,Fail
+spec@!opengl 1.0@depth-clear-precision-check@depth24,Fail
+spec@!opengl 1.0@depth-clear-precision-check@depth24_stencil8,Fail
+spec@!opengl 1.0@depth-clear-precision-check@depth32,Fail
 spec@!opengl 1.0@gl-1.0-drawbuffer-modes,Fail
-spec@!opengl 1.0@gl-1.0-edgeflag,Fail
-spec@!opengl 1.0@gl-1.0-edgeflag-const,Fail
-spec@!opengl 1.0@gl-1.0-edgeflag-quads,Fail
-spec@!opengl 1.0@gl-1.0-no-op-paths,Fail
 spec@!opengl 1.0@gl-1.0-scissor-offscreen,Fail
 spec@!opengl 1.0@gl-1.0-user-clip-all-planes,Fail
 spec@!opengl 1.1@clipflat,Fail
@@ -764,22 +775,17 @@ spec@!opengl 1.1@clipflat@glDrawElements(GL_TRIANGLE_STRIP)- glFrontFace(GL_CW)-
 spec@!opengl 1.1@clipflat@glDrawElements(GL_TRIANGLE_STRIP)- glFrontFace(GL_CW)- glPolygonMode(GL_LINE)- quadrant: right top PV: FIRST,Fail
 spec@arb_clear_texture@arb_clear_texture-3d,Fail
 spec@arb_clear_texture@arb_clear_texture-sized-formats,Fail
-spec@arb_clear_texture@arb_clear_texture-supported-formats,Fail
 spec@glsl-1.10@execution@glsl-fs-inline-explosion,Crash
 spec@glsl-1.10@execution@glsl-vs-inline-explosion,Crash
-spec@glsl-1.20@compiler@invalid-vec4-array-to-vec3-array-conversion.vert,Fail
 
-# fails on arm64, passes on armhf
-spec@arb_depth_buffer_float@depthstencil-render-miplevels 1024 s=z24_s8_d=z32f,Fail
+# A sub-case involving polygon stipple fails because driver doesn't implement
+# stipple
+spec@!opengl 1.0@gl-1.0-no-op-paths,Fail
 
 # Crashes in this group are CMA allocation fails
 spec@!opengl 1.1@depthstencil-default_fb-clear samples=2,Fail
 spec@!opengl 1.1@depthstencil-default_fb-clear samples=4,Fail
 spec@!opengl 1.1@depthstencil-default_fb-clear,Fail
-spec@!opengl 1.1@depthstencil-default_fb-drawpixels-24_8 samples=2,Fail
-spec@!opengl 1.1@depthstencil-default_fb-drawpixels-24_8 samples=4,Fail
-spec@!opengl 1.1@depthstencil-default_fb-drawpixels-float-and-ushort samples=2,Crash
-spec@!opengl 1.1@depthstencil-default_fb-drawpixels-float-and-ushort samples=4,Crash
 
 # These non-supported primitives draws are converted by Mesa into
 # indexed draws with supported primitives. But these indexed draws
@@ -854,7 +860,6 @@ spec@!opengl 1.1@polygon-mode-offset@config 6: Expected blue pixel in center,Fai
 spec@!opengl 1.1@polygon-mode-offset@config 6: Expected white pixel on right edge,Fail
 spec@!opengl 1.1@polygon-mode-offset@config 6: Expected white pixel on top edge,Fail
 
-spec@!opengl 1.1@texsubimage-unpack,Fail
 spec@!opengl 1.1@texwrap 2d proj,Fail
 spec@!opengl 1.1@texwrap 2d proj@GL_RGBA8- NPOT- projected,Fail
 spec@!opengl 1.1@texwrap 2d proj@GL_RGBA8- projected,Fail
@@ -904,8 +909,6 @@ spec@!opengl 1.4@tex-miplevel-selection-lod,Fail
 spec@!opengl 1.4@tex-miplevel-selection-lod-bias,Fail
 spec@!opengl 1.5@depth-tex-compare,Fail
 spec@!opengl 2.0@attrib-assignments,Fail
-spec@!opengl 2.0@gl-2.0-edgeflag,Fail
-spec@!opengl 2.0@gl-2.0-edgeflag-immediate,Fail
 spec@arb_depth_texture@depth-level-clamp,Fail
 spec@arb_depth_texture@texwrap formats,Fail
 spec@arb_depth_texture@texwrap formats@GL_DEPTH_COMPONENT16,Fail
@@ -931,7 +934,6 @@ spec@arb_framebuffer_object@fbo-attachments-blit-scaled-linear,Fail
 spec@arb_framebuffer_object@fbo-blit-stretch,Fail
 spec@arb_framebuffer_object@fbo-mipmap-copypix,Fail
 spec@arb_framebuffer_object@mixed-buffer-sizes,Fail
-spec@arb_framebuffer_object@same-attachment-tex2d-depth_stencil,Fail
 spec@arb_framebuffer_srgb@arb_framebuffer_srgb-srgb_conformance,Fail
 spec@arb_internalformat_query2@all internalformat_<x>_size pname checks,Fail
 spec@arb_internalformat_query2@all internalformat_<x>_size pname checks@GL_INTERNALFORMAT_ALPHA_SIZE,Fail
@@ -951,12 +953,10 @@ spec@arb_internalformat_query2@max dimensions related pname checks@GL_MAX_COMBIN
 spec@arb_internalformat_query2@max dimensions related pname checks@GL_MAX_DEPTH,Fail
 spec@arb_internalformat_query2@max dimensions related pname checks@GL_MAX_HEIGHT,Fail
 spec@arb_internalformat_query2@max dimensions related pname checks@GL_MAX_WIDTH,Fail
-spec@arb_occlusion_query2@render,Fail
 spec@arb_occlusion_query@occlusion_query_conform,Fail
 spec@arb_occlusion_query@occlusion_query_conform@GetObjivAval_multi2,Fail
 spec@arb_pixel_buffer_object@fbo-pbo-readpixels-small,Fail
 spec@arb_pixel_buffer_object@pbo-getteximage,Fail
-spec@arb_pixel_buffer_object@texsubimage-unpack pbo,Fail
 spec@arb_point_sprite@arb_point_sprite-mipmap,Fail
 spec@arb_provoking_vertex@arb-provoking-vertex-render,Fail
 spec@arb_sampler_objects@sampler-objects,Fail
@@ -965,8 +965,6 @@ spec@arb_texture_rectangle@texrect-many,Crash
 spec@arb_vertex_program@minmax,Fail
 spec@egl 1.4@eglterminate then unbind context,Fail
 spec@egl 1.4@largest possible eglcreatepbuffersurface and then glclear,Fail
-spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_depth_component24,Fail
-spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_rgba,Fail
 spec@egl_khr_surfaceless_context@viewport,Fail
 spec@egl_mesa_configless_context@basic,Fail
 spec@ext_direct_state_access@multi-texture,Crash
@@ -978,6 +976,13 @@ spec@ext_direct_state_access@textures@TextureSubImage2DEXT + display list GL_COM
 spec@ext_direct_state_access@textures@TextureSubImage2DEXT + display list GL_COMPILE_AND_EXECUTE,Fail
 spec@ext_direct_state_access@textures@TextureSubImage2DEXT,Fail
 spec@ext_framebuffer_blit@fbo-blit-check-limits,Fail
+
+# Driver is not handling VERT_{ATTRIB,BIT}_EDFLAG at all
+spec@!opengl 1.0@gl-1.0-edgeflag,Fail
+spec@!opengl 1.0@gl-1.0-edgeflag-const,Fail
+spec@!opengl 1.0@gl-1.0-edgeflag-quads,Fail
+spec@!opengl 2.0@gl-2.0-edgeflag,Fail
+spec@!opengl 2.0@gl-2.0-edgeflag-immediate,Fail
 
 # Remaining crashes are CMA allocation failures.
 spec@ext_framebuffer_multisample@blit-mismatched-formats,Fail
@@ -1198,18 +1203,14 @@ spec@ext_framebuffer_multisample@unaligned-blit 4 stencil msaa,Fail
 # https://gitlab.freedesktop.org/mesa/piglit/-/merge_requests/817
 spec@intel_performance_query@intel_performance_query-issue_2235,Fail
 
-# Bisected to 35ae5dce39c ("mesa: don't pass Infs to the shader via gl_Fog.scale")
-spec@glsl-1.10@execution@glsl-1.10-built-in-uniform-state,Fail
-
-# Couldn't reproduce locally
-spec@oes_packed_depth_stencil@depth_stencil texture gles2,Fail
-
 # Failures from arm32
 arm32-KHR-GLES2.core.internalformat.texture2d.depth_component_unsigned_int_depth_component16,Fail
 arm32-KHR-GLES2.core.internalformat.texture2d.depth_component_unsigned_int_depth_component24,Fail
 arm32-KHR-GLES2.core.internalformat.texture2d.depth_component_unsigned_short_depth_component16,Fail
 arm32-dEQP-GLES2.functional.clipping.line.wide_line_clip_viewport_center,Fail
 arm32-dEQP-GLES2.functional.clipping.line.wide_line_clip_viewport_corner,Fail
+arm32-dEQP-GLES2.functional.clipping.triangle_vertex.clip_three.clip_neg_x_and_pos_x_and_pos_y_pos_z,Fail
+arm32-dEQP-GLES2.functional.clipping.triangle_vertex.clip_three.clip_pos_x_and_neg_x_neg_y_pos_z_and_neg_x_pos_y_neg_z,Fail
 arm32-dEQP-GLES2.functional.depth_stencil_clear.depth_stencil_masked,Fail
 arm32-dEQP-GLES2.functional.texture.filtering.2d.nearest_mipmap_linear_linear_mirror_rgba8888,Fail
 arm32-dEQP-GLES2.functional.texture.filtering.2d.nearest_mipmap_linear_linear_repeat_rgba8888,Fail
@@ -1223,12 +1224,27 @@ arm32-dEQP-GLES2.functional.texture.wrap.clamp_clamp_nearest_npot_etc1,Fail
 arm32-dEQP-GLES2.functional.uniform_api.random.3,Fail
 arm32-dEQP-GLES2.functional.uniform_api.random.79,Fail
 
-# These are known failures
-asan-KHR-GLES2.core.internalformat.texture2d.depth_component_unsigned_int_depth_component16,Fail
-asan-dEQP-GLES2.functional.texture.mipmap.2d.basic.nearest_linear_clamp_non_square,Fail
-asan-dEQP-GLES2.functional.texture.wrap.clamp_clamp_nearest_npot_etc1,Fail
+# Already known failures
+ubsan-KHR-GLES2.core.internalformat.texture2d.depth_component_unsigned_int_depth_component16,Fail
+ubsan-KHR-GLES2.core.internalformat.texture2d.depth_component_unsigned_int_depth_component24,Fail
+ubsan-KHR-GLES2.core.internalformat.texture2d.depth_component_unsigned_short_depth_component16,Fail
+ubsan-dEQP-GLES2.functional.clipping.line.wide_line_clip_viewport_center,Fail
+ubsan-dEQP-GLES2.functional.clipping.line.wide_line_clip_viewport_corner,Fail
+ubsan-dEQP-GLES2.functional.clipping.triangle_vertex.clip_three.clip_neg_x_and_pos_x_neg_y_pos_z_and_neg_x_pos_y_neg_z,Fail
+ubsan-dEQP-GLES2.functional.depth_stencil_clear.depth_stencil_masked,Fail
+ubsan-dEQP-GLES2.functional.texture.filtering.2d.nearest_mipmap_linear_linear_mirror_rgba8888,Fail
+ubsan-dEQP-GLES2.functional.texture.filtering.2d.nearest_mipmap_linear_linear_repeat_rgba8888,Fail
+ubsan-dEQP-GLES2.functional.texture.filtering.2d.nearest_mipmap_nearest_linear_mirror_rgba8888,Fail
+ubsan-dEQP-GLES2.functional.texture.mipmap.2d.basic.linear_linear_clamp_non_square,Fail
+ubsan-dEQP-GLES2.functional.texture.mipmap.2d.basic.linear_linear_mirror_non_square,Fail
+ubsan-dEQP-GLES2.functional.texture.mipmap.2d.basic.linear_linear_repeat_non_square,Fail
+ubsan-dEQP-GLES2.functional.texture.mipmap.2d.basic.nearest_linear_clamp_non_square,Fail
+ubsan-dEQP-GLES2.functional.texture.mipmap.2d.basic.nearest_linear_mirror_non_square,Fail
+ubsan-dEQP-GLES2.functional.texture.mipmap.2d.basic.nearest_linear_repeat_non_square,Fail
+ubsan-dEQP-GLES2.functional.texture.wrap.clamp_clamp_nearest_npot_etc1,Fail
+ubsan-dEQP-GLES2.functional.uniform_api.random.3,Fail
+ubsan-dEQP-GLES2.functional.uniform_api.random.79,Fail
 
-asan-dEQP-GLES2.functional.clipping.line.wide_line_clip_viewport_corner,Fail
 arm32-dEQP-GLES2.functional.texture.mipmap.2d.basic.linear_linear_mirror_non_square,Fail
 arm32-dEQP-GLES2.functional.texture.mipmap.2d.basic.linear_linear_clamp_non_square,Fail
 dEQP-GLES2.functional.texture.mipmap.2d.basic.linear_linear_mirror_non_square,Fail
@@ -1240,3 +1256,201 @@ spec@glsl-1.20@execution@vs-loop-uint-induction-var-3,Fail
 spec@glsl-1.20@execution@vs-loop-uint-induction-var-2,Fail
 spec@glsl-1.20@execution@vs-loop-uint-induction-var-4,Fail
 
+# Bisected to d6958a5e ("gallium: kill off pipe_surface::context")
+spec@arb_framebuffer_srgb@blit renderbuffer linear downsample disabled clear,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer linear downsample disabled render,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer linear downsample enabled clear,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer linear downsample enabled render,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer linear msaa disabled clear,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer linear msaa disabled render,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer linear msaa enabled clear,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer linear msaa enabled render,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer linear single_sampled disabled clear,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer linear single_sampled disabled render,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer linear single_sampled enabled clear,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer linear single_sampled enabled render,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer linear upsample disabled clear,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer linear upsample disabled render,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer linear upsample enabled clear,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer linear upsample enabled render,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer srgb_to_linear msaa disabled clear,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer srgb_to_linear msaa disabled render,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer srgb_to_linear msaa enabled clear,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer srgb_to_linear msaa enabled render,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer srgb_to_linear upsample disabled clear,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer srgb_to_linear upsample disabled render,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer srgb_to_linear upsample enabled clear,Fail
+spec@arb_framebuffer_srgb@blit renderbuffer srgb_to_linear upsample enabled render,Fail
+spec@arb_framebuffer_srgb@blit texture linear downsample disabled clear,Fail
+spec@arb_framebuffer_srgb@blit texture linear downsample disabled render,Fail
+spec@arb_framebuffer_srgb@blit texture linear downsample enabled clear,Fail
+spec@arb_framebuffer_srgb@blit texture linear downsample enabled render,Fail
+spec@arb_framebuffer_srgb@blit texture linear msaa disabled clear,Fail
+spec@arb_framebuffer_srgb@blit texture linear msaa disabled render,Fail
+spec@arb_framebuffer_srgb@blit texture linear msaa enabled clear,Fail
+spec@arb_framebuffer_srgb@blit texture linear msaa enabled render,Fail
+spec@arb_framebuffer_srgb@blit texture linear single_sampled disabled clear,Fail
+spec@arb_framebuffer_srgb@blit texture linear single_sampled disabled render,Fail
+spec@arb_framebuffer_srgb@blit texture linear single_sampled enabled clear,Fail
+spec@arb_framebuffer_srgb@blit texture linear single_sampled enabled render,Fail
+spec@arb_framebuffer_srgb@blit texture linear upsample disabled clear,Fail
+spec@arb_framebuffer_srgb@blit texture linear upsample disabled render,Fail
+spec@arb_framebuffer_srgb@blit texture linear upsample enabled clear,Fail
+spec@arb_framebuffer_srgb@blit texture linear upsample enabled render,Fail
+spec@arb_framebuffer_srgb@blit texture srgb_to_linear msaa disabled clear,Fail
+spec@arb_framebuffer_srgb@blit texture srgb_to_linear msaa disabled render,Fail
+spec@arb_framebuffer_srgb@blit texture srgb_to_linear msaa enabled clear,Fail
+spec@arb_framebuffer_srgb@blit texture srgb_to_linear msaa enabled render,Fail
+spec@arb_framebuffer_srgb@blit texture srgb_to_linear upsample disabled clear,Fail
+spec@arb_framebuffer_srgb@blit texture srgb_to_linear upsample disabled render,Fail
+spec@arb_framebuffer_srgb@blit texture srgb_to_linear upsample enabled clear,Fail
+spec@arb_framebuffer_srgb@blit texture srgb_to_linear upsample enabled render,Fail
+
+# SKQP failing tests
+DeferredProxyTest,Crash
+GrContext_colorTypeSupportedAsSurface,Fail
+GrSurfaceRenderability,Fail
+InitialTextureClear,Fail
+SRGBReadWritePixels,Fail
+WrappedProxyTest,Crash
+gl_all_bitmap_configs,Fail
+gl_androidblendmodes,Fail
+gl_animatedGif,Crash
+gl_annotated_text,Fail
+gl_arithmode,Fail
+gl_bitmapcopy,Fail
+gl_blob_rsxform,Fail
+gl_blur2rectsnonninepatch,Fail
+gl_blurSmallRadii,Fail
+gl_bug339297,Fail
+gl_bug339297_as_clip,Fail
+gl_bug583299,Fail
+gl_bug6783,Fail
+gl_coloremoji_blendmodes,Fail
+gl_colorwheelnative,Fail
+gl_combinemaskfilter,Fail
+gl_complexclip2,Fail
+gl_complexclip4_bw,Fail
+gl_complexclip_blur_tiled,Fail
+gl_dashtextcaps,Fail
+gl_degenerate_gradients,Fail
+gl_draw-atlas-colors,Fail
+gl_encode,Fail
+gl_gammagradienttext,Fail
+gl_gpusamplerstress,Fail
+gl_gradtext,Fail
+gl_highcontrastfilter,Fail
+gl_image-surface,Fail
+gl_imagealphathreshold,Fail
+gl_imagealphathreshold_crop,Fail
+gl_imagealphathreshold_surface,Fail
+gl_imageblur2,Fail
+gl_imageblur_large,Fail
+gl_imageblurtiled,Fail
+gl_imagemasksubset,Fail
+gl_lattice_alpha,Fail
+gl_lcdblendmodes,Fail
+gl_lcdtextsize,Fail
+gl_localmatriximagefilter,Fail
+gl_mipmap_srgb,Fail
+gl_nested_bw,Fail
+gl_patch_alpha,Fail
+gl_patch_primitive,Fail
+gl_picture_savelayer,Fail
+gl_pictures,Fail
+gl_pictureshadercache,Fail
+gl_pictureshadertile,Fail
+gl_scaled_tilemode_bitmap,Fail
+gl_scaled_tilemode_gradient,Fail
+gl_scaled_tilemodes,Fail
+gl_scaledemoji,Fail
+gl_scaledemojipos,Fail
+gl_simpleaaclip_aaclip,Fail
+gl_skbug_5321,Fail
+gl_skinning,Crash
+gl_skinning_cached,Crash
+gl_skinning_cpu,Crash
+gl_skinning_cpu_cached,Crash
+gl_srcmode,Fail
+gl_surfaceprops,Fail
+gl_textblob_intercepts,Fail
+gl_textblobblockreordering,Fail
+gl_textblobcolortrans,Fail
+gl_textblobmixedsizes,Crash
+gl_textblobmixedsizes_df,Crash
+gl_textfilter_color,Fail
+gl_textfilter_image,Fail
+gl_tilemode_bitmap,Fail
+gl_typefacestyles,Fail
+gl_wacky_yuv_formats,Fail
+gl_wacky_yuv_formats_cs,Fail
+gl_xfermodes2,Fail
+gl_xfermodes3,Fail
+gles_all_bitmap_configs,Fail
+gles_androidblendmodes,Fail
+gles_animatedGif,Crash
+gles_annotated_text,Fail
+gles_arithmode,Fail
+gles_bitmapcopy,Fail
+gles_blob_rsxform,Fail
+gles_blurSmallRadii,Fail
+gles_bug339297,Fail
+gles_bug339297_as_clip,Fail
+gles_bug583299,Fail
+gles_bug6783,Fail
+gles_coloremoji_blendmodes,Fail
+gles_colorwheelnative,Fail
+gles_combinemaskfilter,Fail
+gles_complexclip2,Fail
+gles_complexclip4_bw,Fail
+gles_complexclip_blur_tiled,Fail
+gles_dashtextcaps,Fail
+gles_degenerate_gradients,Fail
+gles_draw-atlas-colors,Fail
+gles_encode,Fail
+gles_gammagradienttext,Fail
+gles_gpusamplerstress,Fail
+gles_gradtext,Fail
+gles_highcontrastfilter,Fail
+gles_image-surface,Fail
+gles_imageblur2,Fail
+gles_imageblur_large,Fail
+gles_imageblurtiled,Fail
+gles_lcdblendmodes,Fail
+gles_lcdtextsize,Fail
+gles_localmatriximagefilter,Fail
+gles_mipmap_srgb,Fail
+gles_nested_bw,Fail
+gles_patch_alpha,Fail
+gles_patch_primitive,Fail
+gles_picture_savelayer,Fail
+gles_pictures,Fail
+gles_pictureshadercache,Fail
+gles_pictureshadertile,Fail
+gles_scaled_tilemode_bitmap,Fail
+gles_scaled_tilemode_gradient,Fail
+gles_scaled_tilemodes,Fail
+gles_scaledemoji,Fail
+gles_simpleaaclip_aaclip,Fail
+gles_skbug_5321,Fail
+gles_skinning,Crash
+gles_skinning_cached,Crash
+gles_skinning_cpu,Crash
+gles_skinning_cpu_cached,Crash
+gles_srcmode,Fail
+gles_surfaceprops,Fail
+gles_textblob_intercepts,Fail
+gles_textblobblockreordering,Fail
+gles_textblobcolortrans,Fail
+gles_textblobmixedsizes,Crash
+gles_textblobmixedsizes_df,Crash
+gles_textfilter_color,Fail
+gles_textfilter_image,Fail
+gles_tilemode_bitmap,Fail
+gles_typefacestyles,Fail
+gles_wacky_yuv_formats,Fail
+gles_wacky_yuv_formats_cs,Fail
+gles_xfermodes2,Fail
+gles_xfermodes3,Fail
+spec@glsl-1.10@execution@glsl-fs-texture2d-mipmap-const-bias-04,Fail
+spec@glsl-1.10@execution@glsl-fs-texture2d-mipmap-const-bias-05,Fail

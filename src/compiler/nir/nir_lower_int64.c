@@ -111,6 +111,20 @@ lower_bcsel64(nir_builder *b, nir_def *cond, nir_def *x, nir_def *y)
 }
 
 static nir_def *
+lower_bitfield_select64(nir_builder *b, nir_def *cond, nir_def *x, nir_def *y)
+{
+   nir_def *cond_lo = nir_unpack_64_2x32_split_x(b, cond);
+   nir_def *cond_hi = nir_unpack_64_2x32_split_y(b, cond);
+   nir_def *x_lo = nir_unpack_64_2x32_split_x(b, x);
+   nir_def *x_hi = nir_unpack_64_2x32_split_y(b, x);
+   nir_def *y_lo = nir_unpack_64_2x32_split_x(b, y);
+   nir_def *y_hi = nir_unpack_64_2x32_split_y(b, y);
+
+   return nir_pack_64_2x32_split(b, nir_bitfield_select(b, cond_lo, x_lo, y_lo),
+                                 nir_bitfield_select(b, cond_hi, x_hi, y_hi));
+}
+
+static nir_def *
 lower_inot64(nir_builder *b, nir_def *x)
 {
    nir_def *x_lo = nir_unpack_64_2x32_split_x(b, x);
@@ -370,7 +384,7 @@ lower_int64_compare(nir_builder *b, nir_op op, nir_def *x, nir_def *y)
       /* Lower as !(x < y) in the hopes of better CSE */
       return nir_inot(b, lower_int64_compare(b, nir_op_ilt, x, y));
    default:
-      unreachable("Invalid comparison");
+      UNREACHABLE("Invalid comparison");
    }
 }
 
@@ -734,7 +748,7 @@ lower_2f(nir_builder *b, nir_def *x, unsigned dest_bit_size,
       significand_bits = 10;
       break;
    default:
-      unreachable("Invalid dest_bit_size");
+      UNREACHABLE("Invalid dest_bit_size");
    }
 
    nir_def *discard =
@@ -866,6 +880,28 @@ lower_bit_count64(nir_builder *b, nir_def *x)
    return nir_iadd(b, lo_count, hi_count);
 }
 
+static nir_def *
+lower_bitfield_reverse64(nir_builder *b, nir_def *x)
+{
+   nir_def *x_lo = nir_unpack_64_2x32_split_x(b, x);
+   nir_def *x_hi = nir_unpack_64_2x32_split_y(b, x);
+   nir_def *lo_rev = nir_bitfield_reverse(b, x_lo);
+   nir_def *hi_rev = nir_bitfield_reverse(b, x_hi);
+   return nir_pack_64_2x32_split(b, hi_rev, lo_rev);
+}
+
+static nir_def *
+lower_bitfield_extract64(nir_builder *b, nir_def *base, nir_def *offset, nir_def *bits, bool is_signed)
+{
+   nir_def *tmp0 = nir_isub_imm(b, 64, bits);
+   nir_def *tmp1 = nir_isub(b, tmp0, offset);
+   nir_def *tmp2 = nir_ishl(b, base, tmp1);
+
+   nir_def *res = is_signed ? nir_ishr(b, tmp2, tmp0) : nir_ushr(b, tmp2, tmp0);
+
+   return nir_bcsel(b, nir_ieq_imm(b, bits, 0), nir_imm_int64(b, 0), res);
+}
+
 nir_lower_int64_options
 nir_lower_int64_op_to_options_mask(nir_op opcode)
 {
@@ -930,6 +966,7 @@ nir_lower_int64_op_to_options_mask(nir_op opcode)
    case nir_op_ior:
    case nir_op_ixor:
    case nir_op_inot:
+   case nir_op_bitfield_select:
       return nir_lower_logic64;
    case nir_op_ishl:
    case nir_op_ishr:
@@ -946,6 +983,11 @@ nir_lower_int64_op_to_options_mask(nir_op opcode)
       return nir_lower_find_lsb64;
    case nir_op_bit_count:
       return nir_lower_bit_count64;
+   case nir_op_bitfield_reverse:
+      return nir_lower_bitfield_reverse64;
+   case nir_op_ibitfield_extract:
+   case nir_op_ubitfield_extract:
+      return nir_lower_bitfield_extract64;
    default:
       return 0;
    }
@@ -1033,6 +1075,8 @@ lower_int64_alu_instr(nir_builder *b, nir_alu_instr *alu)
       return lower_ixor64(b, src[0], src[1]);
    case nir_op_inot:
       return lower_inot64(b, src[0]);
+   case nir_op_bitfield_select:
+      return lower_bitfield_select64(b, src[0], src[1], src[2]);
    case nir_op_ishl:
       return lower_ishl64(b, src[0], src[1]);
    case nir_op_ishr:
@@ -1050,6 +1094,11 @@ lower_int64_alu_instr(nir_builder *b, nir_alu_instr *alu)
       return lower_find_lsb64(b, src[0]);
    case nir_op_bit_count:
       return lower_bit_count64(b, src[0]);
+   case nir_op_bitfield_reverse:
+      return lower_bitfield_reverse64(b, src[0]);
+   case nir_op_ibitfield_extract:
+   case nir_op_ubitfield_extract:
+      return lower_bitfield_extract64(b, src[0], src[1], src[2], alu->op == nir_op_ibitfield_extract);
    case nir_op_i2f64:
    case nir_op_i2f32:
    case nir_op_i2f16:
@@ -1062,7 +1111,7 @@ lower_int64_alu_instr(nir_builder *b, nir_alu_instr *alu)
    case nir_op_f2u64:
       return lower_f2(b, src[0], alu->op == nir_op_f2i64);
    default:
-      unreachable("Invalid ALU opcode to lower");
+      UNREACHABLE("Invalid ALU opcode to lower");
    }
 }
 
@@ -1334,12 +1383,12 @@ lower_int64_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin)
       case nir_op_ixor:
          return split_64bit_subgroup_op(b, intrin);
       default:
-         unreachable("Unsupported subgroup scan/reduce op");
+         UNREACHABLE("Unsupported subgroup scan/reduce op");
       }
       break;
 
    default:
-      unreachable("Unsupported intrinsic");
+      UNREACHABLE("Unsupported intrinsic");
    }
    return NULL;
 }

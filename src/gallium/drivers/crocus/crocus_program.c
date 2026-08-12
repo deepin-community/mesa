@@ -44,9 +44,9 @@
 #include "compiler/nir/nir_serialize.h"
 #include "intel/compiler/elk/elk_compiler.h"
 #include "intel/compiler/elk/elk_nir.h"
-#include "intel/compiler/elk/elk_prim.h"
 #include "intel/compiler/elk/elk_reg.h"
 #include "intel/compiler/intel_nir.h"
+#include "intel/compiler/intel_prim.h"
 #include "crocus_context.h"
 #include "nir/tgsi_to_nir.h"
 #include "program/prog_instruction.h"
@@ -150,7 +150,7 @@ gfx6_ff_gs_xfb_setup(const struct pipe_stream_output_info *so_info,
 static void
 crocus_populate_sampler_prog_key_data(struct crocus_context *ice,
                                       const struct intel_device_info *devinfo,
-                                      gl_shader_stage stage,
+                                      mesa_shader_stage stage,
                                       struct crocus_uncompiled_shader *ish,
                                       bool uses_texture_gather,
                                       struct elk_sampler_prog_key_data *key)
@@ -277,44 +277,42 @@ get_aoa_deref_offset(nir_builder *b,
    return nir_umin(b, offset, nir_imm_int(b, array_size - elem_size));
 }
 
-static void
+static bool
+crocus_lower_storage_image_derefs_instr(nir_builder *b,
+                                        nir_intrinsic_instr *intrin,
+                                        UNUSED void *_)
+{
+   switch (intrin->intrinsic) {
+   case nir_intrinsic_image_deref_load:
+   case nir_intrinsic_image_deref_store:
+   case nir_intrinsic_image_deref_atomic:
+   case nir_intrinsic_image_deref_atomic_swap:
+   case nir_intrinsic_image_deref_size:
+   case nir_intrinsic_image_deref_samples:
+   case nir_intrinsic_image_deref_load_raw_intel:
+   case nir_intrinsic_image_deref_store_raw_intel: {
+      nir_deref_instr *deref = nir_src_as_deref(intrin->src[0]);
+      nir_variable *var = nir_deref_instr_get_variable(deref);
+
+      b->cursor = nir_before_instr(&intrin->instr);
+      nir_def *index =
+         nir_iadd_imm(b, get_aoa_deref_offset(b, deref, 1),
+                      var->data.driver_location);
+      nir_rewrite_image_intrinsic(intrin, index, nir_image_intrinsic_type_default);
+      return true;
+   }
+
+   default:
+      return false;
+   }
+}
+
+static bool
 crocus_lower_storage_image_derefs(nir_shader *nir)
 {
-   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-
-   nir_builder b = nir_builder_create(impl);
-
-   nir_foreach_block(block, impl) {
-      nir_foreach_instr_safe(instr, block) {
-         if (instr->type != nir_instr_type_intrinsic)
-            continue;
-
-         nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
-         switch (intrin->intrinsic) {
-         case nir_intrinsic_image_deref_load:
-         case nir_intrinsic_image_deref_store:
-         case nir_intrinsic_image_deref_atomic:
-         case nir_intrinsic_image_deref_atomic_swap:
-         case nir_intrinsic_image_deref_size:
-         case nir_intrinsic_image_deref_samples:
-         case nir_intrinsic_image_deref_load_raw_intel:
-         case nir_intrinsic_image_deref_store_raw_intel: {
-            nir_deref_instr *deref = nir_src_as_deref(intrin->src[0]);
-            nir_variable *var = nir_deref_instr_get_variable(deref);
-
-            b.cursor = nir_before_instr(&intrin->instr);
-            nir_def *index =
-               nir_iadd_imm(&b, get_aoa_deref_offset(&b, deref, 1),
-                            var->data.driver_location);
-            nir_rewrite_image_intrinsic(intrin, index, false);
-            break;
-         }
-
-         default:
-            break;
-         }
-      }
-   }
+   return nir_shader_intrinsics_pass(nir, crocus_lower_storage_image_derefs_instr,
+                                     nir_metadata_control_flow,
+                                     NULL);
 }
 
 // XXX: need unify_interfaces() at link time...
@@ -343,9 +341,8 @@ crocus_fix_edge_flags(nir_shader *nir)
    nir_fixup_deref_modes(nir);
 
    nir_foreach_function_impl(impl, nir) {
-      nir_metadata_preserve(impl, nir_metadata_control_flow |
-                            nir_metadata_live_defs |
-                            nir_metadata_loop_analysis);
+      nir_progress(true, impl,
+                   nir_metadata_control_flow | nir_metadata_live_defs | nir_metadata_loop_analysis);
    }
 
    return true;
@@ -697,7 +694,7 @@ crocus_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
     */
    if (temp_const_ubo_name != NULL) {
       nir_load_const_instr *const_ubo_index =
-         nir_instr_as_load_const(temp_const_ubo_name->parent_instr);
+         nir_def_as_load_const(temp_const_ubo_name);
       assert(const_ubo_index->def.bit_size == 32);
       const_ubo_index->value[0].u32 = num_cbufs;
    }
@@ -954,7 +951,7 @@ crocus_setup_binding_table(const struct intel_device_info *devinfo,
    bt->size_bytes = next * 4;
 
    if (INTEL_DEBUG(DEBUG_BT)) {
-      crocus_print_binding_table(stderr, gl_shader_stage_name(info->stage), bt);
+      crocus_print_binding_table(stderr, mesa_shader_stage_name(info->stage), bt);
    }
 
    /* Apply the binding table indices.  The backend compiler is not expected
@@ -988,7 +985,7 @@ crocus_setup_binding_table(const struct intel_device_info *devinfo,
                   val = nir_ishl_imm(&b, val, 32 - width);
                   val = nir_ishr_imm(&b, val, 32 - width);
                }
-               nir_def_rewrite_uses_after(&tex->def, val, val->parent_instr);
+               nir_def_rewrite_uses_after(&tex->def, val);
             }
 
             tex->texture_index =
@@ -1025,6 +1022,13 @@ crocus_setup_binding_table(const struct intel_device_info *devinfo,
 
          case nir_intrinsic_load_output:
             if (devinfo->ver >= 6) {
+               /* We're using a BTI as the load_output offset here which
+                * breaks newer NIR assumptions.
+                */
+               nir_io_semantics io_sem = nir_intrinsic_io_semantics(intrin);
+               io_sem.no_validate = true;
+               nir_intrinsic_set_io_semantics(intrin, io_sem);
+
                rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
                                     CROCUS_SURFACE_GROUP_RENDER_TARGET_READ);
             }
@@ -1043,6 +1047,8 @@ crocus_setup_binding_table(const struct intel_device_info *devinfo,
          }
       }
    }
+
+   nir_validate_shader(nir, "after crocus_setup_binding_table");
 }
 
 static void
@@ -1072,7 +1078,7 @@ crocus_debug_recompile(struct crocus_context *ice,
  *
  * This stage is the one which will feed stream output and the rasterizer.
  */
-static gl_shader_stage
+static mesa_shader_stage
 last_vue_stage(struct crocus_context *ice)
 {
    if (ice->shaders.uncompiled[MESA_SHADER_GEOMETRY])
@@ -1096,7 +1102,7 @@ crocus_vs_outputs_written(struct crocus_context *ice,
    if (devinfo->ver < 6) {
 
       if (key->copy_edgeflag)
-         outputs_written |= BITFIELD64_BIT(VARYING_SLOT_EDGE);
+         outputs_written |= VARYING_BIT_EDGE;
 
       /* Put dummy slots into the VUE for the SF to put the replaced
        * point sprite coords in.  We shouldn't need these dummy slots,
@@ -1110,10 +1116,10 @@ crocus_vs_outputs_written(struct crocus_context *ice,
       }
 
       /* if back colors are written, allocate slots for front colors too */
-      if (outputs_written & BITFIELD64_BIT(VARYING_SLOT_BFC0))
-         outputs_written |= BITFIELD64_BIT(VARYING_SLOT_COL0);
-      if (outputs_written & BITFIELD64_BIT(VARYING_SLOT_BFC1))
-         outputs_written |= BITFIELD64_BIT(VARYING_SLOT_COL1);
+      if (outputs_written & VARYING_BIT_BFC0)
+         outputs_written |= VARYING_BIT_COL0;
+      if (outputs_written & VARYING_BIT_BFC1)
+         outputs_written |= VARYING_BIT_COL1;
    }
 
    /* In order for legacy clipping to work, we need to populate the clip
@@ -1121,8 +1127,8 @@ crocus_vs_outputs_written(struct crocus_context *ice,
     * shader doesn't write to gl_ClipDistance.
     */
    if (key->nr_userclip_plane_consts > 0) {
-      outputs_written |= BITFIELD64_BIT(VARYING_SLOT_CLIP_DIST0);
-      outputs_written |= BITFIELD64_BIT(VARYING_SLOT_CLIP_DIST1);
+      outputs_written |= VARYING_BIT_CLIP_DIST0;
+      outputs_written |= VARYING_BIT_CLIP_DIST1;
    }
 
    return outputs_written;
@@ -1175,7 +1181,7 @@ crocus_compile_vs(struct crocus_context *ice,
       /* Check if variables were found. */
       if (nir_lower_clip_vs(nir, (1 << key->nr_userclip_plane_consts) - 1,
                             true, false, NULL)) {
-         nir_lower_io_to_temporaries(nir, impl, true, false);
+         nir_lower_io_vars_to_temporaries(nir, impl, nir_var_shader_out);
          nir_lower_global_vars_to_local(nir);
          nir_lower_vars_to_ssa(nir);
          nir_shader_gather_info(nir, impl);
@@ -1207,7 +1213,9 @@ crocus_compile_vs(struct crocus_context *ice,
       crocus_vs_outputs_written(ice, key, nir->info.outputs_written);
    elk_compute_vue_map(devinfo,
                        &vue_prog_data->vue_map, outputs_written,
-                       nir->info.separate_shader, /* pos slots */ 1);
+                       nir->info.separate_shader ?
+                       INTEL_VUE_LAYOUT_SEPARATE :
+                       INTEL_VUE_LAYOUT_FIXED, /* pos slots */ 1);
 
    /* Don't tell the backend about our clip plane constants, we've already
     * lowered them in NIR and we don't want it doing it again.
@@ -1232,7 +1240,7 @@ crocus_compile_vs(struct crocus_context *ice,
    if (program == NULL) {
       dbg_printf("Failed to compile vertex shader: %s\n", params.base.error_str);
       ralloc_free(mem_ctx);
-      return false;
+      return NULL;
    }
 
    if (ish->compiled_once) {
@@ -1331,7 +1339,7 @@ crocus_update_compiled_vs(struct crocus_context *ice)
  * Get the shader_info for a given stage, or NULL if the stage is disabled.
  */
 const struct shader_info *
-crocus_get_shader_info(const struct crocus_context *ice, gl_shader_stage stage)
+crocus_get_shader_info(const struct crocus_context *ice, mesa_shader_stage stage)
 {
    const struct crocus_uncompiled_shader *ish = ice->shaders.uncompiled[stage];
 
@@ -1429,7 +1437,7 @@ crocus_compile_tcs(struct crocus_context *ice,
    if (program == NULL) {
       dbg_printf("Failed to compile control shader: %s\n", params.base.error_str);
       ralloc_free(mem_ctx);
-      return false;
+      return NULL;
    }
 
    if (ish) {
@@ -1533,7 +1541,7 @@ crocus_compile_tes(struct crocus_context *ice,
       nir_function_impl *impl = nir_shader_get_entrypoint(nir);
       nir_lower_clip_vs(nir, (1 << key->nr_userclip_plane_consts) - 1, true,
                         false, NULL);
-      nir_lower_io_to_temporaries(nir, impl, true, false);
+      nir_lower_io_vars_to_temporaries(nir, impl, nir_var_shader_out);
       nir_lower_global_vars_to_local(nir);
       nir_lower_vars_to_ssa(nir);
       nir_shader_gather_info(nir, impl);
@@ -1574,7 +1582,7 @@ crocus_compile_tes(struct crocus_context *ice,
    if (program == NULL) {
       dbg_printf("Failed to compile evaluation shader: %s\n", params.base.error_str);
       ralloc_free(mem_ctx);
-      return false;
+      return NULL;
    }
 
    if (ish->compiled_once) {
@@ -1676,7 +1684,7 @@ crocus_compile_gs(struct crocus_context *ice,
       nir_function_impl *impl = nir_shader_get_entrypoint(nir);
       nir_lower_clip_gs(nir, (1 << key->nr_userclip_plane_consts) - 1, false,
                         NULL);
-      nir_lower_io_to_temporaries(nir, impl, true, false);
+      nir_lower_io_vars_to_temporaries(nir, impl, nir_var_shader_out);
       nir_lower_global_vars_to_local(nir);
       nir_lower_vars_to_ssa(nir);
       nir_shader_gather_info(nir, impl);
@@ -1697,7 +1705,9 @@ crocus_compile_gs(struct crocus_context *ice,
 
    elk_compute_vue_map(devinfo,
                        &vue_prog_data->vue_map, nir->info.outputs_written,
-                       nir->info.separate_shader, /* pos slots */ 1);
+                       nir->info.separate_shader ?
+                       INTEL_VUE_LAYOUT_SEPARATE :
+                       INTEL_VUE_LAYOUT_FIXED, /* pos slots */ 1);
 
    if (devinfo->ver == 6)
       gfx6_gs_xfb_setup(&ish->stream_output, gs_prog_data);
@@ -1718,7 +1728,7 @@ crocus_compile_gs(struct crocus_context *ice,
    if (program == NULL) {
       dbg_printf("Failed to compile geometry shader: %s\n", params.base.error_str);
       ralloc_free(mem_ctx);
-      return false;
+      return NULL;
    }
 
    if (ish->compiled_once) {
@@ -1796,14 +1806,14 @@ crocus_update_compiled_gs(struct crocus_context *ice)
 static struct crocus_compiled_shader *
 crocus_compile_fs(struct crocus_context *ice,
                   struct crocus_uncompiled_shader *ish,
-                  const struct elk_wm_prog_key *key,
+                  const struct elk_fs_prog_key *key,
                   struct intel_vue_map *vue_map)
 {
    struct crocus_screen *screen = (struct crocus_screen *)ice->ctx.screen;
    const struct elk_compiler *compiler = screen->compiler;
    void *mem_ctx = ralloc_context(NULL);
-   struct elk_wm_prog_data *fs_prog_data =
-      rzalloc(mem_ctx, struct elk_wm_prog_data);
+   struct elk_fs_prog_data *fs_prog_data =
+      rzalloc(mem_ctx, struct elk_fs_prog_data);
    struct elk_stage_prog_data *prog_data = &fs_prog_data->base;
    enum elk_param_builtin *system_values;
    const struct intel_device_info *devinfo = &screen->devinfo;
@@ -1837,7 +1847,7 @@ crocus_compile_fs(struct crocus_context *ice,
    if (can_push_ubo(devinfo))
       elk_nir_analyze_ubo_ranges(compiler, nir, prog_data->ubo_ranges);
 
-   struct elk_wm_prog_key key_clean = *key;
+   struct elk_fs_prog_key key_clean = *key;
    crocus_sanitize_tex_key(&key_clean.base.tex);
 
    struct elk_compile_fs_params params = {
@@ -1858,7 +1868,7 @@ crocus_compile_fs(struct crocus_context *ice,
    if (program == NULL) {
       dbg_printf("Failed to compile fragment shader: %s\n", params.base.error_str);
       ralloc_free(mem_ctx);
-      return false;
+      return NULL;
    }
 
    if (ish->compiled_once) {
@@ -1895,7 +1905,7 @@ crocus_update_compiled_fs(struct crocus_context *ice)
    struct crocus_shader_state *shs = &ice->state.shaders[MESA_SHADER_FRAGMENT];
    struct crocus_uncompiled_shader *ish =
       ice->shaders.uncompiled[MESA_SHADER_FRAGMENT];
-   struct elk_wm_prog_key key = { KEY_INIT() };
+   struct elk_fs_prog_key key = { KEY_INIT() };
 
    if (ish->nos & (1ull << CROCUS_NOS_TEXTURES))
       crocus_populate_sampler_prog_key_data(ice, devinfo, MESA_SHADER_FRAGMENT, ish,
@@ -1972,7 +1982,7 @@ update_last_vue_map(struct crocus_context *ice,
          ice->state.stage_dirty_for_nos[CROCUS_NOS_LAST_VUE_MAP];
    }
 
-   if (changed_slots || (old_map && old_map->separate != vue_map->separate)) {
+   if (changed_slots || (old_map && old_map->layout != vue_map->layout)) {
       ice->state.dirty |= CROCUS_DIRTY_GEN7_SBE;
       if (devinfo->ver < 6)
          ice->state.dirty |= CROCUS_DIRTY_GEN4_FF_GS_PROG;
@@ -1984,7 +1994,7 @@ update_last_vue_map(struct crocus_context *ice,
 
 static void
 crocus_update_pull_constant_descriptors(struct crocus_context *ice,
-                                        gl_shader_stage stage)
+                                        mesa_shader_stage stage)
 {
    struct crocus_compiled_shader *shader = ice->shaders.prog[stage];
 
@@ -2013,7 +2023,7 @@ crocus_update_pull_constant_descriptors(struct crocus_context *ice,
  * Get the prog_data for a given stage, or NULL if the stage is disabled.
  */
 static struct elk_vue_prog_data *
-get_vue_prog_data(struct crocus_context *ice, gl_shader_stage stage)
+get_vue_prog_data(struct crocus_context *ice, mesa_shader_stage stage)
 {
    if (!ice->shaders.prog[stage])
       return NULL;
@@ -2039,7 +2049,7 @@ crocus_compile_clip(struct crocus_context *ice, struct elk_clip_prog_key *key)
    if (program == NULL) {
       dbg_printf("failed to compile clip shader\n");
       ralloc_free(mem_ctx);
-      return false;
+      return NULL;
    }
    struct crocus_binding_table bt;
    memset(&bt, 0, sizeof(bt));
@@ -2060,12 +2070,12 @@ crocus_update_compiled_clip(struct crocus_context *ice)
    struct crocus_compiled_shader *old = ice->shaders.clip_prog;
    memset(&key, 0, sizeof(key));
 
-   const struct elk_wm_prog_data *wm_prog_data = elk_wm_prog_data(ice->shaders.prog[MESA_SHADER_FRAGMENT]->prog_data);
-   if (wm_prog_data) {
-      key.contains_flat_varying = wm_prog_data->contains_flat_varying;
+   const struct elk_fs_prog_data *fs_prog_data = elk_fs_prog_data(ice->shaders.prog[MESA_SHADER_FRAGMENT]->prog_data);
+   if (fs_prog_data) {
+      key.contains_flat_varying = fs_prog_data->contains_flat_varying;
       key.contains_noperspective_varying =
-         wm_prog_data->contains_noperspective_varying;
-      memcpy(key.interp_mode, wm_prog_data->interp_mode, sizeof(key.interp_mode));
+         fs_prog_data->contains_noperspective_varying;
+      memcpy(key.interp_mode, fs_prog_data->interp_mode, sizeof(key.interp_mode));
    }
 
    key.primitive = ice->state.reduced_prim_mode;
@@ -2136,8 +2146,8 @@ crocus_update_compiled_clip(struct crocus_context *ice)
 
             if (offset_back || offset_front) {
                double mrd = 0.0;
-               if (ice->state.framebuffer.zsbuf)
-                  mrd = util_get_depth_format_mrd(util_format_description(ice->state.framebuffer.zsbuf->format));
+               if (ice->state.framebuffer.zsbuf.texture)
+                  mrd = util_get_depth_format_mrd(util_format_description(ice->state.framebuffer.zsbuf.format));
                key.offset_units = rs_state->offset_units * mrd * 2;
                key.offset_factor = rs_state->offset_scale * mrd;
                key.offset_clamp = rs_state->offset_clamp * mrd;
@@ -2193,7 +2203,7 @@ crocus_compile_sf(struct crocus_context *ice, struct elk_sf_prog_key *key)
    if (program == NULL) {
       dbg_printf("failed to compile sf shader\n");
       ralloc_free(mem_ctx);
-      return false;
+      return NULL;
    }
 
    struct crocus_binding_table bt;
@@ -2219,7 +2229,7 @@ crocus_update_compiled_sf(struct crocus_context *ice)
    switch (ice->state.reduced_prim_mode) {
    case MESA_PRIM_TRIANGLES:
    default:
-      if (key.attrs & BITFIELD64_BIT(VARYING_SLOT_EDGE))
+      if (key.attrs & VARYING_BIT_EDGE)
          key.primitive = ELK_SF_PRIM_UNFILLED_TRIS;
       else
          key.primitive = ELK_SF_PRIM_TRIANGLES;
@@ -2234,10 +2244,10 @@ crocus_update_compiled_sf(struct crocus_context *ice)
 
    struct pipe_rasterizer_state *rs_state = crocus_get_rast_state(ice);
    key.userclip_active = rs_state->clip_plane_enable != 0;
-   const struct elk_wm_prog_data *wm_prog_data = elk_wm_prog_data(ice->shaders.prog[MESA_SHADER_FRAGMENT]->prog_data);
-   if (wm_prog_data) {
-      key.contains_flat_varying = wm_prog_data->contains_flat_varying;
-      memcpy(key.interp_mode, wm_prog_data->interp_mode, sizeof(key.interp_mode));
+   const struct elk_fs_prog_data *fs_prog_data = elk_fs_prog_data(ice->shaders.prog[MESA_SHADER_FRAGMENT]->prog_data);
+   if (fs_prog_data) {
+      key.contains_flat_varying = fs_prog_data->contains_flat_varying;
+      memcpy(key.interp_mode, fs_prog_data->interp_mode, sizeof(key.interp_mode));
    }
 
    key.do_twoside_color = rs_state->light_twoside;
@@ -2247,7 +2257,7 @@ crocus_update_compiled_sf(struct crocus_context *ice)
       key.point_sprite_coord_replace = rs_state->sprite_coord_enable & 0xff;
       if (rs_state->sprite_coord_enable & (1 << 8))
          key.do_point_coord = 1;
-      if (wm_prog_data && wm_prog_data->urb_setup[VARYING_SLOT_PNTC] != -1)
+      if (fs_prog_data && fs_prog_data->urb_setup[VARYING_SLOT_PNTC] != -1)
          key.do_point_coord = 1;
    }
 
@@ -2286,7 +2296,7 @@ crocus_compile_ff_gs(struct crocus_context *ice, struct elk_ff_gs_prog_key *key)
    if (program == NULL) {
       dbg_printf("failed to compile sf shader\n");
       ralloc_free(mem_ctx);
-      return false;
+      return NULL;
    }
 
    struct crocus_binding_table bt;
@@ -2441,7 +2451,7 @@ crocus_update_compiled_shaders(struct crocus_context *ice)
    if (!ice->shaders.prog[MESA_SHADER_VERTEX])
       return false;
 
-   gl_shader_stage last_stage = last_vue_stage(ice);
+   mesa_shader_stage last_stage = last_vue_stage(ice);
    struct crocus_compiled_shader *shader = ice->shaders.prog[last_stage];
    struct crocus_uncompiled_shader *ish = ice->shaders.uncompiled[last_stage];
    update_last_vue_map(ice, shader->prog_data);
@@ -2512,7 +2522,7 @@ crocus_compile_cs(struct crocus_context *ice,
 
    nir_shader *nir = nir_shader_clone(mem_ctx, ish->nir);
 
-   NIR_PASS_V(nir, elk_nir_lower_cs_intrinsics, devinfo, cs_prog_data);
+   NIR_PASS(_, nir, elk_nir_lower_cs_intrinsics, devinfo, cs_prog_data);
 
    crocus_setup_uniforms(devinfo, mem_ctx, nir, prog_data, &system_values,
                          &num_system_values, &num_cbufs);
@@ -2536,7 +2546,7 @@ crocus_compile_cs(struct crocus_context *ice,
    if (program == NULL) {
       dbg_printf("Failed to compile compute shader: %s\n", params.base.error_str);
       ralloc_free(mem_ctx);
-      return false;
+      return NULL;
    }
 
    if (ish->compiled_once) {
@@ -2623,7 +2633,7 @@ crocus_fill_cs_push_const_buffer(struct elk_cs_prog_data *cs_prog_data,
 struct crocus_bo *
 crocus_get_scratch_space(struct crocus_context *ice,
                          unsigned per_thread_scratch,
-                         gl_shader_stage stage)
+                         mesa_shader_stage stage)
 {
    struct crocus_screen *screen = (struct crocus_screen *)ice->ctx.screen;
    struct crocus_bufmgr *bufmgr = screen->bufmgr;
@@ -2673,7 +2683,7 @@ crocus_create_uncompiled_shader(struct pipe_context *ctx,
    struct elk_nir_compiler_opts opts = {};
    elk_preprocess_nir(screen->compiler, nir, &opts);
 
-   NIR_PASS_V(nir, elk_nir_lower_storage_image,
+   NIR_PASS(_, nir, elk_nir_lower_storage_image,
               &(struct elk_nir_lower_storage_image_opts) {
                  .devinfo = devinfo,
                  .lower_loads = true,
@@ -2681,7 +2691,7 @@ crocus_create_uncompiled_shader(struct pipe_context *ctx,
                  .lower_atomics = true,
                  .lower_get_size = true,
               });
-   NIR_PASS_V(nir, crocus_lower_storage_image_derefs);
+   NIR_PASS(_, nir, crocus_lower_storage_image_derefs);
 
    nir_sweep(nir);
 
@@ -2701,7 +2711,7 @@ crocus_create_uncompiled_shader(struct pipe_context *ctx,
       struct blob blob;
       blob_init(&blob);
       nir_serialize(&blob, nir, true);
-      _mesa_sha1_compute(blob.data, blob.size, ish->nir_sha1);
+      _mesa_blake3_compute(blob.data, blob.size, ish->nir_blake3);
       blob_finish(&blob);
    }
 
@@ -2859,14 +2869,15 @@ crocus_create_fs_state(struct pipe_context *ctx,
            BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK));
 
       bool can_rearrange_varyings =
-         screen->devinfo.ver > 6 && util_bitcount64(info->inputs_read & ELK_FS_VARYING_INPUT_MASK) <= 16;
+         screen->devinfo.ver > 5 && util_bitcount64(info->inputs_read & ELK_FS_VARYING_INPUT_MASK) <= 16;
 
       const struct intel_device_info *devinfo = &screen->devinfo;
-      struct elk_wm_prog_key key = {
+      struct elk_fs_prog_key key = {
          KEY_INIT(),
          .nr_color_regions = util_bitcount(color_outputs),
          .coherent_fb_fetch = false,
-         .ignore_sample_mask_out = screen->devinfo.ver < 6 ? 1 : 0,
+         .multisample_fbo = (info->outputs_written & BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK)) ? ELK_ALWAYS : ELK_NEVER,
+         .ignore_sample_mask_out = !key.multisample_fbo,
          .input_slots_valid =
          can_rearrange_varyings ? 0 : info->inputs_read | VARYING_BIT_POS,
       };
@@ -2875,7 +2886,7 @@ crocus_create_fs_state(struct pipe_context *ctx,
       if (devinfo->ver < 6) {
          elk_compute_vue_map(devinfo, &vue_map,
                              info->inputs_read | VARYING_BIT_POS,
-                             false, /* pos slots */ 1);
+                             INTEL_VUE_LAYOUT_FIXED, /* pos slots */ 1);
       }
       if (!crocus_disk_cache_retrieve(ice, ish, &key, sizeof(key)))
          crocus_compile_fs(ice, ish, &key, &vue_map);
@@ -2914,7 +2925,7 @@ crocus_create_compute_state(struct pipe_context *ctx,
  * Frees the crocus_uncompiled_shader.
  */
 static void
-crocus_delete_shader_state(struct pipe_context *ctx, void *state, gl_shader_stage stage)
+crocus_delete_shader_state(struct pipe_context *ctx, void *state, mesa_shader_stage stage)
 {
    struct crocus_uncompiled_shader *ish = state;
    struct crocus_context *ice = (void *) ctx;
@@ -2978,7 +2989,7 @@ crocus_delete_cs_state(struct pipe_context *ctx, void *state)
 static void
 bind_shader_state(struct crocus_context *ice,
                   struct crocus_uncompiled_shader *ish,
-                  gl_shader_stage stage)
+                  mesa_shader_stage stage)
 {
    uint64_t dirty_bit = CROCUS_STAGE_DIRTY_UNCOMPILED_VS << stage;
    const uint64_t nos = ish ? ish->nos : 0;

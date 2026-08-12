@@ -23,12 +23,20 @@ anv_bind_buffer_memory(struct anv_device *device,
       buffer->address = (struct anv_address) {
          .bo = mem->bo,
          .offset = pBindInfo->memoryOffset,
+         .protected = anv_buffer_is_protected(buffer),
       };
    } else {
       buffer->address = ANV_NULL_ADDRESS;
    }
 
+   buffer->vk.device_address = anv_address_physical(buffer->address);
+
    ANV_RMV(buffer_bind, device, buffer);
+
+   ANV_ADDR_BINDING_REPORT_ADDR_BIND(device,
+                                     &buffer->vk.base,
+                                     buffer->vk.device_address,
+                                     buffer->vk.size);
 
    if (bind_status)
       *bind_status->pResult = VK_SUCCESS;
@@ -72,6 +80,9 @@ anv_get_buffer_memory_requirements(struct anv_device *device,
    else if (usage & (VK_BUFFER_USAGE_2_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
                      VK_BUFFER_USAGE_2_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT))
       memory_types = device->physical->memory.dynamic_visible_mem_types;
+   else if (device->physical->instance->enable_buffer_comp)
+      memory_types = device->physical->memory.default_buffer_mem_types |
+                     device->physical->memory.compressed_mem_types;
    else
       memory_types = device->physical->memory.default_buffer_mem_types;
 
@@ -148,8 +159,8 @@ void anv_GetDeviceBufferMemoryRequirements(
        pInfo->pCreateInfo->flags & (VK_BUFFER_CREATE_SPARSE_BINDING_BIT |
                                     VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT |
                                     VK_BUFFER_CREATE_SPARSE_ALIASED_BIT))
-      fprintf(stderr, "=== %s %s:%d flags:0x%08x\n", __func__, __FILE__,
-              __LINE__, pInfo->pCreateInfo->flags);
+      mesa_logi("=== %s %s:%d flags:0x%08x\n", __func__, __FILE__,
+                __LINE__, pInfo->pCreateInfo->flags);
 
    anv_get_buffer_memory_requirements(device,
                                       pInfo->pCreateInfo->flags,
@@ -173,8 +184,8 @@ VkResult anv_CreateBuffer(
        pCreateInfo->flags & (VK_BUFFER_CREATE_SPARSE_BINDING_BIT |
                              VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT |
                              VK_BUFFER_CREATE_SPARSE_ALIASED_BIT))
-      fprintf(stderr, "=== %s %s:%d flags:0x%08x\n", __func__, __FILE__,
-              __LINE__, pCreateInfo->flags);
+      mesa_logi("=== %s %s:%d flags:0x%08x\n", __func__, __FILE__,
+                __LINE__, pCreateInfo->flags);
 
    if ((pCreateInfo->flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT) &&
        device->physical->sparse_type == ANV_SPARSE_TYPE_TRTT) {
@@ -239,6 +250,12 @@ VkResult anv_CreateBuffer(
          vk_buffer_destroy(&device->vk, pAllocator, &buffer->vk);
          return result;
       }
+
+      buffer->vk.device_address = anv_address_physical(buffer->address);
+
+      ANV_ADDR_BINDING_REPORT_ADDR_BIND(device, &buffer->vk.base,
+                                        buffer->vk.device_address,
+                                        buffer->sparse_data.size);
    }
 
    ANV_RMV(buffer_create, device, false, buffer);
@@ -264,6 +281,13 @@ void anv_DestroyBuffer(
    if (anv_buffer_is_sparse(buffer)) {
       assert(buffer->address.offset == buffer->sparse_data.address);
       anv_free_sparse_bindings(device, &buffer->sparse_data);
+      ANV_ADDR_BINDING_REPORT_ADDR_UNBIND(device, &buffer->vk.base,
+                                          buffer->vk.device_address,
+                                          buffer->sparse_data.size);
+   } else {
+      ANV_ADDR_BINDING_REPORT_ADDR_UNBIND(device, &buffer->vk.base,
+                                          buffer->vk.device_address,
+                                          buffer->vk.size);
    }
 
    vk_buffer_destroy(&device->vk, pAllocator, &buffer->vk);
@@ -330,5 +354,6 @@ anv_fill_buffer_surface_state(struct anv_device *device,
                          .size_B = range,
                          .format = format,
                          .swizzle = swizzle,
-                         .stride_B = stride);
+                         .stride_B = stride,
+                         .usage = usage);
 }

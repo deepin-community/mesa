@@ -341,6 +341,11 @@ parse_enable_string(const char *debug,
                     uint64_t default_value,
                     const struct debug_control *control);
 
+void
+dump_debug_control_string(char *output,
+                          size_t max_size,
+                          const struct debug_control *control,
+                          uint64_t flags);
 
 bool
 comma_separated_list_contains(const char *list, const char *s);
@@ -348,7 +353,7 @@ comma_separated_list_contains(const char *list, const char *s);
 /**
  * Get option.
  *
- * It is an alias for getenv on Unix and Windows.
+ * It is an alias for os_get_option.
  *
  */
 const char *
@@ -403,13 +408,6 @@ __normal_user(void)
    return geteuid() == getuid() && getegid() == getgid();
 #endif
 }
-
-#ifndef HAVE_SECURE_GETENV
-static inline char *secure_getenv(const char *name)
-{
-   return getenv(name);
-}
-#endif
 
 #define DEBUG_GET_ONCE_BOOL_OPTION(sufix, name, dfault) \
 static bool \

@@ -84,7 +84,7 @@ feedback_stage( struct draw_stage *stage )
 
 static void
 feedback_vertex(struct gl_context *ctx, const struct draw_context *draw,
-                const struct vertex_header *v)
+                const struct vertex_header *v, const struct vertex_header *pv)
 {
    struct gl_vertex_program *stvp =
       (struct gl_vertex_program *)ctx->VertexProgram._Current;
@@ -107,7 +107,7 @@ feedback_vertex(struct gl_context *ctx, const struct draw_context *draw,
 
    slot = stvp->result_to_output[VARYING_SLOT_COL0];
    if (slot != 0xff)
-      color = v->data[slot];
+      color = pv ? pv->data[slot] : v->data[slot];
    else
       color = ctx->Current.Attrib[VERT_ATTRIB_COLOR0];
 
@@ -126,11 +126,15 @@ feedback_tri( struct draw_stage *stage, struct prim_header *prim )
 {
    struct feedback_stage *fs = feedback_stage(stage);
    struct draw_context *draw = stage->draw;
+   const struct vertex_header *pv = NULL;
+   if (draw->rasterizer->flatshade)
+      pv = draw->rasterizer->flatshade_first ? prim->v[0] : prim->v[2];
+
    _mesa_feedback_token(fs->ctx, (GLfloat) GL_POLYGON_TOKEN);
    _mesa_feedback_token(fs->ctx, (GLfloat) 3); /* three vertices */
-   feedback_vertex(fs->ctx, draw, prim->v[0]);
-   feedback_vertex(fs->ctx, draw, prim->v[1]);
-   feedback_vertex(fs->ctx, draw, prim->v[2]);
+   feedback_vertex(fs->ctx, draw, prim->v[0], pv);
+   feedback_vertex(fs->ctx, draw, prim->v[1], pv);
+   feedback_vertex(fs->ctx, draw, prim->v[2], pv);
 }
 
 
@@ -146,8 +150,8 @@ feedback_line( struct draw_stage *stage, struct prim_header *prim )
    else {
       _mesa_feedback_token(fs->ctx, (GLfloat) GL_LINE_TOKEN);
    }
-   feedback_vertex(fs->ctx, draw, prim->v[0]);
-   feedback_vertex(fs->ctx, draw, prim->v[1]);
+   feedback_vertex(fs->ctx, draw, prim->v[0], NULL);
+   feedback_vertex(fs->ctx, draw, prim->v[1], NULL);
 }
 
 
@@ -157,7 +161,7 @@ feedback_point( struct draw_stage *stage, struct prim_header *prim )
    struct feedback_stage *fs = feedback_stage(stage);
    struct draw_context *draw = stage->draw;
    _mesa_feedback_token(fs->ctx, (GLfloat) GL_POINT_TOKEN);
-   feedback_vertex(fs->ctx, draw, prim->v[0]);
+   feedback_vertex(fs->ctx, draw, prim->v[0], NULL);
 }
 
 
@@ -313,10 +317,11 @@ st_RenderMode(struct gl_context *ctx, GLenum newMode )
       ctx->Driver.DrawGalliumMultiMode = st_feedback_draw_vbo_multi_mode;
       /* need to generate/use a vertex program that emits pos/color/tex */
       if (vp)
-         ctx->NewDriverState |= ST_NEW_VERTEX_PROGRAM(ctx, vp);
+         ST_SET_VERTEX_PROGRAM_STATES(ctx->NewDriverState, ctx, vp);
    }
 
    /* Restore geometry shader states when leaving GL_SELECT mode. */
    if (ctx->RenderMode == GL_SELECT && ctx->Const.HardwareAcceleratedSelect)
-      ctx->NewDriverState |= ST_NEW_GS_SSBOS | ST_NEW_GS_CONSTANTS | ST_NEW_GS_STATE;
+      ST_SET_STATE3(ctx->NewDriverState, ST_NEW_GS_SSBOS, ST_NEW_GS_CONSTANTS,
+                    ST_NEW_GS_STATE);
 }

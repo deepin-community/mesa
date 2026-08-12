@@ -9,11 +9,12 @@
 #define AMDGPU_WINSYS_H
 
 #include "pipebuffer/pb_cache.h"
-#include "pipebuffer/pb_slab.h"
+#include "util/pb_slab.h"
 #include "winsys/radeon_winsys.h"
 #include "util/simple_mtx.h"
 #include "util/u_queue.h"
-#include <amdgpu.h>
+#include "ac_linux_drm.h"
+#include "amdgpu_userq.h"
 
 struct amdgpu_cs;
 
@@ -114,15 +115,28 @@ struct amdgpu_screen_winsys {
  */
 #define AMDGPU_FENCE_RING_SIZE 32
 
-/* The maximum number of queues that can be present. */
-#define AMDGPU_MAX_QUEUES 6
+/* Queues using the fence ring. */
+enum amdgpu_queue_index {
+   AMDGPU_QUEUE_GFX,
+   AMDGPU_QUEUE_GFX_HIGH_PRIO,
+   AMDGPU_QUEUE_COMPUTE,
+   AMDGPU_QUEUE_SDMA,
+   AMDGPU_MAX_QUEUES,
+
+   AMDGPU_QUEUE_USES_ALT_FENCE = INT_MAX,
+};
+
+extern char amdgpu_userq_str[AMDGPU_MAX_QUEUES][8];
 
 /* This can use any integer type because the logic handles integer wraparounds robustly, but
  * uint8_t wraps around so quickly that some BOs might never become idle because we don't
  * remove idle fences from BOs, so they become "busy" again after a queue sequence number wraps
  * around and they may stay "busy" in pb_cache long enough that we run out of memory.
+ *
+ * High FPS applications also wrap around uint16_t so quickly that 32-bit address space allocations
+ * aren't deallocated soon enough and we run out.
  */
-typedef uint16_t uint_seq_no;
+typedef uint32_t uint_seq_no;
 
 struct amdgpu_queue {
    /* Ring buffer of fences.
@@ -166,6 +180,8 @@ struct amdgpu_queue {
 
    /* The last context using this queue. */
    struct amdgpu_ctx *last_ctx;
+
+   struct amdgpu_userq userq;
 };
 
 /* This is part of every BO. */
@@ -193,20 +209,22 @@ struct amdgpu_winsys {
 
    /* Protected by bo_fence_lock. */
    struct amdgpu_queue queues[AMDGPU_MAX_QUEUES];
+   pthread_t userq_job_log_thread;
+   bool userq_job_log; /* enable userq job log thread */
 
    struct pb_cache bo_cache;
    struct pb_slabs bo_slabs;  /* Slab allocator. */
 
-   amdgpu_device_handle dev;
+   ac_drm_device *dev;
 
    simple_mtx_t bo_fence_lock;
+   simple_mtx_t stats_lock;
 
    int num_cs; /* The number of command streams created. */
-   uint32_t surf_index_color;
-   uint32_t surf_index_fmask;
    uint32_t next_bo_unique_id;
    uint64_t allocated_vram;
    uint64_t allocated_gtt;
+   uint32_t allocated_oa;
    uint64_t mapped_vram;
    uint64_t mapped_gtt;
    uint64_t slab_wasted_vram;
@@ -253,6 +271,16 @@ struct amdgpu_winsys {
     * for invoking them because sws_list can be NULL.
     */
    struct amdgpu_screen_winsys dummy_sws;
+
+   /*
+    * In case of userqueue, mesa should ensure that VM page tables are available
+    * when jobs are executed. For this, VM ioctl now outputs timeline syncobj.
+    * This timeline syncobj output will be used as one of the dependency
+    * fence in userqueue wait ioctl.
+    */
+   uint32_t vm_timeline_syncobj;
+   uint64_t vm_timeline_seq_num;
+   simple_mtx_t vm_ioctl_lock;
 };
 
 static inline struct amdgpu_screen_winsys *

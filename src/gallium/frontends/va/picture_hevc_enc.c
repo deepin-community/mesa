@@ -199,6 +199,16 @@ vlVaHandleVAEncSliceParameterBufferTypeHEVC(vlVaDriver *drv, vlVaContext *contex
    slice_descriptor.slice_type = h265->slice_type;
    assert(slice_descriptor.slice_type <= PIPE_H265_SLICE_TYPE_I);
 
+   /* Assert that the slices are coming in order */
+   if (context->desc.h265enc.num_slice_descriptors == 0) {
+      assert(slice_descriptor.slice_segment_address == 0);
+   } else {
+      struct h265_slice_descriptor *last_slice_descriptor =
+         &context->desc.h265enc.slices_descriptors[context->desc.h265enc.num_slice_descriptors - 1];
+      assert(last_slice_descriptor->slice_segment_address +
+             last_slice_descriptor->num_ctu_in_slice == slice_descriptor.slice_segment_address);
+   }
+
    if (context->desc.h265enc.num_slice_descriptors < ARRAY_SIZE(context->desc.h265enc.slices_descriptors))
       context->desc.h265enc.slices_descriptors[context->desc.h265enc.num_slice_descriptors++] = slice_descriptor;
    else
@@ -586,8 +596,7 @@ static unsigned st_ref_pic_set(unsigned index,
          rps->delta_idx_minus1 = vl_rbsp_ue(rbsp);
       rps->delta_rps_sign = vl_rbsp_u(rbsp, 1);
       rps->abs_delta_rps_minus1 = vl_rbsp_ue(rbsp);
-      ref_rps = st_rps + index +
-         (1 - 2 * rps->delta_rps_sign) * (st_rps->delta_idx_minus1 + 1);
+      ref_rps = &st_rps[index - (rps->delta_idx_minus1 + 1)];
       for (i = 0; i <= (ref_rps->num_negative_pics + ref_rps->num_positive_pics); i++) {
          rps->used_by_curr_pic_flag[i] = vl_rbsp_u(rbsp, 1);
          if (!rps->used_by_curr_pic_flag[i])
@@ -602,7 +611,7 @@ static unsigned st_ref_pic_set(unsigned index,
          if (rps->used_by_curr_pic_s0_flag[i])
             num_pic_total_curr++;
       }
-      for (i = 0; i < st_rps->num_positive_pics; i++) {
+      for (i = 0; i < rps->num_positive_pics; i++) {
          rps->delta_poc_s1_minus1[i] = vl_rbsp_ue(rbsp);
          rps->used_by_curr_pic_s1_flag[i] = vl_rbsp_u(rbsp, 1);
          if (rps->used_by_curr_pic_s1_flag[i])

@@ -29,6 +29,7 @@
 
 #include <stdint.h>
 #include "util/box.h"
+#include "util/log.h"
 #include "v3d_tiling.h"
 #include "broadcom/common/v3d_cpu_tiling.h"
 
@@ -46,7 +47,7 @@ v3d_utile_width(int cpp)
         case 16:
                 return 2;
         default:
-                unreachable("unknown cpp");
+                UNREACHABLE("unknown cpp");
         }
 }
 
@@ -64,7 +65,7 @@ v3d_utile_height(int cpp)
         case 16:
                 return 2;
         default:
-                unreachable("unknown cpp");
+                UNREACHABLE("unknown cpp");
         }
 }
 
@@ -233,9 +234,9 @@ v3d_move_pixels_unaligned(void *gpu, uint32_t gpu_stride,
                                                                  box->y + y);
 
                         if (false) {
-                                fprintf(stderr, "%3d,%3d -> %d\n",
-                                        box->x + x, box->y + y,
-                                        pixel_offset);
+                                mesa_logd("%3d,%3d -> %d\n",
+                                          box->x + x, box->y + y,
+                                          pixel_offset);
                         }
 
                         if (is_load) {
@@ -447,7 +448,7 @@ v3d_move_tiled_image(void *gpu, uint32_t gpu_stride,
                                         is_load);
                 break;
         default:
-                unreachable("Unsupported tiling format");
+                UNREACHABLE("Unsupported tiling format");
                 break;
         }
 }

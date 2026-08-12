@@ -38,8 +38,8 @@
 
 
 #include "util/format/u_format.h"
-#include "util/compiler.h"
-#include "gallivm/lp_bld.h"
+
+#include <llvm-c/Core.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -112,6 +112,12 @@ struct lp_type {
     * clamped to the interval above.
     */
    unsigned norm:1;
+
+   /** Arithmetic operations that use this type can not flust -0 to 0. */
+   unsigned signed_zero_preserve:1;
+
+   /** Arithmetic operations that use this type can not flust nan to 0. */
+   unsigned nan_preserve:1;
 
    /**
     * Element width.

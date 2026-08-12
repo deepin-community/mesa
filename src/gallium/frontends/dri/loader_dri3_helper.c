@@ -36,9 +36,12 @@
 
 #include "loader_dri_helper.h"
 #include "loader_dri3_helper.h"
+#include "pipe/p_screen.h"
+#include "util/log.h"
 #include "util/macros.h"
 #include "util/simple_mtx.h"
 #include "drm-uapi/drm_fourcc.h"
+#include "dri_screen.h"
 #include "dri_util.h"
 
 /**
@@ -75,6 +78,26 @@ get_screen_for_root(xcb_connection_t *conn, xcb_window_t root)
 
    return NULL;
 }
+
+/* Error checking helpers for xcb_ functions. Use it to avoid late
+ * error handling
+ */
+__attribute__((format(printf, 3, 4)))
+static bool _check_xcb_error(xcb_connection_t *conn, xcb_void_cookie_t cookie, const char *fmt, ...) {
+   xcb_generic_error_t *error;
+
+   if ((error = xcb_request_check(conn, cookie))) {
+      va_list args;
+      va_start(args, fmt);
+      mesa_loge_v(fmt, args);
+      mesa_loge("X error: %d\n", error->error_code);
+      va_end(args);
+      free(error);
+      return false;
+   }
+   return true;
+}
+#define check_xcb_error(cookie, name) _check_xcb_error(draw->conn, cookie, "%s:%d %s failed", __func__, __LINE__, name)
 
 static xcb_visualtype_t *
 get_xcb_visualtype_for_depth(struct loader_dri3_drawable *draw, int depth)
@@ -161,7 +184,7 @@ loader_dri3_blit_context_get(struct loader_dri3_drawable *draw)
 
    if (!blit_context.ctx) {
       blit_context.ctx = driCreateNewContext(draw->dri_screen_render_gpu,
-                                                           NULL, NULL, NULL);
+                                             NULL, NULL, NULL, true);
       blit_context.cur_screen = draw->dri_screen_render_gpu;
    }
 
@@ -464,7 +487,7 @@ dri3_handle_present_event(struct loader_dri3_drawable *draw,
                           xcb_present_generic_event_t *ge)
 {
    switch (ge->evtype) {
-   case XCB_PRESENT_CONFIGURE_NOTIFY: {
+   case XCB_PRESENT_EVENT_CONFIGURE_NOTIFY: {
       xcb_present_configure_notify_event_t *ce = (void *) ge;
       if (ce->pixmap_flags & PresentWindowDestroyed) {
          free(ge);
@@ -477,7 +500,7 @@ dri3_handle_present_event(struct loader_dri3_drawable *draw,
       dri_invalidate_drawable(draw->dri_drawable);
       break;
    }
-   case XCB_PRESENT_COMPLETE_NOTIFY: {
+   case XCB_PRESENT_EVENT_COMPLETE_NOTIFY: {
       xcb_present_complete_notify_event_t *ce = (void *) ge;
 
       /* Compute the processed SBC number from the received 32-bit serial number
@@ -490,9 +513,11 @@ dri3_handle_present_event(struct loader_dri3_drawable *draw,
          /* Only assume wraparound if that results in exactly the previous
           * SBC + 1, otherwise ignore received SBC > sent SBC (those are
           * probably from a previous loader_dri3_drawable instance) to avoid
-          * calculating bogus target MSC values in loader_dri3_swap_buffers_msc
+          * calculating bogus target MSC values in loader_dri3_swap_buffers_msc.
+          * Since events can be received out of order, don't let recv_sbc go
+          * back unless for wraparound.
           */
-         if (recv_sbc <= draw->send_sbc)
+         if (recv_sbc <= draw->send_sbc && draw->recv_sbc <= recv_sbc)
             draw->recv_sbc = recv_sbc;
          else if (recv_sbc == (draw->recv_sbc + 0x100000001ULL))
             draw->recv_sbc = recv_sbc - 0x100000000ULL;
@@ -512,7 +537,6 @@ dri3_handle_present_event(struct loader_dri3_drawable *draw,
          /* If the server tells us that our allocation is suboptimal, we
           * reallocate once.
           */
-#ifdef HAVE_X11_DRM
          if (ce->mode == XCB_PRESENT_COMPLETE_MODE_SUBOPTIMAL_COPY &&
              draw->last_present_mode != ce->mode) {
             for (int b = 0; b < ARRAY_SIZE(draw->buffers); b++) {
@@ -520,7 +544,6 @@ dri3_handle_present_event(struct loader_dri3_drawable *draw,
                   draw->buffers[b]->reallocate = true;
             }
          }
-#endif
          draw->last_present_mode = ce->mode;
 
          draw->ust = ce->ust;
@@ -1069,11 +1092,35 @@ loader_dri3_swap_buffers_msc(struct loader_dri3_drawable *draw,
        * request. target_msc=divisor=remainder=0 means "Use glXSwapBuffers()
        * semantic"
        */
-      ++draw->send_sbc;
-      if (target_msc == 0 && divisor == 0 && remainder == 0)
+      if (target_msc == 0 && divisor == 0 && remainder == 0) {
+         /* Wait for previous send present request gets its complete event
+          * to update the window msc before send next present request.
+          *
+          * This is to prevent we send too many present requests before we
+          * get an up to date msc value from server when application
+          * start or pause for a while. Otherwise most of the sent
+          * request will be wasted as server just use the latest one and
+          * skip all the previous ones before a vblank. This also match the
+          * swap behavior for interval != 0.
+          *
+          * For example, client side window msc is 0 at the beginning,
+          * when swap interval=1, we will send present request with target
+          * msc = 1, 2, 3, ..., N, before server send back the complete
+          * event for target msc = 1.
+          *
+          * But server side window msc is way bigger than N, so it will
+          * think all these present requests are outdated and just show the
+          * Nth request at the next vblank. [1 .. N-1] requests are skipped.
+          */
+         if (draw->swap_interval != 0) {
+            while (draw->recv_sbc != draw->send_sbc) {
+               if (!dri3_wait_for_event_locked(draw, NULL))
+                  break;
+            }
+         }
          target_msc = draw->msc + abs(draw->swap_interval) *
-                      (draw->send_sbc - draw->recv_sbc);
-      else if (divisor == 0 && remainder > 0) {
+                      (draw->send_sbc + 1 - draw->recv_sbc);
+      } else if (divisor == 0 && remainder > 0) {
          /* From the GLX_OML_sync_control spec:
           *     "If <divisor> = 0, the swap will occur when MSC becomes
           *      greater than or equal to <target_msc>."
@@ -1084,6 +1131,8 @@ loader_dri3_swap_buffers_msc(struct loader_dri3_drawable *draw,
           */
          remainder = 0;
       }
+
+      ++draw->send_sbc;
 
       /* From the GLX_EXT_swap_control spec
        * and the EGL 1.4 spec (page 53):
@@ -1113,10 +1162,10 @@ loader_dri3_swap_buffers_msc(struct loader_dri3_drawable *draw,
        */
       if (draw->cur_blit_source != -1)
          options |= XCB_PRESENT_OPTION_COPY;
-#ifdef HAVE_X11_DRM
+
       if (draw->multiplanes_available)
          options |= XCB_PRESENT_OPTION_SUBOPTIMAL;
-#endif
+
       back->busy = 1;
       back->last_swap = draw->send_sbc;
 
@@ -1260,8 +1309,10 @@ dri3_cpp_for_fourcc(uint32_t format) {
    switch (format) {
    case DRM_FORMAT_R8:
       return 1;
+   case DRM_FORMAT_ARGB1555:
    case DRM_FORMAT_RGB565:
    case DRM_FORMAT_GR88:
+   case DRM_FORMAT_ARGB4444:
       return 2;
    case DRM_FORMAT_XRGB8888:
    case DRM_FORMAT_ARGB8888:
@@ -1316,7 +1367,6 @@ dri3_linear_format_for_format(struct loader_dri3_drawable *draw, uint32_t format
    }
 }
 
-#ifdef HAVE_X11_DRM
 static bool
 has_supported_modifier(struct loader_dri3_drawable *draw, unsigned int format,
                        uint64_t *modifiers, uint32_t count)
@@ -1351,7 +1401,6 @@ has_supported_modifier(struct loader_dri3_drawable *draw, unsigned int format,
    free(supported_modifiers);
    return found;
 }
-#endif
 
 /** loader_dri3_alloc_render_buffer
  *
@@ -1366,7 +1415,7 @@ dri3_alloc_render_buffer(struct loader_dri3_drawable *draw, unsigned int fourcc,
 {
    struct loader_dri3_buffer *buffer;
    struct dri_image *pixmap_buffer = NULL, *linear_buffer_display_gpu = NULL;
-   int format = loader_fourcc_to_image_format(fourcc);
+   enum pipe_format format = loader_fourcc_to_pipe_format(fourcc);
    xcb_pixmap_t pixmap;
    xcb_sync_fence_t sync_fence;
    struct xshmfence *shm_fence;
@@ -1400,8 +1449,7 @@ dri3_alloc_render_buffer(struct loader_dri3_drawable *draw, unsigned int fourcc,
       goto no_image;
 
    if (draw->dri_screen_render_gpu == draw->dri_screen_display_gpu) {
-#ifdef HAVE_X11_DRM
-      if (draw->multiplanes_available) {
+      if (draw->multiplanes_available && draw->dri_screen_render_gpu->base.screen->resource_create_with_modifiers) {
          xcb_dri3_get_supported_modifiers_cookie_t mod_cookie;
          xcb_dri3_get_supported_modifiers_reply_t *mod_reply;
          xcb_generic_error_t *error = NULL;
@@ -1449,7 +1497,6 @@ dri3_alloc_render_buffer(struct loader_dri3_drawable *draw, unsigned int fourcc,
 
          free(mod_reply);
       }
-#endif
       buffer->image = dri_create_image_with_modifiers(draw->dri_screen_render_gpu,
                                               width, height, format,
                                               __DRI_IMAGE_USE_SHARE |
@@ -1573,38 +1620,41 @@ dri3_alloc_render_buffer(struct loader_dri3_drawable *draw, unsigned int fourcc,
    }
 
    pixmap = xcb_generate_id(draw->conn);
-#ifdef HAVE_X11_DRM
+
+   xcb_void_cookie_t cookie_pix, cookie_fence;
    if (draw->multiplanes_available &&
        buffer->modifier != DRM_FORMAT_MOD_INVALID) {
-      xcb_dri3_pixmap_from_buffers(draw->conn,
-                                   pixmap,
-                                   draw->window,
-                                   num_planes,
-                                   width, height,
-                                   buffer->strides[0], buffer->offsets[0],
-                                   buffer->strides[1], buffer->offsets[1],
-                                   buffer->strides[2], buffer->offsets[2],
-                                   buffer->strides[3], buffer->offsets[3],
-                                   depth, buffer->cpp * 8,
-                                   buffer->modifier,
-                                   buffer_fds);
-   } else
-#endif
-   {
-      xcb_dri3_pixmap_from_buffer(draw->conn,
-                                  pixmap,
-                                  draw->drawable,
-                                  buffer->size,
-                                  width, height, buffer->strides[0],
-                                  depth, buffer->cpp * 8,
-                                  buffer_fds[0]);
+      cookie_pix = xcb_dri3_pixmap_from_buffers_checked(draw->conn,
+                                                        pixmap,
+                                                        draw->window,
+                                                        num_planes,
+                                                        width, height,
+                                                        buffer->strides[0], buffer->offsets[0],
+                                                        buffer->strides[1], buffer->offsets[1],
+                                                        buffer->strides[2], buffer->offsets[2],
+                                                        buffer->strides[3], buffer->offsets[3],
+                                                        depth, buffer->cpp * 8,
+                                                        buffer->modifier,
+                                                        buffer_fds);
+   } else {
+      cookie_pix = xcb_dri3_pixmap_from_buffer_checked(draw->conn,
+                                                       pixmap,
+                                                       draw->drawable,
+                                                       0,
+                                                       width, height, buffer->strides[0],
+                                                       depth, buffer->cpp * 8,
+                                                       buffer_fds[0]);
    }
-
-   xcb_dri3_fence_from_fd(draw->conn,
-                          pixmap,
-                          (sync_fence = xcb_generate_id(draw->conn)),
-                          false,
-                          fence_fd);
+   cookie_fence = xcb_dri3_fence_from_fd_checked(draw->conn,
+                                                 pixmap,
+                                                 (sync_fence = xcb_generate_id(draw->conn)),
+                                                 false,
+                                                 fence_fd);
+   /* Group error checking to limit round-trips. */
+   if (!check_xcb_error(cookie_pix, "xcb_dri3_pixmap_from_buffer[s]"))
+      goto no_buffer_attrib;
+   if (!check_xcb_error(cookie_fence, "xcb_dri3_fence_from_fd"))
+      goto no_buffer_attrib;
 
    buffer->pixmap = pixmap;
    buffer->own_pixmap = true;
@@ -1805,7 +1855,6 @@ loader_dri3_create_image(xcb_connection_t *c,
    return ret;
 }
 
-#ifdef HAVE_X11_DRM
 struct dri_image *
 loader_dri3_create_image_from_buffers(xcb_connection_t *c,
                                       xcb_dri3_buffers_from_pixmap_reply_t *bp_reply,
@@ -1846,7 +1895,6 @@ loader_dri3_create_image_from_buffers(xcb_connection_t *c,
 
    return ret;
 }
-#endif
 
 struct dri_image *
 loader_dri3_get_pixmap_buffer(xcb_connection_t *conn, xcb_drawable_t pixmap, struct dri_screen *screen,
@@ -1854,7 +1902,6 @@ loader_dri3_get_pixmap_buffer(xcb_connection_t *conn, xcb_drawable_t pixmap, str
                               int *width, int *height, void *loader_data)
 {
    struct dri_image *image;
-#ifdef HAVE_X11_DRM
    if (multiplanes_available) {
       xcb_dri3_buffers_from_pixmap_cookie_t bps_cookie;
       xcb_dri3_buffers_from_pixmap_reply_t *bps_reply;
@@ -1869,9 +1916,7 @@ loader_dri3_get_pixmap_buffer(xcb_connection_t *conn, xcb_drawable_t pixmap, str
       *width = bps_reply->width;
       *height = bps_reply->height;
       free(bps_reply);
-   } else
-#endif
-   {
+   } else {
       xcb_dri3_buffer_from_pixmap_cookie_t bp_cookie;
       xcb_dri3_buffer_from_pixmap_reply_t *bp_reply;
 
@@ -1902,6 +1947,7 @@ dri3_get_pixmap_buffer(struct dri_drawable *driDrawable, unsigned int fourcc,
    int                                  buf_id = loader_dri3_pixmap_buf_id(buffer_type);
    struct loader_dri3_buffer            *buffer = draw->buffers[buf_id];
    xcb_drawable_t                       pixmap;
+   xcb_void_cookie_t                    cookie;
    xcb_sync_fence_t                     sync_fence;
    struct xshmfence                     *shm_fence;
    int                                  width;
@@ -1936,11 +1982,14 @@ dri3_get_pixmap_buffer(struct dri_drawable *driDrawable, unsigned int fourcc,
        cur_screen = draw->dri_screen_render_gpu;
    }
 
-   xcb_dri3_fence_from_fd(draw->conn,
-                          pixmap,
-                          (sync_fence = xcb_generate_id(draw->conn)),
-                          false,
-                          fence_fd);
+   cookie = xcb_dri3_fence_from_fd_checked(draw->conn,
+                                           pixmap,
+                                           (sync_fence = xcb_generate_id(draw->conn)),
+                                           false,
+                                           fence_fd);
+   if (!check_xcb_error(cookie, "xcb_dri3_fence_from_fd"))
+      goto no_image;
+
    buffer->image = loader_dri3_get_pixmap_buffer(draw->conn, pixmap, cur_screen, fourcc,
                                                  draw->multiplanes_available, &width, &height, buffer);
 
@@ -2123,7 +2172,7 @@ dri3_free_buffers(struct dri_drawable *driDrawable,
       n_id = (draw->cur_blit_source == LOADER_DRI3_FRONT_ID) ? 0 : 1;
       break;
    default:
-      unreachable("unhandled buffer_type");
+      UNREACHABLE("unhandled buffer_type");
    }
 
    for (buf_id = first_id; buf_id < first_id + n_id; buf_id++)
@@ -2146,7 +2195,7 @@ loader_dri3_get_buffers(struct dri_drawable *driDrawable,
 {
    struct loader_dri3_drawable *draw = loaderPrivate;
    struct loader_dri3_buffer   *front, *back;
-   int fourcc = loader_image_format_to_fourcc(format);
+   int fourcc = loader_pipe_format_to_fourcc(format);
    int buf_id;
 
    buffers->image_mask = 0;

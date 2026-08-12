@@ -12,7 +12,8 @@
 #include "aubinator_error_decode_lib.h"
 #include "error_decode_lib.h"
 #include "error_decode_xe_lib.h"
-#include "intel/compiler/brw_isa_info.h"
+#include "intel/compiler/brw/brw_isa_info.h"
+#include "intel/common/intel_gem.h"
 #include "intel/dev/intel_device_info.h"
 
 static struct intel_batch_decode_bo
@@ -105,7 +106,7 @@ read_xe_data_file(FILE *file,
    struct xe_vm xe_vm;
    char *line = NULL;
    size_t line_size;
-   enum xe_topic xe_topic = XE_TOPIC_INVALID;
+   enum xe_topic xe_topic = XE_TOPIC_UNKNOWN;
 
    error_decode_xe_vm_init(&xe_vm);
 
@@ -213,23 +214,27 @@ read_xe_data_file(FILE *file,
 
          if (error_decode_xe_read_u64_hexacimal_parameter(line, "batch_addr[", &u64_value)) {
             batch_buffers.addrs = realloc(batch_buffers.addrs, sizeof(uint64_t) * (batch_buffers.len + 1));
-            batch_buffers.addrs[batch_buffers.len] = u64_value;
+            batch_buffers.addrs[batch_buffers.len] = intel_48b_address(u64_value);
             batch_buffers.len++;
          }
 
          break;
       }
-      case XE_TOPIC_GUC_CT: {
+      case XE_TOPIC_GUC_CT:
+         /*
+          * Workaround bug in the kernel that would put the exec queue dump
+          * in the wrong place, under "GuC CT" topic.
+          */
+      case XE_TOPIC_CONTEXT: {
          enum xe_vm_topic_type type;
          const char *value_ptr;
-         bool is_hw_ctx;
+         char binary_name[64];
 
          /* TODO: what to do with HWSP? */
-         type = error_decode_xe_read_hw_sp_or_ctx_line(line, &value_ptr, &is_hw_ctx);
-         if (type != XE_VM_TOPIC_TYPE_UNKNOWN) {
+         if (error_decode_xe_binary_line(line, binary_name, sizeof(binary_name), &type, &value_ptr)) {
             print_line = false;
 
-            if (!is_hw_ctx)
+            if (strncmp(binary_name, "HWCTX", strlen("HWCTX")) != 0)
                break;
 
             switch (type) {
@@ -242,11 +247,11 @@ read_xe_data_file(FILE *file,
                vm_entry_data = calloc(1, vm_entry_len);
                if (!vm_entry_data) {
                   printf("Out of memory to allocate a buffer to store content of HWCTX\n");
-                  break;
+                  printf("Aborting decode process due to insufficient memory\n");
+                  goto cleanup;
                }
 
-               if (is_hw_ctx)
-                  error_decode_xe_vm_hw_ctx_set(&xe_vm, vm_entry_len, vm_entry_data);
+               error_decode_xe_vm_hw_ctx_set(&xe_vm, vm_entry_len, vm_entry_data);
                break;
             }
             case XE_VM_TOPIC_TYPE_ERROR:
@@ -267,22 +272,32 @@ read_xe_data_file(FILE *file,
          print_line = false;
          type = error_decode_xe_read_vm_line(line, &address, &value_ptr);
          switch (type) {
+         case XE_VM_TOPIC_TYPE_GLOBAL_VM_FLAGS: {
+            printf("VM.uapi_flags are ignored and not parsed: %s", line);
+            break;
+         }
          case XE_VM_TOPIC_TYPE_DATA: {
             if (!error_decode_xe_ascii85_decode_allocated(value_ptr, vm_entry_data, vm_entry_len))
                printf("Failed to parse VMA 0x%" PRIx64 " data\n", address);
             break;
          }
          case XE_VM_TOPIC_TYPE_LENGTH: {
+            struct xe_vma_properties props = {0};
             vm_entry_len = strtoul(value_ptr, NULL, 0);
             vm_entry_data = calloc(1, vm_entry_len);
             if (!vm_entry_data) {
                printf("Out of memory to allocate a buffer to store content of VMA 0x%" PRIx64 "\n", address);
-               break;
+               printf("Aborting decode process due to insufficient memory\n");
+               goto cleanup;
             }
-            if (!error_decode_xe_vm_append(&xe_vm, address, vm_entry_len, vm_entry_data)) {
+            if (!error_decode_xe_vm_append(&xe_vm, address, vm_entry_len, &props, vm_entry_data)) {
                printf("xe_vm_append() failed for VMA 0x%" PRIx64 "\n", address);
                break;
             }
+            break;
+         }
+         case XE_VM_TOPIC_TYPE_PROPERTY: {
+            /* VMA properties are simply ignored and not parsed inside aubinator_error_decode. */
             break;
          }
          case XE_VM_TOPIC_TYPE_ERROR:
@@ -293,8 +308,16 @@ read_xe_data_file(FILE *file,
          }
          break;
       }
-      default:
-            break;
+      default: {
+         enum xe_vm_topic_type type;
+         const char *value_ptr;
+         char binary_name[64];
+
+         if (error_decode_xe_binary_line(line, binary_name, sizeof(binary_name), &type, &value_ptr))
+            print_line = false;
+
+         break;
+      }
       }
 
       if (print_line)
@@ -344,6 +367,8 @@ read_xe_data_file(FILE *file,
    }
 
    intel_batch_decode_ctx_finish(&batch_ctx);
+
+cleanup:
    intel_spec_destroy(spec);
    free(batch_buffers.addrs);
    free(line);

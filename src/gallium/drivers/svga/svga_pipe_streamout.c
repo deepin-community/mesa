@@ -398,7 +398,8 @@ static void
 svga_set_stream_output_targets(struct pipe_context *pipe,
                                unsigned num_targets,
                                struct pipe_stream_output_target **targets,
-                               const unsigned *offsets)
+                               const unsigned *offsets,
+                               enum mesa_prim output_prim)
 {
    struct svga_context *svga = svga_context(pipe);
    struct SVGA3dSoTarget soBindings[SVGA3D_DX_MAX_SOTARGETS];
@@ -415,8 +416,10 @@ svga_set_stream_output_targets(struct pipe_context *pipe,
     * before mapping.
     */
    for (i = 0; i < svga->num_so_targets; i++) {
-      struct svga_buffer *sbuf = svga_buffer(svga->so_targets[i]->buffer);
-      sbuf->dirty = true;
+      if (svga->so_targets[i]) {
+         struct svga_buffer *sbuf = svga_buffer(svga->so_targets[i]->buffer);
+         sbuf->dirty = true;
+      }
    }
 
    /* Before the currently bound streamout targets are unbound,
@@ -432,36 +435,42 @@ svga_set_stream_output_targets(struct pipe_context *pipe,
    for (i = 0; i < num_targets; i++) {
       struct svga_stream_output_target *sot
          = svga_stream_output_target(targets[i]);
-      struct svga_buffer *sbuf = svga_buffer(sot->base.buffer);
-      unsigned size;
+      if (sot) {
+         struct svga_buffer *sbuf = svga_buffer(sot->base.buffer);
 
-      svga->so_surfaces[i] = svga_buffer_handle(svga, sot->base.buffer,
-                                                PIPE_BIND_STREAM_OUTPUT);
+         svga->so_surfaces[i] = svga_buffer_handle(svga, sot->base.buffer,
+                                                   PIPE_BIND_STREAM_OUTPUT);
 
-      assert(svga_buffer(sot->base.buffer)->key.flags
-             & SVGA3D_SURFACE_BIND_STREAM_OUTPUT);
+         assert(svga_buffer(sot->base.buffer)->key.flags
+                & SVGA3D_SURFACE_BIND_STREAM_OUTPUT);
 
-      /* Mark the buffer surface as RENDERED */
-      assert(sbuf->bufsurf);
-      sbuf->bufsurf->surface_state = SVGA_SURFACE_STATE_RENDERED;
+         /* Mark the buffer surface as RENDERED */
+         assert(sbuf->bufsurf);
+         sbuf->bufsurf->surface_state = SVGA_SURFACE_STATE_RENDERED;
 
-      svga->so_targets[i] = &sot->base;
-      if (offsets[i] == -1) {
-         soBindings[i].offset = -1;
+         svga->so_targets[i] = &sot->base;
+         if (offsets[i] == -1) {
+            soBindings[i].offset = -1;
 
-         /* The streamout is being resumed. There is no need to restart streamout statistics
-          * queries for the draw-auto fallback since those queries are still active.
-          */
-         begin_so_queries = false;
+            /* The streamout is being resumed. There is no need to restart
+             * streamout statistics queries for the draw-auto fallback since
+             * those queries are still active.
+             */
+            begin_so_queries = false;
+         } else {
+            soBindings[i].offset = sot->base.buffer_offset + offsets[i];
+         }
+
+         /* The size cannot extend beyond the end of the buffer.  Clamp it. */
+         soBindings[i].sizeInBytes =
+            MIN2(sot->base.buffer_size,
+                 sot->base.buffer->width0 - sot->base.buffer_offset);
+      } else {
+         svga->so_surfaces[i] = NULL;
+         svga->so_targets[i] = NULL;
+         soBindings[i].offset = 0;
+         soBindings[i].sizeInBytes = 0;
       }
-      else
-         soBindings[i].offset = sot->base.buffer_offset + offsets[i];
-
-      /* The size cannot extend beyond the end of the buffer.  Clamp it. */
-      size = MIN2(sot->base.buffer_size,
-                  sot->base.buffer->width0 - sot->base.buffer_offset);
-
-      soBindings[i].sizeInBytes = size;
    }
 
    /* unbind any previously bound stream output buffers */
@@ -574,7 +583,7 @@ svga_begin_stream_output_queries(struct svga_context *svga,
          ret = svga->pipe.begin_query(&svga->pipe, svga->so_queries[i]);
       }
       (void) ret;
-   }   
+   }
    svga->in_streamout = true;
 
    return;
@@ -599,7 +608,7 @@ svga_end_stream_output_queries(struct svga_context *svga,
          ret = svga->pipe.end_query(&svga->pipe, svga->so_queries[i]);
       }
       (void) ret;
-   }   
+   }
    svga->in_streamout = false;
 
    return;

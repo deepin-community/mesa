@@ -36,8 +36,10 @@
 #include <vulkan/vulkan.h>
 
 #include "pvr_bo.h"
+#include "pvr_macros.h"
 #include "pvr_types.h"
 #include "pvr_winsys.h"
+
 #include "util/list.h"
 #include "util/macros.h"
 #include "util/u_dynarray.h"
@@ -48,7 +50,18 @@
 #define __pvr_make_address(addr_u64) PVR_DEV_ADDR(addr_u64)
 /* clang-format on */
 
-#include "csbgen/rogue_hwdefs.h"
+#if defined(PVR_BUILD_ARCH_ROGUE)
+#   include "csbgen/rogue/cdm.h"
+#   include "csbgen/rogue/cr.h"
+#   include "csbgen/rogue/ipf.h"
+#   include "csbgen/rogue/kmd_stream.h"
+#   include "csbgen/rogue/lls.h"
+#   include "csbgen/rogue/pbestate.h"
+#   include "csbgen/rogue/pds.h"
+#   include "csbgen/rogue/ppp.h"
+#   include "csbgen/rogue/texstate.h"
+#   include "csbgen/rogue/vdm.h"
+#endif
 
 /**
  * \brief Size of the individual csb buffer object.
@@ -237,41 +250,45 @@ void pvr_csb_init(struct pvr_device *device,
                   struct pvr_csb *csb);
 void pvr_csb_finish(struct pvr_csb *csb);
 VkResult pvr_csb_bake(struct pvr_csb *csb, struct list_head *bo_list_out);
-void *pvr_csb_alloc_dwords(struct pvr_csb *csb, uint32_t num_dwords);
-VkResult pvr_csb_copy(struct pvr_csb *csb_dst, struct pvr_csb *csb_src);
-void pvr_csb_emit_link(struct pvr_csb *csb, pvr_dev_addr_t addr, bool ret);
-VkResult pvr_csb_emit_return(struct pvr_csb *csb);
-VkResult pvr_csb_emit_terminate(struct pvr_csb *csb);
 
+#ifdef PVR_PER_ARCH
+
+void *PVR_PER_ARCH(csb_alloc_dwords)(struct pvr_csb *csb, uint32_t num_dwords);
+
+#   define pvr_arch_csb_alloc_dwords PVR_PER_ARCH(csb_alloc_dwords)
+
+VkResult PVR_PER_ARCH(csb_copy)(struct pvr_csb *csb_dst,
+                                struct pvr_csb *csb_src);
+
+#   define pvr_arch_csb_copy PVR_PER_ARCH(csb_copy)
+
+void PVR_PER_ARCH(csb_emit_link)(struct pvr_csb *csb,
+                                 pvr_dev_addr_t addr,
+                                 bool ret);
+
+#   define pvr_arch_csb_emit_link PVR_PER_ARCH(csb_emit_link)
+
+VkResult PVR_PER_ARCH(csb_emit_return)(struct pvr_csb *csb);
+
+#   define pvr_arch_csb_emit_return PVR_PER_ARCH(csb_emit_return)
+
+VkResult PVR_PER_ARCH(csb_emit_terminate)(struct pvr_csb *csb);
+
+#   define pvr_arch_csb_emit_terminate PVR_PER_ARCH(csb_emit_terminate)
+
+#endif /* PVR_PER_ARCH */
+
+#ifdef PVR_BUILD_ARCH_ROGUE
 void pvr_csb_dump(const struct pvr_csb *csb,
                   uint32_t frame_num,
                   uint32_t job_num);
+#endif
 
-#define PVRX(x) ROGUE_##x
-#define pvr_cmd_length(x) PVRX(x##_length)
-#define pvr_cmd_header(x) PVRX(x##_header)
-#define pvr_cmd_pack(x) PVRX(x##_pack)
-#define pvr_cmd_unpack(x) PVRX(x##_unpack)
-#define pvr_cmd_enum_to_str(x) PVRX(x##_to_str)
-
-/**
- * \brief Merges dwords0 and dwords1 arrays and stores the result into the
- * control stream pointed by the csb object.
- *
- * \param[in] csb     Control Stream Builder object.
- * \param[in] dwords0 Dwords0 array.
- * \param[in] dwords1 Dwords1 array.
- */
-#define pvr_csb_emit_merge(csb, dwords0, dwords1)                \
-   do {                                                          \
-      uint32_t *dw;                                              \
-      STATIC_ASSERT(ARRAY_SIZE(dwords0) == ARRAY_SIZE(dwords1)); \
-      dw = pvr_csb_alloc_dwords(csb, ARRAY_SIZE(dwords0));       \
-      if (!dw)                                                   \
-         break;                                                  \
-      for (uint32_t i = 0; i < ARRAY_SIZE(dwords0); i++)         \
-         dw[i] = (dwords0)[i] | (dwords1)[i];                    \
-   } while (0)
+#define pvr_cmd_length(x) ROGUE_##x##_length
+#define pvr_cmd_header(x) ROGUE_##x##_header
+#define pvr_cmd_pack(x) ROGUE_##x##_pack
+#define pvr_cmd_unpack(x) ROGUE_##x##_unpack
+#define pvr_cmd_enum_to_str(x) ROGUE_##x##_to_str
 
 /**
  * \brief Packs a command/state into one or more dwords and stores them into
@@ -284,31 +301,15 @@ void pvr_csb_dump(const struct pvr_csb *csb,
  *                     used by the caller to modify the command or state
  *                     information before it's packed.
  */
-#define pvr_csb_emit(csb, cmd, name)                               \
-   for (struct PVRX(cmd)                                           \
-           name = { pvr_cmd_header(cmd) },                         \
-           *_dst = pvr_csb_alloc_dwords(csb, pvr_cmd_length(cmd)); \
-        __builtin_expect(_dst != NULL, 1);                         \
-        ({                                                         \
-           pvr_cmd_pack(cmd)(_dst, &name);                         \
-           _dst = NULL;                                            \
+#define pvr_csb_emit(csb, cmd, name)                                    \
+   for (struct ROGUE_##cmd                                              \
+           name = { pvr_cmd_header(cmd) },                              \
+           *_dst = pvr_arch_csb_alloc_dwords(csb, pvr_cmd_length(cmd)); \
+        __builtin_expect(_dst != NULL, 1);                              \
+        ({                                                              \
+           pvr_cmd_pack(cmd)(_dst, &name);                              \
+           _dst = NULL;                                                 \
         }))
-
-/**
- * \brief Stores dword into the control stream pointed by the csb object.
- *
- * \param[in] csb   Control Stream Builder object.
- * \param[in] dword Dword to store into control stream.
- */
-#define pvr_csb_emit_dword(csb, dword)                  \
-   do {                                                 \
-      uint32_t *dw;                                     \
-      STATIC_ASSERT(sizeof(dword) == sizeof(uint32_t)); \
-      dw = pvr_csb_alloc_dwords(csb, 1U);               \
-      if (!dw)                                          \
-         break;                                         \
-      *dw = dword;                                      \
-   } while (0)
 
 /**
  * \name Raw command/state buffer helpers.
@@ -332,8 +333,8 @@ void pvr_csb_dump(const struct pvr_csb *csb,
  *                     state information before it's packed.
  */
 #define pvr_csb_pack(_dst, cmd, name)                           \
-   for (struct PVRX(cmd) name = { pvr_cmd_header(cmd) },        \
-                         *_loop_terminate = &name;              \
+   for (struct ROGUE_##cmd name = { pvr_cmd_header(cmd) },      \
+                           *_loop_terminate = &name;            \
         __builtin_expect(_loop_terminate != NULL, 1);           \
         ({                                                      \
            STATIC_ASSERT(sizeof(*(_dst)) ==                     \
@@ -353,7 +354,7 @@ void pvr_csb_dump(const struct pvr_csb *csb,
  */
 #define pvr_csb_unpack(_src, cmd)                                             \
    ({                                                                         \
-      struct PVRX(cmd) _name;                                                 \
+      struct ROGUE_##cmd _name;                                               \
       STATIC_ASSERT(sizeof(*(_src)) == PVR_DW_TO_BYTES(pvr_cmd_length(cmd))); \
       pvr_cmd_unpack(cmd)((_src), &_name);                                    \
       _name;                                                                  \

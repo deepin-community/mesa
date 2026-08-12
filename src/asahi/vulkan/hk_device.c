@@ -8,7 +8,6 @@
 
 #include "agx_bg_eot.h"
 #include "agx_helpers.h"
-#include "agx_opcodes.h"
 #include "agx_scratch.h"
 #include "hk_cmd_buffer.h"
 #include "hk_descriptor_table.h"
@@ -20,16 +19,20 @@
 #include "asahi/genxml/agx_pack.h"
 #include "asahi/lib/agx_bo.h"
 #include "asahi/lib/agx_device.h"
-#include "asahi/lib/shaders/geometry.h"
+#include "compiler/nir/nir_builder.h"
+#include "poly/geometry.h"
 #include "util/hash_table.h"
-#include "util/os_file.h"
 #include "util/ralloc.h"
 #include "util/simple_mtx.h"
 #include "vulkan/vulkan_core.h"
 #include "vulkan/wsi/wsi_common.h"
+#include "layout.h"
 #include "vk_cmd_enqueue_entrypoints.h"
 #include "vk_common_entrypoints.h"
+#include "vk_debug_utils.h"
+#include "vk_device.h"
 #include "vk_pipeline_cache.h"
+#include "vk_shader.h"
 
 #include <fcntl.h>
 #include <xf86drm.h>
@@ -60,11 +63,11 @@ hk_upload_rodata(struct hk_device *dev)
    if (!dev->rodata.bo)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
-   uint8_t *map = dev->rodata.bo->map;
+   uint8_t *map = agx_bo_map(dev->rodata.bo);
    uint32_t offs = 0;
 
    offs = align(offs, 8);
-   agx_pack(&dev->rodata.txf_sampler, USC_SAMPLER, cfg) {
+   agx_pack(&dev->dev.txf_sampler, USC_SAMPLER, cfg) {
       cfg.start = 0;
       cfg.count = 1;
       cfg.buffer = dev->rodata.bo->va->addr + offs;
@@ -73,25 +76,7 @@ hk_upload_rodata(struct hk_device *dev)
    agx_pack_txf_sampler((struct agx_sampler_packed *)(map + offs));
    offs += AGX_SAMPLER_LENGTH;
 
-   /* The image heap is allocated on the device prior to the rodata. The heap
-    * lives as long as the device does and has a stable address (requiring
-    * sparse binding to grow dynamically). That means its address is effectively
-    * rodata and can be uploaded now. agx_usc_uniform requires an indirection to
-    * push the heap address, so this takes care of that indirection up front to
-    * cut an alloc/upload at draw time.
-    */
-   offs = align(offs, sizeof(uint64_t));
-   agx_pack(&dev->rodata.image_heap, USC_UNIFORM, cfg) {
-      cfg.start_halfs = HK_IMAGE_HEAP_UNIFORM;
-      cfg.size_halfs = 4;
-      cfg.buffer = dev->rodata.bo->va->addr + offs;
-   }
-
-   uint64_t *image_heap_ptr = dev->rodata.bo->map + offs;
-   *image_heap_ptr = dev->images.bo->va->addr;
-   offs += sizeof(uint64_t);
-
-   /* The geometry state buffer isn't strictly readonly data, but we only have a
+   /* The heap descriptor isn't strictly readonly data, but we only have a
     * single instance of it device-wide and -- after initializing at heap
     * allocate time -- it is read-only from the CPU perspective. The GPU uses it
     * for scratch, but is required to reset it after use to ensure resubmitting
@@ -100,24 +85,8 @@ hk_upload_rodata(struct hk_device *dev)
     * So, we allocate it here for convenience.
     */
    offs = align(offs, sizeof(uint64_t));
-   dev->rodata.geometry_state = dev->rodata.bo->va->addr + offs;
-   offs += sizeof(struct agx_geometry_state);
-
-   /* For null readonly buffers, we need to allocate 16 bytes of zeroes for
-    * robustness2 semantics on read.
-    */
-   offs = align(offs, 16);
-   dev->rodata.zero_sink = dev->rodata.bo->va->addr + offs;
-   memset(dev->rodata.bo->map + offs, 0, 16);
-   offs += 16;
-
-   /* For null storage descriptors, we need to reserve 16 bytes to catch writes.
-    * No particular content is required; we cannot get robustness2 semantics
-    * without more work.
-    */
-   offs = align(offs, 16);
-   dev->rodata.null_sink = dev->rodata.bo->va->addr + offs;
-   offs += 16;
+   dev->rodata.heap = dev->rodata.bo->va->addr + offs;
+   offs += sizeof(struct poly_heap);
 
    return VK_SUCCESS;
 }
@@ -278,29 +247,19 @@ hk_sampler_heap_remove(struct hk_device *dev, struct hk_rc_sampler *rc)
    simple_mtx_unlock(&h->lock);
 }
 
-/*
- * To implement nullDescriptor, the descriptor set code will reference
- * preuploaded null descriptors at fixed offsets in the image heap. Here we
- * upload those descriptors, initializing the image heap.
- */
-static void
-hk_upload_null_descriptors(struct hk_device *dev)
+static VkResult
+hk_check_status(struct vk_device *device)
 {
-   struct agx_texture_packed null_tex;
-   struct agx_pbe_packed null_pbe;
-   uint32_t offset_tex, offset_pbe;
+   struct hk_device *dev = container_of(device, struct hk_device, vk);
+   return vk_check_printf_status(&dev->vk, &dev->dev.printf);
+}
 
-   agx_set_null_texture(&null_tex, dev->rodata.null_sink);
-   agx_set_null_pbe(&null_pbe, dev->rodata.null_sink);
-
-   hk_descriptor_table_add(dev, &dev->images, &null_tex, sizeof(null_tex),
-                           &offset_tex);
-
-   hk_descriptor_table_add(dev, &dev->images, &null_pbe, sizeof(null_pbe),
-                           &offset_pbe);
-
-   assert((offset_tex * HK_IMAGE_STRIDE) == HK_NULL_TEX_OFFSET && "static");
-   assert((offset_pbe * HK_IMAGE_STRIDE) == HK_NULL_PBE_OFFSET && "static");
+static VkResult
+hk_get_timestamp(struct vk_device *device, uint64_t *timestamp)
+{
+   struct hk_device *dev = container_of(device, struct hk_device, vk);
+   *timestamp = agx_get_gpu_timestamp(&dev->dev);
+   return VK_SUCCESS;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -389,15 +348,20 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    vk_device_set_drm_fd(&dev->vk, dev->dev.fd);
    dev->vk.command_buffer_ops = &hk_cmd_buffer_ops;
+   dev->vk.check_status = hk_check_status;
+   dev->vk.get_timestamp = hk_get_timestamp;
 
-   result = hk_descriptor_table_init(dev, &dev->images, AGX_TEXTURE_LENGTH,
-                                     1024, 1024 * 1024);
-   if (result != VK_SUCCESS)
-      goto fail_dev;
+   /* This holds for current platforms. We do not currently implement
+    * timestamp scaling, this would require changes in the query copy kernel
+    * as well. Calibrated timestamps depends on this.
+    */
+   assert(dev->dev.user_timestamp_to_ns.num ==
+             dev->dev.user_timestamp_to_ns.den &&
+          "user timestamps are in ns");
 
    result = hk_init_sampler_heap(dev, &dev->samplers);
    if (result != VK_SUCCESS)
-      goto fail_images;
+      goto fail_dev;
 
    result = hk_descriptor_table_init(
       dev, &dev->occlusion_queries, sizeof(uint64_t), AGX_MAX_OCCLUSION_QUERIES,
@@ -408,9 +372,6 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    result = hk_upload_rodata(dev);
    if (result != VK_SUCCESS)
       goto fail_queries;
-
-   /* Depends on rodata */
-   hk_upload_null_descriptors(dev);
 
    /* XXX: error handling, and should this even go on the device? */
    agx_bg_eot_init(&dev->bg_eot, &dev->dev);
@@ -427,23 +388,44 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (result != VK_SUCCESS)
       goto fail_internal_shaders;
 
-   result =
-      hk_queue_init(dev, &dev->queue, &pCreateInfo->pQueueCreateInfos[0], 0);
-   if (result != VK_SUCCESS)
-      goto fail_internal_shaders_2;
+   for (unsigned i = 0; i < pCreateInfo->queueCreateInfoCount; i++) {
+      for (unsigned q = 0; q < pCreateInfo->pQueueCreateInfos[i].queueCount;
+           q++) {
+         result = hk_queue_init(dev, &pCreateInfo->pQueueCreateInfos[i], q);
+         if (result != VK_SUCCESS)
+            goto fail_queues;
+      }
+   }
 
    struct vk_pipeline_cache_create_info cache_info = {
       .weak_ref = true,
    };
-   dev->mem_cache = vk_pipeline_cache_create(&dev->vk, &cache_info, NULL);
-   if (dev->mem_cache == NULL) {
+   dev->vk.mem_cache = vk_pipeline_cache_create(&dev->vk, &cache_info, NULL);
+   if (dev->vk.mem_cache == NULL) {
       result = VK_ERROR_OUT_OF_HOST_MEMORY;
-      goto fail_queue;
+      goto fail_queues;
    }
 
    result = hk_device_init_meta(dev);
    if (result != VK_SUCCESS)
       goto fail_mem_cache;
+
+   /* Precompile an empty fragment shader that can be used to handle API-level
+    * null fragment shaders. We do this at device-time to make binds cheap.
+    * Regardless, compiling this shader should be fast.
+    */
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT,
+                                                  &agx_nir_options, "empty FS");
+   struct vk_shader_compile_info info = {
+      .nir = b.shader,
+      .robustness = &vk_robustness_disabled,
+      .stage = MESA_SHADER_FRAGMENT,
+   };
+   hk_compile_shader(dev, &info, NULL, NULL, pAllocator, &dev->null_fs);
+   if (!dev->null_fs) {
+      result = VK_ERROR_OUT_OF_HOST_MEMORY;
+      goto fail_meta;
+   }
 
    *pDevice = hk_device_to_handle(dev);
 
@@ -452,26 +434,32 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    agx_scratch_init(&dev->dev, &dev->scratch.fs);
    agx_scratch_init(&dev->dev, &dev->scratch.cs);
 
+   u_rwlock_init(&dev->external_bos.lock);
+   dev->external_bos.counts = UTIL_DYNARRAY_INIT;
+   dev->external_bos.list = UTIL_DYNARRAY_INIT;
+
    return VK_SUCCESS;
 
+fail_meta:
+   hk_device_finish_meta(dev);
 fail_mem_cache:
-   vk_pipeline_cache_destroy(dev->mem_cache, NULL);
-fail_queue:
-   hk_queue_finish(dev, &dev->queue);
-fail_rodata:
-   agx_bo_unreference(&dev->dev, dev->rodata.bo);
-fail_bg_eot:
-   agx_bg_eot_cleanup(&dev->bg_eot);
-fail_internal_shaders_2:
+   vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
+fail_queues:
+   vk_foreach_queue_safe(iter, &dev->vk) {
+      struct hk_queue *queue = container_of(iter, struct hk_queue, vk);
+      hk_queue_finish(dev, queue);
+   }
    hk_destroy_internal_shaders(dev, &dev->kernels, false);
 fail_internal_shaders:
    hk_destroy_internal_shaders(dev, &dev->prolog_epilog, true);
+fail_bg_eot:
+   agx_bg_eot_cleanup(&dev->bg_eot);
+fail_rodata:
+   agx_bo_unreference(&dev->dev, dev->rodata.bo);
 fail_queries:
    hk_descriptor_table_finish(dev, &dev->occlusion_queries);
 fail_samplers:
    hk_destroy_sampler_heap(dev, &dev->samplers);
-fail_images:
-   hk_descriptor_table_finish(dev, &dev->images);
 fail_dev:
    agx_close_device(&dev->dev);
 fail_fd:
@@ -491,12 +479,21 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    if (!dev)
       return;
 
+   util_dynarray_fini(&dev->external_bos.counts);
+   util_dynarray_fini(&dev->external_bos.list);
+   u_rwlock_destroy(&dev->external_bos.lock);
+
    hk_device_finish_meta(dev);
    hk_destroy_internal_shaders(dev, &dev->kernels, false);
    hk_destroy_internal_shaders(dev, &dev->prolog_epilog, true);
 
-   vk_pipeline_cache_destroy(dev->mem_cache, NULL);
-   hk_queue_finish(dev, &dev->queue);
+   vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
+
+   vk_foreach_queue_safe(iter, &dev->vk) {
+      struct hk_queue *queue = container_of(iter, struct hk_queue, vk);
+      hk_queue_finish(dev, queue);
+   }
+
    vk_device_finish(&dev->vk);
 
    agx_scratch_fini(&dev->scratch.vs);
@@ -504,65 +501,15 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    agx_scratch_fini(&dev->scratch.cs);
    simple_mtx_destroy(&dev->scratch.lock);
 
+   if (dev->null_fs) {
+      hk_api_shader_destroy(&dev->vk, &dev->null_fs->vk, pAllocator);
+   }
+
    hk_destroy_sampler_heap(dev, &dev->samplers);
-   hk_descriptor_table_finish(dev, &dev->images);
    hk_descriptor_table_finish(dev, &dev->occlusion_queries);
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
    agx_bo_unreference(&dev->dev, dev->heap);
    agx_bg_eot_cleanup(&dev->bg_eot);
    agx_close_device(&dev->dev);
    vk_free(&dev->vk.alloc, dev);
-}
-
-VKAPI_ATTR VkResult VKAPI_CALL
-hk_GetCalibratedTimestampsKHR(
-   VkDevice _device, uint32_t timestampCount,
-   const VkCalibratedTimestampInfoKHR *pTimestampInfos, uint64_t *pTimestamps,
-   uint64_t *pMaxDeviation)
-{
-   // VK_FROM_HANDLE(hk_device, dev, _device);
-   // struct hk_physical_device *pdev = hk_device_physical(dev);
-   uint64_t max_clock_period = 0;
-   uint64_t begin, end;
-   int d;
-
-#ifdef CLOCK_MONOTONIC_RAW
-   begin = vk_clock_gettime(CLOCK_MONOTONIC_RAW);
-#else
-   begin = vk_clock_gettime(CLOCK_MONOTONIC);
-#endif
-
-   for (d = 0; d < timestampCount; d++) {
-      switch (pTimestampInfos[d].timeDomain) {
-      case VK_TIME_DOMAIN_DEVICE_KHR:
-         unreachable("todo");
-         // pTimestamps[d] = agx_get_gpu_timestamp(&pdev->dev);
-         max_clock_period = MAX2(
-            max_clock_period, 1); /* FIXME: Is timestamp period actually 1? */
-         break;
-      case VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR:
-         pTimestamps[d] = vk_clock_gettime(CLOCK_MONOTONIC);
-         max_clock_period = MAX2(max_clock_period, 1);
-         break;
-
-#ifdef CLOCK_MONOTONIC_RAW
-      case VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_KHR:
-         pTimestamps[d] = begin;
-         break;
-#endif
-      default:
-         pTimestamps[d] = 0;
-         break;
-      }
-   }
-
-#ifdef CLOCK_MONOTONIC_RAW
-   end = vk_clock_gettime(CLOCK_MONOTONIC_RAW);
-#else
-   end = vk_clock_gettime(CLOCK_MONOTONIC);
-#endif
-
-   *pMaxDeviation = vk_time_max_deviation(begin, end, max_clock_period);
-
-   return VK_SUCCESS;
 }

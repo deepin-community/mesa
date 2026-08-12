@@ -8,6 +8,7 @@
 #pragma once
 
 #include "asahi/compiler/agx_compile.h"
+#include "poly/nir/poly_nir.h"
 #include "util/macros.h"
 #include "agx_linker.h"
 #include "agx_nir_lower_vbo.h"
@@ -23,7 +24,7 @@
 #include "shader_enums.h"
 #include "vk_pipeline_cache.h"
 
-#include "nir.h"
+#include "nir_defines.h"
 
 #include "vk_shader.h"
 
@@ -35,10 +36,6 @@ struct vk_pipeline_cache;
 struct vk_pipeline_layout;
 struct vk_pipeline_robustness_state;
 struct vk_shader_module;
-
-/* TODO: Make dynamic */
-#define HK_ROOT_UNIFORM       104
-#define HK_IMAGE_HEAP_UNIFORM 108
 
 struct hk_tess_info {
    enum tess_primitive_mode mode : 8;
@@ -71,16 +68,9 @@ struct hk_shader_info {
       struct {
          uint32_t attribs_read;
          BITSET_DECLARE(attrib_components_read, AGX_MAX_ATTRIBS * 4);
-         uint8_t cull_distance_array_size;
+         bool use_prolog;
          uint8_t _pad[7];
       } vs;
-
-      struct {
-         /* Local workgroup size */
-         uint16_t local_size[3];
-
-         uint8_t _pad[26];
-      } cs;
 
       struct {
          struct agx_interp_info interp;
@@ -104,11 +94,7 @@ struct hk_shader_info {
          struct hk_tess_info info;
       } tess;
 
-      struct {
-         unsigned count_words;
-         enum mesa_prim out_prim;
-         uint8_t _pad[27];
-      } gs;
+      struct poly_gs_info gs;
 
       /* Used to initialize the union for other stages */
       uint8_t _pad[32];
@@ -119,10 +105,10 @@ struct hk_shader_info {
    /* Transform feedback buffer strides */
    uint8_t xfb_stride[MAX_XFB_BUFFERS];
 
-   gl_shader_stage stage : 8;
+   mesa_shader_stage stage : 8;
    uint8_t clip_distance_array_size;
    uint8_t cull_distance_array_size;
-   uint8_t _pad0[1];
+   uint8_t set_count;
 
    /* XXX: is there a less goofy way to do this? I really don't want dynamic
     * allocation here.
@@ -198,15 +184,12 @@ enum hk_gs_variant {
 
    /* Main compute shader */
    HK_GS_VARIANT_MAIN,
-   HK_GS_VARIANT_MAIN_NO_RAST,
 
    /* Count compute shader */
    HK_GS_VARIANT_COUNT,
-   HK_GS_VARIANT_COUNT_NO_RAST,
 
    /* Pre-GS compute shader */
    HK_GS_VARIANT_PRE,
-   HK_GS_VARIANT_PRE_NO_RAST,
 
    HK_GS_VARIANTS,
 };
@@ -215,16 +198,13 @@ enum hk_gs_variant {
 static const char *hk_gs_variant_name[] = {
    [HK_GS_VARIANT_RAST] = "Rasterization",
    [HK_GS_VARIANT_MAIN] = "Main",
-   [HK_GS_VARIANT_MAIN_NO_RAST] = "Main (rast. discard)",
    [HK_GS_VARIANT_COUNT] = "Count",
-   [HK_GS_VARIANT_COUNT_NO_RAST] = "Count (rast. discard)",
    [HK_GS_VARIANT_PRE] = "Pre-GS",
-   [HK_GS_VARIANT_PRE_NO_RAST] = "Pre-GS (rast. discard)",
 };
 /* clang-format on */
 
 static inline unsigned
-hk_num_variants(gl_shader_stage stage)
+hk_num_variants(mesa_shader_stage stage)
 {
    switch (stage) {
    case MESA_SHADER_VERTEX:
@@ -295,21 +275,21 @@ hk_any_variant(struct hk_api_shader *obj)
 }
 
 static struct hk_shader *
-hk_main_gs_variant(struct hk_api_shader *obj, bool rast_disc)
+hk_main_gs_variant(struct hk_api_shader *obj)
 {
-   return &obj->variants[HK_GS_VARIANT_MAIN + rast_disc];
+   return &obj->variants[HK_GS_VARIANT_MAIN];
 }
 
 static struct hk_shader *
-hk_count_gs_variant(struct hk_api_shader *obj, bool rast_disc)
+hk_count_gs_variant(struct hk_api_shader *obj)
 {
-   return &obj->variants[HK_GS_VARIANT_COUNT + rast_disc];
+   return &obj->variants[HK_GS_VARIANT_COUNT];
 }
 
 static struct hk_shader *
-hk_pre_gs_variant(struct hk_api_shader *obj, bool rast_disc)
+hk_pre_gs_variant(struct hk_api_shader *obj)
 {
-   return &obj->variants[HK_GS_VARIANT_PRE + rast_disc];
+   return &obj->variants[HK_GS_VARIANT_PRE];
 }
 
 #define HK_MAX_LINKED_USC_SIZE                                                 \
@@ -319,6 +299,11 @@ hk_pre_gs_variant(struct hk_api_shader *obj, bool rast_disc)
 
 struct hk_linked_shader {
    struct agx_linked_shader b;
+
+   /* True if the VS prolog uses software indexing, either for geom/tess or
+    * adjacency primitives.
+    */
+   bool sw_indexing;
 
    /* Distinct from hk_shader::counts due to addition of cf_binding_count, which
     * is delayed since it depends on cull distance.
@@ -353,25 +338,23 @@ hk_buffer_addr_format(VkPipelineRobustnessBufferBehaviorEXT robustness)
    case VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2_EXT:
       return nir_address_format_64bit_bounded_global;
    default:
-      unreachable("Invalid robust buffer access behavior");
+      UNREACHABLE("Invalid robust buffer access behavior");
    }
 }
 
-bool hk_lower_uvs_index(nir_shader *s, unsigned vs_uniform_base);
+bool hk_lower_uvs_index(nir_shader *s, mesa_shader_stage sw_stage,
+                        unsigned nr_vbos);
 
 bool
 hk_nir_lower_descriptors(nir_shader *nir,
                          const struct vk_pipeline_robustness_state *rs,
                          uint32_t set_layout_count,
                          struct vk_descriptor_set_layout *const *set_layouts);
-void hk_lower_nir(struct hk_device *dev, nir_shader *nir,
-                  const struct vk_pipeline_robustness_state *rs,
-                  bool is_multiview, uint32_t set_layout_count,
-                  struct vk_descriptor_set_layout *const *set_layouts);
 
 VkResult hk_compile_shader(struct hk_device *dev,
                            struct vk_shader_compile_info *info,
                            const struct vk_graphics_pipeline_state *state,
+                           const struct vk_features *features,
                            const VkAllocationCallbacks *pAllocator,
                            struct hk_api_shader **shader_out);
 
@@ -383,19 +366,12 @@ void hk_api_shader_destroy(struct vk_device *vk_dev,
                            const VkAllocationCallbacks *pAllocator);
 
 const nir_shader_compiler_options *
-hk_get_nir_options(struct vk_physical_device *vk_pdev, gl_shader_stage stage,
+hk_get_nir_options(struct vk_physical_device *vk_pdev, mesa_shader_stage stage,
                    UNUSED const struct vk_pipeline_robustness_state *rs);
 
 struct hk_api_shader *hk_meta_shader(struct hk_device *dev,
                                      hk_internal_builder_t builder, void *data,
                                      size_t data_size);
-
-static inline struct hk_shader *
-hk_meta_kernel(struct hk_device *dev, hk_internal_builder_t builder, void *data,
-               size_t data_size)
-{
-   return hk_only_variant(hk_meta_shader(dev, builder, data, data_size));
-}
 
 struct hk_passthrough_gs_key {
    /* Bit mask of outputs written by the VS/TES, to be passed through */
@@ -411,8 +387,16 @@ struct hk_passthrough_gs_key {
    /* Decomposed primitive */
    enum mesa_prim prim;
 
-   /* Transform feedback info. Must add nir_xfb_info_size to get the key size */
+   /* Transform feedback info. Must use hk_passthrough_gs_key_size to get the
+    * key size */
    nir_xfb_info xfb_info;
 };
+
+static inline size_t
+hk_passthrough_gs_key_size(uint16_t output_count)
+{
+   return (sizeof(struct hk_passthrough_gs_key) - sizeof(nir_xfb_info)) +
+      nir_xfb_info_size(output_count);
+}
 
 void hk_nir_passthrough_gs(struct nir_builder *b, const void *key_);

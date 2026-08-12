@@ -49,13 +49,14 @@ anv_init_wsi(struct anv_physical_device *physical_device)
                             &physical_device->instance->vk.alloc,
                             physical_device->master_fd,
                             &physical_device->instance->dri_options,
-                            &(struct wsi_device_options){.sw_device = false});
+                            &(struct wsi_device_options){
+                               .sw_device = false,
+                               .emulate_24as32 = false
+                            });
    if (result != VK_SUCCESS)
       return result;
 
    physical_device->wsi_device.supports_modifiers = true;
-   physical_device->wsi_device.signal_semaphore_with_memory = true;
-   physical_device->wsi_device.signal_fence_with_memory = true;
 
    physical_device->vk.wsi_device = &physical_device->wsi_device;
 
@@ -101,20 +102,14 @@ VkResult anv_QueuePresentKHR(
       device->debug_frame_desc->frame_id++;
 #ifdef SUPPORT_INTEL_INTEGRATED_GPUS
       if (device->physical->memory.need_flush) {
-         intel_flush_range(device->debug_frame_desc,
-                           sizeof(*device->debug_frame_desc));
+         util_flush_range(device->debug_frame_desc,
+                          sizeof(*device->debug_frame_desc));
       }
 #endif
    }
 
-   result = vk_queue_wait_before_present(&queue->vk, pPresentInfo);
-   if (result != VK_SUCCESS)
-      return result;
-
    result = wsi_common_queue_present(&device->physical->wsi_device,
-                                     anv_device_to_handle(queue->device),
-                                     _queue, 0,
-                                     pPresentInfo);
+                                     &queue->vk, pPresentInfo);
 
    intel_ds_device_process(&device->ds, true);
 

@@ -68,7 +68,7 @@ rewrite_load(nir_intrinsic_instr *load, struct regs_to_ssa_state *state)
    if (!value)
       return;
 
-   nir_intrinsic_instr *decl = nir_instr_as_intrinsic(reg->parent_instr);
+   nir_intrinsic_instr *decl = nir_def_as_intrinsic(reg);
    nir_def *def = nir_phi_builder_value_get_block_def(value, block);
 
    nir_def_replace(&load->def, def);
@@ -88,7 +88,7 @@ rewrite_store(nir_intrinsic_instr *store, struct regs_to_ssa_state *state)
    if (!value)
       return;
 
-   nir_intrinsic_instr *decl = nir_instr_as_intrinsic(reg->parent_instr);
+   nir_intrinsic_instr *decl = nir_def_as_intrinsic(reg);
    unsigned num_components = nir_intrinsic_num_components(decl);
    unsigned write_mask = nir_intrinsic_write_mask(store);
 
@@ -128,11 +128,11 @@ nir_lower_reg_intrinsics_to_ssa_impl(nir_function_impl *impl)
       }
    }
    if (!need_lower_reg) {
-      nir_metadata_preserve(impl, nir_metadata_all);
-      return false;
+      return nir_no_progress(impl);
    }
 
-   nir_metadata_require(impl, nir_metadata_control_flow);
+   nir_metadata_require(impl,
+                        nir_metadata_block_index | nir_metadata_dominance);
    nir_index_ssa_defs(impl);
 
    void *dead_ctx = ralloc_context(NULL);
@@ -170,8 +170,7 @@ nir_lower_reg_intrinsics_to_ssa_impl(nir_function_impl *impl)
 
    ralloc_free(dead_ctx);
 
-   nir_metadata_preserve(impl, nir_metadata_control_flow);
-   return true;
+   return nir_progress(true, impl, nir_metadata_control_flow);
 }
 
 bool

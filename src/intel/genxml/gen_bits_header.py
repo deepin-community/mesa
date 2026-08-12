@@ -82,6 +82,7 @@ static inline uint32_t ATTRIBUTE_PURE
 ${item.token_name}_${prop}(const struct intel_device_info *devinfo)
 {
    switch (devinfo->verx10) {
+   case 350: return ${item.get_prop(prop, 35)};
    case 300: return ${item.get_prop(prop, 30)};
    case 200: return ${item.get_prop(prop, 20)};
    case 125: return ${item.get_prop(prop, 12.5)};
@@ -96,7 +97,7 @@ ${item.token_name}_${prop}(const struct intel_device_info *devinfo)
    case 45: return ${item.get_prop(prop, 4.5)};
    case 40: return ${item.get_prop(prop, 4)};
    default:
-      unreachable("Invalid hardware generation");
+      UNREACHABLE("Invalid hardware generation");
    }
 }
 %endif
@@ -129,7 +130,8 @@ ${emit_per_gen_prop_func(field, 'start', False)}
 }
 #endif
 
-#endif /* ${guard} */""")
+#endif /* ${guard} */
+""")
 
 class Gen(object):
 
@@ -212,9 +214,11 @@ class Field(object):
 
     def add_gen(self, gen, xml_attrs):
         assert isinstance(gen, Gen)
-        start = int(xml_attrs['start'])
-        end = int(xml_attrs['end'])
-        self.start_by_gen[gen] = start
+
+        dword = int(xml_attrs['dword'])
+        end, start = map(int, xml_attrs['bits'].split(':'))
+
+        self.start_by_gen[gen] = dword * 32 + start
         self.bits_by_gen[gen] = 1 + end - start
 
     def has_prop(self, prop):

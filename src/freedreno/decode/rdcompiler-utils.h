@@ -16,11 +16,8 @@
 
 #include "util/u_math.h"
 
-#include "adreno_common.xml.h"
-#include "adreno_pm4.xml.h"
 #include "freedreno_pm4.h"
-
-#include "a6xx.xml.h"
+#include "fd6_hw.h"
 
 #include "ir3/ir3_assembler.h"
 #include "ir3/ir3_compiler.h"
@@ -304,7 +301,7 @@ replay_context_finish(struct replay_context *ctx)
    fclose(out);
 }
 
-static void
+UNUSED static void
 upload_shader(struct replay_context *ctx, uint64_t id, const char *source)
 {
    FILE *in = fmemopen((void *)source, strlen(source), "r");
@@ -325,7 +322,7 @@ upload_shader(struct replay_context *ctx, uint64_t id, const char *source)
    _mesa_hash_table_u64_insert(ctx->compiled_shaders, id, shader_iova);
 }
 
-static void
+UNUSED static void
 emit_shader_iova(struct replay_context *ctx, struct cmdstream *cs, uint64_t id)
 {
    uint64_t *shader_iova = (uint64_t *)
@@ -337,6 +334,25 @@ emit_shader_iova(struct replay_context *ctx, struct cmdstream *cs, uint64_t id)
               "Not override for shader at 0x%" PRIx64 ", using original\n", id);
       pkt_qw(cs, id);
    }
+}
+
+UNUSED static void
+emit_shader_iova_reg_bunch(struct replay_context *ctx, struct cmdstream *cs,
+                           uint32_t regbase, uint64_t id)
+{
+   uint64_t *shader_iova = (uint64_t *)
+      _mesa_hash_table_u64_search(ctx->compiled_shaders, id);
+   uint64_t value = shader_iova ? *shader_iova : id;
+
+   if (!shader_iova) {
+      fprintf(stderr,
+              "Not override for shader at 0x%" PRIx64 ", using original\n", id);
+   }
+
+   pkt(cs, regbase + 0);
+   pkt(cs, (uint32_t)(value & 0xffffffff));
+   pkt(cs, regbase + 1);
+   pkt(cs, (uint32_t)(value >> 32));
 }
 
 #define begin_draw_state()                                                     \
@@ -362,7 +378,7 @@ emit_shader_iova(struct replay_context *ctx, struct cmdstream *cs, uint64_t id)
    pkt_qw(prev_cs, cs->iova);                                                  \
    pkt(prev_cs, ibcs_size);
 
-static void
+UNUSED static void
 gpu_print(struct replay_context *ctx, struct cmdstream *_cs, uint64_t iova,
           uint32_t dwords)
 {
@@ -425,9 +441,9 @@ gpu_print(struct replay_context *ctx, struct cmdstream *_cs, uint64_t iova,
  * read the state of the buffer at the end of the cmdstream, not
  * at the point of the call.
  */
-static void
+UNUSED static void
 gpu_read_into_file(struct replay_context *ctx, struct cmdstream *_cs,
-                    uint64_t iova, uint64_t size, bool clear, const char *name)
+                   uint64_t iova, uint64_t size, bool clear, const char *name)
 {
    struct wrbuf *wrbuf = (struct wrbuf *) calloc(1, sizeof(struct wrbuf));
    wrbuf->iova = iova;

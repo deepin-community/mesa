@@ -1,24 +1,6 @@
 /*
  * Copyright © 2015-2019 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 /** @file elk_eu_validate.c
@@ -388,7 +370,7 @@ execution_type_for_type(enum elk_reg_type type)
    case ELK_REGISTER_TYPE_UV:
       return ELK_REGISTER_TYPE_W;
    }
-   unreachable("not reached");
+   UNREACHABLE("not reached");
 }
 
 /**
@@ -452,7 +434,7 @@ execution_type(const struct elk_isa_info *isa, const elk_inst *inst)
        src1_exec_type == ELK_REGISTER_TYPE_DF)
       return ELK_REGISTER_TYPE_DF;
 
-   unreachable("not reached");
+   UNREACHABLE("not reached");
 }
 
 /**
@@ -623,7 +605,7 @@ general_restrictions_based_on_operand_types(const struct elk_isa_info *isa,
          switch (s) {
          case 0: src_type = elk_inst_src0_type(devinfo, inst); break;
          case 1: src_type = elk_inst_src1_type(devinfo, inst); break;
-         default: unreachable("invalid src");
+         default: UNREACHABLE("invalid src");
          }
       }
 
@@ -1551,7 +1533,6 @@ region_alignment_rules(const struct elk_isa_info *isa,
     * float destination type as well. We emit such instructions from
     *
     *    elk_fs_visitor::emit_interpolation_setup_gfx6
-    *    elk_fs_visitor::emit_fragcoord_interpolation
     *
     * and have for years with no ill effects.
     *

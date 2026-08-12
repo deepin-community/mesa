@@ -37,13 +37,11 @@
 #ifndef LP_BLD_TGSI_H
 #define LP_BLD_TGSI_H
 
-#include "gallivm/lp_bld.h"
 #include "gallivm/lp_bld_tgsi_action.h"
 #include "gallivm/lp_bld_limits.h"
 #include "gallivm/lp_bld_sample.h"
 #include "gallivm/lp_bld_ir_common.h"
 #include "lp_bld_type.h"
-#include "util/compiler.h"
 #include "pipe/p_state.h"
 #include "tgsi/tgsi_exec.h"
 #include "tgsi/tgsi_scan.h"
@@ -284,12 +282,11 @@ struct lp_build_tgsi_params {
    LLVMValueRef ssbo_sizes_ptr;
    const struct lp_build_image_soa *image;
    LLVMValueRef shared_ptr;
+   LLVMValueRef shared_size;
    LLVMValueRef payload_ptr;
    const struct lp_build_coro_suspend_info *coro;
-   LLVMValueRef kernel_args;
    const struct lp_build_fs_iface *fs_iface;
    unsigned gs_vertex_streams;
-   LLVMValueRef aniso_filter_table;
    LLVMValueRef current_func;
    struct hash_table *fns;
    LLVMValueRef scratch_ptr;

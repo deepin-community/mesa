@@ -7,6 +7,7 @@
 #define R600_SHADER_COMMON_H
 
 #include "r600_asm.h"
+#include "r600_atomics.h"
 
 #include "compiler/shader_enums.h"
 
@@ -43,9 +44,10 @@ struct r600_shader_io {
 };
 
 struct r600_shader_atomic {
-	unsigned start, end;
-	unsigned buffer_id;
-	unsigned hw_idx;
+	unsigned start;
+	unsigned count;
+	unsigned resource_id;
+	unsigned hw_idx; /* evergreen: mapped to R_02872C_GDS_APPEND_COUNT_0-11 */
 };
 
 #define R600_SHADER_MAX_INPUTS (32 /* generic */ + 32 /* patch */ + 16 /* others */)
@@ -62,7 +64,7 @@ struct r600_shader {
 	unsigned		highest_export_param;
 	struct r600_shader_io	input[R600_SHADER_MAX_INPUTS];
 	struct r600_shader_io	output[R600_SHADER_MAX_OUTPUTS];
-	struct r600_shader_atomic atomics[8];
+	struct r600_shader_atomic atomics[EG_MAX_ATOMIC_BUFFERS];
 	unsigned                nhwatomic_ranges;
 	bool			uses_kill;
 	bool			fs_write_all;
@@ -97,7 +99,7 @@ struct r600_shader {
 	unsigned		max_arrays;
 	unsigned		num_arrays;
 	unsigned		vs_as_es;
-	unsigned		vs_as_ls;
+	bool			vs_as_ls;
 	unsigned		vs_as_gs_a;
 	unsigned                tes_as_es;
 	unsigned                tcs_prim_mode;
@@ -114,6 +116,7 @@ struct r600_shader {
 	uint8_t			rat_base;
 	uint8_t                 image_size_const_offset;
         bool			disable_sb;
+	bool                    vs_draw_parameters_enabled;
 };
 
 union r600_shader_key {
@@ -123,6 +126,7 @@ union r600_shader_key {
 		unsigned        image_size_const_offset:5;
 		unsigned	color_two_side:1;
 		unsigned	alpha_to_one:1;
+		unsigned	alpha_to_one_and_coverage:1;
 		unsigned        apply_sample_id_mask:1;
 		unsigned        dual_source_blend:1;
 	} ps;

@@ -486,7 +486,7 @@ mi_value_half(struct mi_value value, bool top_32_bits)
       return value;
    }
 
-   unreachable("Invalid mi_value type");
+   UNREACHABLE("Invalid mi_value type");
 }
 
 static inline void
@@ -507,7 +507,7 @@ _mi_copy_no_unref(struct mi_builder *b,
 
    switch (dst.type) {
    case MI_VALUE_TYPE_IMM:
-      unreachable("Cannot copy to an immediate");
+      UNREACHABLE("Cannot copy to an immediate");
 
    case MI_VALUE_TYPE_MEM64:
    case MI_VALUE_TYPE_REG64:
@@ -567,7 +567,7 @@ _mi_copy_no_unref(struct mi_builder *b,
                               mi_value_half(src, true));
          break;
       default:
-         unreachable("Invalid mi_value type");
+         UNREACHABLE("Invalid mi_value type");
       }
       break;
 
@@ -598,7 +598,7 @@ _mi_copy_no_unref(struct mi_builder *b,
             mi_value_unref(b, tmp);
          }
 #else
-         unreachable("Cannot do mem <-> mem copy on IVB and earlier");
+         UNREACHABLE("Cannot do mem <-> mem copy on IVB and earlier");
 #endif
          break;
 
@@ -615,7 +615,7 @@ _mi_copy_no_unref(struct mi_builder *b,
          break;
 
       default:
-         unreachable("Invalid mi_value type");
+         UNREACHABLE("Invalid mi_value type");
       }
       break;
 
@@ -644,7 +644,7 @@ _mi_copy_no_unref(struct mi_builder *b,
             lrm.MemoryAddress = src.addr;
          }
 #else
-         unreachable("Cannot load do mem -> reg copy on SNB and earlier");
+         UNREACHABLE("Cannot load do mem -> reg copy on SNB and earlier");
 #endif
          break;
 
@@ -666,17 +666,17 @@ _mi_copy_no_unref(struct mi_builder *b,
             }
          }
 #else
-         unreachable("Cannot do reg <-> reg copy on IVB and earlier");
+         UNREACHABLE("Cannot do reg <-> reg copy on IVB and earlier");
 #endif
          break;
 
       default:
-         unreachable("Invalid mi_value type");
+         UNREACHABLE("Invalid mi_value type");
       }
       break;
 
    default:
-      unreachable("Invalid mi_value type");
+      UNREACHABLE("Invalid mi_value type");
    }
 
 
@@ -1373,7 +1373,7 @@ mi_store_relocated_imm(struct mi_builder *b, struct mi_value dst)
    }
 
    default:
-      unreachable("Invalid value type");
+      UNREACHABLE("Invalid value type");
    }
 
    mi_value_unref(b, dst);
@@ -1393,7 +1393,7 @@ mi_relocate_store_imm(struct mi_reloc_imm_token token, uint64_t value)
       *token.ptr[0] = value & 0xffffffff;
       break;
    default:
-      unreachable("Invalid value type");
+      UNREACHABLE("Invalid value type");
    }
 }
 
@@ -1693,5 +1693,45 @@ mi_goto_target_init_and_place(struct mi_builder *b)
 #define mi_continue_if(b, cond) mi_goto_if(b, cond, &__continue)
 
 #endif /* GFX_VER >= 9 */
+
+/* Common code for drivers to set autostrip state. */
+#if INTEL_WA_14024997852_GFX_VER
+static inline void
+mi_set_autostrip_state(struct mi_builder *b, bool enable)
+{
+   struct mi_value ff_mode_reg = mi_reg32(GENX(FF_MODE_num));
+
+   uint32_t dword;
+   struct GENX(FF_MODE) ff_mode = {
+      .MeshShaderAutostripDisable = true,
+      .MeshShaderPartialAutostripDisable = true,
+      .TEAutostripDisable = true,
+   };
+   GENX(FF_MODE_pack)(NULL, &dword, &ff_mode);
+
+   /* This bit we want to always enable with Wa_14026781792. */
+   uint32_t bugfix;
+   struct GENX(FF_MODE) ff_mode_bugfix = {
+#if INTEL_NEEDS_WA_14026781792
+     .TEPatchcontrolbugfix = true,
+#endif
+   };
+   GENX(FF_MODE_pack)(NULL, &bugfix, &ff_mode_bugfix);
+
+   if (!enable) {
+      /* Enable flags. */
+      mi_store(b, ff_mode_reg,
+               mi_ior(b,
+                      mi_imm(bugfix),
+                      mi_ior(b, ff_mode_reg, mi_imm(dword))));
+   } else {
+      /* Disable flags. */
+      mi_store(b, ff_mode_reg,
+               mi_ior(b,
+                      mi_imm(bugfix),
+                      mi_iand(b, ff_mode_reg, mi_imm(~dword))));
+   }
+}
+#endif
 
 #endif /* MI_BUILDER_H */

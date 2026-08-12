@@ -45,7 +45,7 @@ get_dummy_fragment_shader(void)
    struct ureg_src src;
    struct ureg_dst dst;
 
-   ureg = ureg_create(PIPE_SHADER_FRAGMENT);
+   ureg = ureg_create(MESA_SHADER_FRAGMENT);
    if (!ureg)
       return NULL;
 
@@ -101,7 +101,7 @@ make_fs_key(const struct svga_context *svga,
             struct svga_fragment_shader *fs,
             struct svga_compile_key *key)
 {
-   const enum pipe_shader_type shader = PIPE_SHADER_FRAGMENT;
+   const mesa_shader_stage shader = MESA_SHADER_FRAGMENT;
    unsigned i;
 
    memset(key, 0, sizeof *key);
@@ -153,14 +153,14 @@ make_fs_key(const struct svga_context *svga,
 
       if (svga->curr.gs) {
          key->fs.aa_point = (svga->curr.rast->templ.point_smooth &&
-			     shader->info.gs.in_prim == MESA_PRIM_POINTS &&
+                             shader->info.gs.in_prim == MESA_PRIM_POINTS &&
                              (svga->curr.rast->pointsize > 1.0 ||
                               shader->info.writes_psize));
 
          if (key->fs.aa_point) {
             assert(svga->curr.gs->aa_point_coord_index != -1);
             key->fs.aa_point_coord_index = svga->curr.gs->aa_point_coord_index;
-	 }
+         }
       }
    }
 
@@ -168,14 +168,14 @@ make_fs_key(const struct svga_context *svga,
     * requires that the incoming fragment color be white.  This change
     * achieves that by creating a variant of the current fragment
     * shader that overrides all output colors with 1,1,1,1
-    *   
+    *
     * This will work for most shaders, including those containing
     * TEXKIL and/or depth-write.  However, it will break on the
     * combination of xor-logicop plus alphatest.
     *
     * Ultimately, we could implement alphatest in the shader using
     * texkil prior to overriding the outgoing fragment color.
-    *   
+    *
     * SVGA_NEW_BLEND
     */
    key->fs.white_fragments = svga->curr.blend->need_white_fragments;
@@ -287,7 +287,7 @@ make_fs_key(const struct svga_context *svga,
    if (fs->base.info.fs.color0_writes_all_cbufs ||
        svga->curr.blend->need_white_fragments) {
       /* Replicate color0 output (or white) to N colorbuffers */
-      key->fs.write_color0_to_n_cbufs = svga->curr.framebuffer.nr_cbufs;
+      key->fs.write_color0_to_n_cbufs = svga->curr.framebuffer.base.nr_cbufs;
    }
 
    return PIPE_OK;
@@ -405,7 +405,7 @@ done:
    return ret;
 }
 
-struct svga_tracked_state svga_hw_fs = 
+struct svga_tracked_state svga_hw_fs =
 {
    "fragment shader (hwtnl)",
    (SVGA_NEW_FS |

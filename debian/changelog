@@ -1,66 +1,496 @@
-mesa (24.3.0-1deepin9) unstable; urgency=medium
+mesa (26.1.6-1) unstable; urgency=medium
 
-  * Fix build failure: add missing util/stack_array.h header for CVE-2026-40393
-    patch
+  * New upstream release.
 
- -- lichenggang <lichenggang@uniontech.com>  Tue, 12 May 2026 20:49:05 +0800
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 06 Aug 2026 10:19:20 +0300
 
-mesa (24.3.0-1deepin8) unstable; urgency=medium
+mesa (26.1.5-1) unstable; urgency=medium
 
-  * Fix CVE-2026-40393: replace NIR_VLA with STACK_ARRAY to prevent out-
-    of-bounds memory access in WebGPU
+  [ Dylan Aïssi ]
+  * Bump directx-headers-dev to the minimum 1.619.1
 
- -- deepin-ci-robot <packages@deepin.org>  Tue, 12 May 2026 09:17:02 +0800
+  [ Simon McVittie ]
+  * d/control.in: Reinstate mesa-va-drivers, mesa-vdpau-drivers as transitional
+    (Closes: #1127367, #1125977, #1125779)
 
-mesa (24.3.0-1deepin7) unstable; urgency=medium
+  [ Timo Aaltonen ]
+  * New upstream release.
 
-  * fix: backport EGL software fallback handling fix
-  * fix: avoid crash when swrast_loader is NULL
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 16 Jul 2026 12:17:26 +0300
 
- -- ChenZiyu <czy199896@163.com>  Fri, 10 Apr 2026 17:36:19 +0800
+mesa (26.1.4-1) unstable; urgency=medium
 
-mesa (24.3.0-1deepin6) unstable; urgency=medium
+  * New upstream release.
+  * rules: Enable freedreno on x86 too, for FEX.
+  * control: Bump libdrm-dev build-dep.
 
-  * perf: backport "nvk: Enable compression"
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 02 Jul 2026 10:20:03 +0300
 
- -- WangYuli <wangyl5933@chinaunicom.cn>  Fri, 19 Dec 2025 13:47:10 +0800
+mesa (26.1.2-1) unstable; urgency=medium
 
-mesa (24.3.0-1deepin5) unstable; urgency=medium
+  * New upstream release.
 
-  * fix: race condition of ORCJIT LLVMpipe
+ -- Timo Aaltonen <tjaalton@debian.org>  Wed, 17 Jun 2026 16:27:17 +0300
 
- -- Chang Yang <yangchang@deepin.org>  Wed, 24 Sep 2025 10:15:23 +0800
+mesa (26.1.0-1) experimental; urgency=medium
 
-mesa (24.3.0-1deepin4) unstable; urgency=medium
+  * New upstream release.
 
-  * Fallback llvm-17.
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 07 May 2026 09:31:59 +0300
 
- -- lichenggang <lichenggang@deepin.org>  Wed, 23 Jul 2025 16:21:01 +0800
+mesa (26.1.0~rc3-1) experimental; urgency=medium
 
-mesa (24.3.0-1deepin3) unstable; urgency=medium
+  * New upstream release candidate.
 
-  * feat: add sw64 support.
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 30 Apr 2026 09:44:53 +0300
 
- -- hudeng <hudeng@deepin.org>  Fri, 30 May 2025 11:02:17 +0800
+mesa (26.1.0~rc2-1) experimental; urgency=medium
 
-mesa (24.3.0-1deepin2) unstable; urgency=medium
+  * New upstream release candidate.
 
-  * fix: backport patch to fix zink on img gpu based on
-    commit: 82dda2180624dea25887af405840297b593af71f
+ -- Timo Aaltonen <tjaalton@debian.org>  Tue, 28 Apr 2026 09:09:13 +0300
 
- -- Chang Yang <yangchang@deepin.org>  Thu, 19 Jun 2025 11:35:54 +0800
+mesa (26.1.0~rc1-1) experimental; urgency=medium
 
-mesa (24.3.0-1deepin1) unstable; urgency=medium
+  * New upstream release candidate.
 
-  * Add deepin patches
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 16 Apr 2026 10:40:58 +0300
 
- -- xiangzelong <xiangzelong@deepin.org>  Fri, 29 Nov 2024 14:48:08 +0800
+mesa (26.0.8-1) unstable; urgency=medium
 
-mesa (24.1.5-1deepin3) unstable; urgency=medium
+  * New upstream release.
 
-  * support mips64el.
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 29 May 2026 15:26:38 +0300
 
- -- lichenggang <lichenggang@deepin.org>  Thu, 12 Dec 2024 10:30:35 +0800
+mesa (26.0.7-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 21 May 2026 09:56:28 +0300
+
+mesa (26.0.6-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 30 Apr 2026 09:24:23 +0300
+
+mesa (26.0.5-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 16 Apr 2026 09:54:33 +0300
+
+mesa (26.0.4-1) unstable; urgency=medium
+
+  * New upstream release.
+  * control: Bump spirv-tools-dev build-dep for rusticl.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 03 Apr 2026 09:44:08 +0300
+
+mesa (26.0.3-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 20 Mar 2026 13:47:11 +0200
+
+mesa (26.0.2-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 12 Mar 2026 16:24:27 +0200
+
+mesa (26.0.1-2) unstable; urgency=medium
+
+  [ Christopher Obbard ]
+  * Add Lintian override for Teflon delegate plugin location
+
+  [ Simon McVittie ]
+  * Revert "control: Drop versions from mesa-va/vdpau-drivers Breaks/Replaces."
+    (Closes: #1129207, #1129226)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Sat, 28 Feb 2026 10:32:30 +0200
+
+mesa (26.0.1-1) unstable; urgency=medium
+
+  * rules: Enable imagination vulkan driver on arm/riscv. (LP: #2141905)
+  * control, rules: Drop armel and mips64el.
+  * rules: Add riscv64 to VALGRIND_ARCHS.
+  * control: Add riscv64 to mesa-drm-shim archs.
+  * control: Drop versions from mesa-va/vdpau-drivers Breaks/Replaces.
+  * New upstream release. (Closes: #1129015)
+  * control: Add mesa-vdpau-drivers to mesa-libgallium Provides.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 27 Feb 2026 13:48:06 +0200
+
+mesa (26.0.0-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 13 Feb 2026 10:18:12 +0200
+
+mesa (26.0.0~rc3-1) experimental; urgency=medium
+
+  * New upstream release candidate.
+  * patches: Drop upstreamed patches.
+  * control: Add libdisplay-info-dev to build-depends for llvm archs.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 06 Feb 2026 10:56:13 +0200
+
+mesa (25.3.3-1) unstable; urgency=medium
+
+  [ Timo Aaltonen ]
+  * New upstream release.
+
+  [ Simon McVittie ]
+  * Use the upstream solution for #980148
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Wed, 07 Jan 2026 14:26:39 +0200
+
+mesa (25.3.2-2) unstable; urgency=medium
+
+  [ Mario Limonciello (AMD) ]
+  * Add missing comma for provides (Closes: #1123627)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 19 Dec 2025 07:54:35 +0200
+
+mesa (25.3.2-1) unstable; urgency=medium
+
+  [ Timo Aaltonen ]
+  * New upstream release.
+  * control: Specify versioned build-depends for cbindgen and libx11.
+
+  [ Mario Limonciello (AMD) ]
+  * Merge mesa-va-drivers and mesa-vdpau-drivers into mesa-libgallium (LP: #2135270)
+  * Drop conflicts on mesa-va-drivers and mesa-vdpau-drivers
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 18 Dec 2025 19:03:53 +0200
+
+mesa (25.3.1-1) experimental; urgency=medium
+
+  * New upstream release.
+  * control, rules: Migrate to llvm 21.
+  * control: Make mesa-va-drivers replace mesa-vdpau-drivers, as it's
+    functionally more or less the same.
+  * signing-key.asc: Updated to silence uscan.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Mon, 08 Dec 2025 18:54:43 +0200
+
+mesa (25.3.0-1) experimental; urgency=medium
+
+  * New upstream release.
+  * control: Bump wayland-protocols build-dep.
+  * watch: Fixed.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Mon, 17 Nov 2025 17:12:32 +0200
+
+mesa (25.3.0~rc4-1) experimental; urgency=medium
+
+  * New upstream release candidate.
+  * rules: Enable anti-lag and screenshot vulkan layers.
+  * control: Limit rocket to arm64.
+  * Wrap-and-sort.
+  * control: Add libpng-dev build-dep for screenshot vulkan layer.
+  * mesa-vulkan-drivers: Add mesa-screenshot-control.py.
+  * mesa-vulkan-drivers.lintian-overrides: Updated.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 07 Nov 2025 12:54:12 +0200
+
+mesa (25.3.0~rc2-1) experimental; urgency=medium
+
+  * New upstream release candidate.
+  * rules: Add rocket gallium driver for arm. (Closes: #1118656)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 24 Oct 2025 21:38:08 +0300
+
+mesa (25.3.0~rc1-1) experimental; urgency=medium
+
+  * New upstream release candidate.
+  * watch: Update to version 5.
+  * patches: Drop upstreamed patches.
+  * control: Bump build-dep on directx-headers-dev.
+  * rules: Add a script to rewrite local rust subprojects to use the
+    distro registry.
+  * control, rules: Drop mesa-vdpau-drivers, VDPAU got removed upstream.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Tue, 21 Oct 2025 18:22:18 +0300
+
+mesa (25.2.8-2) unstable; urgency=medium
+
+  * disable-ccs-for-intel-xe2.diff: Dropped, fixed upstream.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 04 Dec 2025 15:45:54 +0200
+
+mesa (25.2.8-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 04 Dec 2025 15:39:40 +0200
+
+mesa (25.2.7-1) unstable; urgency=medium
+
+  * New upstream release.
+  * control: Build-depend on spirv-tools-dev.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 14 Nov 2025 15:48:09 +0200
+
+mesa (25.2.6-1) unstable; urgency=medium
+
+  * New upstream release.
+  * patches: Drop renaming of rsqrtf, upstreamed.
+  * patches: Disable CCS for Intel Xe2. (LP: #2127717)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 30 Oct 2025 11:38:42 +0200
+
+mesa (25.2.5-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 16 Oct 2025 13:15:22 +0300
+
+mesa (25.2.4-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 03 Oct 2025 18:09:21 +0300
+
+mesa (25.2.3-1) unstable; urgency=medium
+
+  * New upstream release. (LP: #2122654)
+  * patches: Fix crash on intel xe with 16kB page size. (Closes: #1115467)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 18 Sep 2025 11:08:11 +0300
+
+mesa (25.2.2-1) unstable; urgency=medium
+
+  [ Simon McVittie ]
+  * d/merge-vulkan-driver-manifests.sh: Remove library_arch from JSON manifests
+    (Closes: #1110523) (LP: #2121980)
+
+  [ Timo Aaltonen ]
+  * New upstream release.
+  * patches: Fix FTBFS with glibc 2.42.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 04 Sep 2025 08:44:46 +0300
+
+mesa (25.2.1-2) unstable; urgency=medium
+
+  * control, rules: Revert back to llvm-19 as -20 is not in unstable
+    yet.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 28 Aug 2025 17:34:14 +0300
+
+mesa (25.2.1-1) unstable; urgency=medium
+
+  [ Timo Aaltonen ]
+  * New upstream release.
+  * rules: Don't clean up .pc dir. (Closes: #1111295)
+  * control, rules: Drop quilt again, unnecessary now.
+
+  [ Fabio Pedretti ]
+  * rules: Disable sse2 disabling on i386.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 22 Aug 2025 14:01:57 +0300
+
+mesa (25.2.0-1) experimental; urgency=medium
+
+  * New upstream release.
+  * patches: Drop upstreamed and obsolete bits.
+  * Drop libd3dadapter9*, gallium-nine is no more.
+  * Drop libxatracker*, gallium-xa is gone.
+  * Drop libMesaOpenCL from mesa-opencl-icd, clover is gone.
+  * control: Bump meson and bindgen build-deps, add librust-rustc-2-hash-dev
+    for nvk.
+  * libegl-mesa0.symbols: Updated.
+  * rules: Drop shared-glapi build option, it's deprecated and doesn't
+    do anything.
+  * rules: Restore quilt, as source3.0 applies patches when building the
+    source.
+  * rules: Enable iris/anv on arm64 & ppc64el. (Closes: #1100537)
+  * rules: intel-clc is gone.
+  * rules: Enable iris/anv on riscv64. (Closes: #1108849)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 07 Aug 2025 14:08:04 +0300
+
+mesa (25.1.7-1) experimental; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Mon, 04 Aug 2025 08:56:31 +0300
+
+mesa (25.1.5-1) experimental; urgency=medium
+
+  [ Jianfeng Liu ]
+  * d/rules: Enable iris and intel vulkan driver for loong64
+
+  [ Timo Aaltonen ]
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 03 Jul 2025 18:43:48 +0300
+
+mesa (25.1.4-1) experimental; urgency=medium
+
+  * New upstream release.
+  * patches: Drop upstreamed patches.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 19 Jun 2025 10:00:29 +0300
+
+mesa (25.1.0-1) experimental; urgency=medium
+
+  * New upstream release.
+  * rules: Enable asahi. (Closes: #1102725)
+  * Drop libosmesa*, removed upstream.
+  * libgbm-dev.install: Updated.
+  * libglx-mesa0.symbols: Updated.
+  * rules: Migrate to llvm-20.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Mon, 19 May 2025 16:10:14 +0300
+
+mesa (25.0.7-2) unstable; urgency=medium
+
+  * patches: Revert a commit to fix mobian vm's. (Closes: #1107895)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Tue, 17 Jun 2025 12:07:43 +0300
+
+mesa (25.0.7-1) unstable; urgency=medium
+
+  * control: Bump rustc dependency to match upstream.
+  * control: Bump wayland-protocols build-dep.
+  * control: Bump directx-headers build-dep.
+  * control: Bump spirv-tools build dep for Intel shader compiler.
+  * New upstream release. (Closes: #1105831)
+  * rules: Drop obsolete removals.
+  * patches: Drop a fix for lp2101817, since 25.0.6 carries a separate
+    fix for that.
+  * Revert a bad commit which broke Intel Haswell. (LP: #2113508)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Wed, 11 Jun 2025 17:14:37 +0300
+
+mesa (25.0.5-2) unstable; urgency=medium
+
+  [ Johannes Schauer Marin Rodrigues ]
+  * cherry-pick patch from upstream: etnaviv-add-support-for-texelfetch.patch
+    (Closes: #1104029)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Mon, 19 May 2025 13:49:49 +0300
+
+mesa (25.0.5-1) unstable; urgency=medium
+
+  [ Simon McVittie ]
+  * Share a single JSON manifest per Vulkan driver between all architectures
+    (Closes: #980148)
+
+  [ Timo Aaltonen ]
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 02 May 2025 08:32:56 +0300
+
+mesa (25.0.4-1) unstable; urgency=medium
+
+  * New upstream release.
+  * patches: Drop upstreamed gfxstream patches.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Tue, 22 Apr 2025 13:10:18 +0300
+
+mesa (25.0.3-1) unstable; urgency=medium
+
+  * New upstream release.
+  * patches: Further fixes for spam caused by gfxstream.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 03 Apr 2025 13:47:45 +0300
+
+mesa (25.0.2-1) unstable; urgency=medium
+
+  * New upstream release.
+  * patches: Fix spam from gfxstream. (Closes: #1100360)
+  * rules: Update gentarball target to use xz and the current tree.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 20 Mar 2025 16:52:21 +0200
+
+mesa (25.0.1-2) unstable; urgency=medium
+
+  * rules: Build gfxstream only on 64bit. (Closes: #1099704)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 07 Mar 2025 08:52:20 +0200
+
+mesa (25.0.1-1) unstable; urgency=medium
+
+  [ Timo Aaltonen ]
+  * New upstream release.
+  * control: Drop python3 dependency from mesa-vulkan-drivers. (Closes:
+    #1061658)
+
+  [ Gurchetan Singh ]
+  * rules: enable gfxstream
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 06 Mar 2025 13:07:00 +0200
+
+mesa (25.0.0-1) unstable; urgency=medium
+
+  * New upstream release.
+  * control: Make mesa-va-drivers depend on the same version of mesa-
+    libgallium. (Closes: #1094190)
+  * rules: Enable panvk, it's production quality now. (Closes: #1095969)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Sun, 23 Feb 2025 11:22:33 +0200
+
+mesa (25.0.0~rc3-1) experimental; urgency=medium
+
+  * New upstream release candidate.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 13 Feb 2025 13:06:35 +0200
+
+mesa (25.0.0~rc2-1) experimental; urgency=medium
+
+  * New upstream release candidate.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 07 Feb 2025 19:30:14 +0200
+
+mesa (25.0.0~rc1-2) experimental; urgency=medium
+
+  * Merge from unstable.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Mon, 03 Feb 2025 12:41:43 +0200
+
+mesa (25.0.0~rc1-1) experimental; urgency=medium
+
+  * New upstream release candidate.
+  * control: Remove libglapi-mesa, provided by mesa-libgallium now.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 31 Jan 2025 09:54:17 +0200
+
+mesa (24.3.4-3) unstable; urgency=medium
+
+  [ Dmitry Shachnev ]
+  * Revert "Build with gcc-12 and -O1 on ppc64el".
+  * Add a patch to disable ppc64el assembly code. (Closes: #1092890)
+
+  [ Emilio Pozuelo Monfort ]
+  * Release to sid.
+
+ -- Emilio Pozuelo Monfort <pochu@debian.org>  Mon, 03 Feb 2025 08:40:16 +0100
+
+mesa (24.3.4-2) unstable; urgency=medium
+
+  * Build with gcc-12 and -O1 on ppc64el to workaround segfaults
+    on driswSwapBuffers. Thanks Dmitry Shachnev for debugging and
+    finding a working compiler and optimization level.
+    Closes: #1092890.
+  * Drop quilt usage, not needed with source format 3.0.
+
+ -- Emilio Pozuelo Monfort <pochu@debian.org>  Sun, 26 Jan 2025 11:39:48 +0100
+
+mesa (24.3.4-1) unstable; urgency=medium
+
+  * New upstream release.
+  * control: Make libgl1-mesa-dri depend on the same version of libgbm1.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 23 Jan 2025 19:48:02 +0200
+
+mesa (24.3.3-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Wed, 08 Jan 2025 13:11:38 +0200
 
 mesa (24.3.0-1) experimental; urgency=medium
 
@@ -84,10 +514,26 @@ mesa (24.3.0~rc1-1) experimental; urgency=medium
 
  -- Timo Aaltonen <tjaalton@debian.org>  Tue, 12 Nov 2024 15:17:38 +0200
 
-mesa (24.2.6-1) unstable; urgency=medium
+mesa (24.2.8-1) unstable; urgency=medium
 
   * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 28 Nov 2024 13:59:57 +0200
+
+mesa (24.2.7-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 14 Nov 2024 14:08:39 +0200
+
+mesa (24.2.6-1) unstable; urgency=medium
+
+  [ Timo Aaltonen ]
+  * New upstream release.
   * fix-armhf-build.diff: Dropped, upstream.
+
+  [ Fabio Pedretti ]
+  * control: lower librust-syn-dev dependency version
 
  -- Timo Aaltonen <tjaalton@debian.org>  Tue, 05 Nov 2024 09:59:12 +0200
 

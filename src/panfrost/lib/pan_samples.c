@@ -1,24 +1,6 @@
 /*
  * Copyright (C) 2019 Collabora, Ltd.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include <stdint.h>
@@ -99,7 +81,7 @@ const struct mali_sample_positions sample_position_lut[] = {
          SAMPLE16(-5,  5),
          SAMPLE16(-7, -1),
          SAMPLE16( 3,  7),
-         SAMPLE16( 7,  -7),
+         SAMPLE16( 7, -7),
       },
       .origin = SAMPLE16(0, 0)
    },
@@ -115,7 +97,7 @@ const struct mali_sample_positions sample_position_lut[] = {
          SAMPLE16( 5,  3),
          SAMPLE16( 3, -5),
          SAMPLE16(-2,  6),
-         SAMPLE16( 0,  7),
+         SAMPLE16( 0, -7),
          SAMPLE16(-4, -6),
          SAMPLE16(-6,  4),
          SAMPLE16(-8,  0),
@@ -124,17 +106,26 @@ const struct mali_sample_positions sample_position_lut[] = {
          SAMPLE16(-7, -8),
       },
       .origin = SAMPLE16(0, 0)
+   },
+
+   [MALI_SAMPLE_PATTERN_ROTATED_2X_GRID] = {
+      .positions = {
+         SAMPLE4( 1,  1),
+         SAMPLE4(-1, -1),
+      },
+      .origin = SAMPLE4(0, 0)
    }
 };
 /* clang-format on */
 
-unsigned panfrost_sample_positions_buffer_size(void)
+unsigned
+pan_sample_positions_buffer_size(void)
 {
    return sizeof(sample_position_lut);
 }
 
 unsigned
-panfrost_sample_positions_offset(enum mali_sample_pattern pattern)
+pan_sample_positions_offset(enum mali_sample_pattern pattern)
 {
    assert(pattern < ARRAY_SIZE(sample_position_lut));
    unsigned offset = (pattern * sizeof(sample_position_lut[0]));
@@ -142,7 +133,7 @@ panfrost_sample_positions_offset(enum mali_sample_pattern pattern)
 }
 
 void
-panfrost_upload_sample_positions(void *buffer)
+pan_upload_sample_positions(void *buffer)
 {
    memcpy(buffer, sample_position_lut, sizeof(sample_position_lut));
 }

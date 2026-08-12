@@ -37,22 +37,43 @@ convert_profile12_to_stdprofile(D3D12_VIDEO_ENCODER_PROFILE_HEVC profile)
       {
          return 2;
       } break;
+      case D3D12_VIDEO_ENCODER_PROFILE_HEVC_MAIN10_422:
       case D3D12_VIDEO_ENCODER_PROFILE_HEVC_MAIN_444:
+      case D3D12_VIDEO_ENCODER_PROFILE_HEVC_MAIN10_444:
       {
          return 4;
       } break;
       default:
       {
-         unreachable("Unsupported D3D12_VIDEO_ENCODER_PROFILE_HEVC value");
+         UNREACHABLE("Unsupported D3D12_VIDEO_ENCODER_PROFILE_HEVC value");
       } break;
+   }
+}
+
+static int
+dxgi_format_to_pix_bits(DXGI_FORMAT fmt)
+{
+   switch (fmt) {
+      default:
+         UNREACHABLE("Unsupported DXGI_FORMAT");
+      case DXGI_FORMAT_AYUV:
+      case DXGI_FORMAT_NV12:
+      case DXGI_FORMAT_YUY2:
+         return 8;
+
+      case DXGI_FORMAT_P010:
+      case DXGI_FORMAT_Y210:
+      case DXGI_FORMAT_Y410:
+         return 10;
    }
 }
 
 void
 d3d12_video_bitstream_builder_hevc::init_profile_tier_level(HEVCProfileTierLevel *ptl,
                         uint8_t HEVCProfileIdc,
-                        uint8_t HEVCLevelIdc,
-                        bool isHighTier)
+                        uint32_t HEVCLevelIdc,
+                        bool isHighTier,
+                        uint32_t pix_bits)
 {
    memset(ptl, 0, sizeof(HEVCProfileTierLevel));
 
@@ -67,14 +88,14 @@ d3d12_video_bitstream_builder_hevc::init_profile_tier_level(HEVCProfileTierLevel
    ptl->general_interlaced_source_flag = 0;  // no
    ptl->general_non_packed_constraint_flag = 1; // no frame packing arrangement SEI messages
    ptl->general_frame_only_constraint_flag = 1;
-   ptl->general_level_idc = HEVCLevelIdc;
+   ptl->general_level_idc = static_cast<uint8_t>(HEVCLevelIdc);
 
    if (ptl->general_profile_idc == 4 /*MAIN444*/)
    {
       ptl->general_intra_constraint_flag = 1;
-      ptl->general_max_12bit_constraint_flag = 1;
-      ptl->general_max_10bit_constraint_flag = 1;
-      ptl->general_max_8bit_constraint_flag = 1;
+      ptl->general_max_12bit_constraint_flag = pix_bits <= 12;
+      ptl->general_max_10bit_constraint_flag = pix_bits <= 10;
+      ptl->general_max_8bit_constraint_flag = pix_bits <= 8;
    }
 }
 
@@ -139,7 +160,7 @@ d3d12_video_encoder_convert_from_d3d12_level_hevc(D3D12_VIDEO_ENCODER_LEVELS_HEV
       } break;
       default:
       {
-         unreachable("Unsupported D3D12_VIDEO_ENCODER_LEVELS_HEVC value");
+         UNREACHABLE("Unsupported D3D12_VIDEO_ENCODER_LEVELS_HEVC value");
       } break;        
    }
 }
@@ -204,7 +225,7 @@ d3d12_video_encoder_convert_level_hevc(uint32_t hevcSpecLevel)
       } break;
       default:
       {
-         unreachable("Unsupported D3D12_VIDEO_ENCODER_LEVELS_HEVC value");
+         UNREACHABLE("Unsupported D3D12_VIDEO_ENCODER_LEVELS_HEVC value");
       } break;        
    }
 }
@@ -232,7 +253,7 @@ d3d12_video_encoder_convert_12cusize_to_pixel_size_hevc(const D3D12_VIDEO_ENCODE
         } break;
         default:
         {
-            unreachable(L"Not a supported cu size");
+            UNREACHABLE(L"Not a supported cu size");
             return 0u;
         } break;            
     }
@@ -261,7 +282,7 @@ d3d12_video_encoder_convert_pixel_size_hevc_to_12cusize(const uint32_t& cuSize)
         } break;
         default:
         {
-            unreachable(L"Not a supported cu size");
+            UNREACHABLE(L"Not a supported cu size");
         } break;            
     }
 }
@@ -289,7 +310,7 @@ d3d12_video_encoder_convert_12tusize_to_pixel_size_hevc(const D3D12_VIDEO_ENCODE
         } break;        
         default:
         {
-            unreachable(L"Not a supported TU size");
+            UNREACHABLE(L"Not a supported TU size");
         } break;            
     }
 }
@@ -317,7 +338,7 @@ d3d12_video_encoder_convert_pixel_size_hevc_to_12tusize(const uint32_t& TUSize)
         } break;        
         default:
         {
-            unreachable(L"Not a supported TU size");
+            UNREACHABLE(L"Not a supported TU size");
         } break;            
     }
 }
@@ -356,7 +377,7 @@ d3d12_video_bitstream_builder_hevc::build_vps(const struct pipe_h265_enc_vid_par
    m_latest_vps.vps_max_sub_layers_minus1 = 0u;
    m_latest_vps.vps_temporal_id_nesting_flag = 1u;
    m_latest_vps.vps_reserved_0xffff_16bits = 0xFFFF;
-   init_profile_tier_level(&m_latest_vps.ptl, HEVCProfileIdc, HEVCLevelIdc, isHighTier);
+   init_profile_tier_level(&m_latest_vps.ptl, HEVCProfileIdc, HEVCLevelIdc, isHighTier, dxgi_format_to_pix_bits(inputFmt));
    m_latest_vps.vps_sub_layer_ordering_info_present_flag = 0u;
    for (int i = (m_latest_vps.vps_sub_layer_ordering_info_present_flag ? 0 : m_latest_vps.vps_max_sub_layers_minus1); i <= m_latest_vps.vps_max_sub_layers_minus1; i++) {
       m_latest_vps.vps_max_dec_pic_buffering_minus1[i] = vidData.vps_max_dec_pic_buffering_minus1[i];
@@ -412,6 +433,27 @@ d3d12_video_bitstream_builder_hevc::build_sps(const HevcVideoParameterSet& paren
       SubWidthC = 1u;
       SubHeightC = 1u;
       m_latest_sps.chroma_format_idc = 3u;
+   } else if (inputFmt == DXGI_FORMAT_Y410) {
+      // 444 10 bits
+      m_latest_sps.bit_depth_luma_minus8 = 2u;
+      m_latest_sps.bit_depth_chroma_minus8 = 2u;
+      SubWidthC = 1u;
+      SubHeightC = 1u;
+      m_latest_sps.chroma_format_idc = 3u;
+   } else if (inputFmt == DXGI_FORMAT_YUY2) {
+      // 422 8 bits
+      m_latest_sps.bit_depth_luma_minus8 = 0u;
+      m_latest_sps.bit_depth_chroma_minus8 = 0u;
+      SubWidthC = 2u;
+      SubHeightC = 1u;
+      m_latest_sps.chroma_format_idc = 2u;
+   } else if (inputFmt == DXGI_FORMAT_Y210) {
+      // 422 10 bits
+      m_latest_sps.bit_depth_luma_minus8 = 2u;
+      m_latest_sps.bit_depth_chroma_minus8 = 2u;
+      SubWidthC = 2u;
+      SubHeightC = 1u;
+      m_latest_sps.chroma_format_idc = 2u;
    }
 
    uint8_t minCuSize = d3d12_video_encoder_convert_12cusize_to_pixel_size_hevc(codecConfig.MinLumaCodingUnitSize);
@@ -437,8 +479,8 @@ d3d12_video_bitstream_builder_hevc::build_sps(const HevcVideoParameterSet& paren
    viewport.Width = crop_window_upper_layer.front /* passes width */ - ((crop_window_upper_layer.left + crop_window_upper_layer.right) * SubWidthC);
    viewport.Height = crop_window_upper_layer.back /* passes height */- ((crop_window_upper_layer.top + crop_window_upper_layer.bottom) * SubHeightC);
 
-   m_latest_sps.pic_width_in_luma_samples = ALIGN(encodeResolution.Width, picDimensionMultipleRequirement);
-   m_latest_sps.pic_height_in_luma_samples = ALIGN(encodeResolution.Height, picDimensionMultipleRequirement);
+   m_latest_sps.pic_width_in_luma_samples = align(encodeResolution.Width, picDimensionMultipleRequirement);
+   m_latest_sps.pic_height_in_luma_samples = align(encodeResolution.Height, picDimensionMultipleRequirement);
    m_latest_sps.conf_win_right_offset = (m_latest_sps.pic_width_in_luma_samples - viewport.Width) / SubWidthC;
    m_latest_sps.conf_win_bottom_offset = (m_latest_sps.pic_height_in_luma_samples - viewport.Height) / SubHeightC;
 
@@ -476,14 +518,14 @@ d3d12_video_bitstream_builder_hevc::build_sps(const HevcVideoParameterSet& paren
    m_latest_sps.strong_intra_smoothing_enabled_flag = 0;
 
    m_latest_sps.vui_parameters_present_flag = seqData.vui_parameters_present_flag;
-   m_latest_sps.vui.aspect_ratio_idc = seqData.aspect_ratio_idc;
+   m_latest_sps.vui.aspect_ratio_idc = static_cast<uint8_t>(seqData.aspect_ratio_idc);
    m_latest_sps.vui.sar_width = seqData.sar_width;
    m_latest_sps.vui.sar_height = seqData.sar_height;
-   m_latest_sps.vui.video_format = seqData.video_format;
+   m_latest_sps.vui.video_format = static_cast<uint8_t>(seqData.video_format);
    m_latest_sps.vui.video_full_range_flag = seqData.video_full_range_flag;
-   m_latest_sps.vui.colour_primaries = seqData.colour_primaries;
-   m_latest_sps.vui.transfer_characteristics = seqData.transfer_characteristics;
-   m_latest_sps.vui.matrix_coeffs = seqData.matrix_coefficients;
+   m_latest_sps.vui.colour_primaries = static_cast<uint8_t>(seqData.colour_primaries);
+   m_latest_sps.vui.transfer_characteristics = static_cast<uint8_t>(seqData.transfer_characteristics);
+   m_latest_sps.vui.matrix_coeffs = static_cast<uint8_t>(seqData.matrix_coefficients);
    m_latest_sps.vui.chroma_sample_loc_type_top_field = seqData.chroma_sample_loc_type_top_field;
    m_latest_sps.vui.chroma_sample_loc_type_bottom_field = seqData.chroma_sample_loc_type_bottom_field;
    m_latest_sps.vui.def_disp_win_left_offset = seqData.def_disp_win_left_offset;
@@ -516,7 +558,7 @@ d3d12_video_bitstream_builder_hevc::build_sps(const HevcVideoParameterSet& paren
    m_latest_sps.vui.motion_vectors_over_pic_boundaries_flag = seqData.vui_flags.motion_vectors_over_pic_boundaries_flag;
    m_latest_sps.vui.restricted_ref_pic_lists_flag = seqData.vui_flags.restricted_ref_pic_lists_flag;
 
-   m_latest_sps.sps_extension_present_flag = seqData.sps_range_extension.sps_range_extension_flag; // Set sps_extension_present_flag if sps_range_extension_flag present
+   m_latest_sps.sps_extension_present_flag = static_cast<uint8_t>(seqData.sps_range_extension.sps_range_extension_flag); // Set sps_extension_present_flag if sps_range_extension_flag present
    if (m_latest_sps.sps_extension_present_flag)
    {
       m_latest_sps.sps_range_extension.sps_range_extension_flag = seqData.sps_range_extension.sps_range_extension_flag;
@@ -545,7 +587,7 @@ d3d12_video_bitstream_builder_hevc::build_pps(const struct pipe_h265_enc_pic_par
          const HevcSeqParameterSet& parentSPS,
          uint8_t pic_parameter_set_id,
          const D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC& codecConfig,
-         const D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC1& pictureControl,
+         const D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC2& pictureControl,
          std::vector<BYTE> &headerBitstream,
          std::vector<BYTE>::iterator placingPositionStart,
          size_t &writtenBytes)
@@ -568,7 +610,7 @@ d3d12_video_bitstream_builder_hevc::build_pps(const struct pipe_h265_enc_pic_par
    m_latest_pps.tiles_enabled_flag = 0u; // no tiling in D3D12
    m_latest_pps.loop_filter_across_tiles_enabled_flag = 0;
 
-   m_latest_pps.lists_modification_present_flag = 0;
+   m_latest_pps.lists_modification_present_flag = ((codecConfig.ConfigurationFlags & D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAG_ENABLE_LONG_TERM_REFERENCES) != 0) ? 1 : 0;
    m_latest_pps.log2_parallel_merge_level_minus2 = 0;
 
    m_latest_pps.deblocking_filter_control_present_flag = 1;

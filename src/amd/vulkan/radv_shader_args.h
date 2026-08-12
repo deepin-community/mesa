@@ -18,21 +18,24 @@ enum radv_ud_index {
    AC_UD_SCRATCH_RING_OFFSETS = 0,
    AC_UD_PUSH_CONSTANTS = 1,
    AC_UD_INLINE_PUSH_CONSTANTS = 2,
-   AC_UD_INDIRECT_DESCRIPTOR_SETS = 3,
+   AC_UD_INDIRECT_DESCRIPTORS = 3,
    AC_UD_VIEW_INDEX = 4,
    AC_UD_STREAMOUT_BUFFERS = 5,
    AC_UD_STREAMOUT_STATE = 6,
    AC_UD_TASK_STATE = 7,
-   AC_UD_NGG_CULLING_SETTINGS = 8,
-   AC_UD_NGG_VIEWPORT = 9,
+   AC_UD_NGGC_SETTINGS = 8,
+   AC_UD_NGGC_VIEWPORT = 9,
    AC_UD_NGG_LDS_LAYOUT = 10,
    AC_UD_NGG_STATE = 11,
-   AC_UD_VGT_ESGS_RING_ITEMSIZE = 12,
-   AC_UD_FORCE_VRS_RATES = 13,
-   AC_UD_TASK_RING_ENTRY = 14,
-   AC_UD_NEXT_STAGE_PC = 15,
-   AC_UD_EPILOG_PC = 16,
-   AC_UD_SHADER_START = 17,
+   AC_UD_NGG_QUERY_BUF_VA = 12,
+   AC_UD_VGT_ESGS_RING_ITEMSIZE = 13,
+   AC_UD_FORCE_VRS_RATES = 14,
+   AC_UD_TASK_RING_ENTRY = 15,
+   AC_UD_NEXT_STAGE_PC = 16,
+   AC_UD_EPILOG_PC = 17,
+   AC_UD_DYNAMIC_DESCRIPTORS = 18,
+   AC_UD_DYNAMIC_DESCRIPTORS_OFFSET_ADDR = 19,
+   AC_UD_SHADER_START = 20,
    AC_UD_VS_VERTEX_BUFFERS = AC_UD_SHADER_START,
    AC_UD_VS_BASE_VERTEX_START_INSTANCE,
    AC_UD_VS_PROLOG_INPUTS,
@@ -65,14 +68,16 @@ struct radv_userdata_info {
 
 struct radv_userdata_locations {
    struct radv_userdata_info descriptor_sets[MAX_SETS];
+   struct radv_userdata_info descriptor_heaps[RADV_MAX_HEAPS];
    struct radv_userdata_info shader_data[AC_UD_MAX_UD];
    uint32_t descriptor_sets_enabled;
+   uint32_t descriptor_heaps_enabled;
 };
 
 struct radv_shader_args {
    struct ac_shader_args ac;
 
-   struct ac_arg descriptor_sets[MAX_SETS];
+   struct ac_arg descriptors[MAX_SETS]; /* sets or heaps */
 
    /* Streamout */
    struct ac_arg streamout_buffers;
@@ -86,11 +91,12 @@ struct radv_shader_args {
    /* NGG */
    struct ac_arg ngg_state;
    struct ac_arg ngg_lds_layout;
+   struct ac_arg ngg_query_buf_va; /* GFX11+ */
 
-   /* NGG GS */
-   struct ac_arg ngg_culling_settings;
-   struct ac_arg ngg_viewport_scale[2];
-   struct ac_arg ngg_viewport_translate[2];
+   /* NGG Culling */
+   struct ac_arg nggc_settings;
+   struct ac_arg nggc_viewport_scale[2];
+   struct ac_arg nggc_viewport_translate[2];
 
    /* Fragment shaders */
    struct ac_arg ps_state;
@@ -103,17 +109,6 @@ struct radv_shader_args {
    struct ac_arg depth;
    struct ac_arg stencil;
    struct ac_arg sample_mask;
-
-   /* TCS */
-   /* # [0:6] = the number of tessellation patches minus one, max = 127
-    * # [7:11] = the number of output patch control points minus one, max = 31
-    * # [12:16] = the number of input patch control points minus one, max = 31
-    * # [17:22] = the number of LS outputs, up to 32
-    * # [23:28] = the number of HS per-vertex outputs, up to 32
-    * # [29:30] = tess_primitive_mode
-    * # [31] = whether TES reads tess factors
-    */
-   struct ac_arg tcs_offchip_layout;
 
    /* GS */
    struct ac_arg vgt_esgs_ring_itemsize;
@@ -129,7 +124,6 @@ struct radv_shader_args {
 
    bool explicit_scratch_args;
    bool remap_spi_ps_input;
-   bool load_grid_size_from_user_sgpr;
 };
 
 static inline struct radv_shader_args *
@@ -142,10 +136,12 @@ struct radv_graphics_state_key;
 struct radv_shader_info;
 struct radv_ps_epilog_key;
 struct radv_device;
+struct radv_shader_debug_info;
 
 void radv_declare_shader_args(const struct radv_device *device, const struct radv_graphics_state_key *gfx_state,
-                              const struct radv_shader_info *info, gl_shader_stage stage,
-                              gl_shader_stage previous_stage, struct radv_shader_args *args);
+                              const struct radv_shader_info *info, mesa_shader_stage stage,
+                              mesa_shader_stage previous_stage, struct radv_shader_args *args,
+                              struct radv_shader_debug_info *debug);
 
 void radv_declare_ps_epilog_args(const struct radv_device *device, const struct radv_ps_epilog_key *key,
                                  struct radv_shader_args *args);

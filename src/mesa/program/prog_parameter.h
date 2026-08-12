@@ -59,9 +59,7 @@ typedef enum
    PROGRAM_STATE_VAR,   /**< gl_program->Parameters[] */
    PROGRAM_CONSTANT,    /**< gl_program->Parameters[] */
    PROGRAM_UNIFORM,     /**< gl_program->Parameters[] */
-   PROGRAM_WRITE_ONLY,  /**< A dummy, write-only register */
    PROGRAM_ADDRESS,     /**< machine->AddressReg */
-   PROGRAM_SYSTEM_VALUE,/**< InstanceId, PrimitiveID, etc. */
    PROGRAM_UNDEFINED,   /**< Invalid/TBD value */
    PROGRAM_FILE_MAX
 } gl_register_file;
@@ -189,6 +187,10 @@ _mesa_add_unnamed_constant(struct gl_program_parameter_list *paramList,
    return _mesa_add_typed_unnamed_constant(paramList, values, size, GL_NONE,
                                            swizzleOut);
 }
+
+extern GLint
+_mesa_lookup_state_param_idx(struct gl_program_parameter_list *paramList,
+                             const gl_state_index16 stateTokens[STATE_LENGTH]);
 
 extern GLint
 _mesa_add_sized_state_reference(struct gl_program_parameter_list *paramList,

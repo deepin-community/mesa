@@ -9,6 +9,7 @@
 
 #include <assert.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -31,8 +32,14 @@ struct fd_dev_info {
 
    uint32_t num_vsc_pipes;
 
+   /* The size of local memory in bytes */
    uint32_t cs_shared_mem_size;
 
+   /* On at least a6xx, waves are always launched in pairs. In calculations
+    * about occupancy, we pretend that each wave pair is actually one wave,
+    * which simplifies many of the calculations, but means we have to
+    * multiply threadsize_base by this number.
+    */
    int wave_granularity;
 
    /* These are fallback values that should match what drm/msm programs, for
@@ -46,9 +53,25 @@ struct fd_dev_info {
    /* Information for private memory calculations */
    uint32_t fibers_per_sp;
 
+   /* The base number of threads per wave. Some stages may be able to double
+    * this.
+    */
    uint32_t threadsize_base;
 
+   /* The maximum number of simultaneous waves per core. */
    uint32_t max_waves;
+
+   /* Local Memory (i.e. shared memory in GL/Vulkan) and compute shader
+    * const registers, as well as other things not relevant here, share the
+    * same storage space, called the Local Buffer or LB. This is the size of
+    * the part of the LB used for consts and LM. Consts are duplicated
+    * wavesize_granularity times, and the size of duplicated consts + local
+    * memory must not exceed it. If it is left 0, assume that it is
+    * compute constlen + wavesize_granularity * cs_shared_mem_size, which is
+    * enough to hold both the maximum possible compute consts and local
+    * memory at the same time.
+    */
+   uint32_t compute_lb_size;
 
    /* number of CCU is always equal to the number of SP */
    union {
@@ -56,7 +79,23 @@ struct fd_dev_info {
       uint32_t num_ccu;
    };
 
+   uint32_t num_slices;    /* gen8+ */
+
    struct {
+      uint32_t RB_DBG_ECO_CNTL;
+      uint32_t RB_DBG_ECO_CNTL_blit;
+      uint32_t RB_RBP_CNTL;
+   } magic;
+
+   struct {
+         uint32_t reg;
+         uint32_t value;
+   } magic_raw[64];
+
+   struct {
+      /*
+       * A6XX / gen6
+       */
       uint32_t reg_size_vec4;
 
       /* The size (in instrlen units (128 bytes)) of instruction cache where
@@ -76,10 +115,11 @@ struct fd_dev_info {
       bool concurrent_resolve;
       bool has_z24uint_s8uint;
 
+      /* on a650, vertex shader <-> tess control io uses LDL/STL */
       bool tess_use_shared;
 
       /* Does the hw support GL_QCOM_shading_rate? */
-      bool has_shading_rate;
+      bool has_legacy_pipeline_shading_rate;
 
       /* Whether a 16-bit descriptor can be used */
       bool storage_16bit;
@@ -120,7 +160,17 @@ struct fd_dev_info {
 
       bool has_lpac;
 
+      /* True if getfiberid, getlast.w8, brcst.active, and quad_shuffle
+       * instructions are supported which are necessary to support
+       * subgroup quad and arithmetic operations.
+       */
       bool has_getfiberid;
+
+      /* Whether half register shared->non-shared moves are broken. */
+      bool mov_half_shared_quirk;
+
+      /* Whether movs is supported for subgroupBroadcast. */
+      bool has_movs;
 
       bool has_dp2acc;
       bool has_dp4acc;
@@ -145,10 +195,6 @@ struct fd_dev_info {
       bool has_per_view_viewport;
       bool has_gmem_fast_clear;
 
-      /* Per CCU GMEM amount reserved for each of DEPTH and COLOR caches
-       * in sysmem rendering. */
-      uint32_t sysmem_per_ccu_depth_cache_size;
-      uint32_t sysmem_per_ccu_color_cache_size;
       /* Per CCU GMEM amount reserved for color cache used by GMEM resolves
        * which require color cache (non-BLIT event case).
        * The size is expressed as a fraction of ccu cache used by sysmem
@@ -158,24 +204,69 @@ struct fd_dev_info {
        */
       /* see enum a6xx_ccu_cache_size */
       uint32_t gmem_ccu_color_cache_fraction;
+      uint32_t gmem_per_ccu_color_cache_size;
+      uint32_t gmem_ccu_depth_cache_fraction;
+      uint32_t gmem_per_ccu_depth_cache_size;
+      uint32_t sysmem_ccu_color_cache_fraction;
+      uint32_t sysmem_per_ccu_color_cache_size;
+      uint32_t sysmem_ccu_depth_cache_fraction;
+      uint32_t sysmem_per_ccu_depth_cache_size;
 
-      /* Corresponds to HLSQ_CONTROL_1_REG::PRIMALLOCTHRESHOLD */
+      /* Size of various in-gmem caches: */
+      uint32_t sysmem_vpc_attr_buf_size;
+      uint32_t sysmem_vpc_pos_buf_size;
+      uint32_t sysmem_vpc_bv_pos_buf_size;
+      uint32_t gmem_vpc_attr_buf_size;
+      uint32_t gmem_vpc_pos_buf_size;
+      uint32_t gmem_vpc_bv_pos_buf_size;
+
+      /* Corresponds to SP_LB_PARAM_LIMIT::PRIMALLOCTHRESHOLD */
       uint32_t prim_alloc_threshold;
 
       uint32_t vs_max_inputs_count;
 
       bool supports_double_threadsize;
 
+      /* Dual-wave dispatch replaces THREAD128 (supports_double_threadsize)
+       * on newer devices.
+       *
+       * This has some implications for marking join-points (jp), because
+       * while a wave may not diverge, a pair of waves might, for example
+       * subgroup-ops.
+       */
+      bool has_dual_wave_dispatch;
+
       bool has_sampler_minmax;
+
+      bool has_astc_hdr;
 
       bool broken_ds_ubwc_quirk;
 
-      /* See ir3_compiler::has_scalar_alu. */
+      /* True if there is a scalar ALU capable of executing a subset of
+       * cat2-cat4 instructions with a shared register destination. This also
+       * implies expanded MOV/COV capability when writing to shared registers,
+       * as MOV/COV is now executed on the scalar ALU except when reading from a
+       * normal register, as well as the ability for ldc to write to a shared
+       * register.
+       */
       bool has_scalar_alu;
-      /* See ir3_compiler::has_early_preamble. */
+
+      /* True if cat2 instructions can write predicate registers from the scalar
+       * ALU.
+       */
+      bool has_scalar_predicates;
+
+      /* On all generations that support scalar ALU, there is also a copy of the
+       * scalar ALU and some other HW units in HLSQ that can execute preambles
+       * before work is dispatched to the SPs, called "early preamble". We detect
+       * whether the shader can use early preamble in ir3.
+       */
       bool has_early_preamble;
 
+      /* Whether isam.v is supported to sample multiple components from SSBOs */
       bool has_isam_v;
+
+      /* Whether isam/stib/ldib have immediate offsets. */
       bool has_ssbo_imm_offsets;
 
       /* Whether writing to UBWC attachment and reading the same image as input
@@ -186,37 +277,65 @@ struct fd_dev_info {
        */
       bool has_coherent_ubwc_flag_caches;
 
-      struct {
-         uint32_t PC_POWER_CNTL;
-         uint32_t TPL1_DBG_ECO_CNTL;
-         uint32_t GRAS_DBG_ECO_CNTL;
-         uint32_t SP_CHICKEN_BITS;
-         uint32_t UCHE_CLIENT_PF;
-         uint32_t PC_MODE_CNTL;
-         uint32_t SP_DBG_ECO_CNTL;
-         uint32_t RB_DBG_ECO_CNTL;
-         uint32_t RB_DBG_ECO_CNTL_blit;
-         uint32_t HLSQ_DBG_ECO_CNTL;
-         uint32_t RB_UNKNOWN_8E01;
-         uint32_t VPC_DBG_ECO_CNTL;
-         uint32_t UCHE_UNKNOWN_0E12;
+      bool has_attachment_shading_rate;
 
-         uint32_t RB_UNKNOWN_8E06;
-      } magic;
+      /* Whether mipmaps below certain threshold can use LINEAR tiling when higher
+       * levels use UBWC,
+       */
+      bool has_ubwc_linear_mipmap_fallback;
 
-      struct {
-            uint32_t reg;
-            uint32_t value;
-      } magic_raw[64];
+      /* Whether threshold for linear mipmaps for compressed textures is in
+       * blocks, if false then threshold is in texels.
+       */
+      bool supports_linear_mipmap_threshold_in_blocks;
+
+      /* Whether 4 nops are needed after the second pred[tf] of a
+       * pred[tf]/pred[ft] pair to work around a hardware issue.
+       */
+      bool predtf_nop_quirk;
+
+      /* Whether 6 nops are needed after prede to work around a hardware
+       * issue.
+       */
+      bool prede_nop_quirk;
+
+      /* Whether the sad instruction (iadd3) is supported. */
+      bool has_sad;
+
+      /* A702 cuts A LOT of things.. */
+      bool is_a702;
 
       /* maximum number of descriptor sets */
       uint32_t max_sets;
 
       float line_width_min;
       float line_width_max;
-   } a6xx;
 
-   struct {
+      bool has_bin_mask;
+
+      /* On a618 at least, there seems to be an errata where a 3D draw
+       * followed by an A2D blit without any event or wait in between hangs
+       * waiting for the draw to complete. Seen on
+       * dEQP-VK.renderpass2.dedicated_allocation.attachment_allocation.grow.17
+       * with sysmem.
+       */
+      bool blit_wfi_quirk;
+
+      /* True if sel.b supports (neg) that behaves as fneg. */
+      bool has_sel_b_fneg;
+
+      /* Whether CP_REG_TEST::PRED_BIT exists so that there are 32 predicates
+       * that can be written by CP_REG_TEST instead of just 1.
+       */
+      bool has_pred_bit;
+
+      /* True if PC_DGEN_SO_CNTL is present. */
+      bool has_pc_dgen_so_cntl;
+
+      /*
+       * A7XX / gen7
+       */
+
       /* stsc may need to be done twice for the same range to workaround
        * _something_, observed in blob's disassembly.
        */
@@ -226,6 +345,7 @@ struct fd_dev_info {
       bool has_event_write_sample_count;
 
       bool has_64b_ssbo_atomics;
+      bool has_64b_image_atomics;
 
       /* Blob executes a special compute dispatch at the start of each
        * command buffers. We copy this dispatch as is.
@@ -236,15 +356,12 @@ struct fd_dev_info {
       bool load_shader_consts_via_preamble;
 
       bool has_gmem_vpc_attr_buf;
-      /* Size of buffer in gmem for VPC attributes */
-      uint32_t sysmem_vpc_attr_buf_size;
-      uint32_t gmem_vpc_attr_buf_size;
 
-      /* Whether UBWC is supported on all IBOs. Prior to this, only readonly
-       * or writeonly IBOs could use UBWC and mixing reads and writes was not
+      /* Whether UBWC is supported on all UAVs. Prior to this, only readonly
+       * or writeonly UAVs could use UBWC and mixing reads and writes was not
        * permitted.
        */
-      bool supports_ibo_ubwc;
+      bool supports_uav_ubwc;
 
       /* Whether the UBWC fast-clear values for snorn, unorm, and int formats
        * are the same. This is the case from a740 onwards. These formats were
@@ -289,7 +406,7 @@ struct fd_dev_info {
       /* Whether r8g8 UBWC fast-clear work correctly. */
       bool r8g8_faulty_fast_clear_quirk;
 
-      /* a750 has a bug where writing and then reading a UBWC-compressed IBO
+      /* a750 has a bug where writing and then reading a UBWC-compressed UAV
        * requires flushing UCHE. This is reproducible in many CTS tests, for
        * example dEQP-VK.image.load_store.with_format.2d.*.
        */
@@ -300,9 +417,64 @@ struct fd_dev_info {
        */
       bool has_persistent_counter;
 
-      /* Whether only 256 vec4 constants are available for compute */
-      bool compute_constlen_quirk;
-   } a7xx;
+      bool has_primitive_shading_rate;
+
+      /* If true, the hw shading rate value matches vk/gl rather than dx.
+       *
+       *   dx:  (width_log2 << 2) | height_log2
+       *   vk:  (height_log2 << 2) | width_log2
+       */
+      bool shading_rate_matches_vk;
+
+      /* A7XX gen1 and gen2 seem to require declaring SAMPLEMASK input
+       * for fragment shading rate to be read correctly.
+       * This workaround was seen in the prop driver v512.762.12.
+       */
+      bool reading_shading_rate_requires_smask_quirk;
+
+      /* Is lock/unlock sequence needed at end of compute shader? */
+      bool cs_lock_unlock_quirk;
+
+      /* Whether the ray_intersection instruction is present. */
+      bool has_ray_intersection;
+
+      /* Whether features may be fused off by the SW_FUSE. So far, this is
+       * just raytracing.
+       */
+      bool has_sw_fuse;
+
+      /* a750-specific HW bug workaround for ray tracing */
+      bool has_rt_workaround;
+
+      /* Whether alias.rt is supported. */
+      bool has_alias_rt;
+
+      /* Whether CP_SET_BIN_DATA5::ABS_MASK exists */
+      bool has_abs_bin_mask;
+
+      /* On a750 the control register layout is rearranged. */
+      bool new_control_regs;
+
+      /* a740+ support a per-view list of bin scales in GRAS which can be used
+       * to modify the viewport, rather than manually patching it in the
+       * driver.
+       */
+      bool has_hw_bin_scaling;
+
+      /* Whether the (eolm) and (eogm) nop flags are supported. */
+      bool has_eolm_eogm;
+
+      /* integer narrowing convert from GPR to uGPR does not behave as
+       * expected:
+       */
+      bool has_salu_int_narrowing_quirk;
+
+      /* Whether the device supports the image processing opcode */
+      bool has_image_processing;
+
+      /* The amount of valid draw state IDs. */
+      uint32_t max_draw_states;
+   } props;
 };
 
 struct fd_dev_id {
@@ -331,6 +503,14 @@ fd_dev_gpu_id(const struct fd_dev_id *id)
 
 /* Unmodified dev info as defined in freedreno_devices.py */
 const struct fd_dev_info *fd_dev_info_raw(const struct fd_dev_id *id);
+
+/* Helper to check if GPU is known before going any further */
+static inline uint8_t
+fd_dev_is_supported(const struct fd_dev_id *id) {
+   assert(id);
+   assert(id->gpu_id || id->chip_id);
+   return fd_dev_info_raw(id) != NULL;
+}
 
 /* Final dev info with dbg options and everything else applied.  */
 const struct fd_dev_info fd_dev_info(const struct fd_dev_id *id);

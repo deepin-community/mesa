@@ -54,14 +54,18 @@ HEADER_TEMPLATE = Template("""\
 #ifndef INTEL_WA_H
 #define INTEL_WA_H
 
+#ifndef __OPENCL_VERSION__
 #include "util/macros.h"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+#ifndef __OPENCL_VERSION__
 struct intel_device_info;
 void intel_device_info_init_was(struct intel_device_info *devinfo);
+#endif
 
 enum intel_wa_steppings {
 % for a in stepping_enum:
@@ -212,6 +216,9 @@ _PLATFORM_GFXVERS = {"INTEL_PLATFORM_BDW" : 80,
                      "INTEL_PLATFORM_LNL" : 200,
                      "INTEL_PLATFORM_BMG" : 200,
                      "INTEL_PLATFORM_PTL" : 300,
+                     "INTEL_PLATFORM_WCL" : 300,
+                     "INTEL_PLATFORM_NVL_U" : 300,
+                     "INTEL_PLATFORM_NVL_P" : 350,
                      }
 
 def macro_versions(wa_def):

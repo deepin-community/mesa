@@ -118,8 +118,6 @@ files_libgallium = files(
   'pipebuffer/pb_bufmgr_slab.c',
   'pipebuffer/pb_cache.c',
   'pipebuffer/pb_cache.h',
-  'pipebuffer/pb_slab.c',
-  'pipebuffer/pb_slab.h',
   'pipebuffer/pb_validate.c',
   'pipebuffer/pb_validate.h',
   'postprocess/filters.h',
@@ -194,10 +192,6 @@ files_libgallium = files(
   'util/u_blend.h',
   'util/u_blitter.c',
   'util/u_blitter.h',
-  'util/u_cache.c',
-  'util/u_cache.h',
-  'util/u_compute.c',
-  'util/u_compute.h',
   'util/u_debug_cb.h',
   'util/u_debug_describe.c',
   'util/u_debug_describe.h',
@@ -288,6 +282,17 @@ files_libgallium = files(
   'nir/nir_to_tgsi.h',
   'nir/nir_draw_helpers.c',
   'nir/nir_draw_helpers.h',
+)
+
+files_libgallium += custom_target(
+  'draw_nir_lower_opcodes.c',
+  input : 'draw/draw_nir_lower_opcodes.py',
+  output : 'draw_nir_lower_opcodes.c',
+  command : [
+    prog_python, '@INPUT@', '-p', dir_compiler_nir,
+  ],
+  capture : true,
+  depend_files : nir_algebraic_depends,
 )
 
 if dep_libdrm.found()
@@ -391,8 +396,6 @@ if draw_with_llvm
 endif
 
 files_libgalliumvl = files(
-  'vl/vl_bicubic_filter.c',
-  'vl/vl_bicubic_filter.h',
   'vl/vl_codec.c',
   'vl/vl_codec.h',
   'vl/vl_compositor.c',
@@ -403,35 +406,23 @@ files_libgalliumvl = files(
   'vl/vl_compositor_cs.h',
   'vl/vl_csc.c',
   'vl/vl_csc.h',
-  'vl/vl_decoder.c',
-  'vl/vl_decoder.h',
   'vl/vl_defines.h',
   'vl/vl_deint_filter.c',
   'vl/vl_deint_filter.h',
-  'vl/vl_idct.c',
-  'vl/vl_idct.h',
-  'vl/vl_matrix_filter.c',
-  'vl/vl_matrix_filter.h',
-  'vl/vl_mc.c',
-  'vl/vl_mc.h',
-  'vl/vl_median_filter.c',
-  'vl/vl_median_filter.h',
+  'vl/vl_deint_filter_cs.c',
+  'vl/vl_deint_filter_cs.h',
   'vl/vl_mpeg12_bitstream.c',
   'vl/vl_mpeg12_bitstream.h',
-  'vl/vl_mpeg12_decoder.c',
-  'vl/vl_mpeg12_decoder.h',
   'vl/vl_types.h',
   'vl/vl_vertex_buffers.c',
   'vl/vl_vertex_buffers.h',
   'vl/vl_video_buffer.c',
   'vl/vl_video_buffer.h',
-  'vl/vl_zscan.c',
-  'vl/vl_zscan.h',
-  'vl/vl_probs_table.h',
 )
 
 vlwinsys_deps = []
 files_libgalliumvlwinsys = files('vl/vl_winsys.h')
+links_libgalliumvlwinsys = []
 if host_machine.system() == 'windows'
   files_libgalliumvlwinsys += files('vl/vl_winsys_win32.c')
 else
@@ -439,7 +430,8 @@ else
 endif
 if with_platform_x11
   files_libgalliumvlwinsys += files('vl/vl_winsys_dri.c')
-  if with_dri_platform == 'drm'
+  links_libgalliumvlwinsys += libloader_x11
+  if with_dri_platform == 'drm' or with_dri_platform == 'pseudo-drm'
     vlwinsys_deps += [
       dep_xcb_sync, dep_xcb_present, dep_xshmfence, dep_xcb_xfixes,
       dep_xcb_dri3,
@@ -462,7 +454,7 @@ files_libgallium += custom_target(
   'tr_util.[ch]',
   input: ['../include/pipe/p_defines.h', '../include/pipe/p_video_enums.h', '../../util/blend.h'],
   output: ['tr_util.c', 'tr_util.h'],
-  command: [prog_python, prog_enums2names, '@INPUT@', '-C', '@OUTPUT0@', '-H', '@OUTPUT1@', '-I', 'tr_util.h'],
+  command: [prog_python, prog_enums2names, '@INPUT@', '-C', '@OUTPUT0@', '-H', '@OUTPUT1@'],
   depend_files: prog_enums2names,
 )
 
@@ -532,7 +524,7 @@ if with_tests
     executable(
       'gallium-aux',
       'util/u_surface_test.cpp',
-      include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux],
+      include_directories : [inc_include, inc_src, inc_gallium, inc_gallium_aux],
       link_with: libgallium,
       dependencies : [idep_gtest, idep_mesautil],
     ),
@@ -565,7 +557,7 @@ libgalliumvl = static_library(
 
 # some drivers export their screen creation function globally, so all frontends have to contain the
 # full libgalliumvl. So we'll handle this here globally for everybody.
-if (with_gallium_va or with_gallium_vdpau or with_dri or with_gallium_radeonsi)
+if (with_gallium_mediafoundation or with_gallium_va or with_dri or with_gallium_radeonsi)
   libgalliumvl_stub = libgalliumvl
 else
   libgalliumvl_stub = _libgalliumvl_stub
@@ -577,6 +569,6 @@ libgalliumvlwinsys = static_library(
   files_libgalliumvlwinsys,
   include_directories : [inc_gallium, inc_include, inc_loader, inc_src, include_directories('../drivers/zink')],
   dependencies : [dep_libdrm, vlwinsys_deps, idep_mesautil],
-  link_with : [libloader_x11],
+  link_with : links_libgalliumvlwinsys,
   build_by_default : false,
 )

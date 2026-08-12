@@ -29,27 +29,41 @@ radv_wsi_set_memory_ownership(VkDevice _device, VkDeviceMemory _mem, VkBool32 ow
    VK_FROM_HANDLE(radv_device, device, _device);
    VK_FROM_HANDLE(radv_device_memory, mem, _mem);
 
-   if (device->use_global_bo_list) {
-      device->ws->buffer_make_resident(device->ws, mem->bo, ownership);
-   }
+   device->ws->buffer_make_resident(device->ws, mem->bo, ownership);
 }
 
-static VkQueue
+static struct vk_queue *
 radv_wsi_get_prime_blit_queue(VkDevice _device)
 {
    VK_FROM_HANDLE(radv_device, device, _device);
    struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
-   if (device->private_sdma_queue != VK_NULL_HANDLE)
-      return vk_queue_to_handle(&device->private_sdma_queue->vk);
+   simple_mtx_lock(&device->blit_queue_mtx);
+
+   if (device->private_sdma_queue != VK_NULL_HANDLE) {
+      simple_mtx_unlock(&device->blit_queue_mtx);
+      return &device->private_sdma_queue->vk;
+   }
 
    if (pdev->info.gfx_level >= GFX9 && !(instance->debug_flags & RADV_DEBUG_NO_DMA_BLIT)) {
 
-      pdev->vk_queue_to_radv[pdev->num_queues++] = RADV_QUEUE_TRANSFER;
+      uint32_t queue_family_index = pdev->num_queues;
+      for (uint32_t i = 0; i < pdev->num_queues; i++) {
+         if (pdev->vk_queue_to_radv[i] == RADV_QUEUE_TRANSFER) {
+            queue_family_index = i;
+            break;
+         }
+      }
+
+      if (queue_family_index == pdev->num_queues) {
+         assert(pdev->num_queues < RADV_MAX_QUEUE_FAMILIES);
+         pdev->vk_queue_to_radv[pdev->num_queues++] = RADV_QUEUE_TRANSFER;
+      }
+
       const VkDeviceQueueCreateInfo queue_create = {
          .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-         .queueFamilyIndex = pdev->num_queues - 1,
+         .queueFamilyIndex = queue_family_index,
          .queueCount = 1,
       };
 
@@ -58,13 +72,16 @@ radv_wsi_get_prime_blit_queue(VkDevice _device)
 
       VkResult result = radv_queue_init(device, device->private_sdma_queue, 0, &queue_create, NULL);
       if (result == VK_SUCCESS) {
-         return vk_queue_to_handle(&device->private_sdma_queue->vk);
+         simple_mtx_unlock(&device->blit_queue_mtx);
+         return &device->private_sdma_queue->vk;
       } else {
          vk_free(&device->vk.alloc, device->private_sdma_queue);
          device->private_sdma_queue = VK_NULL_HANDLE;
       }
    }
-   return VK_NULL_HANDLE;
+
+   simple_mtx_unlock(&device->blit_queue_mtx);
+   return NULL;
 }
 
 VkResult

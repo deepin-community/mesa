@@ -28,6 +28,7 @@
 #include "anv_measure.h"
 #include "vk_format.h"
 #include "vk_render_pass.h"
+#include "vk_synchronization.h"
 #include "vk_util.h"
 #include "util/fast_idiv_by_const.h"
 
@@ -35,7 +36,7 @@
 #include "genxml/gen_macros.h"
 #include "genxml/genX_pack.h"
 #include "common/intel_guardband.h"
-#include "compiler/elk/elk_prim.h"
+#include "compiler/intel_prim.h"
 
 #include "nir/nir_xfb_info.h"
 
@@ -740,7 +741,7 @@ anv_cmd_predicated_mcs_resolve(struct anv_cmd_buffer *cmd_buffer,
    anv_image_mcs_op(cmd_buffer, image, format, swizzle, aspect,
                     array_layer, 1, resolve_op, NULL, true);
 #else
-   unreachable("MCS resolves are unsupported on Ivybridge and Bay Trail");
+   UNREACHABLE("MCS resolves are unsupported on Ivybridge and Bay Trail");
 #endif
 }
 
@@ -927,6 +928,16 @@ transition_color_buffer(struct anv_cmd_buffer *cmd_buffer,
       image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT
       ? isl_drm_modifier_get_info(image->vk.drm_format_mod)
       : NULL;
+
+   /**
+    * Vulkan 1.4.313, 7.7.4. Queue Family Ownership Transfer:
+    *
+    *    If the values of srcQueueFamilyIndex and dstQueueFamilyIndex are equal,
+    *    no ownership transfer is performed, and the barrier operates as if they
+    *    were both set to VK_QUEUE_FAMILY_IGNORED.
+    */
+   if (src_queue_family == dst_queue_family)
+      src_queue_family = dst_queue_family = VK_QUEUE_FAMILY_IGNORED;
 
    const bool src_queue_external =
       src_queue_family == VK_QUEUE_FAMILY_FOREIGN_EXT ||
@@ -1502,7 +1513,9 @@ genX(EndCommandBuffer)(
 
    emit_isp_disable(cmd_buffer);
 
-   trace_intel_end_cmd_buffer(&cmd_buffer->trace, cmd_buffer->vk.level);
+   trace_intel_end_cmd_buffer(&cmd_buffer->trace,
+                              (uintptr_t)(vk_command_buffer_to_handle(&cmd_buffer->vk)),
+                              cmd_buffer->vk.level);
 
    anv_cmd_buffer_end_batch_buffer(cmd_buffer);
 
@@ -2284,7 +2297,9 @@ emit_binding_table(struct anv_cmd_buffer *cmd_buffer,
                             "descriptor does not have NonReadable "
                             "set and the image does not have a "
                             "corresponding SPIR-V format enum.");
-                  vk_debug_report(&cmd_buffer->device->physical->instance->vk,
+                  struct vk_instance *instance =
+                     &cmd_buffer->device->physical->instance->vk;
+                  vk_debug_report(&instance->debug_report,
                                   VK_DEBUG_REPORT_ERROR_BIT_EXT,
                                   &desc->image_view->vk.base,
                                   __LINE__, 0, "anv",
@@ -2385,8 +2400,7 @@ emit_binding_table(struct anv_cmd_buffer *cmd_buffer,
             break;
 
          default:
-            assert(!"Invalid descriptor type");
-            continue;
+            UNREACHABLE("Invalid descriptor type");
          }
          assert(surface_state.map);
          bt_map[s] = surface_state.offset + state_offset;
@@ -2454,7 +2468,7 @@ flush_descriptor_sets(struct anv_cmd_buffer *cmd_buffer,
       if (!shaders[i])
          continue;
 
-      gl_shader_stage stage = shaders[i]->stage;
+      mesa_shader_stage stage = shaders[i]->stage;
       VkShaderStageFlags vk_stage = mesa_to_vk_shader_stage(stage);
       if ((vk_stage & dirty) == 0)
          continue;
@@ -2493,7 +2507,7 @@ flush_descriptor_sets(struct anv_cmd_buffer *cmd_buffer,
          if (!shaders[i])
             continue;
 
-         gl_shader_stage stage = shaders[i]->stage;
+         mesa_shader_stage stage = shaders[i]->stage;
 
          result = emit_samplers(cmd_buffer, pipe_state, shaders[i],
                                 &cmd_buffer->state.samplers[stage]);
@@ -2654,7 +2668,7 @@ get_push_range_bound_size(struct anv_cmd_buffer *cmd_buffer,
       return (range->start + range->length) * 32;
 
    case ANV_DESCRIPTOR_SET_SHADER_CONSTANTS:
-      return ALIGN(shader->prog_data->const_data_size, ANV_UBO_ALIGNMENT);
+      return align(shader->prog_data->const_data_size, ANV_UBO_ALIGNMENT);
 
    default: {
       assert(range->set < MAX_SETS);
@@ -2701,7 +2715,7 @@ get_push_range_bound_size(struct anv_cmd_buffer *cmd_buffer,
 
 static void
 cmd_buffer_emit_push_constant(struct anv_cmd_buffer *cmd_buffer,
-                              gl_shader_stage stage,
+                              mesa_shader_stage stage,
                               struct anv_address *buffers,
                               unsigned buffer_count)
 {
@@ -3609,7 +3623,7 @@ void genX(CmdDraw)(
 
    update_dirty_vbs_for_gfx8_vb_flush(cmd_buffer, SEQUENTIAL);
 
-   trace_intel_end_draw(&cmd_buffer->trace, count);
+   trace_intel_end_draw(&cmd_buffer->trace, count, 0, 0);
 }
 
 void genX(CmdDrawMultiEXT)(
@@ -3660,7 +3674,7 @@ void genX(CmdDrawMultiEXT)(
 
    update_dirty_vbs_for_gfx8_vb_flush(cmd_buffer, SEQUENTIAL);
 
-   trace_intel_end_draw_multi(&cmd_buffer->trace, count);
+   trace_intel_end_draw_multi(&cmd_buffer->trace, count, 0, 0);
 }
 
 void genX(CmdDrawIndexed)(
@@ -3715,7 +3729,7 @@ void genX(CmdDrawIndexed)(
 
    update_dirty_vbs_for_gfx8_vb_flush(cmd_buffer, RANDOM);
 
-   trace_intel_end_draw_indexed(&cmd_buffer->trace, count);
+   trace_intel_end_draw_indexed(&cmd_buffer->trace, count, 0, 0);
 }
 
 void genX(CmdDrawMultiIndexedEXT)(
@@ -3825,7 +3839,7 @@ void genX(CmdDrawMultiIndexedEXT)(
 
    update_dirty_vbs_for_gfx8_vb_flush(cmd_buffer, RANDOM);
 
-   trace_intel_end_draw_indexed_multi(&cmd_buffer->trace, count);
+   trace_intel_end_draw_indexed_multi(&cmd_buffer->trace, count, 0, 0);
 }
 
 /* Auto-Draw / Indirect Registers */
@@ -3906,7 +3920,7 @@ void genX(CmdDrawIndirectByteCountEXT)(
    update_dirty_vbs_for_gfx8_vb_flush(cmd_buffer, SEQUENTIAL);
 
    trace_intel_end_draw_indirect_byte_count(&cmd_buffer->trace,
-      instanceCount * pipeline->instance_multiplier);
+      instanceCount * pipeline->instance_multiplier, 0, 0);
 #endif /* GFX_VERx10 >= 75 */
 }
 
@@ -4004,7 +4018,7 @@ void genX(CmdDrawIndirect)(
       offset += stride;
    }
 
-   trace_intel_end_draw_indirect(&cmd_buffer->trace, drawCount);
+   trace_intel_end_draw_indirect(&cmd_buffer->trace, drawCount, 0, 0);
 }
 
 void genX(CmdDrawIndexedIndirect)(
@@ -4062,7 +4076,7 @@ void genX(CmdDrawIndexedIndirect)(
       offset += stride;
    }
 
-   trace_intel_end_draw_indexed_indirect(&cmd_buffer->trace, drawCount);
+   trace_intel_end_draw_indexed_indirect(&cmd_buffer->trace, drawCount, 0, 0);
 }
 
 static struct mi_value
@@ -4233,7 +4247,7 @@ void genX(CmdDrawIndirectCount)(
    mi_value_unref(&b, max);
 
    trace_intel_end_draw_indirect_count(&cmd_buffer->trace,
-                                       anv_address_utrace(count_address));
+                                       anv_address_utrace(count_address), 0, 0);
 }
 
 void genX(CmdDrawIndexedIndirectCount)(
@@ -4304,7 +4318,7 @@ void genX(CmdDrawIndexedIndirectCount)(
    mi_value_unref(&b, max);
 
    trace_intel_end_draw_indexed_indirect_count(&cmd_buffer->trace,
-                                               anv_address_utrace(count_address));
+                                               anv_address_utrace(count_address), 0, 0);
 }
 
 void genX(CmdBeginTransformFeedbackEXT)(
@@ -4637,12 +4651,9 @@ void genX(CmdDispatchBase)(
                   groupCountY, groupCountZ);
 
    trace_intel_end_compute(&cmd_buffer->trace,
-                           groupCountX, groupCountY, groupCountZ);
+                           groupCountX, groupCountY, groupCountZ,
+                           0);
 }
-
-#define GPGPU_DISPATCHDIMX 0x2500
-#define GPGPU_DISPATCHDIMY 0x2504
-#define GPGPU_DISPATCHDIMZ 0x2508
 
 void genX(CmdDispatchIndirect)(
     VkCommandBuffer                             commandBuffer,
@@ -4689,9 +4700,9 @@ void genX(CmdDispatchIndirect)(
    struct mi_value size_y = mi_mem32(anv_address_add(addr, 4));
    struct mi_value size_z = mi_mem32(anv_address_add(addr, 8));
 
-   mi_store(&b, mi_reg32(GPGPU_DISPATCHDIMX), size_x);
-   mi_store(&b, mi_reg32(GPGPU_DISPATCHDIMY), size_y);
-   mi_store(&b, mi_reg32(GPGPU_DISPATCHDIMZ), size_z);
+   mi_store(&b, mi_reg32(GENX(GPGPU_DISPATCHDIMX_num)), size_x);
+   mi_store(&b, mi_reg32(GENX(GPGPU_DISPATCHDIMY_num)), size_y);
+   mi_store(&b, mi_reg32(GENX(GPGPU_DISPATCHDIMZ_num)), size_z);
 
 #if GFX_VER <= 7
    /* predicate = (compute_dispatch_indirect_x_size == 0); */
@@ -4745,8 +4756,7 @@ void genX(CmdDispatchIndirect)(
 #endif
 
    emit_cs_walker(cmd_buffer, pipeline, true, prog_data, 0, 0, 0);
-
-   trace_intel_end_compute(&cmd_buffer->trace, 0, 0, 0);
+   trace_intel_end_compute(&cmd_buffer->trace, 0, 0, 0, 0);
 }
 
 static void
@@ -5800,14 +5810,8 @@ void genX(CmdSetEvent2)(
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
    ANV_FROM_HANDLE(anv_event, event, _event);
 
-   VkPipelineStageFlags2 src_stages = 0;
-
-   for (uint32_t i = 0; i < pDependencyInfo->memoryBarrierCount; i++)
-      src_stages |= pDependencyInfo->pMemoryBarriers[i].srcStageMask;
-   for (uint32_t i = 0; i < pDependencyInfo->bufferMemoryBarrierCount; i++)
-      src_stages |= pDependencyInfo->pBufferMemoryBarriers[i].srcStageMask;
-   for (uint32_t i = 0; i < pDependencyInfo->imageMemoryBarrierCount; i++)
-      src_stages |= pDependencyInfo->pImageMemoryBarriers[i].srcStageMask;
+   VkPipelineStageFlags2 src_stages =
+      vk_collect_dependency_info_src_stages(pDependencyInfo);
 
    cmd_buffer->state.pending_pipe_bits |= ANV_PIPE_POST_SYNC_BIT;
    genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
@@ -5896,14 +5900,15 @@ static uint32_t vk_to_intel_index_type(VkIndexType type)
    case VK_INDEX_TYPE_UINT32:
       return INDEX_DWORD;
    default:
-      unreachable("invalid index type");
+      UNREACHABLE("invalid index type");
    }
 }
 
-void genX(CmdBindIndexBuffer)(
+void genX(CmdBindIndexBuffer2KHR)(
     VkCommandBuffer                             commandBuffer,
     VkBuffer                                    _buffer,
     VkDeviceSize                                offset,
+	 VkDeviceSize                                size,
     VkIndexType                                 indexType)
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
@@ -5913,7 +5918,7 @@ void genX(CmdBindIndexBuffer)(
    cmd_buffer->state.gfx.index_buffer = buffer;
    cmd_buffer->state.gfx.index_type = vk_to_intel_index_type(indexType);
    cmd_buffer->state.gfx.index_offset = offset;
-
+   cmd_buffer->state.gfx.index_size = buffer ? vk_buffer_range(&buffer->vk, offset, size) : 0;
    cmd_buffer->state.gfx.dirty |= ANV_CMD_DIRTY_INDEX_BUFFER;
 }
 
@@ -5946,7 +5951,7 @@ VkResult genX(CmdSetPerformanceOverrideINTEL)(
       break;
 
    default:
-      unreachable("Invalid override");
+      UNREACHABLE("Invalid override");
    }
 
    return VK_SUCCESS;
@@ -5993,7 +5998,7 @@ void genX(cmd_emit_timestamp)(struct anv_batch *batch,
       break;
 
    default:
-      unreachable("invalid");
+      UNREACHABLE("invalid");
    }
 }
 

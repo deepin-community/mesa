@@ -98,7 +98,7 @@ v3d_tmu_get_type_from_op(uint32_t tmu_op, bool is_write)
                 return V3D_TMU_OP_TYPE_REGULAR;
 
         default:
-                unreachable("Unknown tmu_op\n");
+                UNREACHABLE("Unknown tmu_op\n");
         }
 }
 static void
@@ -117,7 +117,7 @@ resize_qreg_array(struct v3d_compile *c,
         *size = MAX2(*size * 2, decl_size);
         *regs = reralloc(c, *regs, struct qreg, *size);
         if (!*regs) {
-                fprintf(stderr, "Malloc failure\n");
+                mesa_loge("Malloc failure");
                 abort();
         }
 
@@ -138,7 +138,7 @@ resize_interp_array(struct v3d_compile *c,
         *size = MAX2(*size * 2, decl_size);
         *regs = reralloc(c, *regs, struct v3d_interp_input, *size);
         if (!*regs) {
-                fprintf(stderr, "Malloc failure\n");
+                mesa_loge("Malloc failure");
                 abort();
         }
 
@@ -204,7 +204,7 @@ v3d_general_tmu_op_for_atomic(nir_intrinsic_instr *instr)
         case nir_atomic_op_ixor:    return V3D_TMU_OP_WRITE_XOR_READ_NOT;
         case nir_atomic_op_xchg:    return V3D_TMU_OP_WRITE_XCHG_READ_FLUSH;
         case nir_atomic_op_cmpxchg: return V3D_TMU_OP_WRITE_CMPXCHG_READ_FLUSH;
-        default:                    unreachable("unknown atomic op");
+        default:                    UNREACHABLE("unknown atomic op");
         }
 }
 
@@ -234,7 +234,7 @@ v3d_general_tmu_op(nir_intrinsic_instr *instr)
                 return v3d_general_tmu_op_for_atomic(instr);
 
         default:
-                unreachable("unknown intrinsic op");
+                UNREACHABLE("unknown intrinsic op");
         }
 }
 
@@ -651,18 +651,14 @@ ntq_emit_tmu_general(struct v3d_compile *c, nir_intrinsic_instr *instr,
                                 v3d_tmu_get_type_from_op(tmu_op, !is_load) ==
                                 V3D_TMU_OP_TYPE_ATOMIC;
 
-                        /* Only load per-quad if we can be certain that all
-                         * lines in the quad are active. Notice that demoted
-                         * invocations, unlike terminated ones, are still
-                         * active: we want to skip memory writes for them but
-                         * loads should still work.
+                        /* Only load per-quad if we can't skip helper
+                         * invocations.
                          */
                         uint32_t perquad =
-                                is_load && !vir_in_nonuniform_control_flow(c) &&
-                                ((c->s->info.stage == MESA_SHADER_FRAGMENT &&
-                                  c->s->info.fs.needs_quad_helper_invocations &&
-                                  !c->emitted_discard) ||
-                                 c->s->info.uses_wide_subgroup_intrinsics) ?
+                                is_load &&
+                                c->s->info.stage == MESA_SHADER_FRAGMENT &&
+                                nir_intrinsic_has_access(instr) &&
+                                !(nir_intrinsic_access(instr) & ACCESS_SKIP_HELPERS) ?
                                 GENERAL_TMU_LOOKUP_PER_QUAD :
                                 GENERAL_TMU_LOOKUP_PER_PIXEL;
                         config = 0xffffff00 | tmu_op << 3 | perquad;
@@ -681,7 +677,7 @@ ntq_emit_tmu_general(struct v3d_compile *c, nir_intrinsic_instr *instr,
                                         config |= GENERAL_TMU_LOOKUP_TYPE_8BIT_UI;
                                         break;
                                 default:
-                                        unreachable("Unsupported bitsize");
+                                        UNREACHABLE("Unsupported bitsize");
                                 }
                         } else {
                                 assert(type_size == 4);
@@ -721,9 +717,9 @@ ntq_emit_tmu_general(struct v3d_compile *c, nir_intrinsic_instr *instr,
                 }
         }
 
-        /* nir_lower_wrmasks should've ensured that any writemask on a store
-         * operation only has consecutive bits set, in which case we should've
-         * processed the full writemask above.
+        /* v3d_nir_lower_load_store_bitsize should've ensured that any writemask
+         * on a store operation only has consecutive bits set, in which case
+         * we should've processed the full writemask above.
          */
         assert(writemask == 0);
 }
@@ -944,7 +940,7 @@ ntq_emit_txs(struct v3d_compile *c, nir_tex_instr *instr)
                         break;
 
                 default:
-                        unreachable("Bad sampler type");
+                        UNREACHABLE("Bad sampler type");
                 }
 
                 ntq_store_def(c, &instr->def, i, size);
@@ -1103,7 +1099,7 @@ emit_fragment_varying(struct v3d_compile *c, nir_variable *var,
                 break;
 
         default:
-                unreachable("Bad interp mode");
+                UNREACHABLE("Bad interp mode");
         }
 
         if (input_idx >= 0)
@@ -1167,7 +1163,7 @@ ntq_emit_comparison(struct v3d_compile *c,
                     enum v3d_qpu_cond *out_cond)
 {
         struct qreg src0 = ntq_get_alu_src(c, compare_instr, 0);
-        struct qreg src1;
+        struct qreg src1 = { 0 };
         if (nir_op_infos[compare_instr->op].num_inputs > 1)
                 src1 = ntq_get_alu_src(c, compare_instr, 1);
         bool cond_invert = false;
@@ -1231,9 +1227,9 @@ ntq_emit_comparison(struct v3d_compile *c,
 static struct nir_alu_instr *
 ntq_get_alu_parent(nir_src src)
 {
-        if (src.ssa->parent_instr->type != nir_instr_type_alu)
+        if (!nir_src_is_alu(src))
                 return NULL;
-        nir_alu_instr *instr = nir_instr_as_alu(src.ssa->parent_instr);
+        nir_alu_instr *instr = nir_def_as_alu(src.ssa);
         if (!instr)
                 return NULL;
 
@@ -1325,6 +1321,7 @@ f2f16_rtz(struct v3d_compile *c, struct qreg f32)
 /**
  * Takes the result value of a signed integer width conversion from a smaller
  * type to a larger type and if needed, it applies sign extension to it.
+ * This is destructive: the return qreg is the same as the source qreg.
  */
 static struct qreg
 sign_extend(struct v3d_compile *c,
@@ -1334,24 +1331,22 @@ sign_extend(struct v3d_compile *c,
 {
         assert(src_bit_size < dst_bit_size);
 
-        struct qreg tmp = vir_MOV(c, value);
-
         /* Do we need to sign-extend? */
         uint32_t sign_mask = 1 << (src_bit_size - 1);
         struct qinst *sign_check =
                 vir_AND_dest(c, vir_nop_reg(),
-                             tmp, vir_uniform_ui(c, sign_mask));
+                             value, vir_uniform_ui(c, sign_mask));
         vir_set_pf(c, sign_check, V3D_QPU_PF_PUSHZ);
 
         /* If so, fill in leading sign bits */
         uint32_t extend_bits = ~(((1 << src_bit_size) - 1)) &
                                ((1ull << dst_bit_size) - 1);
         struct qinst *extend_inst =
-                vir_OR_dest(c, tmp, tmp,
+                vir_OR_dest(c, value, value,
                             vir_uniform_ui(c, extend_bits));
         vir_set_cond(extend_inst, V3D_QPU_COND_IFNA);
 
-        return tmp;
+        return value;
 }
 
 static void
@@ -1375,7 +1370,8 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
         }
 
         /* General case: We can just grab the one used channel per src. */
-        struct qreg src[nir_op_infos[instr->op].num_inputs];
+        assert(nir_op_infos[instr->op].num_inputs <= 3);
+        struct qreg src[3] = { 0 };
         for (int i = 0; i < nir_op_infos[instr->op].num_inputs; i++) {
                 src[i] = ntq_get_alu_src(c, instr, i);
         }
@@ -1430,6 +1426,12 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
         case nir_op_i2f32: {
                 uint32_t bit_size = nir_src_bit_size(instr->src[0].src);
                 assert(bit_size <= 32);
+
+                /* Convert to 32-bit integer and then convert that to f32.
+                 *
+                 * FIXME: we can do better on Pi5 with MOV.il integer input
+                 * unpack (for i162i32) and unpacki0 opcode (for i82i32).
+                 */
                 result = src[0];
                 if (bit_size < 32) {
                         uint32_t mask = bit_size == 16 ? 0xffff : 0xff;
@@ -1442,6 +1444,12 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
         case nir_op_u2f32: {
                 uint32_t bit_size = nir_src_bit_size(instr->src[0].src);
                 assert(bit_size <= 32);
+
+                /* Convert to 32-bit integer and then convert that to f32.
+                 *
+                 * FIXME: we can do better on Pi5 with MOV.ul integer input
+                 * unpack (for u162u32) and unpacku0 opcode (for u82u32).
+                 */
                 result = src[0];
                 if (bit_size < 32) {
                         uint32_t mask = bit_size == 16 ? 0xffff : 0xff;
@@ -1465,10 +1473,14 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
         case nir_op_i2f16: {
                 uint32_t bit_size = nir_src_bit_size(instr->src[0].src);
                 assert(bit_size <= 32);
+
+                /* Produce a 32-bit integer and convert that to f16 */
                 if (bit_size < 32) {
                         uint32_t mask = bit_size == 16 ? 0xffff : 0xff;
                         result = vir_AND(c, src[0], vir_uniform_ui(c, mask));
                         result = sign_extend(c, result, bit_size, 32);
+                } else {
+                        result = src[0];
                 }
                 result = vir_ITOF(c, result);
                 vir_set_pack(c->defs[result.index], V3D_QPU_PACK_L);
@@ -1478,9 +1490,13 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
         case nir_op_u2f16: {
                 uint32_t bit_size = nir_src_bit_size(instr->src[0].src);
                 assert(bit_size <= 32);
+
+                /* Produce a 32-bit integer and convert that to f16 */
                 if (bit_size < 32) {
                         uint32_t mask = bit_size == 16 ? 0xffff : 0xff;
                         result = vir_AND(c, src[0], vir_uniform_ui(c, mask));
+                } else {
+                        result = src[0];
                 }
                 result = vir_UTOF(c, result);
                 vir_set_pack(c->defs[result.index], V3D_QPU_PACK_L);
@@ -1508,12 +1524,13 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
         case nir_op_i2i16: {
                 uint32_t bit_size = nir_src_bit_size(instr->src[0].src);
                 assert(bit_size == 32 || bit_size == 8);
+
+                /* If we convert from a larger type we truncate and leave the
+                 * MSB bits in the destination undefined. If we convert to a
+                 * larger type we need to clear the undefined bits.
+                 */
                 if (bit_size == 32) {
-                        /* We don't have integer pack/unpack methods for
-                         * converting between 16-bit and 32-bit, so we implement
-                         * the conversion manually by truncating the src.
-                         */
-                        result = vir_AND(c, src[0], vir_uniform_ui(c, 0xffff));
+                        result = vir_MOV(c, src[0]);
                 } else {
                         struct qreg tmp = vir_AND(c, src[0],
                                                   vir_uniform_ui(c, 0xff));
@@ -1526,14 +1543,12 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
                 uint32_t bit_size = nir_src_bit_size(instr->src[0].src);
                 assert(bit_size == 32 || bit_size == 8);
 
-                /* We don't have integer pack/unpack methods for converting
-                 * between 16-bit and 32-bit, so we implement the conversion
-                 * manually by truncating the src. For the 8-bit case, we
-                 * want to make sure we don't copy garbage from any of the
-                 * 24 MSB bits.
+                /* If we convert from a larger type we truncate and leave the
+                 * MSB bits in the destination undefined. If we convert to a
+                 * larger type we need to clear the undefined bits.
                  */
                 if (bit_size == 32)
-                        result = vir_AND(c, src[0], vir_uniform_ui(c, 0xffff));
+                        result = vir_MOV(c, src[0]);
                 else
                         result = vir_AND(c, src[0], vir_uniform_ui(c, 0xff));
                 break;
@@ -1543,20 +1558,21 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
         case nir_op_u2u8:
                 assert(nir_src_bit_size(instr->src[0].src) == 32 ||
                        nir_src_bit_size(instr->src[0].src) == 16);
-                /* We don't have integer pack/unpack methods for converting
-                 * between 8-bit and 32-bit, so we implement the conversion
-                 * manually by truncating the src.
+                /* If we convert from a larger type we truncate and leave the
+                 * MSB bits in the destination undefined.
                  */
-                result = vir_AND(c, src[0], vir_uniform_ui(c, 0xff));
+                result = vir_MOV(c, src[0]);
                 break;
 
         case nir_op_u2u32: {
                 uint32_t bit_size = nir_src_bit_size(instr->src[0].src);
                 assert(bit_size == 16 || bit_size == 8);
 
-                /* we don't have a native 8-bit/16-bit MOV so we copy all 32-bit
-                 * from the src but we make sure to clear any garbage bits that
-                 * may be present in the invalid src bits.
+                /* If we convert to a larger type we need to clear the
+                 * undefined bits.
+                 *
+                 * FIXME: we can do better on v71 for u162u32 (see MOV.ul
+                 * integer input unpack) and u82u32 (unpacku0 instruction)
                  */
                 uint32_t mask = (1 << bit_size) - 1;
                 result = vir_AND(c, src[0], vir_uniform_ui(c, mask));
@@ -1567,10 +1583,15 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
                 uint32_t bit_size = nir_src_bit_size(instr->src[0].src);
                 assert(bit_size == 16 || bit_size == 8);
 
+                /* If we convert to a larger type we need to clear the
+                 * undefined bits.
+                 *
+                 * FIXME: we can do better on v71 for i162i32 (see MOV.il
+                 * integer input unpack) and i82i32 (unpacki0 instruction)
+                 */
                 uint32_t mask = (1 << bit_size) - 1;
                 struct qreg tmp = vir_AND(c, src[0],
                                           vir_uniform_ui(c, mask));
-
                 result = vir_MOV(c, sign_extend(c, tmp, bit_size, 32));
                 break;
         }
@@ -1621,6 +1642,12 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
 
         case nir_op_imul:
                 result = vir_UMUL(c, src[0], src[1]);
+                break;
+        case nir_op_umul24:
+                result = vir_UMUL24_RTOP0(c, src[0], src[1]);
+                break;
+        case nir_op_imul24:
+                result = vir_SMUL24(c, src[0], src[1]);
                 break;
 
         case nir_op_seq:
@@ -1748,16 +1775,6 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
                 result = vir_V8PACK(c, src[0], src[1]);
                 break;
 
-        case nir_op_unpack_half_2x16_split_x:
-                result = vir_FMOV(c, src[0]);
-                vir_set_unpack(c->defs[result.index], 0, V3D_QPU_UNPACK_L);
-                break;
-
-        case nir_op_unpack_half_2x16_split_y:
-                result = vir_FMOV(c, src[0]);
-                vir_set_unpack(c->defs[result.index], 0, V3D_QPU_UNPACK_H);
-                break;
-
         case nir_op_pack_2x16_to_unorm_2x8_v3d:
                 result = vir_VFTOUNORM8(c, src[0]);
                 break;
@@ -1775,11 +1792,23 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
                 break;
 
         case nir_op_f2unorm_16_v3d:
+                assert(c->devinfo->ver >= 71);
                 result = vir_FTOUNORM16(c, src[0]);
                 break;
 
         case nir_op_f2snorm_16_v3d:
+                assert(c->devinfo->ver >= 71);
                 result = vir_FTOSNORM16(c, src[0]);
+                break;
+
+        case nir_op_snorm2f_16_v3d:
+                assert(c->devinfo->ver >= 71);
+                result = vir_FUNPACKSNORMLO(c, src[0]);
+                break;
+
+        case nir_op_unorm2f_16_v3d:
+                assert(c->devinfo->ver >= 71);
+                result = vir_FUNPACKUNORMLO(c, src[0]);
                 break;
 
         case nir_op_fsat:
@@ -1801,9 +1830,8 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
                 break;
 
         default:
-                fprintf(stderr, "unknown NIR ALU inst: ");
-                nir_print_instr(&instr->instr, stderr);
-                fprintf(stderr, "\n");
+                mesa_loge("Unknown NIR ALU inst: %s",
+                          nir_instr_as_str(&instr->instr, NULL));
                 abort();
         }
 
@@ -1860,31 +1888,16 @@ vir_emit_tlb_color_write(struct v3d_compile *c, unsigned rt)
                 num_components = MAX2(num_components, 3);
         assert(num_components != 0);
 
-        enum glsl_base_type type = glsl_get_base_type(var->type);
-        bool is_int_format = type == GLSL_TYPE_INT || type == GLSL_TYPE_UINT;
-        bool is_32b_tlb_format = is_int_format ||
-                                 (c->fs_key->f32_color_rb & (1 << rt));
-
-        if (is_int_format) {
-                /* The F32 vs I32 distinction was dropped in 4.2. */
-                if (c->devinfo->ver < 42)
-                        conf |= TLB_TYPE_I32_COLOR;
-                else
-                        conf |= TLB_TYPE_F32_COLOR;
+        if (c->fs_key->f32_color_rb & (1 << rt)) {
+                conf |= TLB_TYPE_F32_COLOR;
                 conf |= ((num_components - 1) << TLB_VEC_SIZE_MINUS_1_SHIFT);
         } else {
-                if (c->fs_key->f32_color_rb & (1 << rt)) {
-                        conf |= TLB_TYPE_F32_COLOR;
-                        conf |= ((num_components - 1) <<
-                                TLB_VEC_SIZE_MINUS_1_SHIFT);
-                } else {
-                        conf |= TLB_TYPE_F16_COLOR;
-                        conf |= TLB_F16_SWAP_HI_LO;
-                        if (num_components >= 3)
-                                conf |= TLB_VEC_SIZE_4_F16;
-                        else
-                                conf |= TLB_VEC_SIZE_2_F16;
-                }
+                conf |= TLB_TYPE_F16_COLOR;
+                conf |= TLB_F16_SWAP_HI_LO;
+                if (num_components >= 3)
+                        conf |= TLB_VEC_SIZE_4_F16;
+                else
+                        conf |= TLB_VEC_SIZE_2_F16;
         }
 
         int num_samples = c->msaa_per_sample_output ? V3D_MAX_SAMPLES : 1;
@@ -1906,7 +1919,7 @@ vir_emit_tlb_color_write(struct v3d_compile *c, unsigned rt)
                 if (c->fs_key->sample_alpha_to_one)
                         a = vir_uniform_f(c, 1.0);
 
-                if (is_32b_tlb_format) {
+                if (c->fs_key->f32_color_rb & (1 << rt)) {
                         if (i == 0) {
                                 inst = vir_MOV_dest(c, tlbu_reg, r);
                                 inst->uniform =
@@ -1955,7 +1968,8 @@ emit_frag_end(struct v3d_compile *c)
                         has_any_tlb_color_write = true;
         }
 
-        if (c->fs_key->sample_alpha_to_coverage && c->output_color_var[0]) {
+        if (!c->fs_key->software_blend &&
+            c->fs_key->sample_alpha_to_coverage && c->output_color_var[0]) {
                 struct nir_variable *var = c->output_color_var[0];
                 struct qreg *color = &c->outputs[var->data.driver_location * 4];
 
@@ -2085,12 +2099,12 @@ static bool
 mem_vectorize_callback(unsigned align_mul, unsigned align_offset,
                        unsigned bit_size,
                        unsigned num_components,
-                       unsigned hole_size,
+                       int64_t hole_size,
                        nir_intrinsic_instr *low,
                        nir_intrinsic_instr *high,
                        void *data)
 {
-        if (hole_size || !nir_num_components_valid(num_components))
+        if (hole_size > 0 || !nir_num_components_valid(num_components))
                 return false;
 
         /* TMU general access only supports 32-bit vectors */
@@ -2119,10 +2133,6 @@ void
 v3d_optimize_nir(struct v3d_compile *c, struct nir_shader *s)
 {
         bool progress;
-        unsigned lower_flrp =
-                (s->options->lower_flrp16 ? 16 : 0) |
-                (s->options->lower_flrp32 ? 32 : 0) |
-                (s->options->lower_flrp64 ? 64 : 0);
 
         do {
                 progress = false;
@@ -2151,16 +2161,26 @@ v3d_optimize_nir(struct v3d_compile *c, struct nir_shader *s)
                          NULL);
 
                 NIR_PASS(progress, s, nir_lower_alu_to_scalar, NULL, NULL);
-                NIR_PASS(progress, s, nir_lower_phis_to_scalar, false);
-                NIR_PASS(progress, s, nir_copy_prop);
+                NIR_PASS(progress, s, nir_lower_phis_to_scalar, NULL, NULL);
+                NIR_PASS(progress, s, nir_opt_copy_prop);
                 NIR_PASS(progress, s, nir_opt_remove_phis);
                 NIR_PASS(progress, s, nir_opt_dce);
                 NIR_PASS(progress, s, nir_opt_dead_cf);
                 NIR_PASS(progress, s, nir_opt_cse);
                 /* before peephole_select as it can generate 64 bit bcsels */
                 NIR_PASS(progress, s, nir_lower_64bit_phis);
-                NIR_PASS(progress, s, nir_opt_peephole_select, 0, false, false);
-                NIR_PASS(progress, s, nir_opt_peephole_select, 24, true, true);
+
+                nir_opt_peephole_select_options peephole_select_options = {
+                        .limit = 0,
+                };
+                NIR_PASS(progress, s, nir_opt_peephole_select, &peephole_select_options);
+
+                peephole_select_options = (nir_opt_peephole_select_options){
+                        .limit = 24,
+                        .indirect_load_ok = true,
+                        .expensive_alu_ok = true,
+                };
+                NIR_PASS(progress, s, nir_opt_peephole_select, &peephole_select_options);
                 NIR_PASS(progress, s, nir_opt_algebraic);
                 NIR_PASS(progress, s, nir_opt_constant_folding);
 
@@ -2170,11 +2190,15 @@ v3d_optimize_nir(struct v3d_compile *c, struct nir_shader *s)
 
                 if (nir_opt_loop(s)) {
                    progress = true;
-                   NIR_PASS(progress, s, nir_copy_prop);
+                   NIR_PASS(progress, s, nir_opt_copy_prop);
                    NIR_PASS(progress, s, nir_opt_dce);
                 }
 
-                NIR_PASS(progress, s, nir_opt_conditional_discard);
+                peephole_select_options = (nir_opt_peephole_select_options){
+                        .limit = 0,
+                        .discard_ok = true,
+                };
+                NIR_PASS(progress, s, nir_opt_peephole_select, &peephole_select_options);
 
                 NIR_PASS(progress, s, nir_opt_remove_phis);
                 NIR_PASS(progress, s, nir_opt_if, false);
@@ -2218,25 +2242,7 @@ v3d_optimize_nir(struct v3d_compile *c, struct nir_shader *s)
                         }
                 }
 
-                if (lower_flrp != 0) {
-                        bool lower_flrp_progress = false;
-
-                        NIR_PASS(lower_flrp_progress, s, nir_lower_flrp,
-                                 lower_flrp,
-                                 false /* always_precise */);
-                        if (lower_flrp_progress) {
-                                NIR_PASS(progress, s, nir_opt_constant_folding);
-                                progress = true;
-                        }
-
-                        /* Nothing should rematerialize any flrps, so we only
-                         * need to do this lowering once.
-                         */
-                        lower_flrp = 0;
-                }
-
                 NIR_PASS(progress, s, nir_opt_undef);
-                NIR_PASS(progress, s, nir_lower_undef_to_zero);
 
                 if (c && !c->disable_loop_unrolling &&
                     s->options->max_unroll_iterations > 0) {
@@ -2247,11 +2253,16 @@ v3d_optimize_nir(struct v3d_compile *c, struct nir_shader *s)
                 }
         } while (progress);
 
+        NIR_PASS(progress, s, nir_lower_undef_to_zero);
+
         /* needs to be outside of optimization loop, otherwise it fights with
          * opt_algebraic optimizing the conversion lowering
          */
         NIR_PASS(progress, s, v3d_nir_lower_algebraic, c);
         NIR_PASS(progress, s, nir_opt_cse);
+
+        nir_opt_uub_options uub_options = {.opt_imul = true};
+        NIR_PASS(progress, s, nir_opt_uub, &uub_options);
 
         nir_move_options sink_opts =
                 nir_move_const_undef | nir_move_comparisons | nir_move_copies |
@@ -2455,8 +2466,7 @@ ntq_setup_outputs(struct v3d_compile *c)
 
                 switch (var->data.location) {
                 case FRAG_RESULT_COLOR:
-                        for (int i = 0; i < V3D_MAX_DRAW_BUFFERS; i++)
-                                c->output_color_var[i] = var;
+                        UNREACHABLE("Frag color should be lowered");
                         break;
                 case FRAG_RESULT_DATA0:
                 case FRAG_RESULT_DATA1:
@@ -2466,6 +2476,15 @@ ntq_setup_outputs(struct v3d_compile *c)
                 case FRAG_RESULT_DATA5:
                 case FRAG_RESULT_DATA6:
                 case FRAG_RESULT_DATA7:
+                        /* Dual source outputs have an index that is != 0.
+                         * If they have not been removed by now they end up
+                         * clobbering `output_color_var` with the wrong
+                         * variable.
+                         */
+                        if (var->data.index != 0 && var->data.index != NIR_VARIABLE_NO_INDEX) {
+                            break;
+                        }
+
                         c->output_color_var[var->data.location -
                                             FRAG_RESULT_DATA0] = var;
                         break;
@@ -2473,7 +2492,9 @@ ntq_setup_outputs(struct v3d_compile *c)
                         c->output_position_index = loc;
                         break;
                 case FRAG_RESULT_SAMPLE_MASK:
-                        c->output_sample_mask_index = loc;
+                        if (!c->fs_key->ignore_sample_mask) {
+                                c->output_sample_mask_index = loc;
+                        }
                         break;
                 }
         }
@@ -2581,22 +2602,12 @@ vir_emit_tlb_color_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
                 &c->color_reads[(rt * V3D_MAX_SAMPLES + sample_index) * 4];
 
         if (color_reads_for_sample[component].file == QFILE_NULL) {
-                enum pipe_format rt_format = c->fs_key->color_fmt[rt].format;
-                int num_components =
-                        util_format_get_nr_components(rt_format);
+                nir_variable *var = c->output_color_var[rt];
+                int num_components = glsl_get_vector_elements(var->type);
 
                 const bool swap_rb = c->fs_key->swap_color_rb & (1 << rt);
                 if (swap_rb)
                         num_components = MAX2(num_components, 3);
-
-                nir_variable *var = c->output_color_var[rt];
-                enum glsl_base_type type = glsl_get_base_type(var->type);
-
-                bool is_int_format = type == GLSL_TYPE_INT ||
-                                     type == GLSL_TYPE_UINT;
-
-                bool is_32b_tlb_format = is_int_format ||
-                                         (c->fs_key->f32_color_rb & (1 << rt));
 
                 int num_samples = c->fs_key->msaa ? V3D_MAX_SAMPLES : 1;
 
@@ -2605,11 +2616,8 @@ vir_emit_tlb_color_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
                                           TLB_SAMPLE_MODE_PER_PIXEL;
                 conf |= (7 - rt) << TLB_RENDER_TARGET_SHIFT;
 
-                if (is_32b_tlb_format) {
-                        /* The F32 vs I32 distinction was dropped in 4.2. */
-                        conf |= (c->devinfo->ver < 42 && is_int_format) ?
-                                TLB_TYPE_I32_COLOR : TLB_TYPE_F32_COLOR;
-
+                if (c->fs_key->f32_color_rb & (1 << rt)) {
+                        conf |= TLB_TYPE_F32_COLOR;
                         conf |= ((num_components - 1) <<
                                  TLB_VEC_SIZE_MINUS_1_SHIFT);
                 } else {
@@ -2625,7 +2633,7 @@ vir_emit_tlb_color_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
 
                 for (int i = 0; i < num_samples; i++) {
                         struct qreg r, g, b, a;
-                        if (is_32b_tlb_format) {
+                        if (c->fs_key->f32_color_rb & (1 << rt)) {
                                 r = conf != 0xffffffff && i == 0?
                                         vir_TLBU_COLOR_READ(c, conf) :
                                         vir_TLB_COLOR_READ(c);
@@ -2768,14 +2776,8 @@ ntq_emit_load_input(struct v3d_compile *c, nir_intrinsic_instr *instr)
 {
         /* XXX: Use ldvpmv (uniform offset) or ldvpmd (non-uniform offset).
          *
-         * Right now the driver sets PIPE_SHADER_CAP_INDIRECT_INPUT_ADDR even
-         * if we don't support non-uniform offsets because we also set the
-         * lower_all_io_to_temps option in the NIR compiler. This ensures that
-         * any indirect indexing on in/out variables is turned into indirect
-         * indexing on temporary variables instead, that we handle by lowering
-         * to scratch. If we implement non-uniform offset here we might be able
-         * to avoid the temp and scratch lowering, which involves copying from
-         * the input to the temp variable, possibly making code more optimal.
+         * Indirect indexing is lowered by the GLSL compiler based on
+         * support_indirect_inputs.
          */
         unsigned offset =
                 nir_intrinsic_base(instr) + nir_src_as_uint(instr->src[0]);
@@ -3104,7 +3106,7 @@ nir_src_derived_from_reg(nir_src src)
         if (nir_load_reg_for_def(def))
                 return true;
 
-        nir_instr *parent = def->parent_instr;
+        nir_instr *parent = nir_def_instr(def);
         switch (parent->type) {
         case nir_instr_type_alu: {
                 nir_alu_instr *alu = nir_instr_as_alu(parent);
@@ -3535,15 +3537,6 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
                                           nir_src_comp_as_uint(instr->src[0], 0)));
                 break;
 
-        case nir_intrinsic_load_user_clip_plane:
-                for (int i = 0; i < nir_intrinsic_dest_components(instr); i++) {
-                        ntq_store_def(c, &instr->def, i,
-                                      vir_uniform(c, QUNIFORM_USER_CLIP_PLANE,
-                                                  nir_intrinsic_ucp_id(instr) *
-                                                  4 + i));
-                }
-                break;
-
         case nir_intrinsic_load_viewport_x_scale:
                 ntq_store_def(c, &instr->def, 0,
                               vir_uniform(c, QUNIFORM_VIEWPORT_X_SCALE, 0));
@@ -3577,6 +3570,15 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
                 ntq_store_def(c, &instr->def, 0,
                               vir_uniform(c, QUNIFORM_AA_LINE_WIDTH, 0));
                 break;
+
+        case nir_intrinsic_demote_samples: {
+                struct qreg mask =
+                        vir_NOT(c, ntq_get_src(c, instr->src[0], 0));
+
+                vir_SETMSF_dest(c, vir_nop_reg(),
+                                vir_AND(c, mask, vir_MSF(c)));
+                break;
+        }
 
         case nir_intrinsic_load_sample_mask_in:
                 ntq_store_def(c, &instr->def, 0, vir_MSF(c));
@@ -3638,13 +3640,16 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
                 ntq_emit_image_size(c, instr);
                 break;
 
-        /* FIXME: the Vulkan and SPIR-V specs specify that OpTerminate (which
+        /* The Vulkan and SPIR-V specs specify that OpTerminate (which
          * is intended to match the semantics of GLSL's discard) should
-         * terminate the invocation immediately. Our implementation doesn't
-         * do that. What we do is actually a demote by removing the invocations
-         * from the sample mask. Maybe we could be more strict and force an
-         * early termination by emitting a (maybe conditional) jump to the
-         * end section of the fragment shader for affected invocations.
+         * terminate the invocation immediately but our implementation
+         * doesn't do that. We could implement it by emitting a jump to
+         * the end of the shader, however, we have not observed any gains
+         * from this in real use cases, and doing that would require us to
+         * always emit additional instructions for terminates, so we discarded
+         * that approach. See
+         * https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/38381
+         * for more details.
          */
         case nir_intrinsic_terminate:
                 c->emitted_discard = true;
@@ -3814,7 +3819,7 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
 
         case nir_intrinsic_emit_vertex:
         case nir_intrinsic_end_primitive:
-                unreachable("Should have been lowered in v3d_nir_lower_io");
+                UNREACHABLE("Should have been lowered in v3d_nir_lower_io");
                 break;
 
         case nir_intrinsic_load_primitive_id: {
@@ -4095,7 +4100,7 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
         }
 
         case nir_intrinsic_load_num_subgroups:
-                unreachable("Should have been lowered");
+                UNREACHABLE("Should have been lowered");
                 break;
 
         case nir_intrinsic_load_view_index:
@@ -4103,10 +4108,37 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
                               vir_uniform(c, QUNIFORM_VIEW_INDEX, 0));
                 break;
 
+        /* We only use these when doing software blending. */
+        case nir_intrinsic_load_blend_const_color_r_float:
+                ntq_store_def(c, &instr->def, 0,
+                              vir_uniform(c, QUNIFORM_BLEND_CONSTANT_R, 0));
+                break;
+        case nir_intrinsic_load_blend_const_color_g_float:
+                ntq_store_def(c, &instr->def, 0,
+                              vir_uniform(c, QUNIFORM_BLEND_CONSTANT_G, 0));
+                break;
+        case nir_intrinsic_load_blend_const_color_b_float:
+                ntq_store_def(c, &instr->def, 0,
+                              vir_uniform(c, QUNIFORM_BLEND_CONSTANT_B, 0));
+                break;
+        case nir_intrinsic_load_blend_const_color_a_float:
+                ntq_store_def(c, &instr->def, 0,
+                              vir_uniform(c, QUNIFORM_BLEND_CONSTANT_A, 0));
+                break;
+
+
+        /* We only use this if alpha to coverage is enabled when using
+         * software blending.
+         */
+        case nir_intrinsic_alpha_to_coverage:
+                assert(c->fs_key->msaa);
+                ntq_store_def(c, &instr->def, 0,
+                              vir_FTOC(c, ntq_get_src(c, instr->src[0], 0)));
+                break;
+
         default:
-                fprintf(stderr, "Unknown intrinsic: ");
-                nir_print_instr(&instr->instr, stderr);
-                fprintf(stderr, "\n");
+                mesa_loge("Unknown intrinsic: %s",
+                          nir_instr_as_str(&instr->instr, NULL));
                 abort();
         }
 }
@@ -4398,13 +4430,13 @@ ntq_emit_jump(struct v3d_compile *c, nir_jump_instr *jump)
                 break;
 
         case nir_jump_return:
-                unreachable("All returns should be lowered\n");
+                UNREACHABLE("All returns should be lowered\n");
                 break;
 
         case nir_jump_halt:
         case nir_jump_goto:
         case nir_jump_goto_if:
-                unreachable("not supported\n");
+                UNREACHABLE("not supported\n");
                 break;
         }
 }
@@ -4425,13 +4457,13 @@ ntq_emit_uniform_jump(struct v3d_compile *c, nir_jump_instr *jump)
                 break;
 
         case nir_jump_return:
-                unreachable("All returns should be lowered\n");
+                UNREACHABLE("All returns should be lowered\n");
                 break;
 
         case nir_jump_halt:
         case nir_jump_goto:
         case nir_jump_goto_if:
-                unreachable("not supported\n");
+                UNREACHABLE("not supported\n");
                 break;
         }
 }
@@ -4453,7 +4485,7 @@ ntq_emit_instr(struct v3d_compile *c, nir_instr *instr)
                 break;
 
         case nir_instr_type_undef:
-                unreachable("Should've been lowered by nir_lower_undef_to_zero");
+                UNREACHABLE("Should've been lowered by nir_lower_undef_to_zero");
                 break;
 
         case nir_instr_type_tex:
@@ -4472,9 +4504,8 @@ ntq_emit_instr(struct v3d_compile *c, nir_instr *instr)
                 break;
 
         default:
-                fprintf(stderr, "Unknown NIR instr type: ");
-                nir_print_instr(instr, stderr);
-                fprintf(stderr, "\n");
+                mesa_loge("Unknown NIR instr type: %s",
+                          nir_instr_as_str(instr, NULL));
                 abort();
         }
 }
@@ -4607,7 +4638,7 @@ ntq_emit_loop(struct v3d_compile *c, nir_loop *loop)
 static void
 ntq_emit_function(struct v3d_compile *c, nir_function_impl *func)
 {
-        fprintf(stderr, "FUNCTIONS not handled.\n");
+        mesa_loge("FUNCTIONS not handled.");
         abort();
 }
 
@@ -4633,7 +4664,7 @@ ntq_emit_cf_list(struct v3d_compile *c, struct exec_list *list)
                         break;
 
                 default:
-                        fprintf(stderr, "Unknown NIR node type\n");
+                        mesa_loge("Unknown NIR node type");
                         abort();
                 }
         }
@@ -4818,7 +4849,7 @@ nir_to_vir(struct v3d_compile *c)
         case MESA_SHADER_COMPUTE:
                 break;
         default:
-                unreachable("unsupported shader stage");
+                UNREACHABLE("unsupported shader stage");
         }
 
         ntq_setup_outputs(c);
@@ -4941,10 +4972,10 @@ v3d_nir_to_vir(struct v3d_compile *c)
 {
         if (V3D_DBG(NIR) ||
             v3d_debug_flag_for_shader_stage(c->s->info.stage)) {
-                fprintf(stderr, "%s prog %d/%d NIR:\n",
-                        vir_get_stage_name(c),
-                        c->program_id, c->variant_id);
-                nir_print_shader(c->s, stderr);
+                mesa_logi("%s prog %d/%d NIR:",
+                          vir_get_stage_name(c),
+                          c->program_id, c->variant_id);
+                nir_log_shaderi(c->s);
         }
 
         nir_to_vir(c);
@@ -4971,16 +5002,15 @@ v3d_nir_to_vir(struct v3d_compile *c)
         case MESA_SHADER_COMPUTE:
                 break;
         default:
-                unreachable("bad stage");
+                UNREACHABLE("bad stage");
         }
 
         if (V3D_DBG(VIR) ||
             v3d_debug_flag_for_shader_stage(c->s->info.stage)) {
-                fprintf(stderr, "%s prog %d/%d pre-opt VIR:\n",
-                        vir_get_stage_name(c),
-                        c->program_id, c->variant_id);
-                vir_dump(c);
-                fprintf(stderr, "\n");
+                mesa_logi("%s prog %d/%d pre-opt VIR:",
+                          vir_get_stage_name(c),
+                          c->program_id, c->variant_id);
+                vir_dumpi(c);
         }
 
         vir_optimize(c);
@@ -4999,11 +5029,10 @@ v3d_nir_to_vir(struct v3d_compile *c)
 
         if (V3D_DBG(VIR) ||
             v3d_debug_flag_for_shader_stage(c->s->info.stage)) {
-                fprintf(stderr, "%s prog %d/%d VIR:\n",
-                        vir_get_stage_name(c),
-                        c->program_id, c->variant_id);
-                vir_dump(c);
-                fprintf(stderr, "\n");
+                mesa_logi("%s prog %d/%d VIR:",
+                          vir_get_stage_name(c),
+                          c->program_id, c->variant_id);
+                vir_dumpi(c);
         }
 
         /* Attempt to allocate registers for the temporaries.  If we fail,
@@ -5018,30 +5047,23 @@ v3d_nir_to_vir(struct v3d_compile *c)
                         break;
                 }
 
-                if (c->threads == min_threads &&
-                    V3D_DBG(RA)) {
-                        fprintf(stderr,
-                                "Failed to register allocate using %s\n",
-                                c->fallback_scheduler ? "the fallback scheduler:" :
-                                "the normal scheduler: \n");
-
-                        vir_dump(c);
-
-                        char *shaderdb;
-                        int ret = v3d_shaderdb_dump(c, &shaderdb);
-                        if (ret > 0) {
-                                fprintf(stderr, "%s\n", shaderdb);
-                                free(shaderdb);
-                        }
-                }
-
                 if (c->threads <= MAX2(c->min_threads_for_reg_alloc, min_threads)) {
-                        if (V3D_DBG(PERF)) {
-                                fprintf(stderr,
-                                        "Failed to register allocate %s "
-                                        "prog %d/%d at %d threads.\n",
-                                        vir_get_stage_name(c),
-                                        c->program_id, c->variant_id, c->threads);
+                        if (V3D_DBG(PERF) || V3D_DBG(RA)) {
+                                mesa_logi("Failed to register allocate %s "
+                                          "prog %d/%d at %d threads.",
+                                          vir_get_stage_name(c),
+                                          c->program_id, c->variant_id, c->threads);
+                        }
+                        if (V3D_DBG(RA)) {
+                                vir_dumpi(c);
+
+                                char *shaderdb;
+                                int ret = v3d_shaderdb_dump(c, &shaderdb);
+                                if (ret > 0) {
+                                        mesa_logi("%s", shaderdb);
+                                        free(shaderdb);
+                                }
+
                         }
                         c->compilation_result =
                                 V3D_COMPILATION_FAILED_REGISTER_ALLOCATION;
@@ -5065,11 +5087,10 @@ v3d_nir_to_vir(struct v3d_compile *c)
         if (c->spills &&
             (V3D_DBG(VIR) ||
              v3d_debug_flag_for_shader_stage(c->s->info.stage))) {
-                fprintf(stderr, "%s prog %d/%d spilled VIR:\n",
-                        vir_get_stage_name(c),
-                        c->program_id, c->variant_id);
-                vir_dump(c);
-                fprintf(stderr, "\n");
+                mesa_logi("%s prog %d/%d spilled VIR:",
+                          vir_get_stage_name(c),
+                          c->program_id, c->variant_id);
+                vir_dumpi(c);
         }
 
         v3d_vir_to_qpu(c, temp_registers);

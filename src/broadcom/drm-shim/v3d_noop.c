@@ -27,6 +27,7 @@
 #include <sys/ioctl.h>
 #include "drm-uapi/v3d_drm.h"
 #include "drm-shim/drm_shim.h"
+#include "util/log.h"
 
 bool drm_shim_driver_prefers_first_render_node = true;
 
@@ -131,6 +132,9 @@ v3d_ioctl_get_param(int fd, unsigned long request, void *arg)
         case DRM_V3D_PARAM_SUPPORTS_PERFMON:
                 gp->value = 1;
                 return 0;
+        case DRM_V3D_PARAM_SUPPORTS_MULTISYNC_EXT:
+                gp->value = 1;
+                return 0;
         default:
                 break;
         }
@@ -140,7 +144,7 @@ v3d_ioctl_get_param(int fd, unsigned long request, void *arg)
                 return 0;
         }
 
-        fprintf(stderr, "Unknown DRM_IOCTL_V3D_GET_PARAM %d\n", gp->param);
+        mesa_loge("Unknown DRM_IOCTL_V3D_GET_PARAM %d", gp->param);
         return -1;
 }
 

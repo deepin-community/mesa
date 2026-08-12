@@ -150,9 +150,7 @@ void ac_llvm_set_target_features(LLVMValueRef F, struct ac_llvm_context *ctx, bo
 {
    char features[2048];
 
-   snprintf(features, sizeof(features), "+DumpCode%s%s%s",
-            /* GFX9 has broken VGPR indexing, so always promote alloca to scratch. */
-            ctx->gfx_level == GFX9 ? ",-promote-alloca" : "",
+   snprintf(features, sizeof(features), "+DumpCode%s%s",
             /* Wave32 is the default. */
             ctx->gfx_level >= GFX10 && ctx->wave_size == 64 ?
                ",+wavefrontsize64,-wavefrontsize32" : "",
@@ -171,13 +169,6 @@ bool ac_init_llvm_compiler(struct ac_llvm_compiler *compiler, enum radeon_family
    if (!compiler->tm)
       return false;
 
-   if (tm_options & AC_TM_CREATE_LOW_OPT) {
-      compiler->low_opt_tm =
-         ac_create_target_machine(family, tm_options, LLVMCodeGenLevelLess, NULL);
-      if (!compiler->low_opt_tm)
-         goto fail;
-   }
-
    compiler->meo =
       ac_create_midend_optimizer(compiler->tm, tm_options & AC_TM_CHECK_IR);
    if (!compiler->meo)
@@ -193,14 +184,11 @@ void ac_destroy_llvm_compiler(struct ac_llvm_compiler *compiler)
 {
    /* delete the codegen pass managers */
    ac_destroy_backend_optimizer(compiler->beo);
-   ac_destroy_backend_optimizer(compiler->low_opt_beo);
 
    /* delete optimizer pass manager */
    if (compiler->meo)
       ac_destroy_midend_optimiser(compiler->meo);
 
-   if (compiler->low_opt_tm)
-      LLVMDisposeTargetMachine(compiler->low_opt_tm);
    if (compiler->tm)
       LLVMDisposeTargetMachine(compiler->tm);
 }

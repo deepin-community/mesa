@@ -68,6 +68,9 @@ struct agx_bo {
    /* Used to link the BO to the BO cache LRU list. */
    struct list_head lru_link;
 
+   /* Convenience */
+   struct agx_device *dev;
+
    /* The time this BO was used last, so we can evict stale BOs. */
    time_t last_used;
 
@@ -78,10 +81,17 @@ struct agx_bo {
 
    /* Mapping */
    struct agx_va *va;
-   void *map;
+
+   /* Suffixed to force agx_bo_map access */
+   void *_map;
 
    /* Process-local index */
    uint32_t handle;
+
+   /* Handle to refer to this BO in uAPI calls. This is either the GEM handle
+    * on native Linux, or the virtio resource ID with virtgpu.
+    */
+   uint32_t uapi_handle;
 
    /* DMA-BUF fd clone for adding fences to imports/exports */
    int prime_fd;
@@ -94,10 +104,6 @@ struct agx_bo {
 
    /* For debugging */
    const char *label;
-
-   /* virtio blob_id */
-   uint32_t blob_id;
-   uint32_t vbo_res_id;
 };
 
 static inline uint32_t
@@ -118,7 +124,7 @@ agx_bo_writer(uint32_t queue, uint32_t syncobj)
    return (((uint64_t)queue) << 32) | syncobj;
 }
 
-struct agx_bo *agx_bo_create(struct agx_device *dev, unsigned size,
+struct agx_bo *agx_bo_create(struct agx_device *dev, size_t size,
                              unsigned align, enum agx_bo_flags flags,
                              const char *label);
 
@@ -126,6 +132,7 @@ void agx_bo_reference(struct agx_bo *bo);
 void agx_bo_unreference(struct agx_device *dev, struct agx_bo *bo);
 struct agx_bo *agx_bo_import(struct agx_device *dev, int fd);
 int agx_bo_export(struct agx_device *dev, struct agx_bo *bo);
+void agx_bo_make_shared(struct agx_device *dev, struct agx_bo *bo);
 
 void agx_bo_free(struct agx_device *dev, struct agx_bo *bo);
 struct agx_bo *agx_bo_cache_fetch(struct agx_device *dev, size_t size,

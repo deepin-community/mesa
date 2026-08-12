@@ -19,10 +19,11 @@
 #include <sys/sysmacros.h>
 #endif
 
+#include "virtio/virtio-gpu/venus_hw.h"
+
 #include "drm-uapi/virtgpu_drm.h"
+#include "util/os_file.h"
 #include "util/sparse_array.h"
-#define VIRGL_RENDERER_UNSTABLE_APIS
-#include "virtio-gpu/virglrenderer_hw.h"
 
 #include "vn_renderer_internal.h"
 
@@ -96,7 +97,7 @@ struct virtgpu {
    uint32_t max_timeline_count;
 
    struct {
-      enum virgl_renderer_capset id;
+      uint32_t id;
       uint32_t version;
       struct virgl_renderer_capset_venus data;
    } capset;
@@ -140,9 +141,18 @@ struct sim_syncobj {
    bool pending_cpu;
 };
 
+static void
+sim_syncobj_init_once(void)
+{
+   mtx_init(&sim.mutex, mtx_plain);
+}
+
 static uint32_t
 sim_syncobj_create(struct virtgpu *gpu, bool signaled)
 {
+   static once_flag once = ONCE_FLAG_INIT;
+   call_once(&once, sim_syncobj_init_once);
+
    struct sim_syncobj *syncobj = calloc(1, sizeof(*syncobj));
    if (!syncobj)
       return 0;
@@ -157,6 +167,8 @@ sim_syncobj_create(struct virtgpu *gpu, bool signaled)
       sim.syncobjs = _mesa_pointer_hash_table_create(NULL);
       if (!sim.syncobjs) {
          mtx_unlock(&sim.mutex);
+         mtx_destroy(&syncobj->mutex);
+         free(syncobj);
          return 0;
       }
 
@@ -171,6 +183,8 @@ sim_syncobj_create(struct virtgpu *gpu, bool signaled)
          _mesa_hash_table_destroy(sim.syncobjs, NULL);
          sim.syncobjs = NULL;
          mtx_unlock(&sim.mutex);
+         mtx_destroy(&syncobj->mutex);
+         free(syncobj);
          return 0;
       }
 
@@ -345,7 +359,7 @@ sim_syncobj_submit(struct virtgpu *gpu,
    if (!syncobj)
       return -1;
 
-   int pending_fd = dup(sync_fd);
+   int pending_fd = os_dupfd_cloexec(sync_fd);
    if (pending_fd < 0) {
       vn_log(gpu->instance, "failed to dup sync fd");
       return -1;
@@ -440,9 +454,9 @@ sim_syncobj_export(struct virtgpu *gpu, uint32_t syncobj_handle)
    int fd = -1;
    mtx_lock(&syncobj->mutex);
    if (syncobj->pending_fd >= 0)
-      fd = dup(syncobj->pending_fd);
+      fd = os_dupfd_cloexec(syncobj->pending_fd);
    else
-      fd = dup(sim.signaled_fd);
+      fd = os_dupfd_cloexec(sim.signaled_fd);
    mtx_unlock(&syncobj->mutex);
 
    return fd;
@@ -581,7 +595,7 @@ virtgpu_ioctl_getparam(struct virtgpu *gpu, uint64_t param)
 
 static int
 virtgpu_ioctl_get_caps(struct virtgpu *gpu,
-                       enum virgl_renderer_capset id,
+                       uint32_t id,
                        uint32_t version,
                        void *capset,
                        size_t capset_size)
@@ -597,8 +611,7 @@ virtgpu_ioctl_get_caps(struct virtgpu *gpu,
 }
 
 static int
-virtgpu_ioctl_context_init(struct virtgpu *gpu,
-                           enum virgl_renderer_capset capset_id)
+virtgpu_ioctl_context_init(struct virtgpu *gpu, uint32_t capset_id)
 {
    struct drm_virtgpu_context_set_param ctx_set_params[3] = {
       {
@@ -642,8 +655,13 @@ virtgpu_ioctl_resource_create_blob(struct virtgpu *gpu,
       .blob_id = blob_id,
    };
 
-   if (virtgpu_ioctl(gpu, DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB, &args))
+   if (virtgpu_ioctl(gpu, DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB, &args)) {
+      vn_log(gpu->instance,
+             "RESOURCE_CREATE_BLOB failed: type=%u, flags=%u, size=%zu, "
+             "id=%" PRIu64 ", err=%s",
+             blob_mem, blob_flags, blob_size, blob_id, strerror(errno));
       return 0;
+   }
 
    *res_id = args.res_handle;
    return args.bo_handle;
@@ -658,7 +676,14 @@ virtgpu_ioctl_resource_info(struct virtgpu *gpu,
       .bo_handle = gem_handle,
    };
 
-   return virtgpu_ioctl(gpu, DRM_IOCTL_VIRTGPU_RESOURCE_INFO, info);
+   const int ret = virtgpu_ioctl(gpu, DRM_IOCTL_VIRTGPU_RESOURCE_INFO, info);
+   if (ret) {
+      vn_log(gpu->instance, "RESOURCE_INFO failed: handle=%u, err=%s",
+             gem_handle, strerror(errno));
+      return ret;
+   }
+
+   return 0;
 }
 
 static void
@@ -683,7 +708,14 @@ virtgpu_ioctl_prime_handle_to_fd(struct virtgpu *gpu,
    };
 
    const int ret = virtgpu_ioctl(gpu, DRM_IOCTL_PRIME_HANDLE_TO_FD, &args);
-   return ret ? -1 : args.fd;
+   if (ret) {
+      vn_log(gpu->instance,
+             "PRIME_HANDLE_TO_FD failed: handle=%u, mappable=%d, err=%s",
+             gem_handle, mappable, strerror(errno));
+      return -1;
+   }
+
+   return args.fd;
 }
 
 static uint32_t
@@ -694,23 +726,41 @@ virtgpu_ioctl_prime_fd_to_handle(struct virtgpu *gpu, int fd)
    };
 
    const int ret = virtgpu_ioctl(gpu, DRM_IOCTL_PRIME_FD_TO_HANDLE, &args);
-   return ret ? 0 : args.handle;
+   if (ret) {
+      vn_log(gpu->instance, "PRIME_FD_TO_HANDLE failed: fd=%d, err=%s", fd,
+             strerror(errno));
+      return 0;
+   }
+
+   return args.handle;
 }
 
 static void *
-virtgpu_ioctl_map(struct virtgpu *gpu, uint32_t gem_handle, size_t size)
+virtgpu_ioctl_map(struct virtgpu *gpu,
+                  uint32_t gem_handle,
+                  size_t size,
+                  void *placed_addr)
 {
    struct drm_virtgpu_map args = {
       .handle = gem_handle,
    };
 
-   if (virtgpu_ioctl(gpu, DRM_IOCTL_VIRTGPU_MAP, &args))
+   if (virtgpu_ioctl(gpu, DRM_IOCTL_VIRTGPU_MAP, &args)) {
+      vn_log(gpu->instance, "MAP failed: handle=%u, err=%s", gem_handle,
+             strerror(errno));
       return NULL;
+   }
 
-   void *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, gpu->fd,
-                    args.offset);
-   if (ptr == MAP_FAILED)
+   void *ptr =
+      mmap(placed_addr, size, PROT_READ | PROT_WRITE,
+           MAP_SHARED | (placed_addr ? MAP_FIXED : 0), gpu->fd, args.offset);
+   if (ptr == MAP_FAILED) {
+      vn_log(
+         gpu->instance,
+         "mmap failed: gpu_fd=%d, handle=%u, size=%zu, offset=%llu, err=%s",
+         gpu->fd, gem_handle, size, (long long)args.offset, strerror(errno));
       return NULL;
+   }
 
    return ptr;
 }
@@ -1064,7 +1114,9 @@ virtgpu_bo_flush(struct vn_renderer *renderer,
 }
 
 static void *
-virtgpu_bo_map(struct vn_renderer *renderer, struct vn_renderer_bo *_bo)
+virtgpu_bo_map(struct vn_renderer *renderer,
+               struct vn_renderer_bo *_bo,
+               void *placed_addr)
 {
    struct virtgpu *gpu = (struct virtgpu *)renderer;
    struct virtgpu_bo *bo = (struct virtgpu_bo *)_bo;
@@ -1072,8 +1124,8 @@ virtgpu_bo_map(struct vn_renderer *renderer, struct vn_renderer_bo *_bo)
 
    /* not thread-safe but is fine */
    if (!bo->base.mmap_ptr && mappable) {
-      bo->base.mmap_ptr =
-         virtgpu_ioctl_map(gpu, bo->gem_handle, bo->base.mmap_size);
+      bo->base.mmap_ptr = virtgpu_ioctl_map(gpu, bo->gem_handle,
+                                            bo->base.mmap_size, placed_addr);
    }
 
    return bo->base.mmap_ptr;
@@ -1175,18 +1227,33 @@ virtgpu_bo_create_from_dma_buf(struct vn_renderer *renderer,
    size_t mmap_size = 0;
    if (info.blob_mem) {
       /* must be VIRTGPU_BLOB_MEM_HOST3D or VIRTGPU_BLOB_MEM_GUEST_VRAM */
-      if (info.blob_mem != gpu->bo_blob_mem)
+      if (info.blob_mem != gpu->bo_blob_mem) {
+         vn_log(gpu->instance,
+                "dma-buf import failed: info.blob_mem(%u) != "
+                "gpu->bo_blob_mem(%u)",
+                info.blob_mem, gpu->bo_blob_mem);
          goto fail;
+      }
 
       blob_flags |= virtgpu_bo_blob_flags(gpu, flags, 0);
 
       /* mmap_size is only used when mappable */
       mmap_size = 0;
       if (blob_flags & VIRTGPU_BLOB_FLAG_USE_MAPPABLE) {
-         if (info.size < size)
-            goto fail;
-
-         mmap_size = size;
+         if (info.size < size) {
+            /* If queried blob size is smaller than requested allocation size,
+             * we drop the mappable flag to defer the mapping failure till the
+             * app attempts to map the imported memory.
+             */
+            blob_flags &= ~VIRTGPU_BLOB_FLAG_USE_MAPPABLE;
+         } else {
+            /* Similar to virtgpu_bo_create_from_device_memory, the app can
+             * do multiple imports with different sizes for suballocation. So
+             * on the initial import, the mapping size has to be initialized
+             * with the real size of the backing blob resource.
+             */
+            mmap_size = info.size;
+         }
       }
    }
 
@@ -1194,10 +1261,19 @@ virtgpu_bo_create_from_dma_buf(struct vn_renderer *renderer,
     * might only be memset to 0 and is not considered initialized in theory
     */
    if (bo->gem_handle == gem_handle) {
-      if (bo->base.mmap_size < mmap_size)
+      if (bo->base.mmap_size < mmap_size) {
+         vn_log(
+            gpu->instance,
+            "dma-buf import failed: bo->base.mmap_size(%zu) < mmap_size(%zu)",
+            bo->base.mmap_size, mmap_size);
          goto fail;
-      if (blob_flags & ~bo->blob_flags)
+      }
+      if (blob_flags & ~bo->blob_flags) {
+         vn_log(gpu->instance,
+                "dma-buf import failed: blob_flags(%u) & ~bo->blob_flags(%u)",
+                blob_flags, bo->blob_flags);
          goto fail;
+      }
 
       /* we can't use vn_renderer_bo_ref as the refcount may drop to 0
        * temporarily before virtgpu_bo_destroy grabs the lock
@@ -1238,13 +1314,41 @@ virtgpu_bo_create_from_device_memory(
    struct vn_renderer_bo **out_bo)
 {
    struct virtgpu *gpu = (struct virtgpu *)renderer;
-   const uint32_t blob_flags = virtgpu_bo_blob_flags(gpu, flags, external_handles);
+   const uint32_t blob_flags =
+      virtgpu_bo_blob_flags(gpu, flags, external_handles);
 
    uint32_t res_id;
    uint32_t gem_handle = virtgpu_ioctl_resource_create_blob(
       gpu, gpu->bo_blob_mem, blob_flags, size, mem_id, &res_id);
    if (!gem_handle)
       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+   /* There's a single underlying bo mapping shared by the initial alloc here
+    * and the later import of the same. The mapping size has to be initialized
+    * with the real size of the created blob resource, since the app can query
+    * the exported native handle size for re-import. e.g. lseek dma-buf size
+    */
+   const uint32_t mappable_and_shareable =
+      VIRTGPU_BLOB_FLAG_USE_MAPPABLE | VIRTGPU_BLOB_FLAG_USE_SHAREABLE;
+   if ((blob_flags & mappable_and_shareable) == mappable_and_shareable) {
+      struct drm_virtgpu_resource_info info;
+      if (virtgpu_ioctl_resource_info(gpu, gem_handle, &info)) {
+         virtgpu_ioctl_gem_close(gpu, gem_handle);
+         return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+      }
+
+      assert(info.blob_mem);
+      if (info.size < size) {
+         virtgpu_ioctl_gem_close(gpu, gem_handle);
+
+         vn_log(gpu->instance,
+                "blob mem create failed: info.size(%u) < size(%" PRIu64 ")",
+                info.size, size);
+         return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+      }
+
+      size = info.size;
+   }
 
    struct virtgpu_bo *bo = util_sparse_array_get(&gpu->bo_array, gem_handle);
    *bo = (struct virtgpu_bo){
@@ -1304,7 +1408,7 @@ virtgpu_shmem_create(struct vn_renderer *renderer, size_t size)
    if (!gem_handle)
       return NULL;
 
-   void *ptr = virtgpu_ioctl_map(gpu, gem_handle, size);
+   void *ptr = virtgpu_ioctl_map(gpu, gem_handle, size, NULL);
    if (!ptr) {
       virtgpu_ioctl_gem_close(gpu, gem_handle);
       return NULL;
@@ -1476,7 +1580,7 @@ virtgpu_init_context(struct virtgpu *gpu)
 static VkResult
 virtgpu_init_capset(struct virtgpu *gpu)
 {
-   gpu->capset.id = VIRGL_RENDERER_CAPSET_VENUS;
+   gpu->capset.id = VIRTGPU_DRM_CAPSET_VENUS;
    gpu->capset.version = 0;
 
    const int ret =
@@ -1490,6 +1594,14 @@ virtgpu_init_capset(struct virtgpu *gpu)
       return VK_ERROR_INITIALIZATION_FAILED;
    }
 
+   if (gpu->capset.data.wire_format_version == 0) {
+      if (VN_DEBUG(INIT)) {
+         vn_log(gpu->instance, "Unsupported wire format version %u",
+                gpu->capset.data.wire_format_version);
+      }
+      return VK_ERROR_INITIALIZATION_FAILED;
+   }
+
    return VK_SUCCESS;
 }
 
@@ -1497,8 +1609,10 @@ static VkResult
 virtgpu_init_params(struct virtgpu *gpu)
 {
    const uint64_t required_params[] = {
-      VIRTGPU_PARAM_3D_FEATURES,   VIRTGPU_PARAM_CAPSET_QUERY_FIX,
-      VIRTGPU_PARAM_RESOURCE_BLOB, VIRTGPU_PARAM_CONTEXT_INIT,
+      VIRTGPU_PARAM_3D_FEATURES,
+      VIRTGPU_PARAM_CAPSET_QUERY_FIX,
+      VIRTGPU_PARAM_RESOURCE_BLOB,
+      VIRTGPU_PARAM_CONTEXT_INIT,
    };
    uint64_t val;
    for (uint32_t i = 0; i < ARRAY_SIZE(required_params); i++) {
@@ -1691,6 +1805,8 @@ virtgpu_init(struct virtgpu *gpu)
    gpu->base.bo_ops.create_from_dma_buf = virtgpu_bo_create_from_dma_buf;
    gpu->base.bo_ops.destroy = virtgpu_bo_destroy;
    gpu->base.bo_ops.export_dma_buf = virtgpu_bo_export_dma_buf;
+   gpu->base.bo_ops.export_sync_file =
+      vn_renderer_bo_export_sync_file_internal;
    gpu->base.bo_ops.map = virtgpu_bo_map;
    gpu->base.bo_ops.flush = virtgpu_bo_flush;
    gpu->base.bo_ops.invalidate = virtgpu_bo_invalidate;

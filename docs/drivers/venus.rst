@@ -12,22 +12,39 @@ Requirements
 
 The Venus renderer requires
 
-- Vulkan 1.1
-- :ext:`VK_EXT_external_memory_dma_buf`
-- :ext:`VK_EXT_image_drm_format_modifier`
-- :ext:`VK_EXT_queue_family_foreign`
+- Linux platform
+   - Vulkan 1.1
+   - :ext:`VK_KHR_external_memory_fd`
+- Android platform
+   - Vulkan 1.1
+   - :ext:`VK_EXT_external_memory_dma_buf`
+   - :ext:`VK_EXT_image_drm_format_modifier`
+   - :ext:`VK_EXT_queue_family_foreign`
 
-from the host driver.  However, it violates the spec in some places currently
-and also relies on implementation-defined behaviors in others.  It is not
-expected to work on all drivers meeting the requirements.  It has only been
-tested with
+from the host driver.  However, it violates the spec and relies on
+implementation-defined behaviors to support ``vkMapMemory`` (see `below
+<#vk-memory-property-host-visible-bit>`__).  It is not expected to work on all
+drivers meeting the requirements.  It has only been tested with:
 
 - ANV 21.1 or later
-- RADV 21.1 or later (the host kernel must have
-  ``CONFIG_TRANSPARENT_HUGEPAGE`` disabled because of this `KVM issue
-  <https://github.com/google/security-research/security/advisories/GHSA-7wq5-phmq-m584>`__)
-- TURNIP 22.0 or later
-- Mali r32p0 or later
+   - Note: with Intel Meteor Lake or xe driver, you need 6.16+ kernel and 11.0+
+     QEMU with ``-accel kvm,honor-guest-pat=on`` (request to default that on is
+     `here <https://gitlab.com/qemu-project/qemu/-/work_items/3357>`__).
+- RADV 21.1 or later
+   - Note: you need 6.13+ kernel that already has
+     `KVM: Stop grabbing references to PFNMAP'd pages
+     <https://lore.kernel.org/all/20241010182427.1434605-1-seanjc@google.com/>`__.
+   - Note: for dGPU paired with Intel CPU, you need 6.16+ kernel and 11.0+ QEMU
+     with ``-accel kvm,honor-guest-pat=on`` (request to default that on is
+     `here <https://gitlab.com/qemu-project/qemu/-/work_items/3357>`__).
+- NVIDIA (Proprietary) 570.86 or later
+   - Note: if paired with Intel CPU, you need 6.16+ kernel and 11.0+ QEMU with
+     ``-accel kvm,honor-guest-pat=on`` (request to default that on is
+     `here <https://gitlab.com/qemu-project/qemu/-/work_items/3357>`__).
+- ARM Mali (Proprietary) r32p0 or later
+- Turnip 22.0 or later
+- PanVK 25.1 or later
+- Lavapipe 22.1 or later
 
 The Venus driver requires supports for
 
@@ -35,15 +52,12 @@ The Venus driver requires supports for
 - ``VIRTGPU_PARAM_CAPSET_QUERY_FIX``
 - ``VIRTGPU_PARAM_RESOURCE_BLOB``
 - ``VIRTGPU_PARAM_HOST_VISIBLE``
-- ``VIRTGPU_PARAM_CROSS_DEVICE``
 - ``VIRTGPU_PARAM_CONTEXT_INIT``
 
 from the virtio-gpu kernel driver, unless vtest is used.  That usually means
 the guest kernel should be at least 5.16 or have the parameters back ported,
-paired with hypervisors such as `crosvm
-<https://chromium.googlesource.com/chromiumos/platform/crosvm>`__, or `patched
-qemu
-<https://www.collabora.com/news-and-blog/blog/2021/11/26/venus-on-qemu-enabling-new-virtual-vulkan-driver/>`__.
+paired with hypervisors such as `crosvm <https://crosvm.dev>`__, or `QEMU
+<https://www.qemu.org>`__.
 
 vtest
 -----
@@ -75,11 +89,48 @@ the host driver as well when building the Venus driver.  Just remember to set
 :envvar:`VK_DRIVER_FILES` when starting the vtest server so that the vtest
 server finds the locally built host driver.
 
-Virtio-GPU
-----------
+QEMU
+----
 
-The driver requires ``VIRTGPU_PARAM_CONTEXT_INIT`` from the virtio-gpu kernel
-driver, which was upstreamed in kernel 5.16.
+This is how one might want to start QEMU
+
+.. code-block:: sh
+
+ $ ./qemu-system-x86_64                                             \
+       -enable-kvm                                                  \
+       -M q35                                                       \
+       -smp 8                                                       \
+       -m 4G                                                        \
+       -cpu host                                                    \
+       -net nic,model=virtio                                        \
+       -net user,hostfwd=tcp::2222-:22                              \
+       -device virtio-gpu-gl,hostmem=4G,blob=true,venus=true        \
+       -vga none                                                    \
+       -display sdl,gl=on,show-cursor=on                            \
+       -usb -device usb-tablet                                      \
+       -object memory-backend-memfd,id=mem1,size=4G                 \
+       -machine memory-backend=mem1                                 \
+       -hda $IMG
+
+To build QEMU, this is how one might want to configure it
+
+.. code-block:: sh
+
+ $ cd <QEMU source dir>
+ $ mkdir build && cd build
+ $ ../configure                                                     \
+       --prefix=$HOME/.local                                        \
+       --target-list=x86_64-softmmu                                 \
+       --enable-kvm                                                 \
+       --disable-werror                                             \
+       --enable-opengl                                              \
+       --enable-virglrenderer                                       \
+       --enable-gtk                                                 \
+       --enable-sdl
+ $ make -j$(nproc)
+
+crosvm
+------
 
 crosvm is written in Rust.  To build crosvm, make sure Rust has been installed
 and
@@ -112,53 +163,15 @@ This is how one might want to start crosvm
 assuming a working system is installed to partition 1 of ``disk.img``.
 ``sudo`` or ``CAP_NET_ADMIN`` is needed to set up the TAP network device.
 
-Virtio-GPU and Virtio-WL
-------------------------
+Android Cuttlefish
+------------------
 
-In this setup, the guest userspace uses Xwayland and a special Wayland
-compositor to connect guest X11/Wayland clients to the host Wayland
-compositor, using Virtio-WL as the transport.  This setup is more tedious, but
-that should hopefully change over time.
-
-For now, the guest kernel must be built from the ``chromeos-5.10`` branch of
-the `Chrome OS kernel
-<https://chromium.googlesource.com/chromiumos/third_party/kernel>`__.
-
-To build minigbm and to enable minigbm support in virglrenderer,
-
-.. code-block:: sh
-
- $ git clone https://chromium.googlesource.com/chromiumos/platform/minigbm
- $ cd minigbm
- $ CFLAGS=-DDRV_<I915-or-your-driver> OUT=out DESTDIR=out/install make install
- $ cd ../virglrenderer
- $ meson configure out -Dminigbm_allocation=true
- $ meson compile -C out
-
-Make sure a host Wayland compositor is running.  Replace
-``--display-window-keyboard --display-window-mouse`` by
-``--wayland-sock=<path-to-wayland-socket>`` when starting crosvm.
-
-In the guest, build and start Sommelier, the special Wayland compositor,
-
-.. code-block:: sh
-
- $ git clone https://chromium.googlesource.com/chromiumos/platform2
- $ cd platform2/vm_tools/sommelier
- $ meson out -Dxwayland_path=/usr/bin/Xwayland -Dxwayland_gl_driver_path=/usr/lib/dri
- $ meson compile -C out
- $ sudo chmod 777 /dev/wl0
- $ ./out/sommelier -X --glamor
-       --xwayland-gl-driver-path=<path-to-locally-built-gl-driver> \
-       sleep infinity
+Venus isn't supported in the upstream Cuttlefish yet, for ``venus_guest_angle``
+mode used in Mesa CI against Android 16 AOSP, the instruction is
+`here <https://gitlab.freedesktop.org/gfx-ci/android/aosp-manifest/-/blob/android16-release+venus/README.md>`__.
 
 Optional Requirements
 ---------------------
-
-When virglrenderer is built with ``-Dminigbm_allocation=true``, the Venus
-renderer might need to import GBM BOs.  The imports will fail unless the host
-driver supports the formats, especially multi-planar ones, and the DRM format
-modifiers of the GBM BOs.
 
 In the future, if virglrenderer's ``virgl_renderer_export_fence`` is
 supported, the Venus renderer will require :ext:`VK_KHR_external_fence_fd`

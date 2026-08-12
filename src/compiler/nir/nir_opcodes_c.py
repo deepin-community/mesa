@@ -87,7 +87,7 @@ nir_type_conversion_op(nir_alu_type src, nir_alu_type dst, nir_rounding_mode rnd
                                                                    dst_bits, rnd_t[1])};
 %                       endfor
                         default:
-                           unreachable("Invalid 16-bit nir rounding mode");
+                           UNREACHABLE("Invalid 16-bit nir rounding mode");
                      }
 %                    else:
                      assert(rnd == nir_rounding_mode_undef);
@@ -95,15 +95,15 @@ nir_type_conversion_op(nir_alu_type src, nir_alu_type dst, nir_rounding_mode rnd
 %                    endif
 %                 endfor
                   default:
-                     unreachable("Invalid nir alu bit size");
+                     UNREACHABLE("Invalid nir alu bit size");
                }
 %           endfor
             default:
-               unreachable("Invalid nir alu base type");
+               UNREACHABLE("Invalid nir alu base type");
          }
 %     endfor
       default:
-         unreachable("Invalid nir alu base type");
+         UNREACHABLE("Invalid nir alu base type");
    }
 }
 
@@ -124,7 +124,11 @@ const nir_op_info nir_op_infos[nir_num_opcodes] = {
    .algebraic_properties =
       ${ "0" if opcode.algebraic_properties == "" else " | ".join(
             "NIR_OP_IS_" + prop.upper() for prop in
-               opcode.algebraic_properties.strip().split(" ")) }
+               opcode.algebraic_properties.strip().split(" ")) },
+   .valid_fp_math_ctrl =
+      ${ "0" if opcode.valid_fp_math_ctrl == "" else " | ".join(
+            "nir_fp_" + prop for prop in
+               opcode.valid_fp_math_ctrl.strip().split(" ")) }
 },
 % endfor
 };

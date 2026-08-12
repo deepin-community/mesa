@@ -41,6 +41,8 @@
 #include "util/u_helpers.h"
 #include "util/u_queue.h"
 #include "compiler/nir/nir.h"
+#include "etnaviv_ml.h"
+#include "pipe/p_state.h"
 
 struct etna_bo;
 
@@ -54,6 +56,7 @@ struct etna_screen {
    struct etna_pipe *pipe_nn;
    struct etna_perfmon *perfmon;
    struct renderonly *ro;
+   struct etna_ml_device ml_device;
 
    struct util_dynarray supported_pm_queries;
    struct slab_parent_pool transfer_pool;
@@ -66,6 +69,9 @@ struct etna_screen {
 
    struct etna_compiler *compiler;
    struct util_queue shader_compiler_queue;
+
+   /* dummy BO available to user that don't care about the content */
+   struct etna_bo *dummy_bo;
 
    /* dummy render target for GPUs that can't fully disable the color pipe */
    struct etna_reloc dummy_rt_reloc;
@@ -84,6 +90,13 @@ static inline struct etna_screen *
 etna_screen(struct pipe_screen *pscreen)
 {
    return (struct etna_screen *)pscreen;
+}
+
+static inline struct etna_screen *
+etna_ml_device_screen(struct pipe_ml_device *pdevice)
+{
+   struct etna_ml_device *dev = etna_ml_device(pdevice);
+   return container_of(dev, struct etna_screen, ml_device);
 }
 
 struct etna_bo *

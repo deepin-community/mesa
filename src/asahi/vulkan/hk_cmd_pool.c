@@ -23,13 +23,13 @@ hk_cmd_bo_create(struct hk_cmd_pool *pool, bool usc, struct hk_cmd_bo **bo_out)
       return vk_error(pool, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    bo->bo = agx_bo_create(&dev->dev, HK_CMD_BO_SIZE, 0, usc ? AGX_BO_LOW_VA : 0,
-                          "Command pool");
+                          usc ? "USC command pool" : "Main command pool");
    if (bo->bo == NULL) {
       vk_free(&pool->vk.alloc, bo);
       return vk_error(pool, VK_ERROR_OUT_OF_DEVICE_MEMORY);
    }
 
-   bo->map = bo->bo->map;
+   bo->map = agx_bo_map(bo->bo);
 
    *bo_out = bo;
    return VK_SUCCESS;

@@ -48,12 +48,12 @@
 static bool
 ssa_def_dominates_instr(nir_def *def, nir_instr *instr)
 {
-   if (instr->index <= def->parent_instr->index) {
+   if (instr->index <= nir_def_instr(def)->index) {
       return false;
-   } else if (def->parent_instr->block == instr->block) {
-      return def->parent_instr->index < instr->index;
+   } else if (nir_def_block(def) == instr->block) {
+      return nir_def_instr(def)->index < instr->index;
    } else {
-      return nir_block_dominates(def->parent_instr->block, instr->block);
+      return nir_block_dominates(nir_def_block(def), instr->block);
    }
 }
 
@@ -85,7 +85,8 @@ move_vec_src_uses_to_dest_block(nir_block *block, bool skip_const_srcs)
          nir_instr *use_instr = nir_src_parent_instr(src);
          if (use_instr->type == nir_instr_type_intrinsic) {
             nir_intrinsic_instr *intr = nir_instr_as_intrinsic(use_instr);
-            if (intr->intrinsic == nir_intrinsic_store_output)
+            if (intr->intrinsic == nir_intrinsic_store_output ||
+                intr->intrinsic == nir_intrinsic_store_per_view_output)
                return false;
          }
       }
@@ -186,7 +187,7 @@ nir_move_vec_src_uses_to_dest_impl(nir_shader *shader, nir_function_impl *impl,
       progress |= move_vec_src_uses_to_dest_block(block, skip_const_srcs);
    }
 
-   nir_metadata_preserve(impl, nir_metadata_control_flow);
+   nir_progress(true, impl, nir_metadata_control_flow);
 
    return progress;
 }

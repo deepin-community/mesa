@@ -1,24 +1,6 @@
 /*
  * Copyright © 2010 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 /** @file elk_fs_visitor.cpp
@@ -31,6 +13,7 @@
 #include "elk_fs.h"
 #include "elk_fs_builder.h"
 #include "elk_nir.h"
+#include "elk_private.h"
 #include "compiler/glsl_types.h"
 
 using namespace elk;
@@ -49,45 +32,14 @@ elk_fs_visitor::interp_reg(const fs_builder &bld, unsigned location,
                        unsigned channel, unsigned comp)
 {
    assert(stage == MESA_SHADER_FRAGMENT);
-   assert(BITFIELD64_BIT(location) & ~nir->info.per_primitive_inputs);
 
-   const struct elk_wm_prog_data *prog_data = elk_wm_prog_data(this->prog_data);
+   const struct elk_fs_prog_data *prog_data = elk_fs_prog_data(this->prog_data);
 
    assert(prog_data->urb_setup[location] >= 0);
-   unsigned nr = prog_data->urb_setup[location];
-   channel += prog_data->urb_setup_channel[location];
 
-   /* Adjust so we start counting from the first per_vertex input. */
-   assert(nr >= prog_data->num_per_primitive_inputs);
-   nr -= prog_data->num_per_primitive_inputs;
-
-   const unsigned per_vertex_start = prog_data->num_per_primitive_inputs;
-   const unsigned regnr = per_vertex_start + (nr * 4) + channel;
+   const unsigned regnr = 4 * prog_data->urb_setup[location] + channel;
 
    return component(elk_fs_reg(ATTR, regnr, ELK_REGISTER_TYPE_F), comp);
-}
-
-/* The register location here is relative to the start of the URB
- * data.  It will get adjusted to be a real location before
- * generate_code() time.
- */
-elk_fs_reg
-elk_fs_visitor::per_primitive_reg(const fs_builder &bld, int location, unsigned comp)
-{
-   assert(stage == MESA_SHADER_FRAGMENT);
-   assert(BITFIELD64_BIT(location) & nir->info.per_primitive_inputs);
-
-   const struct elk_wm_prog_data *prog_data = elk_wm_prog_data(this->prog_data);
-
-   comp += prog_data->urb_setup_channel[location];
-
-   assert(prog_data->urb_setup[location] >= 0);
-
-   const unsigned regnr = prog_data->urb_setup[location] + comp / 4;
-
-   assert(regnr < prog_data->num_per_primitive_inputs);
-
-   return component(elk_fs_reg(ATTR, regnr, ELK_REGISTER_TYPE_F), comp % 4);
 }
 
 /** Emits the interpolation for the varying inputs. */
@@ -97,14 +49,14 @@ elk_fs_visitor::emit_interpolation_setup_gfx4()
    struct elk_reg g1_uw = retype(elk_vec1_grf(1, 0), ELK_REGISTER_TYPE_UW);
 
    fs_builder abld = fs_builder(this).at_end().annotate("compute pixel centers");
-   this->pixel_x = vgrf(glsl_uint_type());
-   this->pixel_y = vgrf(glsl_uint_type());
-   this->pixel_x.type = ELK_REGISTER_TYPE_UW;
-   this->pixel_y.type = ELK_REGISTER_TYPE_UW;
-   abld.ADD(this->pixel_x,
+   this->uw_pixel_x = vgrf(glsl_uint_type());
+   this->uw_pixel_y = vgrf(glsl_uint_type());
+   this->uw_pixel_x.type = ELK_REGISTER_TYPE_UW;
+   this->uw_pixel_y.type = ELK_REGISTER_TYPE_UW;
+   abld.ADD(this->uw_pixel_x,
             elk_fs_reg(stride(suboffset(g1_uw, 4), 2, 4, 0)),
             elk_fs_reg(elk_imm_v(0x10101010)));
-   abld.ADD(this->pixel_y,
+   abld.ADD(this->uw_pixel_y,
             elk_fs_reg(stride(suboffset(g1_uw, 5), 2, 4, 0)),
             elk_fs_reg(elk_imm_v(0x11001100)));
 
@@ -120,34 +72,25 @@ elk_fs_visitor::emit_interpolation_setup_gfx4()
    if (devinfo->has_pln) {
       for (unsigned i = 0; i < dispatch_width / 8; i++) {
          abld.quarter(i).ADD(quarter(offset(delta_xy, abld, 0), i),
-                             quarter(this->pixel_x, i), xstart);
+                             quarter(this->uw_pixel_x, i), xstart);
          abld.quarter(i).ADD(quarter(offset(delta_xy, abld, 1), i),
-                             quarter(this->pixel_y, i), ystart);
+                             quarter(this->uw_pixel_y, i), ystart);
       }
    } else {
-      abld.ADD(offset(delta_xy, abld, 0), this->pixel_x, xstart);
-      abld.ADD(offset(delta_xy, abld, 1), this->pixel_y, ystart);
+      abld.ADD(offset(delta_xy, abld, 0), this->uw_pixel_x, xstart);
+      abld.ADD(offset(delta_xy, abld, 1), this->uw_pixel_y, ystart);
    }
 
    this->pixel_z = fetch_payload_reg(bld, fs_payload().source_depth_reg);
 
    /* The SF program automatically handles doing the perspective correction or
-    * not based on wm_prog_data::interp_mode[] so we can use the same pixel
+    * not based on fs_prog_data::interp_mode[] so we can use the same pixel
     * offsets for both perspective and non-perspective.
     */
    this->delta_xy[ELK_BARYCENTRIC_NONPERSPECTIVE_PIXEL] =
       this->delta_xy[ELK_BARYCENTRIC_PERSPECTIVE_PIXEL];
 
    abld = bld.annotate("compute pos.w and 1/pos.w");
-   /* Compute wpos.w.  It's always in our setup, since it's needed to
-    * interpolate the other attributes.
-    */
-   this->wpos_w = vgrf(glsl_float_type());
-   abld.emit(ELK_FS_OPCODE_LINTERP, wpos_w, delta_xy,
-             interp_reg(abld, VARYING_SLOT_POS, 3, 0));
-   /* Compute the pixel 1/W value from wpos.w. */
-   this->pixel_w = vgrf(glsl_float_type());
-   abld.emit(ELK_SHADER_OPCODE_RCP, this->pixel_w, wpos_w);
 }
 
 /** Emits the interpolation for the varying inputs. */
@@ -157,11 +100,8 @@ elk_fs_visitor::emit_interpolation_setup_gfx6()
    const fs_builder bld = fs_builder(this).at_end();
    fs_builder abld = bld.annotate("compute pixel centers");
 
-   this->pixel_x = vgrf(glsl_float_type());
-   this->pixel_y = vgrf(glsl_float_type());
-
-   const struct elk_wm_prog_key *wm_key = (elk_wm_prog_key*) this->key;
-   struct elk_wm_prog_data *wm_prog_data = elk_wm_prog_data(prog_data);
+   const struct elk_fs_prog_key *wm_key = (elk_fs_prog_key*) this->key;
+   struct elk_fs_prog_data *fs_prog_data = elk_fs_prog_data(prog_data);
 
    elk_fs_reg int_sample_offset_x, int_sample_offset_y; /* Used on Gen12HP+ */
    elk_fs_reg int_sample_offset_xy; /* Used on Gen8+ */
@@ -215,8 +155,15 @@ elk_fs_visitor::emit_interpolation_setup_gfx6()
    elk_fs_reg half_int_pixel_offset_x = half_int_sample_offset_x;
    elk_fs_reg half_int_pixel_offset_y = half_int_sample_offset_y;
 
+   uw_pixel_x = abld.vgrf(ELK_REGISTER_TYPE_UW);
+   uw_pixel_y = abld.vgrf(ELK_REGISTER_TYPE_UW);
+
    for (unsigned i = 0; i < DIV_ROUND_UP(dispatch_width, 16); i++) {
       const fs_builder hbld = abld.group(MIN2(16, dispatch_width), i);
+
+      elk_fs_reg int_pixel_x = offset(uw_pixel_x, hbld, i);
+      elk_fs_reg int_pixel_y = offset(uw_pixel_y, hbld, i);
+
       /* According to the "PS Thread Payload for Normal Dispatch"
        * pages on the BSpec, subspan X/Y coordinates are stored in
        * R1.2-R1.5/R2.2-R2.5 on gfx6+, and on R0.10-R0.13/R1.10-R1.13
@@ -245,9 +192,9 @@ elk_fs_visitor::emit_interpolation_setup_gfx6()
                   elk_fs_reg(stride(suboffset(gi_uw, 4), 1, 4, 0)),
                   int_pixel_offset_xy);
 
-         hbld.emit(ELK_FS_OPCODE_PIXEL_X, offset(pixel_x, hbld, i), int_pixel_xy,
+         hbld.emit(ELK_FS_OPCODE_PIXEL_X, int_pixel_x, int_pixel_xy,
                                       horiz_stride(half_int_pixel_offset_x, 0));
-         hbld.emit(ELK_FS_OPCODE_PIXEL_Y, offset(pixel_y, hbld, i), int_pixel_xy,
+         hbld.emit(ELK_FS_OPCODE_PIXEL_Y, int_pixel_y, int_pixel_xy,
                                       horiz_stride(half_int_pixel_offset_y, 0));
       } else {
          /* The "Register Region Restrictions" page says for SNB, IVB, HSW:
@@ -258,61 +205,44 @@ elk_fs_visitor::emit_interpolation_setup_gfx6()
           * Since the GRF source of the ADD will only read a single register,
           * we must do two separate ADDs in SIMD16.
           */
-         const elk_fs_reg int_pixel_x = hbld.vgrf(ELK_REGISTER_TYPE_UW);
-         const elk_fs_reg int_pixel_y = hbld.vgrf(ELK_REGISTER_TYPE_UW);
-
          hbld.ADD(int_pixel_x,
                   elk_fs_reg(stride(suboffset(gi_uw, 4), 2, 4, 0)),
                   elk_fs_reg(elk_imm_v(0x10101010)));
          hbld.ADD(int_pixel_y,
                   elk_fs_reg(stride(suboffset(gi_uw, 5), 2, 4, 0)),
                   elk_fs_reg(elk_imm_v(0x11001100)));
-
-         /* As of gfx6, we can no longer mix float and int sources.  We have
-          * to turn the integer pixel centers into floats for their actual
-          * use.
-          */
-         hbld.MOV(offset(pixel_x, hbld, i), int_pixel_x);
-         hbld.MOV(offset(pixel_y, hbld, i), int_pixel_y);
       }
    }
 
    abld = bld.annotate("compute pos.z");
-   if (wm_prog_data->uses_src_depth)
+   if (fs_prog_data->uses_src_depth)
       this->pixel_z = fetch_payload_reg(bld, fs_payload().source_depth_reg);
 
-   if (wm_prog_data->uses_src_w) {
-      abld = bld.annotate("compute pos.w");
-      this->pixel_w = fetch_payload_reg(abld, fs_payload().source_w_reg);
-      this->wpos_w = vgrf(glsl_float_type());
-      abld.emit(ELK_SHADER_OPCODE_RCP, this->wpos_w, this->pixel_w);
-   }
-
    if (wm_key->persample_interp == ELK_SOMETIMES) {
-      assert(!devinfo->needs_unlit_centroid_workaround);
+      assert(!elk_needs_unlit_centroid_workaround(devinfo));
 
       const fs_builder ubld = bld.exec_all().group(16, 0);
       bool loaded_flag = false;
 
       for (int i = 0; i < ELK_BARYCENTRIC_MODE_COUNT; ++i) {
-         if (!(wm_prog_data->barycentric_interp_modes & BITFIELD_BIT(i)))
+         if (!(fs_prog_data->barycentric_interp_modes & BITFIELD_BIT(i)))
             continue;
 
          /* The sample mode will always be the top bit set in the perspective
           * or non-perspective section.  In the case where no SAMPLE mode was
-          * requested, elk_wm_prog_data_barycentric_modes() will swap out the top
+          * requested, elk_fs_prog_data_barycentric_modes() will swap out the top
           * mode for SAMPLE so this works regardless of whether SAMPLE was
           * requested or not.
           */
          int sample_mode;
          if (BITFIELD_BIT(i) & ELK_BARYCENTRIC_NONPERSPECTIVE_BITS) {
-            sample_mode = util_last_bit(wm_prog_data->barycentric_interp_modes &
+            sample_mode = util_last_bit(fs_prog_data->barycentric_interp_modes &
                                         ELK_BARYCENTRIC_NONPERSPECTIVE_BITS) - 1;
          } else {
-            sample_mode = util_last_bit(wm_prog_data->barycentric_interp_modes &
+            sample_mode = util_last_bit(fs_prog_data->barycentric_interp_modes &
                                         ELK_BARYCENTRIC_PERSPECTIVE_BITS) - 1;
          }
-         assert(wm_prog_data->barycentric_interp_modes &
+         assert(fs_prog_data->barycentric_interp_modes &
                 BITFIELD_BIT(sample_mode));
 
          if (i == sample_mode)
@@ -324,8 +254,8 @@ elk_fs_visitor::emit_interpolation_setup_gfx6()
          assert(barys[0] && sample_barys[0]);
 
          if (!loaded_flag) {
-            check_dynamic_msaa_flag(ubld, wm_prog_data,
-                                    INTEL_MSAA_FLAG_PERSAMPLE_INTERP);
+            check_dynamic_fs_config(ubld, fs_prog_data,
+                                    INTEL_FS_CONFIG_PERSAMPLE_INTERP);
          }
 
          for (unsigned j = 0; j < dispatch_width / 8; j++) {
@@ -342,11 +272,11 @@ elk_fs_visitor::emit_interpolation_setup_gfx6()
          bld, fs_payload().barycentric_coord_reg[i]);
    }
 
-   uint32_t centroid_modes = wm_prog_data->barycentric_interp_modes &
+   uint32_t centroid_modes = fs_prog_data->barycentric_interp_modes &
       (1 << ELK_BARYCENTRIC_PERSPECTIVE_CENTROID |
        1 << ELK_BARYCENTRIC_NONPERSPECTIVE_CENTROID);
 
-   if (devinfo->needs_unlit_centroid_workaround && centroid_modes) {
+   if (elk_needs_unlit_centroid_workaround(devinfo) && centroid_modes) {
       /* Get the pixel/sample mask into f0 so that we know which
        * pixels are lit.  Then, for each channel that is unlit,
        * replace the centroid data with non-centroid data.
@@ -396,7 +326,7 @@ cond_for_alpha_func(enum compare_func func)
    case COMPARE_FUNC_NOTEQUAL:
       return ELK_CONDITIONAL_NEQ;
    default:
-      unreachable("Not reached");
+      UNREACHABLE("Not reached");
    }
 }
 
@@ -408,7 +338,7 @@ void
 elk_fs_visitor::emit_alpha_test()
 {
    assert(stage == MESA_SHADER_FRAGMENT);
-   elk_wm_prog_key *key = (elk_wm_prog_key*) this->key;
+   elk_fs_prog_key *key = (elk_fs_prog_key*) this->key;
    const fs_builder bld = fs_builder(this).at_end();
    const fs_builder abld = bld.annotate("Alpha test");
 
@@ -440,7 +370,7 @@ elk_fs_visitor::emit_single_fb_write(const fs_builder &bld,
                                  elk_fs_reg src0_alpha, unsigned components)
 {
    assert(stage == MESA_SHADER_FRAGMENT);
-   struct elk_wm_prog_data *prog_data = elk_wm_prog_data(this->prog_data);
+   struct elk_fs_prog_data *prog_data = elk_fs_prog_data(this->prog_data);
 
    /* Hand over gl_FragDepth or the payload depth. */
    const elk_fs_reg dst_depth = fetch_payload_reg(bld, fs_payload().dest_depth_reg);
@@ -525,8 +455,8 @@ void
 elk_fs_visitor::emit_fb_writes()
 {
    assert(stage == MESA_SHADER_FRAGMENT);
-   struct elk_wm_prog_data *prog_data = elk_wm_prog_data(this->prog_data);
-   elk_wm_prog_key *key = (elk_wm_prog_key*) this->key;
+   struct elk_fs_prog_data *prog_data = elk_fs_prog_data(this->prog_data);
+   elk_fs_prog_key *key = (elk_fs_prog_key*) this->key;
 
    if (source_depth_to_render_target && devinfo->ver == 6) {
       /* For outputting oDepth on gfx6, SIMD8 writes have to be used.  This
@@ -562,8 +492,6 @@ elk_fs_visitor::emit_urb_writes(const elk_fs_reg &gs_vertex_count)
       elk_vue_prog_data(this->prog_data);
    const struct elk_vs_prog_key *vs_key =
       (const struct elk_vs_prog_key *) this->key;
-   const GLbitfield64 psiz_mask =
-      VARYING_BIT_LAYER | VARYING_BIT_VIEWPORT | VARYING_BIT_PSIZ | VARYING_BIT_PRIMITIVE_SHADING_RATE;
    const struct intel_vue_map *vue_map = &vue_prog_data->vue_map;
    bool flush;
    elk_fs_reg sources[8];
@@ -580,7 +508,7 @@ elk_fs_visitor::emit_urb_writes(const elk_fs_reg &gs_vertex_count)
       urb_handle = gs_payload().urb_handles;
       break;
    default:
-      unreachable("invalid stage");
+      UNREACHABLE("invalid stage");
    }
 
    const fs_builder bld = fs_builder(this).at_end();
@@ -633,15 +561,40 @@ elk_fs_visitor::emit_urb_writes(const elk_fs_reg &gs_vertex_count)
       switch (varying) {
       case VARYING_SLOT_PSIZ: {
          /* The point size varying slot is the vue header and is always in the
-          * vue map.  But often none of the special varyings that live there
-          * are written and in that case we can skip writing to the vue
-          * header, provided the corresponding state properly clamps the
-          * values further down the pipeline. */
-         if ((vue_map->slots_valid & psiz_mask) == 0) {
-            assert(length == 0);
-            urb_offset++;
-            break;
-         }
+          * vue map. If anything in the header is going to be read back by HW,
+          * we need to initialize it, in particular the viewport & layer
+          * values.
+          *
+          * SKL PRMs, Volume 7: 3D-Media-GPGPU, Vertex URB Entry (VUE)
+          * Formats:
+          *
+          *    "VUEs are written in two ways:
+          *
+          *       - At the top of the 3D Geometry pipeline, the VF's
+          *         InputAssembly function creates VUEs and initializes them
+          *         from data extracted from Vertex Buffers as well as
+          *         internally generated data.
+          *
+          *       - VS, GS, HS and DS threads can compute, format, and write
+          *         new VUEs as thread output."
+          *
+          *    "Software must ensure that any VUEs subject to readback by the
+          *     3D pipeline start with a valid Vertex Header. This extends to
+          *     all VUEs with the following exceptions:
+          *
+          *       - If the VS function is enabled, the VF-written VUEs are not
+          *         required to have Vertex Headers, as the VS-incoming
+          *         vertices are guaranteed to be consumed by the VS (i.e.,
+          *         the VS thread is responsible for overwriting the input
+          *         vertex data).
+          *
+          *       - If the GS FF is enabled, neither VF-written VUEs nor VS
+          *         thread-generated VUEs are required to have Vertex Headers,
+          *         as the GS will consume all incoming vertices.
+          *
+          *       - If Rendering is disabled, VertexHeaders are not required
+          *         anywhere."
+          */
 
          elk_fs_reg zero(VGRF, alloc.allocate(dispatch_width / 8),
                      ELK_REGISTER_TYPE_UD);
@@ -678,7 +631,7 @@ elk_fs_visitor::emit_urb_writes(const elk_fs_reg &gs_vertex_count)
       }
       case ELK_VARYING_SLOT_NDC:
       case VARYING_SLOT_EDGE:
-         unreachable("unexpected scalar vs output");
+         UNREACHABLE("unexpected scalar vs output");
          break;
 
       default:
@@ -861,8 +814,8 @@ elk_fs_visitor::elk_fs_visitor(const struct elk_compiler *compiler,
 
 elk_fs_visitor::elk_fs_visitor(const struct elk_compiler *compiler,
                        const struct elk_compile_params *params,
-                       const elk_wm_prog_key *key,
-                       struct elk_wm_prog_data *prog_data,
+                       const elk_fs_prog_key *key,
+                       struct elk_fs_prog_data *prog_data,
                        const nir_shader *shader,
                        unsigned dispatch_width,
                        bool needs_register_pressure,

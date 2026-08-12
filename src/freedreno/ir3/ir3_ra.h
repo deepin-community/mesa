@@ -154,15 +154,21 @@ bool ir3_def_live_after(struct ir3_liveness *live, struct ir3_register *def,
 void ir3_create_parallel_copies(struct ir3 *ir);
 
 void ir3_merge_regs(struct ir3_liveness *live, struct ir3 *ir);
+void ir3_aggressive_coalesce(struct ir3_liveness *live,
+                             struct ir3_instruction *instr);
 
 void ir3_force_merge(struct ir3_register *a, struct ir3_register *b,
                      int b_offset);
+void ir3_update_merge_sets_index(struct ir3_liveness *live, struct ir3 *ir);
 
 void ir3_index_instrs_for_merge_sets(struct ir3 *ir);
 
 struct ir3_pressure {
+   /* Register number limits for RA, in units of half regs. */
    unsigned full, half, shared, shared_half;
 };
+
+struct ir3_pressure ir3_ra_get_reg_file_limits(struct ir3_shader_variant *so);
 
 void ir3_calc_pressure(struct ir3_shader_variant *v, struct ir3_liveness *live,
                        struct ir3_pressure *max_pressure);
@@ -290,5 +296,7 @@ void ir3_reg_interval_remove_all(struct ir3_reg_ctx *ctx,
 
 void ra_update_affinity(unsigned file_size, struct ir3_register *reg,
                         physreg_t physreg);
+
+void ir3_ra_handle_unavailable_merge_set(struct ir3_register *reg);
 
 #endif

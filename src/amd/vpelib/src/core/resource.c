@@ -136,16 +136,28 @@ void vpe_destroy_resource(struct vpe_priv *vpe_priv, struct resource *res)
     }
 }
 
-struct segment_ctx *vpe_alloc_segment_ctx(struct vpe_priv *vpe_priv, uint16_t num_segments)
+enum vpe_status vpe_alloc_segment_ctx(
+    struct vpe_priv *vpe_priv, struct stream_ctx *stream_ctx, uint16_t num_segments)
 {
-    struct segment_ctx *segment_ctx_base;
+    // If segment_ctx is already allocated, check if re-allocation needed
+    if (stream_ctx->segment_ctx) {
+        if (num_segments != stream_ctx->num_segments) {
+            // Need to re-allocate segment_ctx. Free it first
+            vpe_free(stream_ctx->segment_ctx);
+            stream_ctx->segment_ctx = NULL;
+        } else {
+            // No need for re-allocation. Return
+            return VPE_STATUS_OK;
+        }
+    }
 
-    segment_ctx_base = (struct segment_ctx *)vpe_zalloc(sizeof(struct segment_ctx) * num_segments);
+    stream_ctx->segment_ctx =
+        (struct segment_ctx *)vpe_zalloc(sizeof(struct segment_ctx) * num_segments);
+    if (!stream_ctx->segment_ctx) {
+        return VPE_STATUS_NO_MEMORY;
+    }
 
-    if (!segment_ctx_base)
-        return NULL;
-
-    return segment_ctx_base;
+    return VPE_STATUS_OK;
 }
 
 static enum vpe_status create_input_config_vector(struct stream_ctx *stream_ctx)
@@ -327,17 +339,18 @@ void vpe_pipe_reset(struct vpe_priv *vpe_priv)
 
 void vpe_pipe_reclaim(struct vpe_priv *vpe_priv, struct vpe_cmd_info *cmd_info)
 {
-    int              i, j;
+    int              pipe_idx, input_idx;
     struct pipe_ctx *pipe_ctx;
 
-    for (i = 0; i < vpe_priv->num_pipe; i++) {
-        pipe_ctx = &vpe_priv->pipe_ctx[i];
+    for (pipe_idx = 0; pipe_idx < vpe_priv->num_pipe; pipe_idx++) {
+        pipe_ctx = &vpe_priv->pipe_ctx[pipe_idx];
         if (pipe_ctx->owner != PIPE_CTX_NO_OWNER) {
-            for (j = 0; j < cmd_info->num_inputs; j++)
-                if (pipe_ctx->owner == cmd_info->inputs[j].stream_idx)
+            for (input_idx = 0; input_idx < cmd_info->num_inputs; input_idx++)
+                if ((pipe_ctx->owner == cmd_info->inputs[input_idx].stream_idx) &&
+                    (pipe_idx == input_idx)) // Check if stream is being used again in same pipe
                     break;
 
-            if (j == cmd_info->num_inputs) {
+            if (input_idx == cmd_info->num_inputs) {
                 // that stream no longer exists
                 pipe_ctx->is_top_pipe  = true;
                 pipe_ctx->owner        = PIPE_CTX_NO_OWNER;
@@ -405,7 +418,7 @@ static void calculate_recout(struct segment_ctx *segment)
     }
 }
 
-void calculate_scaling_ratios(struct scaler_data *scl_data, struct vpe_rect *src_rect,
+void vpe_calculate_scaling_ratios(struct scaler_data *scl_data, struct vpe_rect *src_rect,
     struct vpe_rect *dst_rect, enum vpe_surface_pixel_format format)
 {
     // no rotation support
@@ -592,12 +605,39 @@ static enum vpe_status calculate_inits_and_viewports(struct segment_ctx *segment
     return VPE_STATUS_OK;
 }
 
+enum lut3d_type vpe_get_stream_lut3d_type(struct stream_ctx *stream_ctx)
+{
+    enum lut3d_type lut3d;
+
+    if ((stream_ctx->stream.tm_params.UID == 0) || (!stream_ctx->stream.tm_params.enable_3dlut)) {
+        lut3d = LUT3D_TYPE_NONE;
+    } else {
+        lut3d = LUT3D_TYPE_CPU;
+    }
+    return lut3d;
+}
+
 uint16_t vpe_get_num_segments(struct vpe_priv *vpe_priv, const struct vpe_rect *src,
     const struct vpe_rect *dst, const uint32_t max_seg_width)
 {
     int num_seg_src = (int)(ceil((double)src->width / max_seg_width));
     int num_seg_dst = (int)(ceil((double)dst->width / max_seg_width));
     return (uint16_t)(max(max(num_seg_src, num_seg_dst), 1));
+}
+
+bool vpe_should_generate_cmd_info(struct stream_ctx *stream_ctx)
+{
+    enum vpe_stream_type stream_type = stream_ctx->stream_type;
+
+    switch (stream_type) {
+    case VPE_STREAM_TYPE_INPUT:
+    case VPE_STREAM_TYPE_BG_GEN:
+        return true;
+    default:
+        /* destination-as-input virtual stream does not need a new cmd_info,
+           it is used as one of the inputs in blending normal input stream only */
+        return false;
+    }
 }
 
 void vpe_clip_stream(
@@ -608,6 +648,9 @@ void vpe_clip_stream(
 
     struct vpe_rect clipped_dst_rect, clipped_src_rect;
     uint32_t        clipped_pixels;
+
+    if (dst_rect->height == 0 && dst_rect->width == 0)
+        return;
 
     clipped_dst_rect = *dst_rect;
     clipped_src_rect = *src_rect;
@@ -788,4 +831,50 @@ void vpe_backend_config_callback(
 
     vpe_priv->vpe_desc_writer.add_config_desc(
         &vpe_priv->vpe_desc_writer, cfg_base_gpu, false, (uint8_t)vpe_priv->config_writer.buf->tmz);
+}
+
+uint32_t vpe_get_recout_width_alignment(const struct vpe_build_param *params)
+{
+    uint16_t recout_alignment;
+        recout_alignment = VPE_NO_ALIGNMENT;
+
+    return recout_alignment;
+}
+
+bool vpe_rec_is_equal(struct vpe_rect rec1, struct vpe_rect rec2)
+{
+    return (rec1.x == rec2.x && rec1.y == rec2.y && rec1.width == rec2.width &&
+            rec1.height == rec2.height);
+}
+
+const struct vpe_caps *vpe_get_capability(enum vpe_ip_level ip_level)
+{
+    const struct vpe_caps *caps;
+    switch (ip_level) {
+    case VPE_IP_LEVEL_1_0:
+        caps = vpe10_get_capability();
+        break;
+    case VPE_IP_LEVEL_1_1:
+        caps = vpe11_get_capability();
+        break;
+
+    default:
+        caps = NULL;
+    }
+    return caps;
+}
+
+void vpe_setup_check_funcs(struct vpe_check_support_funcs *funcs, enum vpe_ip_level ip_level)
+{
+    switch (ip_level) {
+    case VPE_IP_LEVEL_1_0:
+        vpe10_setup_check_funcs(funcs);
+        break;
+    case VPE_IP_LEVEL_1_1:
+        vpe11_setup_check_funcs(funcs);
+        break;
+    default:
+        break;
+    }
+    return;
 }

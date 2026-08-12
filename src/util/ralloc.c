@@ -79,7 +79,7 @@ static ralloc_header *
 get_header(const void *ptr)
 {
    ralloc_header *info = (ralloc_header *) (((char *) ptr) -
-					    sizeof(ralloc_header));
+                                            sizeof(ralloc_header));
    assert(info->canary == CANARY);
    return info;
 }
@@ -95,7 +95,7 @@ add_child(ralloc_header *parent, ralloc_header *info)
       parent->child = info;
 
       if (info->next != NULL)
-	 info->next->prev = info;
+         info->next->prev = info;
    }
 }
 
@@ -173,13 +173,13 @@ resize(void *ptr, size_t size)
    /* Update parent and sibling's links to the reallocated node. */
    if (info != old && info->parent != NULL) {
       if (info->parent->child == old)
-	 info->parent->child = info;
+         info->parent->child = info;
 
       if (info->prev != NULL)
-	 info->prev->next = info;
+         info->prev->next = info;
 
       if (info->next != NULL)
-	 info->next->prev = info;
+         info->next->prev = info;
    }
 
    /* Update child->parent links for all children */
@@ -295,13 +295,13 @@ unlink_block(ralloc_header *info)
    /* Unlink from parent & siblings */
    if (info->parent != NULL) {
       if (info->parent->child == info)
-	 info->parent->child = info->next;
+         info->parent->child = info->next;
 
       if (info->prev != NULL)
-	 info->prev->next = info->next;
+         info->prev->next = info->next;
 
       if (info->next != NULL)
-	 info->next->prev = info->prev;
+         info->next->prev = info->prev;
    }
    info->parent = NULL;
    info->prev = NULL;
@@ -542,7 +542,7 @@ ralloc_asprintf_rewrite_tail(char **str, size_t *start, const char *fmt, ...)
 
 bool
 ralloc_vasprintf_rewrite_tail(char **str, size_t *start, const char *fmt,
-			      va_list args)
+                              va_list args)
 {
    size_t new_length;
    char *ptr;
@@ -1118,9 +1118,6 @@ linear_context_with_opts(void *ralloc_ctx, const linear_opts *opts)
 {
    linear_ctx *ctx;
 
-   if (unlikely(!ralloc_ctx))
-      return NULL;
-
    const unsigned default_min_buffer_size = 2048;
    const unsigned min_buffer_size =
       MAX2(ALIGN_POT(opts->min_buffer_size, default_min_buffer_size),
@@ -1194,6 +1191,18 @@ ralloc_parent_of_linear_context(linear_ctx *ctx)
 /* All code below is pretty much copied from ralloc and only the alloc
  * calls are different.
  */
+
+void *
+linear_memdup(linear_ctx *ctx, const void *mem, size_t n)
+{
+   void *ptr = linear_alloc_child(ctx, n);
+
+   if (unlikely(ptr == NULL))
+      return NULL;
+
+   memcpy(ptr, mem, n);
+   return ptr;
+}
 
 char *
 linear_strdup(linear_ctx *ctx, const char *str)
@@ -1383,14 +1392,19 @@ ralloc_print_info_helper(ralloc_print_info_state *state, const ralloc_header *in
    const linear_ctx *lin_ctx = ptr;
    const gc_ctx *gc_ctx = ptr;
 
-   if (lin_ctx->magic == LMAGIC_CONTEXT) {
+   const bool is_linear = info->size >= sizeof(*lin_ctx) &&
+                          lin_ctx->magic == LMAGIC_CONTEXT;
+   const bool is_gc = info->size >= sizeof(*gc_ctx) &&
+                      gc_ctx->canary == GC_CONTEXT_CANARY;
+
+   if (is_linear) {
       if (f) fprintf(f, " (linear context)");
       assert(!state->inside_gc && !state->inside_linear);
       state->inside_linear = true;
       state->linear_metadata_bytes += sizeof(linear_ctx);
       state->content_bytes -= sizeof(linear_ctx);
       state->linear_count++;
-   } else if (gc_ctx->canary == GC_CONTEXT_CANARY) {
+   } else if (is_gc) {
       if (f) fprintf(f, " (gc context)");
       assert(!state->inside_gc && !state->inside_linear);
       state->inside_gc = true;
@@ -1421,8 +1435,8 @@ ralloc_print_info_helper(ralloc_print_info_state *state, const ralloc_header *in
    state->indent -= 2;
 
 #ifndef NDEBUG
-   if (lin_ctx->magic == LMAGIC_CONTEXT) state->inside_linear = false;
-   else if (gc_ctx->canary == GC_CONTEXT_CANARY) state->inside_gc = false;
+   if (is_linear) state->inside_linear = false;
+   else if (is_gc) state->inside_gc = false;
 #endif
 }
 

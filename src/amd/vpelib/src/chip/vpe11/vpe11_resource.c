@@ -1,4 +1,4 @@
-/* Copyright 2023 Advanced Micro Devices, Inc.
+/* Copyright 2023-2025 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -34,17 +34,10 @@
 #include "vpe10_mpc.h"
 #include "vpe10_opp.h"
 #include "vpe11_command.h"
-#include "vpe10_cm_common.h"
 #include "vpe10_background.h"
 #include "vpe10_plane_desc_writer.h"
 #include "vpe11_vpe_desc_writer.h"
 #include "vpe10_config_writer.h"
-#include "vpe10/inc/asic/bringup_vpe_6_1_0_offset.h"
-#include "vpe10/inc/asic/bringup_vpe_6_1_0_sh_mask.h"
-#include "vpe10/inc/asic/bringup_vpe_6_1_0_default.h"
-#include "vpe10/inc/asic/vpe_1_0_offset.h"
-#include "custom_fp16.h"
-#include "custom_float.h"
 #include "background.h"
 
 #define LUT_NUM_ENTRIES   (17 * 17 * 17)
@@ -65,88 +58,106 @@
     .reg_name = {BASE(reg##reg_name##_BASE_IDX) + reg##reg_name, reg##reg_name##_##DEFAULT,        \
         reg##reg_name##_##DEFAULT, false}
 
-static struct vpe_caps caps = {
-    .lut_size               = LUT_BUFFER_SIZE,
-    .rotation_support       = 0,
-    .h_mirror_support       = 1,
-    .v_mirror_support       = 0,
-    .is_apu                 = 1,
-    .bg_color_check_support = 0,
-    .resource_caps =
-        {
-            .num_dpp       = 1,
-            .num_opp       = 1,
-            .num_mpc_3dlut = 1,
-            .num_queue     = 8,
-            .num_cdc_be    = 1,
-        },
-    .color_caps = {.dpp =
-                       {
-                           .pre_csc    = 1,
-                           .luma_key   = 0,
-                           .color_key  = 1,
-                           .dgam_ram   = 0,
-                           .post_csc   = 1,
-                           .gamma_corr = 1,
-                           .hw_3dlut   = 1,
-                           .ogam_ram   = 1, /**< programmable gam in output -> gamma_corr */
-                           .ocsc       = 0,
-                           .dgam_rom_caps =
+static struct vpe_caps
+   caps = {
+            .max_input_size =
+                {
+                    .width  = 16384,
+                    .height = 16384,
+                },
+            .max_output_size =
+                {
+                    .width  = 16384,
+                    .height = 16384,
+                },
+            .min_input_size =
+                {
+                    .width  = 1,
+                    .height = 1,
+                },
+            .min_output_size =
+                {
+                    .width  = 1,
+                    .height = 1,
+                },
+            .lut_size               = LUT_BUFFER_SIZE,
+            .rotation_support       = 0,
+            .h_mirror_support       = 1,
+            .v_mirror_support       = 0,
+            .is_apu                 = 1,
+            .bg_color_check_support = 0,
+
+            .prefer_external_scaler_coef = 1,
+
+            .resource_caps =
+                {
+                    .num_dpp       = 1,
+                    .num_opp       = 1,
+                    .num_mpc_3dlut = 1,
+                    .num_queue     = 8,
+                    .num_cdc_be    = 1,
+                },
+            .color_caps = {.dpp =
                                {
-                                   .srgb     = 1,
-                                   .bt2020   = 1,
-                                   .gamma2_2 = 1,
-                                   .pq       = 1,
-                                   .hlg      = 1,
+                                   .pre_csc    = 1,
+                                   .luma_key   = 0,
+                                   .color_key  = 1,
+                                   .dgam_ram   = 0,
+                                   .post_csc   = 1,
+                                   .gamma_corr = 1,
+                                   .hw_3dlut   = 1,
+                                   .ogam_ram   = 1, /**< programmable gam in output -> gamma_corr */
+                                   .ocsc       = 0,
+                                   .dgam_rom_caps =
+                                       {
+                                           .srgb     = 1,
+                                           .bt2020   = 1,
+                                           .gamma2_2 = 1,
+                                           .pq       = 1,
+                                           .hlg      = 1,
+                                       },
                                },
-                       },
-        .mpc =
-            {
-                .gamut_remap         = 1,
-                .ogam_ram            = 1,
-                .ocsc                = 1,
-                .shared_3d_lut       = 1,
-                .global_alpha        = 1,
-                .top_bottom_blending = 0,
-            }},
-    .plane_caps =
-        {
-            .per_pixel_alpha = 1,
-            .input_pixel_format_support =
+                .mpc =
+                    {
+                        .gamut_remap         = 1,
+                        .ogam_ram            = 1,
+                        .ocsc                = 1,
+                        .shared_3d_lut       = 1,
+                        .global_alpha        = 1,
+                        .top_bottom_blending = 0,
+                    }},
+            .plane_caps =
                 {
-                    .argb_packed_32b = 1,
-                    .nv12            = 1,
-                    .fp16            = 0,
-                    .p010            = 1, /**< planar 4:2:0 10-bit */
-                    .p016            = 0, /**< planar 4:2:0 16-bit */
-                    .ayuv            = 0, /**< packed 4:4:4 */
-                    .yuy2 = 0
+                    .per_pixel_alpha = 1,
+                    .input_pixel_format_support =
+                        {
+                            .argb_packed_32b = 1,
+                            .nv12            = 1,
+                            .fp16            = 0,
+                            .p010            = 1, /**< planar 4:2:0 10-bit */
+                            .p016            = 0, /**< planar 4:2:0 16-bit */
+                            .ayuv            = 0, /**< packed 4:4:4 */
+                            .yuy2            = 0, /**< packed 4:2:2 */
+                        },
+                    .output_pixel_format_support =
+                        {
+                            .argb_packed_32b = 1,
+                            .nv12            = 0,
+                            .fp16            = 1,
+                            .p010            = 0, /**< planar 4:2:0 10-bit */
+                            .p016            = 0, /**< planar 4:2:0 16-bit */
+                            .ayuv            = 0, /**< packed 4:4:4 */
+                            .yuy2 = 0
+                        },
+                    .max_upscale_factor = 64000,
+
+                    // 6:1 downscaling ratio: 1000/6 = 166.666
+                    .max_downscale_factor = 167,
+
+                    .pitch_alignment    = 256,
+                    .addr_alignment     = 256,
+                    .max_viewport_width = 1024,
                 },
-            .output_pixel_format_support =
-                {
-                    .argb_packed_32b = 1,
-                    .nv12            = 0,
-                    .fp16            = 1,
-                    .p010            = 0, /**< planar 4:2:0 10-bit */
-                    .p016            = 0, /**< planar 4:2:0 16-bit */
-                    .ayuv            = 0, /**< packed 4:4:4 */
-                    .yuy2 = 0
-                },
-            .max_upscale_factor = 64000,
-
-            // 6:1 downscaling ratio: 1000/6 = 166.666
-            .max_downscale_factor = 167,
-
-            .pitch_alignment    = 256,
-            .addr_alignment     = 256,
-            .max_viewport_width = 1024,
-        },
-};
-
-static struct vpe_cap_funcs cap_funcs =
-{
-    .get_dcc_compression_output_cap = vpe10_get_dcc_compression_output_cap,
-    .get_dcc_compression_input_cap  = vpe10_get_dcc_compression_input_cap
 };
 
 enum vpe_status vpe11_construct_resource(struct vpe_priv *vpe_priv, struct resource *res)
@@ -154,10 +165,8 @@ enum vpe_status vpe11_construct_resource(struct vpe_priv *vpe_priv, struct resou
     struct vpe *vpe = &vpe_priv->pub;
 
     vpe->caps      = &caps;
-    vpe->cap_funcs = &cap_funcs;
 
     vpe10_construct_vpec(vpe_priv, &res->vpec);
-
     res->cdc_fe[0] = vpe10_cdc_fe_create(vpe_priv, 0);
     if (!res->cdc_fe[0])
         goto err;
@@ -187,13 +196,12 @@ enum vpe_status vpe11_construct_resource(struct vpe_priv *vpe_priv, struct resou
 
     res->internal_hdr_normalization = 1;
 
-    res->check_input_color_space           = vpe10_check_input_color_space;
-    res->check_output_color_space          = vpe10_check_output_color_space;
     res->check_h_mirror_support            = vpe10_check_h_mirror_support;
     res->calculate_segments                = vpe10_calculate_segments;
     res->set_num_segments                  = vpe11_set_num_segments;
     res->split_bg_gap                      = vpe10_split_bg_gap;
     res->calculate_dst_viewport_and_active = vpe10_calculate_dst_viewport_and_active;
+    res->get_bg_stream_idx                 = vpe10_get_bg_stream_idx;
     res->find_bg_gaps                      = vpe_find_bg_gaps;
     res->create_bg_segments                = vpe_create_bg_segments;
     res->populate_cmd_info                 = vpe10_populate_cmd_info;
@@ -201,7 +209,12 @@ enum vpe_status vpe11_construct_resource(struct vpe_priv *vpe_priv, struct resou
     res->program_backend                   = vpe10_program_backend;
     res->get_bufs_req                      = vpe10_get_bufs_req;
     res->check_bg_color_support            = vpe10_check_bg_color_support;
+    res->bg_color_convert                  = vpe10_bg_color_convert;
     res->check_mirror_rotation_support     = vpe10_check_mirror_rotation_support;
+    res->update_blnd_gamma                 = vpe10_update_blnd_gamma;
+    res->update_output_gamma               = vpe10_update_output_gamma;
+    res->validate_cached_param             = vpe11_validate_cached_param;
+    res->calculate_shaper                  = vpe10_calculate_shaper;
 
     return VPE_STATUS_OK;
 err:
@@ -239,13 +252,14 @@ void vpe11_destroy_resource(struct vpe_priv *vpe_priv, struct resource *res)
 
 enum vpe_status vpe11_set_num_segments(struct vpe_priv *vpe_priv, struct stream_ctx *stream_ctx,
     struct scaler_data *scl_data, struct vpe_rect *src_rect, struct vpe_rect *dst_rect,
-    uint32_t *max_seg_width)
+    uint32_t *max_seg_width, uint32_t recout_width_alignment)
 {
+    uint16_t        num_segs;
+    struct dpp     *dpp         = vpe_priv->resource.dpp[0];
+    const uint32_t  max_lb_size = dpp->funcs->get_line_buffer_size();
+    enum vpe_status res         = VPE_STATUS_OK;
 
-    uint16_t       num_segs;
-    struct dpp    *dpp         = vpe_priv->resource.dpp[0];
-    const uint32_t max_lb_size = dpp->funcs->get_line_buffer_size();
-
+    (void)recout_width_alignment;
     *max_seg_width = min(*max_seg_width, max_lb_size / scl_data->taps.v_taps);
 
     num_segs = vpe_get_num_segments(vpe_priv, src_rect, dst_rect, *max_seg_width);
@@ -254,11 +268,70 @@ enum vpe_status vpe11_set_num_segments(struct vpe_priv *vpe_priv, struct stream_
         num_segs += (vpe_priv->vpe_num_instance - (num_segs % vpe_priv->vpe_num_instance));
     }
 
-    stream_ctx->segment_ctx = vpe_alloc_segment_ctx(vpe_priv, num_segs);
-    if (!stream_ctx->segment_ctx)
-        return VPE_STATUS_NO_MEMORY;
+    res = vpe_alloc_segment_ctx(vpe_priv, stream_ctx, num_segs);
 
-    stream_ctx->num_segments = num_segs;
+    if (res == VPE_STATUS_OK) {
+        stream_ctx->num_segments = num_segs;
+    }
 
-    return VPE_STATUS_OK;
+    return res;
+}
+
+bool vpe11_validate_cached_param(struct vpe_priv *vpe_priv, const struct vpe_build_param *param)
+{
+    uint32_t           i;
+    struct output_ctx *output_ctx;
+
+    if (vpe_priv->num_input_streams != param->num_streams &&
+        !(vpe_priv->init.debug.bg_color_fill_only == true && vpe_priv->num_streams == 1))
+        return false;
+
+    if (vpe_priv->collaboration_mode != param->collaboration_mode)
+        return false;
+
+    if (param->num_instances > 0 && vpe_priv->vpe_num_instance != param->num_instances)
+        return false;
+
+    for (i = 0; i < vpe_priv->num_input_streams; i++) {
+        struct vpe_stream stream = param->streams[i];
+
+        vpe_clip_stream(
+            &stream.scaling_info.src_rect, &stream.scaling_info.dst_rect, &param->target_rect);
+
+        if (memcmp(&vpe_priv->stream_ctx[i].stream, &stream, sizeof(struct vpe_stream)))
+            return false;
+    }
+
+    output_ctx = &vpe_priv->output_ctx;
+    if (output_ctx->alpha_mode != param->alpha_mode)
+        return false;
+
+    if (memcmp(&output_ctx->mpc_bg_color, &param->bg_color, sizeof(struct vpe_color)))
+        return false;
+
+    if (memcmp(&output_ctx->opp_bg_color, &param->bg_color, sizeof(struct vpe_color)))
+        return false;
+
+    if (memcmp(&output_ctx->target_rect, &param->target_rect, sizeof(struct vpe_rect)))
+        return false;
+
+    if (memcmp(&output_ctx->surface, &param->dst_surface, sizeof(struct vpe_surface_info)))
+        return false;
+
+    return true;
+}
+
+const struct vpe_caps *vpe11_get_capability(void)
+{
+    return &caps;
+}
+
+void vpe11_setup_check_funcs(struct vpe_check_support_funcs *funcs)
+{
+    funcs->check_input_format             = vpe10_check_input_format;
+    funcs->check_output_format            = vpe10_check_output_format;
+    funcs->check_input_color_space        = vpe10_check_input_color_space;
+    funcs->check_output_color_space       = vpe10_check_output_color_space;
+    funcs->get_dcc_compression_input_cap  = vpe10_get_dcc_compression_input_cap;
+    funcs->get_dcc_compression_output_cap = vpe10_get_dcc_compression_output_cap;
 }

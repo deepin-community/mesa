@@ -12,13 +12,18 @@ pps_sources = [
 include_pps = include_directories('../')
 
 dep_drm = dependency('libdrm')
-pps_deps = [dep_drm, dep_perfetto]
-pps_deps += pps_datasources
+
+pps_deps = [
+  dep_drm,
+  dep_perfetto,
+  idep_mesautil,
+  pps_datasources,
+]
 
 lib_pps = static_library(
   'pps',
   sources: pps_sources,
-  include_directories: [include_pps, inc_src, pps_includes],
+  include_directories: [include_pps, inc_src, inc_util, pps_includes],
   dependencies: pps_deps,
 )
 
@@ -39,6 +44,16 @@ executable(
   dependencies: [dep_pps, dep_perfetto],
   install: true
 )
+
+if with_platform_android
+  shared_library(
+    'gpudataproducer',
+    sources: producer_sources,
+    include_directories: [include_pps, inc_src],
+    dependencies: [dep_pps, dep_perfetto],
+    install: true
+  )
+endif
 
 config_sources = [
   'pps_config.cc'

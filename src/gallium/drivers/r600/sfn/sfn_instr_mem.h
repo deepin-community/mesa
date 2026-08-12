@@ -46,6 +46,8 @@ private:
    static bool emit_atomic_op2(nir_intrinsic_instr *intr, Shader& shader);
    static bool emit_atomic_inc(nir_intrinsic_instr *intr, Shader& shader);
    static bool emit_atomic_pre_dec(nir_intrinsic_instr *intr, Shader& shader);
+   static bool emit_atomic_post_dec(nir_intrinsic_instr *intr, Shader& shader);
+   static bool emit_atomic_counter_comp_swap(nir_intrinsic_instr *intr, Shader& shader);
 
    void do_print(std::ostream& os) const override;
 
@@ -98,7 +100,8 @@ public:
       OR_RTN,
       XOR_RTN,
       MSKOR_RTN,
-      UINT_RTN,
+      WRAP_INC_RTN,
+      WRAP_DEC_RTN,
       UNSUPPORTED
    };
 

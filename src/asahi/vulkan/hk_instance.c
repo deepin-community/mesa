@@ -13,14 +13,14 @@
 
 #include "util/build_id.h"
 #include "util/driconf.h"
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_EnumerateInstanceVersion(uint32_t *pApiVersion)
 {
    uint32_t version_override = vk_get_version_override();
    *pApiVersion = version_override ? version_override
-                                   : VK_MAKE_VERSION(1, 3, VK_HEADER_VERSION);
+                                   : VK_MAKE_VERSION(1, 4, VK_HEADER_VERSION);
 
    return VK_SUCCESS;
 }
@@ -29,6 +29,7 @@ static const struct vk_instance_extension_table instance_extensions = {
 #ifdef HK_USE_WSI_PLATFORM
    .KHR_get_surface_capabilities2 = true,
    .KHR_surface = true,
+   .KHR_surface_maintenance1 = true,
    .KHR_surface_protected_capabilities = true,
    .EXT_surface_maintenance1 = true,
    .EXT_swapchain_colorspace = true,
@@ -83,7 +84,6 @@ static const driOptionDescription hk_dri_options[] = {
       DRI_CONF_VK_X11_OVERRIDE_MIN_IMAGE_COUNT(0)
       DRI_CONF_VK_X11_STRICT_IMAGE_COUNT(false)
       DRI_CONF_VK_X11_ENSURE_MIN_IMAGE_COUNT(false)
-      DRI_CONF_VK_KHR_PRESENT_WAIT(false)
       DRI_CONF_VK_XWAYLAND_WAIT_READY(false)
    DRI_CONF_SECTION_END
 
@@ -94,8 +94,10 @@ static const driOptionDescription hk_dri_options[] = {
    DRI_CONF_SECTION_END
 
    DRI_CONF_SECTION_MISCELLANEOUS
-      DRI_CONF_HK_DISABLE_RGBA4_BORDER_COLOR_WORKAROUND(false)
       DRI_CONF_HK_DISABLE_BORDER_EMULATION(false)
+      DRI_CONF_HK_FAKE_MINMAX(false)
+      DRI_CONF_HK_IMAGE_VIEW_MIN_LOD(false)
+      DRI_CONF_HK_ENABLE_VERTEX_PIPELINE_STORES_ATOMICS(false)
    DRI_CONF_SECTION_END
 };
 /* clang-format on */
@@ -113,11 +115,17 @@ hk_init_dri_options(struct hk_instance *instance)
    instance->force_vk_vendor =
       driQueryOptioni(&instance->dri_options, "force_vk_vendor");
 
-   instance->workaround_rgba4 = !driQueryOptionb(
-      &instance->dri_options, "hk_disable_rgba4_border_color_workaround");
-
    instance->no_border =
       driQueryOptionb(&instance->dri_options, "hk_disable_border_emulation");
+
+   instance->fake_minmax =
+      driQueryOptionb(&instance->dri_options, "hk_fake_minmax");
+
+   instance->image_view_min_lod =
+      driQueryOptionb(&instance->dri_options, "hk_image_view_min_lod");
+
+   instance->vertex_stores = driQueryOptionb(
+      &instance->dri_options, "hk_enable_vertex_pipeline_stores_atomics");
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -162,14 +170,14 @@ hk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
    }
 
    unsigned build_id_len = build_id_length(note);
-   if (build_id_len < SHA1_DIGEST_LENGTH) {
+   if (build_id_len < BUILD_ID_EXPECTED_HASH_LENGTH) {
       result = vk_errorf(NULL, VK_ERROR_INITIALIZATION_FAILED,
                          "build-id too short.  It needs to be a SHA");
       goto fail_init;
    }
 
-   static_assert(sizeof(instance->driver_build_sha) == SHA1_DIGEST_LENGTH);
-   memcpy(instance->driver_build_sha, build_id_data(note), SHA1_DIGEST_LENGTH);
+   static_assert(sizeof(instance->driver_build_sha) == BLAKE3_KEY_LEN);
+   copy_build_id_to_sha1(instance->driver_build_sha, note);
 
    *pInstance = hk_instance_to_handle(instance);
    return VK_SUCCESS;

@@ -29,6 +29,23 @@ DELAYED_DECODER_DELETE_DICT_ENTRIES = [
     "vkDestroyShaderModule",
 ]
 
+GLOBAL_COMMANDS_WITHOUT_DISPATCH = [
+    "vkCreateInstance",
+    "vkEnumerateInstanceVersion",
+    "vkEnumerateInstanceExtensionProperties",
+    "vkEnumerateInstanceLayerProperties",
+    "vkTraceAsyncGOOGLE",
+    "vkSetDebugMetadataAsyncGOOGLE",
+]
+
+COMMANDS_WITHOUT_TRACE = [
+    # This command is used to set perfetto track names (using the guest process and thread name)
+    # and track names should (ideally) be set before any trace events
+    'vkSetDebugMetadataAsyncGOOGLE',
+]
+
+SNAPSHOT_API_CALL_HANDLE_VARNAME = "snapshotApiCallHandle"
+
 global_state_prefix = "m_state->on_"
 
 decoder_decl_preamble = """
@@ -38,6 +55,7 @@ class IOStream;
 }  // namespace gfxstream
 
 namespace gfxstream {
+namespace host {
 namespace vk {
 
 class VkDecoder {
@@ -53,31 +71,28 @@ private:
 };
 
 }  // namespace vk
+}  // namespace host
 }  // namespace gfxstream
 
 """
 
 decoder_impl_preamble ="""
 namespace gfxstream {
+namespace host {
 namespace vk {
-
-using android::base::MetricEventBadPacketLength;
-using android::base::MetricEventDuplicateSequenceNum;
 
 class VkDecoder::Impl {
 public:
-    Impl() : m_logCalls(android::base::getEnvironmentVariable("ANDROID_EMU_VK_LOG_CALLS") == "1"),
+    Impl() : m_logCalls(gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VK_LOG_CALLS") == "1"),
              m_vk(vkDispatch()),
              m_state(VkDecoderGlobalState::get()),
              m_vkStream(nullptr, m_state->getFeatures()),
              m_vkMemReadingStream(nullptr, m_state->getFeatures()),
-             m_boxedHandleUnwrapMapping(m_state),
              m_boxedHandleCreateMapping(m_state),
-             m_boxedHandleDestroyMapping(m_state),
-             m_boxedHandleUnwrapAndDeleteMapping(m_state),
-             m_boxedHandleUnwrapAndDeletePreserveBoxedMapping(m_state),
+             m_boxedHandleUnwrapMapping(m_state),
              m_prevSeqno(std::nullopt),
-             m_queueSubmitWithCommandsEnabled(m_state->getFeatures().VulkanQueueSubmitWithCommands.enabled) {}
+             m_queueSubmitWithCommandsEnabled(m_state->getFeatures().VulkanQueueSubmitWithCommands.enabled),
+             m_snapshotsEnabled(m_state->snapshotsEnabled()) {}
     %s* stream() { return &m_vkStream; }
     VulkanMemReadingStream* readStream() { return &m_vkMemReadingStream; }
 
@@ -95,14 +110,12 @@ private:
     VkDecoderGlobalState* m_state;
     %s m_vkStream;
     VulkanMemReadingStream m_vkMemReadingStream;
-    BoxedHandleUnwrapMapping m_boxedHandleUnwrapMapping;
     BoxedHandleCreateMapping m_boxedHandleCreateMapping;
-    BoxedHandleDestroyMapping m_boxedHandleDestroyMapping;
-    BoxedHandleUnwrapAndDeleteMapping m_boxedHandleUnwrapAndDeleteMapping;
-    android::base::BumpPool m_pool;
-    BoxedHandleUnwrapAndDeletePreserveBoxedMapping m_boxedHandleUnwrapAndDeletePreserveBoxedMapping;
+    BoxedHandleUnwrapMapping m_boxedHandleUnwrapMapping;
+    gfxstream::base::BumpPool m_pool;
     std::optional<uint32_t> m_prevSeqno;
     bool m_queueSubmitWithCommandsEnabled = false;
+    const bool m_snapshotsEnabled = false;
 };
 
 VkDecoder::VkDecoder() :
@@ -126,6 +139,7 @@ size_t VkDecoder::decode(void* buf, size_t bufsize, IOStream* stream,
 decoder_impl_postamble = """
 
 }  // namespace vk
+}  // namespace host
 }  // namespace gfxstream
 
 """
@@ -213,6 +227,10 @@ def emit_dispatch_unmarshal(typeInfo: VulkanTypeInfo, param: VulkanType, cgen, g
         cgen.stmt("auto vk = dispatch_%s(%s)" %
                   (param.typeName, param.paramName))
         cgen.stmt("// End manual dispatchable handle unboxing for %s" % param.paramName)
+    else:
+        # Still need to check dispatcher validity to handle threads with fatal errors
+        cgen.stmt("auto vk = dispatch_%s(%s)" %
+                  (param.typeName, param.paramName))
 
 
 def emit_transform(typeInfo, param, cgen, variant="tohost"):
@@ -274,7 +292,7 @@ def emit_call_log(api, cgen):
         paramLogFormat += "0x%llx "
     for p in paramsToRead:
         paramLogArgs.append("(unsigned long long)%s" % (p.paramName))
-    cgen.stmt("fprintf(stderr, \"stream %%p: call %s %s\\n\", ioStream, %s)" % (api.name, paramLogFormat, ", ".join(paramLogArgs)))
+    cgen.stmt("GFXSTREAM_INFO(\"stream %%p: call %s %s\", ioStream, %s)" % (api.name, paramLogFormat, ", ".join(paramLogArgs)))
     cgen.endIf()
 
 def emit_decode_parameters(typeInfo: VulkanTypeInfo, api: VulkanAPI, cgen, globalWrapped=False):
@@ -289,7 +307,7 @@ def emit_decode_parameters(typeInfo: VulkanTypeInfo, api: VulkanAPI, cgen, globa
         lenAccess = cgen.generalLengthAccess(p)
 
         if p.dispatchHandle:
-            if api.name in DELAYED_DECODER_DELETE_DICT_ENTRIES:
+            if api.name in DELAYED_DECODER_DELETE_DICT_ENTRIES or api.name in DELAYED_DECODER_DELETES:
                 emit_dispatch_unmarshal(typeInfo, p, cgen, False)
             else:
                 emit_dispatch_unmarshal(typeInfo, p, cgen, globalWrapped)
@@ -340,9 +358,15 @@ def emit_dispatch_call(api, cgen):
         else:
             cgen.stmt("m_state->lock()")
 
-    cgen.vkApiCall(api, customPrefix="vk->", customParameters=customParams, \
+    whichDispatch = "vk->"
+    checkDispatcher = "CC_LIKELY(vk)"
+    if api.name in GLOBAL_COMMANDS_WITHOUT_DISPATCH:
+        whichDispatch = "m_vk->"
+        checkDispatcher = None
+
+    cgen.vkApiCall(api, customPrefix=whichDispatch, customParameters=customParams, \
         globalStatePrefix=global_state_prefix, checkForDeviceLost=True,
-        checkForOutOfMemory=True)
+        checkDispatcher=checkDispatcher)
 
     if api.name in driver_workarounds_global_lock_apis:
         if not delay:
@@ -354,16 +378,29 @@ def emit_dispatch_call(api, cgen):
         cgen.line("};")
 
 def emit_global_state_wrapped_call(api, cgen, context):
-    if api.name in DELAYED_DECODER_DELETES:
-        print("Error: Cannot generate a global state wrapped call that is also a delayed delete (yet)");
-        raise
+    # Delayed deletes will call wrapped call with a callback without pool or snapshot info
+    delay = api.name in DELAYED_DECODER_DELETES
+    coreCustomParams = list(map(lambda p: p.paramName, api.parameters))
 
-    customParams = ["&m_pool"] + list(map(lambda p: p.paramName, api.parameters))
+    if delay:
+        cgen.line("std::function<void()> delayed_remove_callback = [vk, %s]() {" % ", ".join(coreCustomParams))
+        cgen.stmt("auto m_state = VkDecoderGlobalState::get()")
+        customParams = ["nullptr", "kInvalidSnapshotApiCallHandle"] + coreCustomParams
+    else:
+        customParams = ["&m_pool", SNAPSHOT_API_CALL_HANDLE_VARNAME] + coreCustomParams
+
     if context:
         customParams += ["context"]
+
+    checkDispatcher = "CC_LIKELY(vk)"
+    if api.name in GLOBAL_COMMANDS_WITHOUT_DISPATCH:
+        checkDispatcher = None
     cgen.vkApiCall(api, customPrefix=global_state_prefix, \
         customParameters=customParams, globalStatePrefix=global_state_prefix, \
-        checkForDeviceLost=True, checkForOutOfMemory=True)
+        checkForDeviceLost=True, checkDispatcher=checkDispatcher)
+
+    if delay:
+        cgen.line("};")
 
 def emit_decode_parameters_writeback(typeInfo, api, cgen, autobox=True):
     decodingParams = DecodingParameters(api)
@@ -460,14 +497,11 @@ def emit_seqno_incr(api, cgen):
     cgen.stmt("if (m_queueSubmitWithCommandsEnabled) seqnoPtr->fetch_add(1, std::memory_order_seq_cst)")
 
 def emit_snapshot(typeInfo, api, cgen):
-
-    cgen.stmt("%s->setReadPos((uintptr_t)(*readStreamPtrPtr) - (uintptr_t)snapshotTraceBegin)" % READ_STREAM)
-    cgen.stmt("size_t snapshotTraceBytes = %s->endTrace()" % READ_STREAM)
-
     additionalParams = [ \
-        makeVulkanTypeSimple(True, "uint8_t", 1, "snapshotTraceBegin"),
-        makeVulkanTypeSimple(False, "size_t", 0, "snapshotTraceBytes"),
-        makeVulkanTypeSimple(False, "android::base::BumpPool", 1, "&m_pool"),
+        makeVulkanTypeSimple(False, "gfxstream::base::BumpPool", 1, "&m_pool"),
+        makeVulkanTypeSimple(True, "VkSnapshotApiCallHandle", 1, SNAPSHOT_API_CALL_HANDLE_VARNAME),
+        makeVulkanTypeSimple(True, "uint8_t", 1, "packet"),
+        makeVulkanTypeSimple(False, "size_t", 0, "packetLen"),
     ]
 
     retTypeName = api.getRetTypeExpr()
@@ -491,7 +525,7 @@ def emit_snapshot(typeInfo, api, cgen):
         api.withCustomReturnType(makeVulkanTypeSimple(False, "void", 0, "void")). \
             withCustomParameters(customParams)
 
-    cgen.beginIf("m_state->snapshotsEnabled()")
+    cgen.beginIf("m_snapshotsEnabled")
     cgen.vkApiCall(apiForSnapshot, customPrefix="m_state->snapshot()->")
     cgen.endIf()
 
@@ -540,23 +574,21 @@ def decode_vkFlushMappedMemoryRanges(typeInfo: VulkanTypeInfo, api, cgen):
     cgen.beginIf("m_prevSeqno")
     cgen.stmt("m_prevSeqno = m_prevSeqno.value() - 1")
     cgen.endIf()
-    cgen.stmt("return ptr - (unsigned char*)buf;")
+    cgen.stmt("return ptr - (unsigned char*)buf")
     cgen.endIf()
-    cgen.stmt("auto range = pMemoryRanges[i]")
     cgen.stmt("auto memory = pMemoryRanges[i].memory")
-    cgen.stmt("auto size = pMemoryRanges[i].size")
     cgen.stmt("auto offset = pMemoryRanges[i].offset")
     cgen.stmt("uint64_t readStream = 0")
     cgen.stmt("memcpy(&readStream, *readStreamPtrPtr, sizeof(uint64_t)); *readStreamPtrPtr += sizeof(uint64_t)")
     cgen.stmt("sizeLeft -= sizeof(uint64_t)")
     cgen.stmt("auto hostPtr = m_state->getMappedHostPointer(memory)")
-    cgen.stmt("if (!hostPtr && readStream > 0) GFXSTREAM_ABORT(::emugl::FatalError(::emugl::ABORT_REASON_OTHER))")
+    cgen.stmt("if (!hostPtr && readStream > 0) GFXSTREAM_FATAL(\"Unexpected\")")
     cgen.stmt("if (!hostPtr) continue")
     cgen.beginIf("sizeLeft < readStream")
     cgen.beginIf("m_prevSeqno")
     cgen.stmt("m_prevSeqno = m_prevSeqno.value() - 1")
     cgen.endIf()
-    cgen.stmt("return ptr - (unsigned char*)buf;")
+    cgen.stmt("return ptr - (unsigned char*)buf")
     cgen.endIf()
     cgen.stmt("sizeLeft -= readStream")
     cgen.stmt("uint8_t* targetRange = hostPtr + offset")
@@ -611,6 +643,7 @@ custom_decodes = {
     "vkCreateInstance" : emit_global_state_wrapped_decoding,
     "vkDestroyInstance" : emit_global_state_wrapped_decoding,
     "vkEnumeratePhysicalDevices" : emit_global_state_wrapped_decoding,
+    "vkEnumerateInstanceExtensionProperties" : emit_global_state_wrapped_decoding,
 
     "vkGetPhysicalDeviceFeatures" : emit_global_state_wrapped_decoding,
     "vkGetPhysicalDeviceFeatures2" : emit_global_state_wrapped_decoding,
@@ -642,10 +675,16 @@ custom_decodes = {
     "vkBindBufferMemory2KHR" : emit_global_state_wrapped_decoding,
 
     "vkCreateDevice" : emit_global_state_wrapped_decoding,
-    "vkGetDeviceQueue" : emit_global_state_wrapped_decoding,
     "vkDestroyDevice" : emit_global_state_wrapped_decoding,
 
+    "vkGetDeviceQueue" : emit_global_state_wrapped_decoding,
     "vkGetDeviceQueue2" : emit_global_state_wrapped_decoding,
+
+    "vkGetPhysicalDeviceQueueFamilyProperties" : emit_global_state_wrapped_decoding,
+    "vkGetPhysicalDeviceQueueFamilyProperties2" : emit_global_state_wrapped_decoding,
+
+    "vkQueueBindSparse" : emit_global_state_wrapped_decoding,
+    "vkQueuePresentKHR" : emit_global_state_wrapped_decoding,
 
     "vkBindImageMemory" : emit_global_state_wrapped_decoding,
     "vkBindImageMemory2" : emit_global_state_wrapped_decoding,
@@ -684,6 +723,8 @@ custom_decodes = {
     "vkDestroyShaderModule": emit_global_state_wrapped_decoding,
     "vkCreatePipelineCache": emit_global_state_wrapped_decoding,
     "vkDestroyPipelineCache": emit_global_state_wrapped_decoding,
+    "vkCreatePipelineLayout": emit_global_state_wrapped_decoding,
+    "vkDestroyPipelineLayout": emit_global_state_wrapped_decoding,
     "vkCreateComputePipelines": emit_global_state_wrapped_decoding,
     "vkCreateGraphicsPipelines": emit_global_state_wrapped_decoding,
     "vkDestroyPipeline": emit_global_state_wrapped_decoding,
@@ -718,6 +759,10 @@ custom_decodes = {
     "vkDestroyRenderPass" : emit_global_state_wrapped_decoding,
     "vkCreateFramebuffer" : emit_global_state_wrapped_decoding,
     "vkDestroyFramebuffer" : emit_global_state_wrapped_decoding,
+    "vkCreateEvent" : emit_global_state_wrapped_decoding,
+    "vkDestroyEvent" : emit_global_state_wrapped_decoding,
+    "vkSetEvent" : emit_global_state_wrapped_decoding,
+    "vkResetEvent" : emit_global_state_wrapped_decoding,
     "vkDestroyFramebuffer" : emit_global_state_wrapped_decoding,
     "vkCmdBeginRenderPass" : emit_global_state_wrapped_decoding,
     "vkCmdBeginRenderPass2" : emit_global_state_wrapped_decoding,
@@ -732,12 +777,18 @@ custom_decodes = {
     "vkAcquireImageANDROID" : emit_global_state_wrapped_decoding,
     "vkQueueSignalReleaseImageANDROID" : emit_global_state_wrapped_decoding,
 
+    # Semaphores
     "vkCreateSemaphore" : emit_global_state_wrapped_decoding,
     "vkGetSemaphoreFdKHR" : emit_global_state_wrapped_decoding,
     "vkImportSemaphoreFdKHR" : emit_global_state_wrapped_decoding,
     "vkDestroySemaphore" : emit_global_state_wrapped_decoding,
+    "vkSignalSemaphore" : emit_global_state_wrapped_decoding,
+    "vkWaitSemaphores" : emit_global_state_wrapped_decoding,
 
+    # Fences
     "vkCreateFence" : emit_global_state_wrapped_decoding,
+    "vkGetFenceStatus" : emit_global_state_wrapped_decoding,
+    "vkWaitForFences" : emit_global_state_wrapped_decoding,
     "vkResetFences" : emit_global_state_wrapped_decoding,
     "vkDestroyFence" : emit_global_state_wrapped_decoding,
 
@@ -747,6 +798,8 @@ custom_decodes = {
     "vkGetMemoryHostAddressInfoGOOGLE" : emit_global_state_wrapped_decoding,
     "vkGetBlobGOOGLE" : emit_global_state_wrapped_decoding,
     "vkGetSemaphoreGOOGLE" : emit_global_state_wrapped_decoding,
+    "vkTraceAsyncGOOGLE" : emit_global_state_wrapped_decoding,
+    "vkSetDebugMetadataAsyncGOOGLE" : emit_global_state_wrapped_decoding,
 
     # Descriptor update templates
     "vkCreateDescriptorUpdateTemplate" : emit_global_state_wrapped_decoding,
@@ -797,6 +850,16 @@ custom_decodes = {
     # VK_KHR_device_group_creation / VK_VERSION_1_1
     "vkEnumeratePhysicalDeviceGroups" : emit_global_state_wrapped_decoding,
     "vkEnumeratePhysicalDeviceGroupsKHR" : emit_global_state_wrapped_decoding,
+
+    # Sparse binding and formats (Support can be disabled from the host)
+    "vkGetPhysicalDeviceSparseImageFormatProperties" : emit_global_state_wrapped_decoding,
+    "vkGetPhysicalDeviceSparseImageFormatProperties2" : emit_global_state_wrapped_decoding,
+    "vkGetPhysicalDeviceSparseImageFormatProperties2KHR" : emit_global_state_wrapped_decoding,
+
+    # Image requirements need to be adjusted for compressed textures
+    "vkGetDeviceImageMemoryRequirements" : emit_global_state_wrapped_decoding,
+    "vkGetDeviceImageMemoryRequirementsKHR" : emit_global_state_wrapped_decoding,
+
 }
 
 class VulkanDecoder(VulkanWrapperGenerator):
@@ -808,6 +871,11 @@ class VulkanDecoder(VulkanWrapperGenerator):
     def onBegin(self,):
         self.module.appendImpl(
             "#define MAX_PACKET_LENGTH %s\n" % MAX_PACKET_LENGTH)
+        self.module.appendImpl(
+            "#define CC_LIKELY(exp)    (__builtin_expect( !!(exp), true ))\n")
+        self.module.appendImpl(
+            "#define CC_UNLIKELY(exp)  (__builtin_expect( !!(exp), false ))\n")
+
         self.module.appendHeader(decoder_decl_preamble)
         self.module.appendImpl(decoder_impl_preamble)
 
@@ -822,25 +890,25 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
 
         self.cgen.stmt("const char* processName = context.processName")
         self.cgen.stmt("auto& gfx_logger = *context.gfxApiLogger")
-        self.cgen.stmt("auto* healthMonitor = context.healthMonitor")
-        self.cgen.stmt("auto& metricsLogger = *context.metricsLogger")
+        self.cgen.stmt("auto& shouldExit = *context.shouldExit")
         self.cgen.stmt("if (len < 8) return 0")
         self.cgen.stmt("unsigned char *ptr = (unsigned char *)buf")
         self.cgen.stmt("const unsigned char* const end = (const unsigned char*)buf + len")
 
-        self.cgen.beginIf("m_forSnapshotLoad")
-        self.cgen.stmt("ptr += m_state->setCreatedHandlesForSnapshotLoad(ptr)");
-        self.cgen.endIf()
         self.cgen.line("while (end - ptr >= 8)")
         self.cgen.beginBlock() # while loop
 
-        self.cgen.stmt("uint32_t opcode = *(uint32_t *)ptr")
-        self.cgen.stmt("uint32_t packetLen = *(uint32_t *)(ptr + 4)")
+        self.cgen.stmt("const uint8_t* packet = (const uint8_t *)ptr")
+        self.cgen.stmt("uint32_t opcode")
+        self.cgen.stmt("std::memcpy(&opcode, ptr, sizeof(uint32_t))")
+        self.cgen.line("")
+        self.cgen.stmt("uint32_t packetLen")
+        self.cgen.stmt("std::memcpy(&packetLen, ptr + 4, sizeof(uint32_t))")
+        self.cgen.line("")
         self.cgen.line("""
         // packetLen should be at least 8 (op code and packet length) and should not be excessively large
         if (packetLen < 8 || packetLen > MAX_PACKET_LENGTH) {
-            WARN("Bad packet length %d detected, decode may fail", packetLen);
-            metricsLogger.logMetricEvent(MetricEventBadPacketLength{ .len = packetLen });
+            GFXSTREAM_WARNING("Bad packet length %d detected, decode may fail", packetLen);
         }
         """)
         self.cgen.stmt("if (end - ptr < packetLen) return ptr - (unsigned char*)buf")
@@ -851,53 +919,28 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
         self.cgen.stmt("VulkanMemReadingStream* %s = readStream()" % READ_STREAM)
         self.cgen.stmt("%s->setBuf((uint8_t*)(ptr + 8))" % READ_STREAM)
         self.cgen.stmt("uint8_t* readStreamPtr = %s->getBuf(); uint8_t** readStreamPtrPtr = &readStreamPtr" % READ_STREAM)
-        self.cgen.stmt("uint8_t* snapshotTraceBegin = %s->beginTrace()" % READ_STREAM)
         self.cgen.stmt("%s->setHandleMapping(&m_boxedHandleUnwrapMapping)" % READ_STREAM)
         self.cgen.line("""
-        std::unique_ptr<EventHangMetadata::HangAnnotations> executionData =
-            std::make_unique<EventHangMetadata::HangAnnotations>();
-        if (healthMonitor) {
-            executionData->insert(
-                 {{"packet_length", std::to_string(packetLen)},
-                 {"opcode", std::to_string(opcode)}});
-            if (processName) {
-                executionData->insert(
-                    {{"renderthread_guest_process", std::string(processName)}});
-            }
-            if (m_prevSeqno) {
-                executionData->insert({{"previous_seqno", std::to_string(m_prevSeqno.value())}});
-            }
-        }
-
         std::atomic<uint32_t>* seqnoPtr = processResources ?
                 processResources->getSequenceNumberPtr() : nullptr;
 
         if (m_queueSubmitWithCommandsEnabled && ((opcode >= OP_vkFirst && opcode < OP_vkLast) || (opcode >= OP_vkFirst_old && opcode < OP_vkLast_old))) {
             uint32_t seqno;
             memcpy(&seqno, *readStreamPtrPtr, sizeof(uint32_t)); *readStreamPtrPtr += sizeof(uint32_t);
-            if (healthMonitor) executionData->insert({{"seqno", std::to_string(seqno)}});
             if (m_prevSeqno  && seqno == m_prevSeqno.value()) {
-                WARN(
+                GFXSTREAM_WARNING(
                     "Seqno %d is the same as previously processed on thread %d. It might be a "
                     "duplicate command.",
-                    seqno, getCurrentThreadId());
-                metricsLogger.logMetricEvent(MetricEventDuplicateSequenceNum{ .opcode = opcode });
+                    seqno, gfxstream::base::getCurrentThreadId());
             }
             if (seqnoPtr && !m_forSnapshotLoad) {
                 {
-                    auto seqnoWatchdog =
-                        WATCHDOG_BUILDER(healthMonitor,
-                                         "RenderThread seqno loop")
-                            .setHangType(EventHangMetadata::HangType::kRenderThread)
-                            .setAnnotations(std::make_unique<EventHangMetadata::HangAnnotations>(*executionData))
-                            /* Data gathered if this hangs*/
-                            .setOnHangCallback([=]() {
-                                auto annotations = std::make_unique<EventHangMetadata::HangAnnotations>();
-                                annotations->insert({{"seqnoPtr", std::to_string(seqnoPtr->load(std::memory_order_seq_cst))}});
-                                return annotations;
-                            })
-                            .build();
                     while ((seqno - seqnoPtr->load(std::memory_order_seq_cst) != 1)) {
+                        if (shouldExit.load(std::memory_order_relaxed)) {
+                            GFXSTREAM_WARNING("Process=%s is exitting. Skip processing seqno=%d on thread=0x%x.",
+                                 processName ? processName : "null", seqno, gfxstream::base::getCurrentThreadId());
+                            return 0;
+                        }
                         #if (defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64)))
                         _mm_pause();
                         #elif (defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__)))
@@ -911,18 +954,15 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
         """)
 
         self.cgen.line("""
-        gfx_logger.recordCommandExecution();
-        """)
+        VkSnapshotApiCallHandle %s = kInvalidSnapshotApiCallHandle;
+        if (m_snapshotsEnabled) {
+            %s = m_state->snapshot()->createApiCallInfo();
+        }
+        """ % (SNAPSHOT_API_CALL_HANDLE_VARNAME, SNAPSHOT_API_CALL_HANDLE_VARNAME))
 
         self.cgen.line("""
-        auto executionWatchdog =
-            WATCHDOG_BUILDER(healthMonitor, "RenderThread VkDecoder command execution")
-                .setHangType(EventHangMetadata::HangType::kRenderThread)
-                .setAnnotations(std::move(executionData))
-                .build();
+        gfx_logger.recordCommandExecution();
         """)
-
-        self.cgen.stmt("auto vk = m_vk")
 
         self.cgen.line("switch (opcode)")
         self.cgen.beginBlock()  # switch stmt
@@ -936,7 +976,9 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
 
         cgen.line("case OP_%s:" % name)
         cgen.beginBlock()
-        cgen.stmt("GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_DECODER_CATEGORY, \"VkDecoder %s\")" % name)
+
+        if name not in COMMANDS_WITHOUT_TRACE:
+            cgen.stmt("GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_DECODER_CATEGORY, \"VkDecoder %s\")" % name)
 
         if api.name in custom_decodes.keys():
             custom_decodes[api.name](typeInfo, api, cgen)
@@ -950,18 +992,27 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
     def onEnd(self,):
         self.cgen.line("default:")
         self.cgen.beginBlock()
+        self.cgen.line("""
+        if (m_snapshotsEnabled) {
+            m_state->snapshot()->destroyApiCallInfoIfUnused(%s);
+        }
+        """ % (SNAPSHOT_API_CALL_HANDLE_VARNAME))
+
         self.cgen.stmt("m_pool.freeAll()")
         self.cgen.stmt("return ptr - (unsigned char *)buf")
         self.cgen.endBlock()
 
         self.cgen.endBlock() # switch stmt
 
-        self.cgen.stmt("ptr += packetLen")
-        self.cgen.endBlock() # while loop
+        self.cgen.line("""
+        if (m_snapshotsEnabled) {
+            m_state->snapshot()->destroyApiCallInfoIfUnused(%s);
+        }
+        """ % (SNAPSHOT_API_CALL_HANDLE_VARNAME))
 
-        self.cgen.beginIf("m_forSnapshotLoad")
-        self.cgen.stmt("m_state->clearCreatedHandlesForSnapshotLoad()");
-        self.cgen.endIf()
+        self.cgen.stmt("ptr += packetLen")
+        self.cgen.stmt("vkStream->clearPool()")
+        self.cgen.endBlock() # while loop
 
         self.cgen.stmt("m_pool.freeAll()")
         self.cgen.stmt("return ptr - (unsigned char*)buf;")
