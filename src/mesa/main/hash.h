@@ -46,11 +46,8 @@
  */
 struct _mesa_HashTable {
    struct util_sparse_array array;
-   simple_mtx_t Mutex;
-   GLuint MaxKey;                        /**< highest key inserted so far */
-   bool alloc_via_idalloc;
-   /* Used when name reuse is enabled */
    struct util_idalloc_sparse id_alloc;
+   simple_mtx_t Mutex;
 };
 
 void
@@ -89,9 +86,6 @@ _mesa_HashFindFreeKeyBlock(struct _mesa_HashTable *table, GLuint numKeys);
 bool
 _mesa_HashFindFreeKeys(struct _mesa_HashTable *table, GLuint* keys,
                        GLuint numKeys);
-
-void
-_mesa_HashEnableNameReuse(struct _mesa_HashTable *table);
 
 /* Inline functions. */
 

@@ -37,10 +37,13 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    case nir_intrinsic_image_atomic_swap:
    case nir_intrinsic_bindless_image_atomic:
    case nir_intrinsic_bindless_image_atomic_swap:
+   case nir_intrinsic_image_heap_atomic:
+   case nir_intrinsic_image_heap_atomic_swap:
       break;
    case nir_intrinsic_store_global:
    case nir_intrinsic_image_store:
    case nir_intrinsic_bindless_image_store:
+   case nir_intrinsic_image_heap_store:
       if (!(*lower_plain_stores))
          return false;
       else
@@ -49,11 +52,18 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       return false;
    }
 
+   if (nir_intrinsic_has_access(intr) &&
+       (nir_intrinsic_access(intr) & ACCESS_INCLUDE_HELPERS))
+      return false;
+
    b->cursor = nir_before_instr(&intr->instr);
    bool has_dest = nir_intrinsic_infos[intr->intrinsic].has_dest;
    nir_def *undef = NULL;
 
-   nir_def *helper = nir_load_helper_invocation(b, 1);
+   /* We need to use nir_is_helper_invocation instead of
+    * nir_load_helper_invocation, to correctly predicate stores after demote.
+    */
+   nir_def *helper = nir_is_helper_invocation(b, 1);
    nir_push_if(b, nir_inot(b, helper));
    nir_instr_remove(&intr->instr);
    nir_builder_instr_insert(b, &intr->instr);
@@ -89,9 +99,8 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
        */
       nir_def_rewrite_uses(&intr->def, phi);
 
-      nir_instr *phi_instr = phi->parent_instr;
-      nir_phi_instr *phi_as_phi = nir_instr_as_phi(phi_instr);
-      nir_phi_src *phi_src = nir_phi_get_src_from_block(phi_as_phi,
+      nir_phi_instr *phi_instr = nir_def_as_phi(phi);
+      nir_phi_src *phi_src = nir_phi_get_src_from_block(phi_instr,
                                                         intr->instr.block);
       nir_src_rewrite(&phi_src->src, &intr->def);
    }
@@ -104,5 +113,5 @@ nir_lower_helper_writes(nir_shader *shader, bool lower_plain_stores)
 {
    assert(shader->info.stage == MESA_SHADER_FRAGMENT);
    return nir_shader_intrinsics_pass(shader, lower, nir_metadata_none,
-                                       &lower_plain_stores);
+                                     &lower_plain_stores);
 }

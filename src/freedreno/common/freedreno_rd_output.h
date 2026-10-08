@@ -11,6 +11,7 @@
 #include <zlib.h>
 
 #include "redump.h"
+#include "util/u_dynarray.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,6 +26,7 @@ enum fd_rd_dump_flags {
 
 struct fd_rd_dump_env {
    uint32_t flags;
+   char output_path[PATH_MAX];
 };
 
 extern struct fd_rd_dump_env fd_rd_dump_env;
@@ -41,6 +43,9 @@ struct fd_rd_output {
 
    int trigger_fd;
    uint32_t trigger_count;
+
+   struct util_dynarray frame_ranges;
+   struct util_dynarray submit_ranges;
 };
 
 void
@@ -50,7 +55,7 @@ void
 fd_rd_output_fini(struct fd_rd_output *output);
 
 bool
-fd_rd_output_begin(struct fd_rd_output *output, uint32_t submit_idx);
+fd_rd_output_begin(struct fd_rd_output *output, uint32_t frame, uint32_t submit_idx);
 
 void
 fd_rd_output_write_section(struct fd_rd_output *output, enum rd_sect_type type,

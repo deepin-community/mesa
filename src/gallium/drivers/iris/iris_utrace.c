@@ -1,24 +1,6 @@
 /*
  * Copyright © 2021 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "iris_batch.h"
@@ -84,7 +66,7 @@ iris_utrace_create_buffer(struct u_trace_context *utctx, uint64_t size_B)
       iris_bo_alloc(screen->bufmgr, "utrace timestamps",
                     size_B, 16 /* alignment */,
                     IRIS_MEMZONE_OTHER,
-                    BO_ALLOC_COHERENT | BO_ALLOC_SMEM);
+                    BO_ALLOC_SMEM);
 
    void *ptr = iris_bo_map(NULL, bo, MAP_READ | MAP_WRITE);
    memset(ptr, 0, size_B);
@@ -112,7 +94,7 @@ iris_utrace_record_ts(struct u_trace *trace, void *cs,
 
    const bool is_end_compute =
       cs == NULL &&
-      (flags & INTEL_DS_TRACEPOINT_FLAG_END_OF_PIPE_CS);
+      (flags & INTEL_DS_TRACEPOINT_FLAG_END_CS);
    if (is_end_compute) {
       assert(ice->utrace.last_compute_walker != NULL);
       batch->screen->vtbl.rewrite_compute_walker_pc(
@@ -131,7 +113,8 @@ iris_utrace_record_ts(struct u_trace *trace, void *cs,
 
 static uint64_t
 iris_utrace_read_ts(struct u_trace_context *utctx,
-                    void *timestamps, uint64_t offset_B, void *flush_data)
+                    void *timestamps, uint64_t offset_B,
+                    uint32_t flags, void *flush_data)
 {
    struct iris_context *ice =
       container_of(utctx, struct iris_context, ds.trace_context);

@@ -24,8 +24,7 @@
 #ifndef VK_NIR_CONVERT_YCBCR_H
 #define VK_NIR_CONVERT_YCBCR_H
 
-#include "nir.h"
-#include "nir_builder.h"
+#include "nir_defines.h"
 #include "vulkan/vulkan_core.h"
 
 #ifdef __cplusplus
@@ -40,6 +39,12 @@ nir_convert_ycbcr_to_rgb(nir_builder *b,
                          uint32_t *bpcs);
 
 struct vk_ycbcr_conversion;
+
+/** Passed as the set parameter to nir_vk_ycbcr_conversion_lookup_cb() to
+ * indicate that embedded samplers are being used and that binding is the
+ * index in the embedded sampler table.
+ */
+#define VK_NIR_YCBCR_SET_IMMUTABLE_SAMPLERS UINT32_MAX
 
 typedef const struct vk_ycbcr_conversion_state *
    (*nir_vk_ycbcr_conversion_lookup_cb)(const void *data, uint32_t set,

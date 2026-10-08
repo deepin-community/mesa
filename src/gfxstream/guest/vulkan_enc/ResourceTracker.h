@@ -23,6 +23,8 @@
 #include "VulkanHandles.h"
 #include "goldfish_vk_transform_guest.h"
 #include "util/perf/cpu_trace.h"
+#include "util/detect_os.h"
+#include "vulkan/vulkan_core.h"
 
 /// Use installed headers or locally defined Fuchsia-specific bits
 #ifdef VK_USE_PLATFORM_FUCHSIA
@@ -78,6 +80,16 @@ typedef uint64_t zx_koid_t;
 /// Goldfish sync only used for AEMU -- should replace in virtio-gpu when possibe
 #include "gfxstream/guest/goldfish_sync.h"
 #endif
+
+#define vk_filter_struct(__start, __sType) { \
+    auto* curr = reinterpret_cast<VkBaseOutStructure*>(__start); \
+    while (curr != nullptr) { \
+        if (curr->pNext != nullptr && curr->pNext->sType == VK_STRUCTURE_TYPE_##__sType) { \
+            curr->pNext = curr->pNext->pNext; \
+        } \
+        curr = curr->pNext; \
+    } \
+} \
 
 // This should be ABI identical with the variant in ResourceTracker.h
 struct GfxStreamVkFeatureInfo {
@@ -150,14 +162,11 @@ class ResourceTracker {
 
     void on_vkGetPhysicalDeviceFeatures2(void* context, VkPhysicalDevice physicalDevice,
                                          VkPhysicalDeviceFeatures2* pFeatures);
-    void on_vkGetPhysicalDeviceFeatures2KHR(void* context, VkPhysicalDevice physicalDevice,
-                                            VkPhysicalDeviceFeatures2* pFeatures);
-    void on_vkGetPhysicalDeviceProperties(void* context, VkPhysicalDevice physicalDevice,
-                                          VkPhysicalDeviceProperties* pProperties);
-    void on_vkGetPhysicalDeviceProperties2(void* context, VkPhysicalDevice physicalDevice,
-                                           VkPhysicalDeviceProperties2* pProperties);
+
     void on_vkGetPhysicalDeviceProperties2KHR(void* context, VkPhysicalDevice physicalDevice,
                                               VkPhysicalDeviceProperties2* pProperties);
+    void on_vkGetPhysicalDeviceProperties2(void* context, VkPhysicalDevice physicalDevice,
+                                           VkPhysicalDeviceProperties2* pProperties);
 
     void on_vkGetPhysicalDeviceMemoryProperties(
         void* context, VkPhysicalDevice physicalDevice,
@@ -165,13 +174,6 @@ class ResourceTracker {
     void on_vkGetPhysicalDeviceMemoryProperties2(
         void* context, VkPhysicalDevice physicalDevice,
         VkPhysicalDeviceMemoryProperties2* pMemoryProperties);
-    void on_vkGetPhysicalDeviceMemoryProperties2KHR(
-        void* context, VkPhysicalDevice physicalDevice,
-        VkPhysicalDeviceMemoryProperties2* pMemoryProperties);
-    void on_vkGetDeviceQueue(void* context, VkDevice device, uint32_t queueFamilyIndex,
-                             uint32_t queueIndex, VkQueue* pQueue);
-    void on_vkGetDeviceQueue2(void* context, VkDevice device, const VkDeviceQueueInfo2* pQueueInfo,
-                              VkQueue* pQueue);
 
     VkResult on_vkCreateInstance(void* context, VkResult input_result,
                                  const VkInstanceCreateInfo* createInfo,
@@ -206,20 +208,14 @@ class ResourceTracker {
     void on_vkGetImageMemoryRequirements2(void* context, VkDevice device,
                                           const VkImageMemoryRequirementsInfo2* pInfo,
                                           VkMemoryRequirements2* pMemoryRequirements);
-    void on_vkGetImageMemoryRequirements2KHR(void* context, VkDevice device,
-                                             const VkImageMemoryRequirementsInfo2* pInfo,
-                                             VkMemoryRequirements2* pMemoryRequirements);
-    void on_vkGetImageSubresourceLayout(void* context, VkDevice device, VkImage image,
-                                        const VkImageSubresource* pSubresource,
-                                        VkSubresourceLayout* pLayout);
+    VkResult on_vkGetImageDrmFormatModifierPropertiesEXT(
+        void* context, VkResult input_result, VkDevice device, VkImage image,
+        VkImageDrmFormatModifierPropertiesEXT* pProperties);
 
     VkResult on_vkBindImageMemory(void* context, VkResult input_result, VkDevice device,
                                   VkImage image, VkDeviceMemory memory, VkDeviceSize memoryOffset);
     VkResult on_vkBindImageMemory2(void* context, VkResult input_result, VkDevice device,
                                    uint32_t bindingCount, const VkBindImageMemoryInfo* pBindInfos);
-    VkResult on_vkBindImageMemory2KHR(void* context, VkResult input_result, VkDevice device,
-                                      uint32_t bindingCount,
-                                      const VkBindImageMemoryInfo* pBindInfos);
 
     VkResult on_vkCreateBuffer(void* context, VkResult input_result, VkDevice device,
                                const VkBufferCreateInfo* pCreateInfo,
@@ -232,19 +228,6 @@ class ResourceTracker {
     void on_vkGetBufferMemoryRequirements2(void* context, VkDevice device,
                                            const VkBufferMemoryRequirementsInfo2* pInfo,
                                            VkMemoryRequirements2* pMemoryRequirements);
-    void on_vkGetBufferMemoryRequirements2KHR(void* context, VkDevice device,
-                                              const VkBufferMemoryRequirementsInfo2* pInfo,
-                                              VkMemoryRequirements2* pMemoryRequirements);
-
-    VkResult on_vkBindBufferMemory(void* context, VkResult input_result, VkDevice device,
-                                   VkBuffer buffer, VkDeviceMemory memory,
-                                   VkDeviceSize memoryOffset);
-    VkResult on_vkBindBufferMemory2(void* context, VkResult input_result, VkDevice device,
-                                    uint32_t bindInfoCount,
-                                    const VkBindBufferMemoryInfo* pBindInfos);
-    VkResult on_vkBindBufferMemory2KHR(void* context, VkResult input_result, VkDevice device,
-                                       uint32_t bindInfoCount,
-                                       const VkBindBufferMemoryInfo* pBindInfos);
 
     VkResult on_vkCreateSemaphore(void* context, VkResult, VkDevice device,
                                   const VkSemaphoreCreateInfo* pCreateInfo,
@@ -339,24 +322,12 @@ class ResourceTracker {
     void on_vkDestroySamplerYcbcrConversion(void* context, VkDevice device,
                                             VkSamplerYcbcrConversion ycbcrConversion,
                                             const VkAllocationCallbacks* pAllocator);
-    VkResult on_vkCreateSamplerYcbcrConversionKHR(
-        void* context, VkResult input_result, VkDevice device,
-        const VkSamplerYcbcrConversionCreateInfo* pCreateInfo,
-        const VkAllocationCallbacks* pAllocator, VkSamplerYcbcrConversion* pYcbcrConversion);
-    void on_vkDestroySamplerYcbcrConversionKHR(void* context, VkDevice device,
-                                               VkSamplerYcbcrConversion ycbcrConversion,
-                                               const VkAllocationCallbacks* pAllocator);
 
     VkResult on_vkCreateSampler(void* context, VkResult input_result, VkDevice device,
                                 const VkSamplerCreateInfo* pCreateInfo,
                                 const VkAllocationCallbacks* pAllocator, VkSampler* pSampler);
 
     void on_vkGetPhysicalDeviceExternalFenceProperties(
-        void* context, VkPhysicalDevice physicalDevice,
-        const VkPhysicalDeviceExternalFenceInfo* pExternalFenceInfo,
-        VkExternalFenceProperties* pExternalFenceProperties);
-
-    void on_vkGetPhysicalDeviceExternalFencePropertiesKHR(
         void* context, VkPhysicalDevice physicalDevice,
         const VkPhysicalDeviceExternalFenceInfo* pExternalFenceInfo,
         VkExternalFenceProperties* pExternalFenceProperties);
@@ -383,6 +354,35 @@ class ResourceTracker {
     VkResult on_vkWaitForFences(void* context, VkResult input_result, VkDevice device,
                                 uint32_t fenceCount, const VkFence* pFences, VkBool32 waitAll,
                                 uint64_t timeout);
+
+    VkResult on_vkSetPrivateData(void* context, VkResult input_result, VkDevice device,
+                                 VkObjectType objectType, uint64_t objectHandle,
+                                 VkPrivateDataSlot privateDataSlot, uint64_t data);
+    VkResult on_vkSetPrivateDataEXT(void* context, VkResult input_result, VkDevice device,
+                                    VkObjectType objectType, uint64_t objectHandle,
+                                    VkPrivateDataSlot privateDataSlot, uint64_t data);
+
+    void on_vkGetPrivateData(void* context, VkDevice device, VkObjectType objectType,
+                             uint64_t objectHandle, VkPrivateDataSlot privateDataSlot,
+                             uint64_t* pData);
+    void on_vkGetPrivateDataEXT(void* context, VkDevice device, VkObjectType objectType,
+                                uint64_t objectHandle, VkPrivateDataSlot privateDataSlot,
+                                uint64_t* pData);
+
+    VkResult on_vkCreatePrivateDataSlot(void* context, VkResult input_result, VkDevice device,
+                                        const VkPrivateDataSlotCreateInfo* pCreateInfo,
+                                        const VkAllocationCallbacks* pAllocator,
+                                        VkPrivateDataSlot* pPrivateDataSlot);
+    VkResult on_vkCreatePrivateDataSlotEXT(void* context, VkResult input_result, VkDevice device,
+                                           const VkPrivateDataSlotCreateInfo* pCreateInfo,
+                                           const VkAllocationCallbacks* pAllocator,
+                                           VkPrivateDataSlot* pPrivateDataSlot);
+    void on_vkDestroyPrivateDataSlot(void* context, VkDevice device,
+                                     VkPrivateDataSlot privateDataSlot,
+                                     const VkAllocationCallbacks* pAllocator);
+    void on_vkDestroyPrivateDataSlotEXT(void* context, VkDevice device,
+                                        VkPrivateDataSlot privateDataSlot,
+                                        const VkAllocationCallbacks* pAllocator);
 
     VkResult on_vkCreateDescriptorPool(void* context, VkResult input_result, VkDevice device,
                                        const VkDescriptorPoolCreateInfo* pCreateInfo,
@@ -427,28 +427,16 @@ class ResourceTracker {
         const VkAllocationCallbacks* pAllocator,
         VkDescriptorUpdateTemplate* pDescriptorUpdateTemplate);
 
-    VkResult on_vkCreateDescriptorUpdateTemplateKHR(
-        void* context, VkResult input_result, VkDevice device,
-        const VkDescriptorUpdateTemplateCreateInfo* pCreateInfo,
-        const VkAllocationCallbacks* pAllocator,
-        VkDescriptorUpdateTemplate* pDescriptorUpdateTemplate);
-
     void on_vkUpdateDescriptorSetWithTemplate(void* context, VkDevice device,
                                               VkDescriptorSet descriptorSet,
                                               VkDescriptorUpdateTemplate descriptorUpdateTemplate,
                                               const void* pData);
 
-    void on_vkUpdateDescriptorSetWithTemplateKHR(void* context, VkDevice device,
-                                              VkDescriptorSet descriptorSet,
-                                              VkDescriptorUpdateTemplate descriptorUpdateTemplate,
-                                              const void* pData);
+    void on_vkGetPhysicalDeviceFormatProperties2(void* context, VkPhysicalDevice physicalDevice,
+                                                 VkFormat format,
+                                                 VkFormatProperties2* pFormatProperties);
 
     VkResult on_vkGetPhysicalDeviceImageFormatProperties2(
-        void* context, VkResult input_result, VkPhysicalDevice physicalDevice,
-        const VkPhysicalDeviceImageFormatInfo2* pImageFormatInfo,
-        VkImageFormatProperties2* pImageFormatProperties);
-
-    VkResult on_vkGetPhysicalDeviceImageFormatProperties2KHR(
         void* context, VkResult input_result, VkPhysicalDevice physicalDevice,
         const VkPhysicalDeviceImageFormatInfo2* pImageFormatInfo,
         VkImageFormatProperties2* pImageFormatProperties);
@@ -458,17 +446,7 @@ class ResourceTracker {
         const VkPhysicalDeviceExternalBufferInfo* pExternalBufferInfo,
         VkExternalBufferProperties* pExternalBufferProperties);
 
-    void on_vkGetPhysicalDeviceExternalBufferPropertiesKHR(
-        void* context, VkPhysicalDevice physicalDevice,
-        const VkPhysicalDeviceExternalBufferInfoKHR* pExternalBufferInfo,
-        VkExternalBufferPropertiesKHR* pExternalBufferProperties);
-
     void on_vkGetPhysicalDeviceExternalSemaphoreProperties(
-        void* context, VkPhysicalDevice physicalDevice,
-        const VkPhysicalDeviceExternalSemaphoreInfo* pExternalSemaphoreInfo,
-        VkExternalSemaphoreProperties* pExternalSemaphoreProperties);
-
-    void on_vkGetPhysicalDeviceExternalSemaphorePropertiesKHR(
         void* context, VkPhysicalDevice physicalDevice,
         const VkPhysicalDeviceExternalSemaphoreInfo* pExternalSemaphoreInfo,
         VkExternalSemaphoreProperties* pExternalSemaphoreProperties);
@@ -514,6 +492,10 @@ class ResourceTracker {
         uint32_t bufferMemoryBarrierCount, const VkBufferMemoryBarrier* pBufferMemoryBarriers,
         uint32_t imageMemoryBarrierCount, const VkImageMemoryBarrier* pImageMemoryBarriers);
 
+    void on_vkCmdClearColorImage(void* context, VkCommandBuffer commandBuffer, VkImage image,
+                                 VkImageLayout imageLayout, const VkClearColorValue* pColor,
+                                 uint32_t rangeCount, const VkImageSubresourceRange* pRanges);
+
     void on_vkDestroyDescriptorSetLayout(void* context, VkDevice device,
                                          VkDescriptorSetLayout descriptorSetLayout,
                                          const VkAllocationCallbacks* pAllocator);
@@ -541,19 +523,23 @@ class ResourceTracker {
     void setupFeatures(const struct GfxStreamVkFeatureInfo* features);
     void setupCaps(uint32_t& noRenderControlEnc);
     void setupPlatformHelpers();
-
     void setThreadingCallbacks(const ThreadingCallbacks& callbacks);
     bool hostSupportsVulkan() const;
     bool usingDirectMapping() const;
     uint32_t getStreamFeatures() const;
     uint32_t getApiVersionFromInstance(VkInstance instance);
     uint32_t getApiVersionFromDevice(VkDevice device);
-    bool hasInstanceExtension(VkInstance instance, const std::string& name);
-    bool hasDeviceExtension(VkDevice instance, const std::string& name);
     VkDevice getDevice(VkCommandBuffer commandBuffer) const;
     void addToCommandPool(VkCommandPool commandPool, uint32_t commandBufferCount,
                           VkCommandBuffer* pCommandBuffers);
     void resetCommandPoolStagingInfo(VkCommandPool commandPool);
+
+#ifdef LINUX_GUEST_BUILD
+    // TODO: This information is tracked in
+    // gfxstream_vk_physical_device::doImageDrmFormatModifierEmulation, but mesa objects need to be
+    // combined with gfxstream objects
+    bool doImageDrmFormatModifierEmulation(VkPhysicalDevice physicalDevice);
+#endif
 
 #ifdef __GNUC__
 #define ALWAYS_INLINE_GFXSTREAM
@@ -602,17 +588,12 @@ class ResourceTracker {
     const VkPhysicalDeviceMemoryProperties& getPhysicalDeviceMemoryProperties(
         void* context, VkDevice device, VkPhysicalDevice physicalDevice);
 
-    VkResult on_vkGetPhysicalDeviceImageFormatProperties2_common(
-        bool isKhr, void* context, VkResult input_result, VkPhysicalDevice physicalDevice,
-        const VkPhysicalDeviceImageFormatInfo2* pImageFormatInfo,
-        VkImageFormatProperties2* pImageFormatProperties);
-
     void on_vkGetPhysicalDeviceExternalBufferProperties_common(
         bool isKhr, void* context, VkPhysicalDevice physicalDevice,
         const VkPhysicalDeviceExternalBufferInfo* pExternalBufferInfo,
         VkExternalBufferProperties* pExternalBufferProperties);
 
-    template <typename VkSubmitInfoType>
+    template <typename VkSubmitInfoType, typename VkSemaphoreInfoType>
     VkResult on_vkQueueSubmitTemplate(void* context, VkResult input_result, VkQueue queue,
                                       uint32_t submitCount, const VkSubmitInfoType* pSubmits,
                                       VkFence fence);
@@ -629,7 +610,7 @@ class ResourceTracker {
 
     void setDeviceMemoryInfo(VkDevice device, VkDeviceMemory memory, VkDeviceSize allocationSize,
                              uint8_t* ptr, uint32_t memoryTypeIndex, void* ahw, bool imported,
-                             zx_handle_t vmoHandle, VirtGpuResourcePtr blobPtr);
+                             zx_handle_t vmoHandle, VirtGpuResourcePtr blobPtr, int importedFd);
 
     void setImageInfo(VkImage image, VkDevice device, const VkImageCreateInfo* pCreateInfo);
 
@@ -725,7 +706,6 @@ class ResourceTracker {
 
     struct VkInstance_Info {
         uint32_t highestApiVersion;
-        std::set<std::string> enabledExtensions;
         // Fodder for vkEnumeratePhysicalDevices.
         std::vector<VkPhysicalDevice> physicalDevices;
     };
@@ -735,7 +715,6 @@ class ResourceTracker {
         VkPhysicalDeviceProperties props;
         VkPhysicalDeviceMemoryProperties memProps;
         uint32_t apiVersion;
-        std::set<std::string> enabledExtensions;
         std::vector<std::pair<PFN_vkDeviceMemoryReportCallbackEXT, void*>>
             deviceMemoryReportCallbacks;
     };
@@ -758,11 +737,12 @@ class ResourceTracker {
         uint64_t coherentMemorySize = 0;
         uint64_t coherentMemoryOffset = 0;
 
-#if defined(__ANDROID__)
+#if DETECT_OS_ANDROID
         GoldfishAddressSpaceBlockPtr goldfishBlock = nullptr;
-#endif  // defined(__ANDROID__)
+#endif  // DETECT_OS_ANDROID
         CoherentMemoryPtr coherentMemory = nullptr;
         VirtGpuResourcePtr blobPtr = nullptr;
+        int importedFd = -1;
     };
 
     struct VkCommandBuffer_Info {
@@ -770,7 +750,7 @@ class ResourceTracker {
     };
 
     struct VkQueue_Info {
-        VkDevice device;
+        uint32_t placeholder;
     };
 
     // custom guest-side structs for images/buffers because of AHardwareBuffer :((
@@ -788,13 +768,10 @@ class ResourceTracker {
         bool hasExternalFormat = false;
         unsigned externalFourccFormat = 0;
         std::vector<int> pendingQsriSyncFds;
+        bool hasAnb = false;
 #endif
 #ifdef VK_USE_PLATFORM_FUCHSIA
         bool isSysmemBackedMemory = false;
-#endif
-#ifdef LINUX_GUEST_BUILD
-        bool isDmaBufImage = false;
-        VkImage linearPeerImage = VK_NULL_HANDLE;
 #endif
     };
 
@@ -842,7 +819,7 @@ class ResourceTracker {
         VkDevice device;
         bool external = false;
         VkExportFenceCreateInfo exportFenceCreateInfo;
-#if defined(VK_USE_PLATFORM_ANDROID_KHR) || defined(__linux__)
+#if defined(VK_USE_PLATFORM_ANDROID_KHR) || DETECT_OS_LINUX
         // Note: -1 means already signaled.
         std::optional<int> syncFd;
 #endif
@@ -868,6 +845,28 @@ class ResourceTracker {
         uint32_t unused;
     };
 
+    struct VkPrivateDataSlot_Info {
+        // We need special handling for device memory and swapchain object types for private data
+        // management. For memory, we can use a single handle on the host side, so setting a
+        // private data slot for guest handle can also set any other data set previously.
+        // For swapchains, we don't actually get create/destroy calls to keep track of object
+        // handles to be able to pass the call to the underlying host driver. Rather than handling
+        // the 2 cases separately, we handle all the private data management directly here with a
+        // single table, so vkSetPrivateData and vkGetPrivateData calls don't need to be encoded for
+        // the host.
+        typedef std::pair<uint64_t, VkObjectType> PrivateDataKey;
+        struct PrivateDataKeyHash {
+            template <class T1, class T2>
+            std::size_t operator()(const std::pair<T1, T2>& p) const {
+                std::size_t h1 = std::hash<T1>{}(p.first);
+                std::size_t h2 = std::hash<T2>{}(p.second);
+                return h1 ^ h2;
+            }
+        };
+
+        std::unordered_map<PrivateDataKey, uint64_t, PrivateDataKeyHash> privateDataTable;
+    };
+
     struct VkBufferCollectionFUCHSIA_Info {
 #ifdef VK_USE_PLATFORM_FUCHSIA
         std::optional<fuchsia_sysmem::wire::BufferCollectionConstraints> constraints;
@@ -888,15 +887,19 @@ class ResourceTracker {
     void transformImageMemoryRequirementsForGuestLocked(VkImage image, VkMemoryRequirements* reqs);
     CoherentMemoryPtr freeCoherentMemoryLocked(VkDeviceMemory memory, VkDeviceMemory_Info& info);
 
+    void EmitGuestAndHostTraceMarker(VkEncoder* encoder);
+
+    void sendGuestInfo(VkEncoder* encoder);
+
     std::recursive_mutex mLock;
 
     std::optional<const VkPhysicalDeviceMemoryProperties> mCachedPhysicalDeviceMemoryProps;
 
     struct GfxStreamVkFeatureInfo mFeatureInfo = {};
 
-#if defined(__ANDROID__)
+#if DETECT_OS_ANDROID
     std::unique_ptr<GoldfishAddressSpaceBlockProvider> mGoldfishAddressSpaceBlockProvider;
-#endif  // defined(__ANDROID__)
+#endif  // DETECT_OS_ANDROID
 
 #if defined(VK_USE_PLATFORM_ANDROID_KHR)
     std::unique_ptr<gfxstream::Gralloc> mGralloc = nullptr;
@@ -904,13 +907,13 @@ class ResourceTracker {
 
     std::unique_ptr<gfxstream::SyncHelper> mSyncHelper = nullptr;
 
-    struct VirtGpuCaps mCaps;
+    struct VirtGpuCaps mCaps = {};
     std::vector<VkExtensionProperties> mHostInstanceExtensions;
     std::vector<VkExtensionProperties> mHostDeviceExtensions;
 
     // 32 bits only for now, upper bits may be used later.
     std::atomic<uint32_t> mAtomicId = 0;
-#if defined(VK_USE_PLATFORM_ANDROID_KHR) || defined(__linux__)
+#if defined(VK_USE_PLATFORM_ANDROID_KHR) || DETECT_OS_LINUX
     int mSyncDeviceFd = -1;
 #endif
 

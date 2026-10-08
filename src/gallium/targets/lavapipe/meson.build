@@ -18,18 +18,14 @@ libvulkan_lvp = shared_library(
   install : true,
 )
 
-if host_machine.system() == 'windows'
-  icd_lib_path = import('fs').relative_to(get_option('bindir'), with_vulkan_icd_dir)
-  icd_file_name = 'vulkan_lvp.dll'
-else
-  icd_lib_path = join_paths(get_option('prefix'), get_option('libdir'))
-  icd_file_name = 'libvulkan_lvp.@0@'.format(host_machine.system() == 'darwin' ? 'dylib' : 'so')
-endif
+icd_file_name = libname_prefix + 'vulkan_lvp.' + libname_suffix
 
 icd_command = [
   prog_python, '@INPUT0@',
-  '--api-version', '1.3', '--xml', '@INPUT1@',
-  '--lib-path', join_paths(icd_lib_path, icd_file_name),
+  '--api-version', '1.4', '--xml', '@INPUT1@',
+  '--sizeof-pointer', sizeof_pointer,
+  '--icd-lib-path', vulkan_icd_lib_path,
+  '--icd-filename', icd_file_name,
   '--out', '@OUTPUT@',
 ]
 if host_machine.system() == 'windows'
@@ -39,7 +35,7 @@ endif
 lvp_icd = custom_target(
   'lvp_icd',
   input : [vk_icd_gen, vk_api_xml],
-  output : 'lvp_icd.@0@.json'.format(host_machine.cpu()),
+  output : 'lvp_icd.' + vulkan_manifest_suffix,
   command : icd_command,
   build_by_default : true,
   install_dir : with_vulkan_icd_dir,
@@ -54,13 +50,13 @@ _dev_icd = custom_target(
   output : _dev_icdname,
   command : [
     prog_python, '@INPUT0@',
-    '--api-version', '1.1', '--xml', '@INPUT1@',
-    '--lib-path', meson.current_build_dir() / icd_file_name,
+    '--api-version', '1.4', '--xml', '@INPUT1@',
+    '--sizeof-pointer', sizeof_pointer,
+    '--icd-lib-path', meson.current_build_dir(),
+    '--icd-filename', icd_file_name,
     '--out', '@OUTPUT@',
   ],
   build_by_default : true,
 )
 
 devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
-# Deprecated: replaced by VK_DRIVER_FILES above
-devenv.append('VK_ICD_FILENAMES', _dev_icd.full_path())

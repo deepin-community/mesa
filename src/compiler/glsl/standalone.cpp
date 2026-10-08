@@ -32,7 +32,6 @@
 #include "ast.h"
 #include "glsl_parser_extras.h"
 #include "ir_optimization.h"
-#include "program.h"
 #include "standalone_scaffolding.h"
 #include "standalone.h"
 #include "util/set.h"
@@ -42,6 +41,8 @@
 #include "linker_util.h"
 #include "main/mtypes.h"
 #include "program/program.h"
+#include "nir_shader_compiler_options.h"
+#include "pipe/p_screen.h"
 
 static const struct standalone_options *options;
 
@@ -55,10 +56,10 @@ initialize_context(struct gl_context *ctx, gl_api api)
    _mesa_glsl_builtin_functions_init_or_ref();
 
    ctx->Version = 450;
-   ctx->Const.ShaderCompilerOptions[MESA_SHADER_VERTEX].NirOptions =
-      &nir_fs_options;
-   ctx->Const.ShaderCompilerOptions[MESA_SHADER_FRAGMENT].NirOptions =
-      &nir_vs_options;
+
+   ctx->screen->nir_options[MESA_SHADER_VERTEX] = &nir_vs_options;
+   ctx->screen->nir_options[MESA_SHADER_FRAGMENT] = &nir_fs_options;
+
 
    /* The standalone compiler needs to claim support for almost
     * everything in order to compile the built-in functions.
@@ -264,7 +265,7 @@ initialize_context(struct gl_context *ctx, gl_api api)
 
    /* GL_ARB_explicit_uniform_location, GL_MAX_UNIFORM_LOCATIONS */
    ctx->Const.MaxUserAssignableUniformLocations =
-      4 * MESA_SHADER_STAGES * MAX_UNIFORMS;
+      4 * MESA_SHADER_MESH_STAGES * MAX_UNIFORMS;
 }
 
 /* Returned string will have 'ctx' as its ralloc owner. */
@@ -364,13 +365,12 @@ standalone_compile_shader(const struct standalone_options *_options,
 
    if (options->lower_precision) {
       for (unsigned i = MESA_SHADER_VERTEX; i <= MESA_SHADER_COMPUTE; i++) {
-         struct gl_shader_compiler_options *options =
-            &ctx->Const.ShaderCompilerOptions[i];
-         options->LowerPrecisionFloat16 = true;
-         options->LowerPrecisionInt16 = true;
-         options->LowerPrecisionDerivatives = true;
-         options->LowerPrecisionConstants = true;
-         options->LowerPrecisionFloat16Uniforms = true;
+         ((struct pipe_shader_caps*)&ctx->screen->shader_caps[i])->fp16 = true;
+         ((struct pipe_shader_caps*)&ctx->screen->shader_caps[i])->int16 = true;
+         ((struct pipe_shader_caps*)&ctx->screen->shader_caps[i])->fp16_derivatives = true;
+         ((struct pipe_shader_caps*)&ctx->screen->shader_caps[i])->fp16_const_buffers = true;
+         ((struct pipe_shader_caps*)&ctx->screen->shader_caps[i])->glsl_16bit_load_dst = true;
+         ((struct pipe_shader_caps*)&ctx->screen->shader_caps[i])->glsl_16bit_consts = true;
       }
    }
 
@@ -446,7 +446,7 @@ standalone_compile_shader(const struct standalone_options *_options,
    return whole_program;
 
 fail:
-   for (unsigned i = 0; i < MESA_SHADER_STAGES; i++) {
+   for (unsigned i = 0; i < MESA_SHADER_MESH_STAGES; i++) {
       if (whole_program->_LinkedShaders[i])
          _mesa_delete_linked_shader(ctx, whole_program->_LinkedShaders[i]);
    }
@@ -456,9 +456,11 @@ fail:
 }
 
 extern "C" void
-standalone_compiler_cleanup(struct gl_shader_program *whole_program)
+standalone_compiler_cleanup(struct gl_shader_program *whole_program,
+                            struct gl_context *ctx)
 {
    standalone_destroy_shader_program(whole_program);
 
+   free(ctx->screen);
    _mesa_glsl_builtin_functions_decref();
 }

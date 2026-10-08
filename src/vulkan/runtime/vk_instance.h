@@ -23,13 +23,19 @@
 #ifndef VK_INSTANCE_H
 #define VK_INSTANCE_H
 
+#include "vk_debug_report.h"
 #include "vk_dispatch_table.h"
 #include "vk_extensions.h"
 #include "vk_object.h"
 
 #include "c11/threads.h"
 #include "util/list.h"
+#include "util/simple_mtx.h"
 #include "util/u_debug.h"
+
+#if HAVE_RENDERDOC_INTEGRATION
+#include "renderdoc_app.h"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -104,11 +110,16 @@ struct vk_instance {
    /** Instance-level dispatch table */
    struct vk_instance_dispatch_table dispatch_table;
 
+   /** Driver-set flag to enable debug logging in release builds
+    *
+    * When set to true, vk_log messages will not be skipped in non-debug
+    * builds even when no debug_utils or debug_report callbacks are registered.
+    * Drivers should set this based on their own debug environment variables.
+    */
+   bool enable_debug_logging;
+
    /* VK_EXT_debug_report debug callbacks */
-   struct {
-      mtx_t callbacks_mutex;
-      struct list_head callbacks;
-   } debug_report;
+   struct vk_debug_report debug_report;
 
    /* VK_EXT_debug_utils */
    struct {
@@ -172,7 +183,16 @@ struct vk_instance {
    uint64_t trace_mode;
 
    uint32_t trace_frame;
-   char *trace_trigger_file;
+   const char *trace_trigger_file;
+
+   /** Whether the capture mode is per-submit. */
+   bool trace_per_submit;
+
+#if HAVE_RENDERDOC_INTEGRATION
+   /** For triggering renderdoc captures from inside the driver. */
+   simple_mtx_t renderdoc_mtx;
+   RENDERDOC_API_1_0_0 *renderdoc_api;
+#endif
 };
 
 VK_DEFINE_HANDLE_CASTS(vk_instance, base, VkInstance,
@@ -245,6 +265,10 @@ vk_instance_add_driver_trace_modes(struct vk_instance *instance,
 
 uint32_t
 vk_get_negotiated_icd_version(void);
+
+void vk_instance_start_renderdoc_capture(struct vk_instance *instance);
+
+void vk_instance_end_renderdoc_capture(struct vk_instance *instance);
 
 #ifdef __cplusplus
 }

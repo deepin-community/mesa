@@ -95,7 +95,7 @@ vn_sizeof_VkDescriptorSetAllocateInfo_pnext(const void *val)
         case VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO:
             size += vn_sizeof_simple_pointer(pnext);
             size += vn_sizeof_VkStructureType(&pnext->sType);
-            size += vn_sizeof_VkDescriptorSetAllocateInfo_pnext(pnext->pNext);
+            size += vn_sizeof_VkDescriptorSetAllocateInfo_pnext(((const VkDescriptorSetVariableDescriptorCountAllocateInfo *)pnext)->pNext);
             size += vn_sizeof_VkDescriptorSetVariableDescriptorCountAllocateInfo_self((const VkDescriptorSetVariableDescriptorCountAllocateInfo *)pnext);
             return size;
         default:
@@ -147,7 +147,7 @@ vn_encode_VkDescriptorSetAllocateInfo_pnext(struct vn_cs_encoder *enc, const voi
         case VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO:
             vn_encode_simple_pointer(enc, pnext);
             vn_encode_VkStructureType(enc, &pnext->sType);
-            vn_encode_VkDescriptorSetAllocateInfo_pnext(enc, pnext->pNext);
+            vn_encode_VkDescriptorSetAllocateInfo_pnext(enc, ((const VkDescriptorSetVariableDescriptorCountAllocateInfo *)pnext)->pNext);
             vn_encode_VkDescriptorSetVariableDescriptorCountAllocateInfo_self(enc, (const VkDescriptorSetVariableDescriptorCountAllocateInfo *)pnext);
             return;
         default:
@@ -586,19 +586,6 @@ static inline void vn_async_vkFreeDescriptorSets(struct vn_ring *vn_ring, VkDevi
 {
     struct vn_ring_submit_command submit;
     vn_submit_vkFreeDescriptorSets(vn_ring, 0, device, descriptorPool, descriptorSetCount, pDescriptorSets, &submit);
-}
-
-static inline void vn_call_vkUpdateDescriptorSets(struct vn_ring *vn_ring, VkDevice device, uint32_t descriptorWriteCount, const VkWriteDescriptorSet* pDescriptorWrites, uint32_t descriptorCopyCount, const VkCopyDescriptorSet* pDescriptorCopies)
-{
-    VN_TRACE_FUNC();
-
-    struct vn_ring_submit_command submit;
-    vn_submit_vkUpdateDescriptorSets(vn_ring, VK_COMMAND_GENERATE_REPLY_BIT_EXT, device, descriptorWriteCount, pDescriptorWrites, descriptorCopyCount, pDescriptorCopies, &submit);
-    struct vn_cs_decoder *dec = vn_ring_get_command_reply(vn_ring, &submit);
-    if (dec) {
-        vn_decode_vkUpdateDescriptorSets_reply(dec, device, descriptorWriteCount, pDescriptorWrites, descriptorCopyCount, pDescriptorCopies);
-        vn_ring_free_command_reply(vn_ring, &submit);
-    }
 }
 
 static inline void vn_async_vkUpdateDescriptorSets(struct vn_ring *vn_ring, VkDevice device, uint32_t descriptorWriteCount, const VkWriteDescriptorSet* pDescriptorWrites, uint32_t descriptorCopyCount, const VkCopyDescriptorSet* pDescriptorCopies)

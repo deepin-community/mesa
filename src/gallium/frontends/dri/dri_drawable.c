@@ -96,9 +96,11 @@ dri_st_framebuffer_validate(struct st_context *st,
        pscreen->set_damage_region) {
       struct pipe_resource *resource = textures[ST_ATTACHMENT_BACK_LEFT];
 
-      pscreen->set_damage_region(pscreen, resource,
-                                 drawable->num_damage_rects,
-                                 drawable->damage_rects);
+      if (resource) {
+         pscreen->set_damage_region(pscreen, resource,
+                                    drawable->num_damage_rects,
+                                    drawable->damage_rects);
+      }
    }
 
    if (!out)
@@ -212,6 +214,9 @@ dri_destroy_drawable(struct dri_drawable *drawable)
    /* Notify the st manager that this drawable is no longer valid */
    st_api_destroy_drawable(&drawable->base);
 
+   if (screen->type == DRI_SCREEN_KOPPER)
+      kopper_destroy_drawable(drawable);
+
    FREE(drawable->damage_rects);
    FREE(drawable);
 }
@@ -305,12 +310,6 @@ dri_set_tex_buffer2(struct dri_context *ctx, GLint target,
       st_context_teximage(ctx->st, target, 0, internal_format, pt, false);
    }
 }
-
-const __DRItexBufferExtension driTexBufferExtension = {
-   .base = { __DRI_TEX_BUFFER, 2 },
-
-   .setTexBuffer2      = dri_set_tex_buffer2,
-};
 
 /**
  * Get the format and binding of an attachment.

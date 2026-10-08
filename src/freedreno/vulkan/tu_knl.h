@@ -10,9 +10,14 @@
 #ifndef TU_DRM_H
 #define TU_DRM_H
 
-#include "tu_common.h"
+#include <stddef.h>
+#include <stdint.h>
+
+#include "util/u_atomic.h"
+#include "vulkan/vulkan_core.h"
 
 struct tu_u_trace_syncobj;
+struct tu_queue;
 struct vdrm_bo;
 
 enum tu_bo_alloc_flags {
@@ -23,22 +28,7 @@ enum tu_bo_alloc_flags {
    TU_BO_ALLOC_INTERNAL_RESOURCE = 1 << 3,
    TU_BO_ALLOC_DMABUF = 1 << 4,
    TU_BO_ALLOC_SHAREABLE = 1 << 5,
-};
-
-/* Define tu_timeline_sync type based on drm syncobj for a point type
- * for vk_sync_timeline, and the logic to handle is mostly copied from
- * anv_bo_sync since it seems it can be used by similar way to anv.
- */
-enum tu_timeline_sync_state {
-   /** Indicates that this is a new (or newly reset fence) */
-   TU_TIMELINE_SYNC_STATE_RESET,
-
-   /** Indicates that this fence has been submitted to the GPU but is still
-    * (as far as we know) in use by the GPU.
-    */
-   TU_TIMELINE_SYNC_STATE_SUBMITTED,
-
-   TU_TIMELINE_SYNC_STATE_SIGNALED,
+   TU_BO_ALLOC_IMPLICIT_SYNC = 1 << 6,
 };
 
 enum tu_mem_sync_op {
@@ -57,7 +47,8 @@ struct tu_bo {
    const char *name; /* pointer to device->bo_sizes's entry's name */
    int32_t refcnt;
 
-   uint32_t bo_list_idx;
+   uint32_t submit_bo_list_idx;
+   uint32_t dump_bo_list_idx;
 
 #ifdef TU_HAS_KGSL
    /* We have to store fd returned by ion_fd_data
@@ -70,11 +61,65 @@ struct tu_bo {
    bool implicit_sync : 1;
    bool never_unmap : 1;
    bool cached_non_coherent : 1;
+   bool lazy : 1;
+
+   bool dump;
 
    /* Pointer to the vk_object_base associated with the BO
     * for the purposes of VK_EXT_device_address_binding_report
     */
    struct vk_object_base *base;
+
+   /* Stable identifier for the underlying memory object.
+    *
+    * Used for VK_EXT_device_memory_report. On KGSL, GEM handles are
+    * per-import and not stable, so this may be derived from the dma-buf
+    * inode to provide a consistent ID across imports.
+    */
+   uint64_t unique_id;
+};
+
+enum tu_sparse_vma_flags {
+   TU_SPARSE_VMA_NONE = 0,
+   TU_SPARSE_VMA_REPLAYABLE = 1 << 0,
+
+   /* Make unmapped pages in the memory region map to the PRR NULL page. This
+    * applies to all pages initially as well as pages that are subsequently
+    * unmapped via a queue submission. Writes to the PRR NULL page are
+    * dropped, and reads return zero. If this flag isn't set then reads and
+    * writes to unmapped pages will fault instead.
+    */
+   TU_SPARSE_VMA_MAP_ZERO = 1 << 1,
+};
+
+/* This represents a memory region into which BOs can be mapped. This is
+ * implemented differently on drm/msm and kgsl:
+ *
+ * - msm allows us to control the VA range ourselves, and provides an API to
+ *   map arbitrary parts of BOs to a given VA range. The sparse VMA is
+ *   just a userspace driver abstraction, consisting of an iova range we
+ *   reserve and (optionally) map as NULL initially, and when mapping a BO
+ *   into the sparse VMA we calculate the final iova range to map it to.
+ * - kgsl doesn't allow userspace control of the iova, and requires that we
+ *   create a "virtual BO" into which we can map BOs. The virtual BO maps
+ *   one-to-one to tu_sparse_vma, and almost one-to-one to a Vulkan VkBuffer
+ *   or VkImage with sparse binding.
+ *
+ * tu_sparse_vma is an abstraction to bridge this difference.
+ */
+struct tu_sparse_vma {
+   enum tu_sparse_vma_flags flags;
+
+   union {
+      struct {
+         uint64_t iova;
+         uint64_t size;
+         bool backs_lazy_bo;
+      } msm;
+      struct {
+         struct tu_bo *virtual_bo;
+      } kgsl;
+   };
 };
 
 struct tu_knl {
@@ -85,15 +130,18 @@ struct tu_knl {
    int (*device_get_gpu_timestamp)(struct tu_device *dev, uint64_t *ts);
    int (*device_get_suspend_count)(struct tu_device *dev, uint64_t *suspend_count);
    VkResult (*device_check_status)(struct tu_device *dev);
-   int (*submitqueue_new)(struct tu_device *dev, int priority, uint32_t *queue_id);
-   void (*submitqueue_close)(struct tu_device *dev, uint32_t queue_id);
+   int (*submitqueue_new)(struct tu_device *dev, struct tu_queue *queue);
+   void (*submitqueue_close)(struct tu_device *dev, struct tu_queue *queue);
    VkResult (*bo_init)(struct tu_device *dev, struct vk_object_base *base,
                        struct tu_bo **out_bo, uint64_t size, uint64_t client_iova,
                        VkMemoryPropertyFlags mem_property,
-                       enum tu_bo_alloc_flags flags, const char *name);
+                       enum tu_bo_alloc_flags flags,
+                       struct tu_sparse_vma *lazy_vma,
+                       const char *name);
    VkResult (*bo_init_dmabuf)(struct tu_device *dev, struct tu_bo **out_bo,
-                              uint64_t size, int prime_fd);
+                              uint64_t size, enum tu_bo_alloc_flags flags, int prime_fd);
    int (*bo_export_dmabuf)(struct tu_device *dev, struct tu_bo *bo);
+   VkResult (*bo_alloc_lazy)(struct tu_device *dev, struct tu_bo *bo);
    VkResult (*bo_map)(struct tu_device *dev, struct tu_bo *bo, void *placed_addr);
    void (*bo_allow_dump)(struct tu_device *dev, struct tu_bo *bo);
    void (*bo_finish)(struct tu_device *dev, struct tu_bo *bo);
@@ -101,10 +149,30 @@ struct tu_knl {
                            void *metadata, uint32_t metadata_size);
    int (*bo_get_metadata)(struct tu_device *dev, struct tu_bo *bo,
                           void *metadata, uint32_t metadata_size);
-   VkResult (*device_wait_u_trace)(struct tu_device *dev,
-                                   struct tu_u_trace_syncobj *syncobj);
-   VkResult (*queue_submit)(struct tu_queue *queue,
-                            struct vk_queue_submit *submit);
+   void *(*submit_create)(struct tu_device *device);
+   void (*submit_finish)(struct tu_device *device, void *_submit);
+   void (*submit_add_entries)(struct tu_device *device, void *_submit,
+                              struct tu_cs_entry *entries,
+                              unsigned num_entries);
+   void (*submit_add_bind)(struct tu_device *device,
+                           void *_submit,
+                           struct tu_sparse_vma *vma, uint64_t vma_offset,
+                           struct tu_bo *bo, uint64_t bo_offset,
+                           uint64_t size);
+   VkResult (*queue_submit)(struct tu_queue *queue, void *_submit,
+                            struct vk_sync_wait *waits, uint32_t wait_count,
+                            struct vk_sync_signal *signals, uint32_t signal_count,
+                            struct tu_u_trace_submission_data *u_trace_submission_data);
+   VkResult (*queue_wait_fence)(struct tu_queue *queue, uint32_t fence,
+                                uint64_t timeout_ns);
+   VkResult (*sparse_vma_init)(struct tu_device *dev,
+                               struct vk_object_base *base,
+                               struct tu_sparse_vma *out_vma,
+                               uint64_t *out_iova,
+                               enum tu_sparse_vma_flags flags,
+                               uint64_t size, uint64_t client_iova);
+   void (*sparse_vma_finish)(struct tu_device *device,
+                             struct tu_sparse_vma *vma);
 
    const struct vk_device_entrypoint_table *device_entrypoints;
 };
@@ -119,13 +187,6 @@ struct tu_zombie_vma {
    uint64_t size;
 };
 
-struct tu_timeline_sync {
-   struct vk_sync base;
-
-   enum tu_timeline_sync_state state;
-   uint32_t syncobj;
-};
-
 VkResult
 tu_bo_init_new_explicit_iova(struct tu_device *dev,
                              struct vk_object_base *base,
@@ -134,6 +195,7 @@ tu_bo_init_new_explicit_iova(struct tu_device *dev,
                              uint64_t client_iova,
                              VkMemoryPropertyFlags mem_property,
                              enum tu_bo_alloc_flags flags,
+                             struct tu_sparse_vma *lazy_vma,
                              const char *name);
 
 static inline VkResult
@@ -141,20 +203,19 @@ tu_bo_init_new(struct tu_device *dev, struct vk_object_base *base,
                struct tu_bo **out_bo, uint64_t size,
                enum tu_bo_alloc_flags flags, const char *name)
 {
-   // TODO don't mark everything with HOST_VISIBLE !!! Anything that
-   // never gets CPU access should not have this bit set
    return tu_bo_init_new_explicit_iova(
       dev, base, out_bo, size, 0,
       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-      flags, name);
+      flags, NULL, name);
 }
 
 VkResult
 tu_bo_init_dmabuf(struct tu_device *dev,
                   struct tu_bo **bo,
                   uint64_t size,
+                  enum tu_bo_alloc_flags flags,
                   int fd);
 
 int
@@ -176,8 +237,6 @@ tu_bo_sync_cache(struct tu_device *dev,
                  VkDeviceSize size,
                  enum tu_mem_sync_op op);
 
-uint32_t tu_get_l1_dcache_size();
-
 void tu_bo_allow_dump(struct tu_device *dev, struct tu_bo *bo);
 
 void tu_bo_set_metadata(struct tu_device *dev, struct tu_bo *bo,
@@ -191,6 +250,16 @@ tu_bo_get_ref(struct tu_bo *bo)
    p_atomic_inc(&bo->refcnt);
    return bo;
 }
+
+VkResult tu_sparse_vma_init(struct tu_device *dev,
+                            struct vk_object_base *base,
+                            struct tu_sparse_vma *out_vma,
+                            uint64_t *out_iova,
+                            enum tu_sparse_vma_flags flags,
+                            uint64_t size, uint64_t client_iova);
+
+void tu_sparse_vma_finish(struct tu_device *device,
+                          struct tu_sparse_vma *vma);
 
 VkResult tu_knl_kgsl_load(struct tu_instance *instance, int fd);
 
@@ -230,14 +299,37 @@ VkResult
 tu_device_check_status(struct vk_device *vk_device);
 
 int
-tu_drm_submitqueue_new(struct tu_device *dev,
-                       int priority,
-                       uint32_t *queue_id);
+tu_drm_submitqueue_new(struct tu_device *dev, struct tu_queue *queue);
 
 void
-tu_drm_submitqueue_close(struct tu_device *dev, uint32_t queue_id);
+tu_drm_submitqueue_close(struct tu_device *dev, struct tu_queue *queue);
+
+void *
+tu_submit_create(struct tu_device *dev);
+
+void
+tu_submit_finish(struct tu_device *dev, void *submit);
+
+void
+tu_submit_add_entries(struct tu_device *dev, void *submit,
+                      struct tu_cs_entry *entries,
+                      unsigned num_entries);
+
+void
+tu_submit_add_bind(struct tu_device *device,
+                   void *_submit,
+                   struct tu_sparse_vma *vma, uint64_t vma_offset,
+                   struct tu_bo *bo, uint64_t bo_offset,
+                   uint64_t size);
 
 VkResult
-tu_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit);
+tu_queue_submit(struct tu_queue *queue, void *submit,
+                struct vk_sync_wait *waits, uint32_t wait_count,
+                struct vk_sync_signal *signals, uint32_t signal_count,
+                struct tu_u_trace_submission_data *u_trace_submission_data);
+
+VkResult
+tu_queue_wait_fence(struct tu_queue *queue, uint32_t fence,
+                    uint64_t timeout_ns);
 
 #endif /* TU_DRM_H */

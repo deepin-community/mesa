@@ -1,25 +1,6 @@
 /*
  * © Copyright 2017-2018 Alyssa Rosenzweig
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- *
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef __PAN_MEMPOOL_H__
@@ -71,14 +52,14 @@ struct panfrost_pool_ref {
    struct panfrost_bo *bo;
 
    /* Mapped GPU VA */
-   mali_ptr gpu;
+   uint64_t gpu;
 };
 
 /* Take a reference to an allocation pool. Call directly after allocating from
  * an unowned pool for correct operation. */
 
 static inline struct panfrost_pool_ref
-panfrost_pool_take_ref(struct panfrost_pool *pool, mali_ptr ptr)
+panfrost_pool_take_ref(struct panfrost_pool *pool, uint64_t ptr)
 {
    if (!pool->owned)
       panfrost_bo_reference(pool->transient_bo);
@@ -89,10 +70,10 @@ panfrost_pool_take_ref(struct panfrost_pool *pool, mali_ptr ptr)
    };
 }
 
-void panfrost_pool_init(struct panfrost_pool *pool, void *memctx,
-                        struct panfrost_device *dev, unsigned create_flags,
-                        size_t slab_size, const char *label, bool prealloc,
-                        bool owned);
+int panfrost_pool_init(struct panfrost_pool *pool, void *memctx,
+                       struct panfrost_device *dev, unsigned create_flags,
+                       size_t slab_size, const char *label, bool prealloc,
+                       bool owned);
 
 void panfrost_pool_cleanup(struct panfrost_pool *pool);
 

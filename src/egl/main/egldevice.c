@@ -30,12 +30,14 @@
 #endif
 #include "util/compiler.h"
 #include "util/macros.h"
+#include "util/u_debug.h"
 
 #include "eglcurrent.h"
 #include "egldevice.h"
 #include "eglglobals.h"
 #include "egllog.h"
 #include "egltypedefs.h"
+#include "egldriver.h"
 
 struct _egl_device {
    _EGLDevice *Next;
@@ -45,10 +47,15 @@ struct _egl_device {
    EGLBoolean MESA_device_software;
    EGLBoolean EXT_device_drm;
    EGLBoolean EXT_device_drm_render_node;
+   EGLBoolean EXT_device_query_name;
+   EGLBoolean EXT_device_persistent_id;
 
 #ifdef HAVE_LIBDRM
    drmDevicePtr device;
 #endif
+
+   /* Cache for EGL_EXT_device_query_name and EXT_device_persistent_id. */
+   struct egl_device_info device_info;
 };
 
 void
@@ -74,6 +81,9 @@ _eglFiniDevice(void)
       assert(_eglDeviceSupports(dev, _EGL_DEVICE_DRM));
       drmFreeDevice(&dev->device);
 #endif
+      free(dev->device_info.vendor_name);
+      free(dev->device_info.renderer_name);
+      free(dev->device_info.driver_name);
       free(dev);
    }
 
@@ -104,6 +114,7 @@ _EGLDevice _eglSoftwareDevice = {
 };
 
 #ifdef HAVE_LIBDRM
+extern const _EGLDriver _eglDriver;
 /*
  * Negative value on error, zero if newly added, one if already in list.
  */
@@ -142,9 +153,24 @@ _eglAddDRMDevice(drmDevicePtr device)
       return -1;
 
    dev = dev->Next;
-   dev->extensions = "EGL_EXT_device_drm EGL_EXT_device_drm_render_node";
+
+   /* Need to have render node for query to work. */
+   bool supports_info_query =
+      device->available_nodes & (1 << DRM_NODE_RENDER) &&
+      _eglDriver.QueryDeviceInfo;
+
+   if (supports_info_query)
+      dev->extensions =
+         "EGL_EXT_device_drm EGL_EXT_device_drm_render_node "
+         "EGL_EXT_device_query_name EGL_EXT_device_persistent_id";
+   else
+      dev->extensions = "EGL_EXT_device_drm EGL_EXT_device_drm_render_node";
    dev->EXT_device_drm = EGL_TRUE;
    dev->EXT_device_drm_render_node = EGL_TRUE;
+   if (supports_info_query) {
+      dev->EXT_device_query_name = EGL_TRUE;
+      dev->EXT_device_persistent_id = EGL_TRUE;
+   }
    dev->device = device;
 
    return 0;
@@ -236,6 +262,10 @@ _eglDeviceSupports(_EGLDevice *dev, _EGLDeviceExtension ext)
       return dev->EXT_device_drm;
    case _EGL_DEVICE_DRM_RENDER_NODE:
       return dev->EXT_device_drm_render_node;
+   case _EGL_DEVICE_QUERY_NAME:
+      return dev->EXT_device_query_name;
+   case _EGL_DEVICE_PERSISTENT_ID:
+      return dev->EXT_device_persistent_id;
    default:
       assert(0);
       return EGL_FALSE;
@@ -252,9 +282,58 @@ _eglQueryDeviceAttribEXT(_EGLDevice *dev, EGLint attribute, EGLAttrib *value)
    }
 }
 
+EGLBoolean
+_eglQueryDeviceBinaryEXT(_EGLDevice *dev, EGLint name, EGLint max_size,
+                         void *value, EGLint *size)
+{
+   if (!_eglDeviceSupports(dev, _EGL_DEVICE_DRM) ||
+       !_eglDeviceSupports(dev, _EGL_DEVICE_PERSISTENT_ID) ||
+       !(name == EGL_DEVICE_UUID_EXT || name == EGL_DRIVER_UUID_EXT) ||
+       (value != NULL && max_size < EGL_UUID_SIZE) ||
+       size == NULL) {
+      _eglError(EGL_BAD_ATTRIBUTE, "eglQueryDeviceBinaryEXT");
+      return EGL_FALSE;
+   }
+
+#ifdef HAVE_LIBDRM
+   drmDevicePtr device = _eglDeviceDrm(dev);
+   /* Software device does not have render node. */
+   const char *render_node =
+      _eglDeviceSupports(dev, _EGL_DEVICE_SOFTWARE) ?
+      "" : device->nodes[DRM_NODE_RENDER];
+   if (!_eglDriver.QueryDeviceInfo(render_node, &dev->device_info)) {
+      _eglError(EGL_BAD_DEVICE_EXT, "eglQueryDeviceBinaryEXT");
+      return EGL_FALSE;
+   }
+   if (value && name == EGL_DEVICE_UUID_EXT) {
+      memcpy(value, dev->device_info.device_uuid, EGL_UUID_SIZE);
+   }
+   if (value && name == EGL_DRIVER_UUID_EXT) {
+      memcpy(value, dev->device_info.driver_uuid, EGL_UUID_SIZE);
+   }
+   *size = EGL_UUID_SIZE;
+   return EGL_TRUE;
+#else
+   /* This should never happen: we don't yet support EGL_DEVICE_DRM nor
+    * EGL_DEVICE_PERSISTENT_ID for the software device, and physical devices are
+    * only exposed when libdrm is available. */
+   assert(0);
+   _eglError(EGL_BAD_ATTRIBUTE, "eglQueryDeviceBinaryEXT");
+   return EGL_FALSE;
+#endif
+}
+
 const char *
 _eglQueryDeviceStringEXT(_EGLDevice *dev, EGLint name)
 {
+#ifdef HAVE_LIBDRM
+   drmDevicePtr device = _eglDeviceDrm(dev);
+   /* Software device does not have render node. */
+   const char *render_node =
+      _eglDeviceSupports(dev, _EGL_DEVICE_SOFTWARE) ?
+      "" : device->nodes[DRM_NODE_RENDER];
+#endif
+
    switch (name) {
    case EGL_EXTENSIONS:
       return dev->extensions;
@@ -281,6 +360,50 @@ _eglQueryDeviceStringEXT(_EGLDevice *dev, EGLint name)
       /* We create EGLDevice's only for render capable devices. */
       assert(dev->device->available_nodes & (1 << DRM_NODE_RENDER));
       return dev->device->nodes[DRM_NODE_RENDER];
+#else
+      /* Physical devices are only exposed when libdrm is available. */
+      assert(_eglDeviceSupports(dev, _EGL_DEVICE_SOFTWARE));
+      return NULL;
+#endif
+   /* EGL_EXT_device_query_name */
+   case EGL_VENDOR:
+      if (!_eglDeviceSupports(dev, _EGL_DEVICE_QUERY_NAME))
+         break;
+#ifdef HAVE_LIBDRM
+      if (!_eglDriver.QueryDeviceInfo(render_node, &dev->device_info)) {
+         _eglError(EGL_BAD_DEVICE_EXT, "eglQueryDeviceStringEXT");
+         return NULL;
+      }
+      return dev->device_info.vendor_name;
+#else
+      /* Physical devices are only exposed when libdrm is available. */
+      assert(_eglDeviceSupports(dev, _EGL_DEVICE_SOFTWARE));
+      return NULL;
+#endif
+   case EGL_RENDERER_EXT:
+      if (!_eglDeviceSupports(dev, _EGL_DEVICE_QUERY_NAME))
+         break;
+#ifdef HAVE_LIBDRM
+      if (!_eglDriver.QueryDeviceInfo(render_node, &dev->device_info)) {
+         _eglError(EGL_BAD_DEVICE_EXT, "eglQueryDeviceStringEXT");
+         return NULL;
+      }
+      return dev->device_info.renderer_name;
+#else
+      /* Physical devices are only exposed when libdrm is available. */
+      assert(_eglDeviceSupports(dev, _EGL_DEVICE_SOFTWARE));
+      return NULL;
+#endif
+   /* EGL_EXT_device_persistent_id */
+   case EGL_DRIVER_NAME_EXT:
+      if (!_eglDeviceSupports(dev, _EGL_DEVICE_PERSISTENT_ID))
+         break;
+#ifdef HAVE_LIBDRM
+      if (!_eglDriver.QueryDeviceInfo(render_node, &dev->device_info)) {
+         _eglError(EGL_BAD_DEVICE_EXT, "eglQueryDeviceStringEXT");
+         return NULL;
+      }
+      return dev->device_info.driver_name;
 #else
       /* Physical devices are only exposed when libdrm is available. */
       assert(_eglDeviceSupports(dev, _EGL_DEVICE_SOFTWARE));
@@ -342,6 +465,8 @@ _eglQueryDevicesEXT(EGLint max_devices, _EGLDevice **devices,
 {
    _EGLDevice *dev, *devs, *swrast;
    int i = 0, num_devs;
+   bool request_software =
+      debug_get_bool_option("LIBGL_ALWAYS_SOFTWARE", false);
 
    if ((devices && max_devices <= 0) || !num_devices)
       return _eglError(EGL_BAD_PARAMETER, "eglQueryDevicesEXT");
@@ -363,7 +488,13 @@ _eglQueryDevicesEXT(EGLint max_devices, _EGLDevice **devices,
 
    /* bail early if we only care about the count */
    if (!devices) {
-      *num_devices = num_devs;
+      *num_devices = request_software ? !!swrast : num_devs;
+      goto out;
+   }
+
+   if (request_software) {
+      *num_devices = !!swrast;
+      devices[0] = swrast;
       goto out;
    }
 

@@ -41,7 +41,7 @@ enum d3d12_residency_status {
    d3d12_permanently_resident,
 };
 
-enum batch_bo_reference_state {
+enum batch_bo_reference_state : uint8_t {
    batch_bo_reference_none = 0,
    batch_bo_reference_read = (1 << 0),
    batch_bo_reference_written = (1 << 1),
@@ -60,10 +60,15 @@ struct d3d12_bo {
     */
    uint64_t unique_id;
 
+#ifndef NDEBUG
+   bool is_front_buffer;
+#endif
+
    struct list_head residency_list_entry;
    uint64_t estimated_size;
    int64_t last_used_timestamp;
    uint64_t last_used_fence;
+   uint64_t last_used_periodic_notification_index;
    enum d3d12_residency_status residency_status;
    uint16_t local_needs_resolve_state;
 

@@ -1,8 +1,19 @@
 # Copyright © 2017 Intel Corporation
 # SPDX-License-Identifier: MIT
 
+subdir('glapi')
 subdir('program')
-subdir('main')
+
+if _shader_replacement != ''
+  shader_replacement_h = custom_target(
+    'shader_replacement.h',
+    input: [files(_shader_replacement + '/process_shaders.py')],
+    output: 'shader_replacement.h',
+    command: [prog_python, '@INPUT0@', _shader_replacement, '@OUTPUT@'],
+    build_by_default : true,
+    build_always_stale : true,
+  )
+endif
 
 # files shared between classic mesa and gallium mesa
 files_libmesa = files(
@@ -124,6 +135,7 @@ files_libmesa = files(
   'main/matrix.h',
   'main/menums.h',
   'main/mesa_private.h',
+  'main/mesh_shader.c',
   'main/mipmap.c',
   'main/mipmap.h',
   'main/mtypes.h',
@@ -160,8 +172,6 @@ files_libmesa = files(
   'main/rastpos.h',
   'main/readpix.c',
   'main/readpix.h',
-  'main/remap.c',
-  'main/remap.h',
   'main/renderbuffer.c',
   'main/renderbuffer.h',
   'main/robustness.c',
@@ -190,8 +200,6 @@ files_libmesa = files(
   'main/syncobj.h',
   'main/texcompress.c',
   'main/texcompress.h',
-  'main/texcompress_astc.cpp',
-  'main/texcompress_astc.h',
   'main/texcompress_bptc.c',
   'main/texcompress_bptc.h',
   'main/texcompress_cpal.c',
@@ -232,7 +240,6 @@ files_libmesa = files(
   'main/uniforms.h',
   'main/varray.c',
   'main/varray.h',
-  'main/vdpau.c',
   'main/version.c',
   'main/version.h',
   'main/viewport.c',
@@ -334,8 +341,11 @@ files_libmesa = files(
   'state_tracker/st_manager.h',
   'state_tracker/st_nir.h',
   'state_tracker/st_nir_builtins.c',
+  'state_tracker/st_nir_lower_alpha_test.c',
   'state_tracker/st_nir_lower_builtin.c',
+  'state_tracker/st_nir_lower_drawpixels.c',
   'state_tracker/st_nir_lower_fog.c',
+  'state_tracker/st_nir_lower_point_size_mov.c',
   'state_tracker/st_nir_lower_position_invariant.c',
   'state_tracker/st_nir_lower_tex_src_plane.c',
   'state_tracker/st_pbo.c',
@@ -354,8 +364,6 @@ files_libmesa = files(
   'state_tracker/st_texture.c',
   'state_tracker/st_texture.h',
   'state_tracker/st_util.h',
-  'state_tracker/st_vdpau.c',
-  'state_tracker/st_vdpau.h',
   'vbo/vbo.h',
   'vbo/vbo_attrib.h',
   'vbo/vbo_attrib_tmp.h',
@@ -376,11 +384,6 @@ files_libmesa = files(
 )
 
 inc_libmesa_asm = []
-if with_asm_arch == 'x86'
-  files_libmesa += files(
-    'x86/assyntax.h',
-  )
-endif
 
 format_fallback_c = custom_target(
   'format_fallback.c',
@@ -392,10 +395,10 @@ format_fallback_c = custom_target(
 
 get_hash_h = custom_target(
   'get_hash.h',
-  input : ['main/get_hash_generator.py', gl_and_es_api_files],
+  input : ['main/get_hash_generator.py', 'glapi/glapi/gen/gl_and_es_API.xml'],
   output : 'get_hash.h',
   command : [prog_python, '@INPUT0@', '-f', '@INPUT1@'],
-  depend_files : files('main/get_hash_params.py'),
+  depend_files : files('main/get_hash_params.py') + glapi_xml_py_deps,
   capture : true,
 )
 
@@ -425,7 +428,6 @@ files_libmesa += [
   main_marshal_generated_h,
   main_dispatch_h,
   ir_expression_operation_h,
-  main_remap_helper_h,
   sha1_h,
   main_unmarshal_table_c,
 ] + main_marshal_generated_c
@@ -435,7 +437,7 @@ if with_sse41
     'mesa_sse41',
     files('main/sse_minmax.c'),
     c_args : [c_msvc_compat_args, sse41_args],
-    include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux],
+    include_directories : [inc_include, inc_src, inc_mesa, inc_gallium, inc_gallium_aux],
     gnu_symbol_visibility : 'hidden',
   )
 else
@@ -447,10 +449,6 @@ if with_platform_windows
   _mesa_windows_args += [
     '-D_GDI32_',    # prevent gl* being declared __declspec(dllimport) in MS headers
   ]
-  if not with_shared_glapi
-    # prevent _glapi_* from being declared __declspec(dllimport)
-    _mesa_windows_args += '-D_GLAPI_NO_EXPORTS'
-  endif
 endif
 
 libmesa = static_library(
@@ -460,10 +458,10 @@ libmesa = static_library(
   cpp_args : [cpp_msvc_compat_args, _mesa_windows_args],
   gnu_symbol_visibility : 'hidden',
   include_directories : [
-    inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux,
+    inc_include, inc_src, inc_mesa, inc_gallium, inc_gallium_aux,
     inc_libmesa_asm, include_directories('main'),
   ],
   link_with : [libmesa_sse41],
-  dependencies : [idep_libglsl, idep_nir, idep_vtn, dep_vdpau, idep_mesautil],
+  dependencies : [idep_libglsl, idep_nir, idep_vtn, idep_mesautil],
   build_by_default : false,
 )

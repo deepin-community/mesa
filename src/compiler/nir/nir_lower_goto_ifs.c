@@ -346,7 +346,9 @@ loop_routing_start(struct routes *routing, nir_builder *b,
       routing->brk.fork = fork;
       routing->brk.reachable = fork_reachable(fork);
    }
-   nir_push_loop(b);
+
+   nir_loop *loop = nir_push_loop(b);
+   nir_loop_add_continue_construct(loop);
 }
 
 /**
@@ -446,7 +448,7 @@ inside_outside(nir_block *block, struct set *loop_heads, struct set *outside,
       set_foreach(remaining, child_entry) {
          nir_block *dom_child = (nir_block *)child_entry->key;
          bool can_jump_back = false;
-         set_foreach(dom_child->dom_frontier, entry) {
+         set_foreach(&dom_child->dom_frontier, entry) {
             if (entry->key == dom_child)
                continue;
             if (_mesa_set_search_pre_hashed(remaining, entry->hash,
@@ -587,7 +589,7 @@ handle_irreducible(struct set *remaining, struct strct_lvl *curr_level,
       set_foreach(remaining, entry) {
          nir_block *remaining_block = (nir_block *)entry->key;
          if (!_mesa_set_search(curr_level->blocks, remaining_block) &&
-             _mesa_set_intersects(remaining_block->dom_frontier,
+             _mesa_set_intersects(&remaining_block->dom_frontier,
                                   curr_level->blocks)) {
             if (_mesa_set_search(old_candidates, remaining_block)) {
                _mesa_set_add(curr_level->blocks, remaining_block);
@@ -668,7 +670,7 @@ organize_levels(struct list_head *levels, struct set *remaining,
       _mesa_set_clear(remaining_frontier, NULL);
       set_foreach(remaining, entry) {
          nir_block *remain_block = (nir_block *)entry->key;
-         set_foreach(remain_block->dom_frontier, frontier_entry) {
+         set_foreach(&remain_block->dom_frontier, frontier_entry) {
             nir_block *frontier = (nir_block *)frontier_entry->key;
             if (frontier != remain_block) {
                _mesa_set_add(remaining_frontier, frontier);
@@ -717,9 +719,9 @@ organize_levels(struct list_head *levels, struct set *remaining,
          nir_block *level_block = (nir_block *)blocks_entry->key;
          if (prev_frontier == NULL) {
             prev_frontier =
-               _mesa_set_clone(level_block->dom_frontier, curr_level);
+               _mesa_set_clone(&level_block->dom_frontier, curr_level);
          } else {
-            set_foreach(level_block->dom_frontier, entry)
+            set_foreach(&level_block->dom_frontier, entry)
                _mesa_set_add_pre_hashed(prev_frontier, entry->hash,
                                         entry->key);
          }
@@ -849,7 +851,7 @@ nir_structurize(struct routes *routing, nir_builder *b, nir_block *block,
    }
 
    /* If the block can reach back to itself, it is a loop head */
-   int is_looped = _mesa_set_search(block->dom_frontier, block) != NULL;
+   int is_looped = _mesa_set_search(&block->dom_frontier, block) != NULL;
    struct list_head outside_levels;
    if (is_looped) {
       struct set *loop_heads = _mesa_pointer_set_create(mem_ctx);
@@ -914,8 +916,7 @@ static bool
 nir_lower_goto_ifs_impl(nir_function_impl *impl)
 {
    if (impl->structured) {
-      nir_metadata_preserve(impl, nir_metadata_all);
-      return false;
+      return nir_no_progress(impl);
    }
 
    nir_metadata_require(impl, nir_metadata_dominance);
@@ -924,7 +925,7 @@ nir_lower_goto_ifs_impl(nir_function_impl *impl)
     * if we don't have any phi nodes to fix up.
     */
    nir_foreach_block_unstructured(block, impl)
-      nir_lower_phis_to_regs_block(block);
+      nir_lower_phis_to_regs_block(block, false);
 
    nir_cf_list cf_list;
    nir_cf_extract(&cf_list, nir_before_impl(impl),
@@ -961,7 +962,7 @@ nir_lower_goto_ifs_impl(nir_function_impl *impl)
    ralloc_free(mem_ctx);
    nir_cf_delete(&cf_list);
 
-   nir_metadata_preserve(impl, nir_metadata_none);
+   nir_progress(true, impl, nir_metadata_none);
 
    nir_repair_ssa_impl(impl);
    nir_lower_reg_intrinsics_to_ssa_impl(impl);
@@ -978,6 +979,9 @@ nir_lower_goto_ifs(nir_shader *shader)
       if (nir_lower_goto_ifs_impl(impl))
          progress = true;
    }
+
+   if (progress)
+      nir_lower_continue_constructs(shader);
 
    return progress;
 }

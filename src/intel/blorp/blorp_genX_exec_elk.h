@@ -141,7 +141,7 @@ blorp_emit_post_draw(struct blorp_batch *batch,
                      const struct blorp_params *params);
 
 static inline unsigned
-elk_blorp_get_urb_length(const struct elk_wm_prog_data *prog_data)
+elk_blorp_get_urb_length(const struct elk_fs_prog_data *prog_data)
 {
    if (prog_data == NULL)
       return 1;
@@ -239,8 +239,7 @@ _blorp_combine_address(struct blorp_batch *batch, void *location,
  */
 static void
 emit_urb_config(struct blorp_batch *batch,
-                const struct blorp_params *params,
-                UNUSED enum intel_urb_deref_block_size *deref_block_size)
+                const struct blorp_params *params)
 {
    /* Once vertex fetcher has written full VUE entries with complete
     * header the space requirement is as follows per vertex (in bytes):
@@ -252,9 +251,9 @@ emit_urb_config(struct blorp_batch *batch,
     *
     * where 'n' stands for number of varying inputs expressed as vec4s.
     */
-   struct elk_wm_prog_data *wm_prog_data = params->wm_prog_data;
+   struct elk_fs_prog_data *fs_prog_data = params->fs_prog_data;
    const unsigned num_varyings =
-      wm_prog_data ? wm_prog_data->num_varying_inputs : 0;
+      fs_prog_data ? fs_prog_data->num_varying_inputs : 0;
    const unsigned total_needed = 16 + 16 + num_varyings * 16;
 
    /* The URB size is expressed in units of 64 bytes (512 bits) */
@@ -274,8 +273,7 @@ emit_urb_config(struct blorp_batch *batch,
    bool constrained;
    intel_get_urb_config(batch->blorp->compiler->elk->devinfo,
                         blorp_get_l3_config(batch),
-                        false, false, &urb_cfg,
-                        deref_block_size, &constrained);
+                        false, false, &urb_cfg, &constrained);
 
    /* Tell drivers about the config. */
    blorp_pre_emit_urb_config(batch, &urb_cfg);
@@ -348,9 +346,9 @@ blorp_emit_input_varying_data(struct blorp_batch *batch,
    const unsigned vec4_size_in_bytes = 4 * sizeof(float);
    const unsigned max_num_varyings =
       DIV_ROUND_UP(sizeof(params->wm_inputs), vec4_size_in_bytes);
-   struct elk_wm_prog_data *wm_prog_data = params->wm_prog_data;
+   struct elk_fs_prog_data *fs_prog_data = params->fs_prog_data;
    const unsigned num_varyings =
-      wm_prog_data ? wm_prog_data->num_varying_inputs : 0;
+      fs_prog_data ? fs_prog_data->num_varying_inputs : 0;
 
    *size = 16 + num_varyings * vec4_size_in_bytes;
 
@@ -365,7 +363,7 @@ blorp_emit_input_varying_data(struct blorp_batch *batch,
    memcpy(inputs, &params->vs_inputs, sizeof(params->vs_inputs));
    inputs += 4;
 
-   if (params->wm_prog_data) {
+   if (params->fs_prog_data) {
       /* Walk over the attribute slots, determine if the attribute is used by
        * the program and when necessary copy the values from the input storage
        * to the vertex data buffer.
@@ -373,7 +371,7 @@ blorp_emit_input_varying_data(struct blorp_batch *batch,
       for (unsigned i = 0; i < max_num_varyings; i++) {
          const gl_varying_slot attr = VARYING_SLOT_VAR0 + i;
 
-         const int input_index = wm_prog_data->urb_setup[attr];
+         const int input_index = fs_prog_data->urb_setup[attr];
          if (input_index < 0)
             continue;
 
@@ -405,7 +403,7 @@ blorp_emit_input_varying_data(struct blorp_batch *batch,
                         params->dst.clear_color_addr,
                         clear_color_size);
 #else
-      unreachable("MCS partial resolve is not a thing on SNB and earlier");
+      UNREACHABLE("MCS partial resolve is not a thing on SNB and earlier");
 #endif
    }
 }
@@ -475,9 +473,9 @@ static void
 blorp_emit_vertex_elements(struct blorp_batch *batch,
                            const struct blorp_params *params)
 {
-   struct elk_wm_prog_data *wm_prog_data = params->wm_prog_data;
+   struct elk_fs_prog_data *fs_prog_data = params->fs_prog_data;
    const unsigned num_varyings =
-      wm_prog_data ? wm_prog_data->num_varying_inputs : 0;
+      fs_prog_data ? fs_prog_data->num_varying_inputs : 0;
    bool need_ndc = batch->blorp->compiler->elk->devinfo->ver <= 5;
    const unsigned num_elements = 2 + need_ndc + num_varyings;
 
@@ -761,10 +759,9 @@ blorp_emit_vs_config(struct blorp_batch *batch,
 
 static void
 blorp_emit_sf_config(struct blorp_batch *batch,
-                     const struct blorp_params *params,
-                     UNUSED enum intel_urb_deref_block_size urb_deref_block_size)
+                     const struct blorp_params *params)
 {
-   const struct elk_wm_prog_data *prog_data = params->wm_prog_data;
+   const struct elk_fs_prog_data *prog_data = params->fs_prog_data;
 
    /* 3DSTATE_SF
     *
@@ -861,7 +858,7 @@ static void
 blorp_emit_ps_config(struct blorp_batch *batch,
                      const struct blorp_params *params)
 {
-   const struct elk_wm_prog_data *prog_data = params->wm_prog_data;
+   const struct elk_fs_prog_data *prog_data = params->fs_prog_data;
 
    /* Even when thread dispatch is disabled, max threads (dw5.25:31) must be
     * nonzero to prevent the GPU from hanging.  While the documentation doesn't
@@ -909,7 +906,7 @@ blorp_emit_ps_config(struct blorp_batch *batch,
          ps.RenderTargetFastClearEnable = true;
          break;
       default:
-         unreachable("Invalid fast clear op");
+         UNREACHABLE("Invalid fast clear op");
       }
 
       /* The RENDER_SURFACE_STATE page for TGL says:
@@ -940,21 +937,21 @@ blorp_emit_ps_config(struct blorp_batch *batch,
       if (prog_data) {
          intel_set_ps_dispatch_state(&ps, devinfo, prog_data,
                                      params->num_samples,
-                                     0 /* msaa_flags */);
+                                     0 /* fs_config */);
 
          ps.DispatchGRFStartRegisterForConstantSetupData0 =
-            elk_wm_prog_data_dispatch_grf_start_reg(prog_data, ps, 0);
+            elk_fs_prog_data_dispatch_grf_start_reg(prog_data, ps, 0);
          ps.DispatchGRFStartRegisterForConstantSetupData1 =
-            elk_wm_prog_data_dispatch_grf_start_reg(prog_data, ps, 1);
+            elk_fs_prog_data_dispatch_grf_start_reg(prog_data, ps, 1);
          ps.DispatchGRFStartRegisterForConstantSetupData2 =
-            elk_wm_prog_data_dispatch_grf_start_reg(prog_data, ps, 2);
+            elk_fs_prog_data_dispatch_grf_start_reg(prog_data, ps, 2);
 
          ps.KernelStartPointer0 = params->wm_prog_kernel +
-                                  elk_wm_prog_data_prog_offset(prog_data, ps, 0);
+                                  elk_fs_prog_data_prog_offset(prog_data, ps, 0);
          ps.KernelStartPointer1 = params->wm_prog_kernel +
-                                  elk_wm_prog_data_prog_offset(prog_data, ps, 1);
+                                  elk_fs_prog_data_prog_offset(prog_data, ps, 1);
          ps.KernelStartPointer2 = params->wm_prog_kernel +
-                                  elk_wm_prog_data_prog_offset(prog_data, ps, 2);
+                                  elk_fs_prog_data_prog_offset(prog_data, ps, 2);
       }
    }
 
@@ -987,7 +984,7 @@ blorp_emit_ps_config(struct blorp_batch *batch,
       case ISL_AUX_OP_NONE:
          break;
       default:
-         unreachable("not reached");
+         UNREACHABLE("not reached");
       }
 
       if (prog_data) {
@@ -1020,21 +1017,21 @@ blorp_emit_ps_config(struct blorp_batch *batch,
       if (prog_data) {
          intel_set_ps_dispatch_state(&ps, devinfo, prog_data,
                                      params->num_samples,
-                                     0 /* msaa_flags */);
+                                     0 /* fs_config */);
 
          ps.DispatchGRFStartRegisterForConstantSetupData0 =
-            elk_wm_prog_data_dispatch_grf_start_reg(prog_data, ps, 0);
+            elk_fs_prog_data_dispatch_grf_start_reg(prog_data, ps, 0);
          ps.DispatchGRFStartRegisterForConstantSetupData1 =
-            elk_wm_prog_data_dispatch_grf_start_reg(prog_data, ps, 1);
+            elk_fs_prog_data_dispatch_grf_start_reg(prog_data, ps, 1);
          ps.DispatchGRFStartRegisterForConstantSetupData2 =
-            elk_wm_prog_data_dispatch_grf_start_reg(prog_data, ps, 2);
+            elk_fs_prog_data_dispatch_grf_start_reg(prog_data, ps, 2);
 
          ps.KernelStartPointer0 = params->wm_prog_kernel +
-                                  elk_wm_prog_data_prog_offset(prog_data, ps, 0);
+                                  elk_fs_prog_data_prog_offset(prog_data, ps, 0);
          ps.KernelStartPointer1 = params->wm_prog_kernel +
-                                  elk_wm_prog_data_prog_offset(prog_data, ps, 1);
+                                  elk_fs_prog_data_prog_offset(prog_data, ps, 1);
          ps.KernelStartPointer2 = params->wm_prog_kernel +
-                                  elk_wm_prog_data_prog_offset(prog_data, ps, 2);
+                                  elk_fs_prog_data_prog_offset(prog_data, ps, 2);
 
          ps.AttributeEnable = prog_data->num_varying_inputs > 0;
       } else {
@@ -1057,7 +1054,7 @@ blorp_emit_ps_config(struct blorp_batch *batch,
          ps.RenderTargetFastClearEnable = true;
          break;
       default:
-         unreachable("Invalid fast clear op");
+         UNREACHABLE("Invalid fast clear op");
       }
    }
 
@@ -1080,7 +1077,7 @@ blorp_emit_ps_config(struct blorp_batch *batch,
       case ISL_AUX_OP_NONE:
          break;
       default:
-         unreachable("not reached");
+         UNREACHABLE("not reached");
       }
 
       if (prog_data) {
@@ -1091,18 +1088,18 @@ blorp_emit_ps_config(struct blorp_batch *batch,
          wm._32PixelDispatchEnable = prog_data->dispatch_32;
 
          wm.DispatchGRFStartRegisterForConstantSetupData0 =
-            elk_wm_prog_data_dispatch_grf_start_reg(prog_data, wm, 0);
+            elk_fs_prog_data_dispatch_grf_start_reg(prog_data, wm, 0);
          wm.DispatchGRFStartRegisterForConstantSetupData1 =
-            elk_wm_prog_data_dispatch_grf_start_reg(prog_data, wm, 1);
+            elk_fs_prog_data_dispatch_grf_start_reg(prog_data, wm, 1);
          wm.DispatchGRFStartRegisterForConstantSetupData2 =
-            elk_wm_prog_data_dispatch_grf_start_reg(prog_data, wm, 2);
+            elk_fs_prog_data_dispatch_grf_start_reg(prog_data, wm, 2);
 
          wm.KernelStartPointer0 = params->wm_prog_kernel +
-                                  elk_wm_prog_data_prog_offset(prog_data, wm, 0);
+                                  elk_fs_prog_data_prog_offset(prog_data, wm, 0);
          wm.KernelStartPointer1 = params->wm_prog_kernel +
-                                  elk_wm_prog_data_prog_offset(prog_data, wm, 1);
+                                  elk_fs_prog_data_prog_offset(prog_data, wm, 1);
          wm.KernelStartPointer2 = params->wm_prog_kernel +
-                                  elk_wm_prog_data_prog_offset(prog_data, wm, 2);
+                                  elk_fs_prog_data_prog_offset(prog_data, wm, 2);
 
          wm.NumberofSFOutputAttributes = prog_data->num_varying_inputs;
       }
@@ -1233,7 +1230,7 @@ blorp_emit_depth_stencil_state(struct blorp_batch *batch,
          ds.DepthTestEnable = false;
          break;
       case ISL_AUX_OP_PARTIAL_RESOLVE:
-         unreachable("Invalid HIZ op");
+         UNREACHABLE("Invalid HIZ op");
       }
    }
 
@@ -1312,10 +1309,9 @@ blorp_emit_pipeline(struct blorp_batch *batch,
    uint32_t color_calc_state_offset;
    uint32_t depth_stencil_state_offset;
 
-   enum intel_urb_deref_block_size urb_deref_block_size;
-   emit_urb_config(batch, params, &urb_deref_block_size);
+   emit_urb_config(batch, params);
 
-   if (params->wm_prog_data) {
+   if (params->fs_prog_data) {
       blend_state_offset = blorp_emit_blend_state(batch, params);
    }
    color_calc_state_offset = blorp_emit_color_calc_state(batch, params);
@@ -1334,7 +1330,7 @@ blorp_emit_pipeline(struct blorp_batch *batch,
     * one CC_STATE_POINTERS packet so we have to emit that here.
     */
    blorp_emit(batch, GENX(3DSTATE_CC_STATE_POINTERS), cc) {
-      cc.BLEND_STATEChange = params->wm_prog_data ? true : false;
+      cc.BLEND_STATEChange = params->fs_prog_data ? true : false;
       cc.ColorCalcStatePointerValid = true;
       cc.DEPTH_STENCIL_STATEChange = true;
       cc.PointertoBLEND_STATE = blend_state_offset;
@@ -1395,7 +1391,7 @@ blorp_emit_pipeline(struct blorp_batch *batch,
       clip.PerspectiveDivideDisable = true;
    }
 
-   blorp_emit_sf_config(batch, params, urb_deref_block_size);
+   blorp_emit_sf_config(batch, params);
    blorp_emit_ps_config(batch, params);
 
    blorp_emit_cc_viewport(batch);
@@ -1520,7 +1516,7 @@ blorp_emit_surface_state(struct blorp_batch *batch,
                            isl_dev->ss.clear_value_size);
       }
 #else
-      unreachable("Fast clears are only supported on gfx7+");
+      UNREACHABLE("Fast clears are only supported on gfx7+");
 #endif
    }
 
@@ -1799,7 +1795,7 @@ blorp_emit_gfx8_hiz_op(struct blorp_batch *batch,
          break;
       case ISL_AUX_OP_PARTIAL_RESOLVE:
       case ISL_AUX_OP_NONE:
-         unreachable("Invalid HIZ op");
+         UNREACHABLE("Invalid HIZ op");
       }
 
       hzp.NumberofMultisamples = ffs(params->num_samples) - 1;
@@ -1886,7 +1882,7 @@ blorp_get_compute_push_const(struct blorp_batch *batch,
 {
    const struct elk_cs_prog_data *cs_prog_data = params->cs_prog_data;
    const unsigned push_const_size =
-      ALIGN(elk_cs_push_const_total_size(cs_prog_data, threads), 64);
+      align(elk_cs_push_const_total_size(cs_prog_data, threads), 64);
    assert(cs_prog_data->push.cross_thread.size +
           cs_prog_data->push.per_thread.size == sizeof(params->wm_inputs));
 
@@ -1985,7 +1981,7 @@ blorp_exec_compute(struct blorp_batch *batch, const struct blorp_params *params)
       vfe.URBEntryAllocationSize = GFX_VER >= 8 ? 2 : 0;
 
       const uint32_t vfe_curbe_allocation =
-         ALIGN(cs_prog_data->push.per_thread.regs * dispatch.threads +
+         align(cs_prog_data->push.per_thread.regs * dispatch.threads +
                cs_prog_data->push.cross_thread.regs, 2);
       vfe.CURBEAllocationSize = vfe_curbe_allocation;
    }
@@ -2053,7 +2049,7 @@ blorp_exec_compute(struct blorp_batch *batch, const struct blorp_params *params)
 
 #else /* GFX_VER >= 7 */
 
-   unreachable("Compute blorp is not supported on SNB and earlier");
+   UNREACHABLE("Compute blorp is not supported on SNB and earlier");
 
 #endif /* GFX_VER >= 7 */
 

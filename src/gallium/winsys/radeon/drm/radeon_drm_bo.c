@@ -338,11 +338,6 @@ void radeon_bo_destroy(void *winsys, struct pb_buffer_lean *_buf)
    memset(&args, 0, sizeof(args));
 
    mtx_lock(&rws->bo_handles_mutex);
-   /* radeon_winsys_bo_from_handle might have revived the bo */
-   if (pipe_is_referenced(&bo->base.reference)) {
-      mtx_unlock(&rws->bo_handles_mutex);
-      return;
-   }
    _mesa_hash_table_remove_key(rws->bo_handles, (void*)(uintptr_t)bo->handle);
    if (bo->flink_name) {
       _mesa_hash_table_remove_key(rws->bo_names,
@@ -906,7 +901,7 @@ static void radeon_bo_get_metadata(struct radeon_winsys *rws,
 static void radeon_bo_set_metadata(struct radeon_winsys *rws,
                                    struct pb_buffer_lean *_buf,
                                    struct radeon_bo_metadata *md,
-                                   struct radeon_surf *surf)
+                                   const struct radeon_surf *surf)
 {
    struct radeon_bo *bo = radeon_bo(_buf);
    struct drm_radeon_gem_set_tiling args;
@@ -1190,8 +1185,12 @@ static struct pb_buffer_lean *radeon_winsys_bo_from_handle(struct radeon_winsys 
 
    if (bo) {
       /* Increase the refcount. */
-      p_atomic_inc(&bo->base.reference.count);
-      goto done;
+      if (unlikely(p_atomic_inc_return(&bo->base.reference.count) == 1)) {
+         p_atomic_dec(&bo->base.reference.count);
+         assert(p_atomic_read(&bo->base.reference.count) == 0);
+      } else {
+         goto done;
+      }
    }
 
    /* There isn't, create a new one. */
@@ -1328,7 +1327,7 @@ static bool radeon_winsys_bo_get_handle(struct radeon_winsys *rws,
    } else if (whandle->type == WINSYS_HANDLE_TYPE_KMS) {
       whandle->handle = bo->handle;
    } else if (whandle->type == WINSYS_HANDLE_TYPE_FD) {
-      if (drmPrimeHandleToFD(ws->fd, bo->handle, DRM_CLOEXEC, (int*)&whandle->handle))
+      if (drmPrimeHandleToFD(ws->fd, bo->handle, DRM_CLOEXEC | DRM_RDWR, (int*)&whandle->handle))
          return false;
    }
 
@@ -1343,6 +1342,11 @@ static bool radeon_winsys_bo_is_user_ptr(struct pb_buffer_lean *buf)
 static bool radeon_winsys_bo_is_suballocated(struct pb_buffer_lean *buf)
 {
    return !((struct radeon_bo*)buf)->handle;
+}
+
+static bool radeon_winsys_bo_has_vm_always_valid(struct pb_buffer_lean *buf)
+{
+   return false;
 }
 
 static uint64_t radeon_winsys_bo_va(struct pb_buffer_lean *buf)
@@ -1373,6 +1377,7 @@ void radeon_drm_bo_init_functions(struct radeon_drm_winsys *ws)
    ws->base.buffer_from_ptr = radeon_winsys_bo_from_ptr;
    ws->base.buffer_is_user_ptr = radeon_winsys_bo_is_user_ptr;
    ws->base.buffer_is_suballocated = radeon_winsys_bo_is_suballocated;
+   ws->base.buffer_has_vm_always_valid = radeon_winsys_bo_has_vm_always_valid;
    ws->base.buffer_get_handle = radeon_winsys_bo_get_handle;
    ws->base.buffer_get_virtual_address = radeon_winsys_bo_va;
    ws->base.buffer_get_reloc_offset = radeon_winsys_bo_get_reloc_offset;

@@ -40,10 +40,10 @@ tess_ctrl_output_vtx(nir_builder *b, nir_def *vtx)
     * range of lanes.  We have to compute the lane index of the requested
     * invocation from the invocation index.
     */
-   nir_def *lane = nir_load_sysval_nv(b, 32, .base = NAK_SV_LANE_ID,
-                                      .access = ACCESS_CAN_REORDER);
-   nir_def *invoc = nir_load_sysval_nv(b, 32, .base = NAK_SV_INVOCATION_ID,
-                                       .access = ACCESS_CAN_REORDER);
+   nir_def *lane = nak_nir_load_sysval(b, NAK_SV_LANE_ID,
+                                       ACCESS_CAN_REORDER);
+   nir_def *invoc = nak_nir_load_sysval(b, NAK_SV_INVOCATION_ID,
+                                        ACCESS_CAN_REORDER);
 
    return nir_iadd(b, lane, nir_iadd(b, vtx, nir_ineg(b, invoc)));
 }
@@ -58,6 +58,21 @@ lower_vtg_io_intrin(nir_builder *b,
 
    nir_def *vtx = NULL, *offset = NULL, *data = NULL;
    switch (intrin->intrinsic) {
+   case nir_intrinsic_load_primitive_id:
+   case nir_intrinsic_load_instance_id:
+   case nir_intrinsic_load_vertex_id: {
+      /* These still input loads but they're a special case */
+      const gl_system_value sysval =
+         nir_system_value_from_intrinsic(intrin->intrinsic);
+      const uint32_t addr = nak_sysval_attr_addr(nak, sysval);
+      nir_def *val = nir_ald_nv(b, 1, nir_imm_int(b, 0), nir_imm_int(b, 0),
+                                .base = addr, .flags = 0,
+                                .range_base = addr, .range = 4,
+                                .access = ACCESS_CAN_REORDER);
+      nir_def_rewrite_uses(&intrin->def, val);
+      return true;
+   }
+
    case nir_intrinsic_load_input:
    case nir_intrinsic_load_output:
       offset = intrin->src[0].ssa;
@@ -109,7 +124,7 @@ lower_vtg_io_intrin(nir_builder *b,
       break;
 
    default:
-      unreachable("Unknown NIR I/O intrinsic");
+      UNREACHABLE("Unknown NIR I/O intrinsic");
    }
 
    bool is_patch;
@@ -128,7 +143,7 @@ lower_vtg_io_intrin(nir_builder *b,
       break;
 
    default:
-      unreachable("Unknown shader stage");
+      UNREACHABLE("Unknown shader stage");
    }
 
    nir_component_mask_t mask;
@@ -138,13 +153,26 @@ lower_vtg_io_intrin(nir_builder *b,
       mask = nir_component_mask(intrin->num_components);
 
    if (vtx != NULL && !is_output) {
-      nir_def *info = nir_load_sysval_nv(b, 32,
-                                         .base = NAK_SV_INVOCATION_INFO,
-                                         .access = ACCESS_CAN_REORDER);
-      nir_def *lo = nir_extract_u8_imm(b, info, 0);
-      nir_def *hi = nir_extract_u8_imm(b, info, 2);
-      nir_def *idx = nir_iadd(b, nir_imul(b, lo, hi), vtx);
-      vtx = nir_isberd_nv(b, idx);
+      if (nak->sm >= 50) {
+         nir_def *info = nak_nir_load_sysval(b, NAK_SV_INVOCATION_INFO,
+                                             ACCESS_CAN_REORDER);
+         nir_def *lo = nir_extract_u8_imm(b, info, 0);
+         nir_def *hi = nir_extract_u8_imm(b, info, 2);
+         nir_def *idx = nir_iadd(b, nir_imul(b, lo, hi), vtx);
+
+         const struct nak_nir_isbe_flags flags = {
+            .access = NAK_ISBE_ACCESS_MAP,
+            .output = false,
+            .skew = false,
+            .per_primitive = false,
+         };
+
+         vtx = nir_isberd_nv(b, 8, idx,
+                             .flags = NAK_AS_U32(flags),
+                             .access = ACCESS_CAN_REORDER);
+      } else {
+         vtx = nir_vild_nv(b, vtx);
+      }
    }
 
    if (vtx == NULL)
@@ -182,10 +210,6 @@ lower_vtg_io_intrin(nir_builder *b,
       .phys = !offset_is_const && !is_patch,
    };
 
-   uint32_t flags_u32;
-   STATIC_ASSERT(sizeof(flags_u32) == sizeof(flags));
-   memcpy(&flags_u32, &flags, sizeof(flags_u32));
-
    nir_def *dst_comps[NIR_MAX_VEC_COMPONENTS];
    while (mask) {
       const unsigned c = ffs(mask) - 1;
@@ -206,6 +230,13 @@ lower_vtg_io_intrin(nir_builder *b,
          comps = 1;
       assert(!(c_addr & 0x3));
 
+      /* Vector load/store with non-constant offsets don't work pre-Maxwell.
+       * They encode fine and they don't throw any shader exceptions but the
+       * seem to get stuck in the hardware and we get context timeouts.
+       */
+      if (nak->sm < 50 && !offset_is_const)
+         comps = 1;
+
       nir_def *c_offset = offset;
       if (flags.phys) {
          /* Physical addressing has to be scalar */
@@ -213,7 +244,7 @@ lower_vtg_io_intrin(nir_builder *b,
 
          /* Use al2p to compute a physical address */
          c_offset = nir_al2p_nv(b, offset, .base = c_addr,
-                                .flags = flags_u32);
+                                .flags = NAK_AS_U32(flags));
          c_addr = 0;
       }
 
@@ -221,14 +252,14 @@ lower_vtg_io_intrin(nir_builder *b,
          nir_def *c_data = nir_channels(b, data, BITFIELD_RANGE(c, comps));
          nir_ast_nv(b, c_data, vtx, c_offset,
                     .base = c_addr,
-                    .flags = flags_u32,
+                    .flags = NAK_AS_U32(flags),
                     .range_base = base_addr,
                     .range = range);
       } else {
          uint32_t access = flags.output ? 0 : ACCESS_CAN_REORDER;
          nir_def *c_data = nir_ald_nv(b, comps, vtx, c_offset,
                                       .base = c_addr,
-                                      .flags = flags_u32,
+                                      .flags = NAK_AS_U32(flags),
                                       .range_base = base_addr,
                                       .range = range,
                                       .access = access);

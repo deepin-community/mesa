@@ -1,33 +1,10 @@
 /*
- Copyright (C) Intel Corp.  2006.  All Rights Reserved.
- Intel funded Tungsten Graphics to
- develop this 3D driver.
-
- Permission is hereby granted, free of charge, to any person obtaining
- a copy of this software and associated documentation files (the
- "Software"), to deal in the Software without restriction, including
- without limitation the rights to use, copy, modify, merge, publish,
- distribute, sublicense, and/or sell copies of the Software, and to
- permit persons to whom the Software is furnished to do so, subject to
- the following conditions:
-
- The above copyright notice and this permission notice (including the
- next paragraph) shall be included in all copies or substantial
- portions of the Software.
-
- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
- IN NO EVENT SHALL THE COPYRIGHT OWNER(S) AND/OR ITS SUPPLIERS BE
- LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
- WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
- **********************************************************************/
- /*
-  * Authors:
-  *   Keith Whitwell <keithw@vmware.com>
-  */
+ * Copyright © 2006 Intel Corporation
+ * SPDX-License-Identifier: MIT
+ *
+ * Intel funded Tungsten Graphics to develop this 3D driver.
+ * File originally authored by: Keith Whitwell <keithw@vmware.com>
+ */
 
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -60,7 +37,7 @@ elk_negate_cmod(enum elk_conditional_mod cmod)
    case ELK_CONDITIONAL_LE:
       return ELK_CONDITIONAL_G;
    default:
-      unreachable("Can't negate this cmod");
+      UNREACHABLE("Can't negate this cmod");
    }
 }
 
@@ -198,7 +175,7 @@ elk_set_default_compression_control(struct elk_codegen *p,
       p->current->group = 0;
       break;
    default:
-      unreachable("not reached");
+      UNREACHABLE("not reached");
    }
 
    if (p->devinfo->ver <= 6) {
@@ -355,7 +332,7 @@ const unsigned *elk_get_program( struct elk_codegen *p,
    return (const unsigned *)p->store;
 }
 
-const struct elk_shader_reloc *
+const struct intel_shader_reloc *
 elk_get_shader_relocs(struct elk_codegen *p, unsigned *num_relocs)
 {
    *num_relocs = p->num_relocs;
@@ -409,7 +386,7 @@ void elk_dump_shader_bin(void *assembly, int start_offset, int end_offset,
 bool elk_try_override_assembly(struct elk_codegen *p, int start_offset,
                                const char *identifier)
 {
-   const char *read_path = getenv("INTEL_SHADER_ASM_READ_PATH");
+   const char *read_path = os_get_option("INTEL_SHADER_ASM_READ_PATH");
    if (!read_path) {
       return false;
    }
@@ -826,6 +803,6 @@ elk_num_sources_from_inst(const struct elk_isa_info *isa,
    case ELK_MATH_FUNCTION_INT_DIV_REMAINDER:
       return 2;
    default:
-      unreachable("not reached");
+      UNREACHABLE("not reached");
    }
 }

@@ -1,24 +1,6 @@
 /*
  * Copyright © 2014 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 /** @file elk_fs_combine_constants.cpp
@@ -243,24 +225,24 @@ negation_exists(nir_const_value v, unsigned bit_size,
 
    case 16:
       if (base_type == float_only)
-         return !util_is_half_nan(v.i16);
+         return !util_is_half_nan(v.i16) && !util_is_half_subnormal(v.i16);
       else
          return v.i16 != 0 && v.i16 != INT16_MIN;
 
    case 32:
       if (base_type == float_only)
-         return !isnan(v.f32);
+         return !isnan(v.f32) && fpclassify(v.f32) != FP_SUBNORMAL;
       else
          return v.i32 != 0 && v.i32 != INT32_MIN;
 
    case 64:
       if (base_type == float_only)
-         return !isnan(v.f64);
+         return !isnan(v.f64) && fpclassify(v.f64) != FP_SUBNORMAL;
       else
          return v.i64 != 0 && v.i64 != INT64_MIN;
 
    default:
-      unreachable("unsupported bit-size should have already been filtered.");
+      UNREACHABLE("unsupported bit-size should have already been filtered.");
    }
 }
 
@@ -300,7 +282,7 @@ negate(nir_const_value v, unsigned bit_size, enum interpreted_type base_type)
       break;
 
    default:
-      unreachable("unsupported bit-size should have already been filtered.");
+      UNREACHABLE("unsupported bit-size should have already been filtered.");
    }
 
    return ret;
@@ -348,7 +330,7 @@ absolute(nir_const_value v, unsigned bit_size, enum interpreted_type base_type)
       break;
 
    default:
-      unreachable("unsupported bit-size should have already been filtered.");
+      UNREACHABLE("unsupported bit-size should have already been filtered.");
    }
 
    return ret;
@@ -424,7 +406,7 @@ value_equal(nir_const_value a, nir_const_value b, unsigned bit_size)
    case 64:
       return a.u64 == b.u64;
    default:
-      unreachable("unsupported bit-size should have already been filtered.");
+      UNREACHABLE("unsupported bit-size should have already been filtered.");
    }
 }
 
@@ -813,14 +795,14 @@ struct reg_link {
    reg_link(elk_fs_inst *inst, unsigned src, bool negate, enum interpreted_type type)
    : inst(inst), src(src), negate(negate), type(type) {}
 
-   struct exec_node link;
+   struct brw_exec_node link;
    elk_fs_inst *inst;
    uint8_t src;
    bool negate;
    enum interpreted_type type;
 };
 
-static struct exec_node *
+static struct brw_exec_node *
 link(void *mem_ctx, elk_fs_inst *inst, unsigned src, bool negate,
      enum interpreted_type type)
 {
@@ -845,7 +827,7 @@ struct imm {
     * A list of fs_regs that refer to this immediate.  If we promote it, we'll
     * have to patch these up to refer to the new GRF.
     */
-   exec_list *uses;
+   brw_exec_list *uses;
 
    /** The immediate value */
    union {
@@ -861,13 +843,6 @@ struct imm {
    /** When promoting half-float we need to account for certain restrictions */
    bool is_half_float;
 
-   /**
-    * The GRF register and subregister number where we've decided to store the
-    * constant value.
-    */
-   uint8_t subreg_offset;
-   uint16_t nr;
-
    /** The number of coissuable instructions using this immediate. */
    uint16_t uses_by_coissue;
 
@@ -880,8 +855,15 @@ struct imm {
    /** Is the value used only in a single basic block? */
    bool used_in_single_block;
 
-   uint16_t first_use_ip;
-   uint16_t last_use_ip;
+   /**
+    * The GRF register and subregister number where we've decided to store the
+    * constant value.
+    */
+   uint8_t subreg_offset;
+   uint32_t nr;
+
+   uint32_t first_use_ip;
+   uint32_t last_use_ip;
 };
 
 /** The working set of information about immediates. */
@@ -984,7 +966,7 @@ build_imm_reg_for_copy(struct imm *imm)
    case 2:
       return elk_imm_w(imm->w);
    default:
-      unreachable("not implemented");
+      UNREACHABLE("not implemented");
    }
 }
 
@@ -1049,7 +1031,7 @@ add_candidate_immediate(struct table *table, elk_fs_inst *inst, unsigned ip,
    case ELK_REGISTER_TYPE_UB:
    case ELK_REGISTER_TYPE_B:
    default:
-      unreachable("not reached");
+      UNREACHABLE("not reached");
    }
 
    /* It is safe to change the type of the operands of a select instruction
@@ -1108,7 +1090,7 @@ allocate_slots(struct register_allocation *regs, unsigned num_regs,
       }
    }
 
-   unreachable("No free slots found.");
+   UNREACHABLE("No free slots found.");
 }
 
 static void
@@ -1130,7 +1112,7 @@ deallocate_slots(struct register_allocation *regs, unsigned num_regs,
       }
    }
 
-   unreachable("No such register found.");
+   UNREACHABLE("No such register found.");
 }
 
 static void
@@ -1347,10 +1329,10 @@ elk_fs_visitor::opt_combine_constants()
       imm->must_promote = false;
       imm->is_half_float = false;
 
-      imm->first_use_ip = UINT16_MAX;
+      imm->first_use_ip = UINT32_MAX;
       imm->last_use_ip = 0;
 
-      imm->uses = new(const_ctx) exec_list;
+      imm->uses = new(const_ctx) brw_exec_list;
 
       const unsigned first_user = result->values_to_emit[i].first_user;
       const unsigned last_user = first_user +
@@ -1461,7 +1443,7 @@ elk_fs_visitor::opt_combine_constants()
           * instructions seem to have additional alignment requirements, so
           * account for that too.
           */
-         reg.offset = ALIGN(reg.offset, get_alignment_for_imm(imm));
+         reg.offset = align(reg.offset, get_alignment_for_imm(imm));
 
          /* Ensure we have enough space in the register to copy the immediate */
          if (reg.offset + imm->size > REG_SIZE) {
@@ -1485,7 +1467,7 @@ elk_fs_visitor::opt_combine_constants()
       /* Insert it either before the instruction that generated the immediate
        * or after the last non-control flow instruction of the common ancestor.
        */
-      exec_node *n;
+      brw_exec_node *n;
       elk_bblock_t *insert_block;
       if (imm->inst != nullptr) {
          n = imm->inst;
@@ -1555,7 +1537,7 @@ elk_fs_visitor::opt_combine_constants()
        * seem to have additional alignment requirements, so account for that
        * too.
        */
-      assert(reg.offset == ALIGN(reg.offset, get_alignment_for_imm(imm)));
+      assert(reg.offset == align(reg.offset, get_alignment_for_imm(imm)));
 
       struct elk_reg imm_reg = build_imm_reg_for_copy(imm);
 
@@ -1568,7 +1550,7 @@ elk_fs_visitor::opt_combine_constants()
 
    /* Rewrite the immediate sources to refer to the new GRFs. */
    for (int i = 0; i < table.len; i++) {
-      foreach_list_typed(reg_link, link, link, table.imm[i].uses) {
+      brw_foreach_list_typed(reg_link, link, link, table.imm[i].uses) {
          elk_fs_reg *reg = &link->inst->src[link->src];
 
          if (link->inst->opcode == ELK_OPCODE_SEL) {
@@ -1590,7 +1572,7 @@ elk_fs_visitor::opt_combine_constants()
                   reg->type = ELK_REGISTER_TYPE_DF;
                   break;
                default:
-                  unreachable("Bad type size");
+                  UNREACHABLE("Bad type size");
                }
             }
          } else if ((link->inst->opcode == ELK_OPCODE_SHL ||
@@ -1723,9 +1705,9 @@ elk_fs_visitor::opt_combine_constants()
        * is used for membership in that list and in a block list.  So we need
        * to pull them back before rebuilding the CFG.
        */
-      assert(exec_list_length(&instructions) == 0);
+      assert(brw_exec_list_length(&instructions) == 0);
       foreach_block(block, cfg) {
-         exec_list_append(&instructions, &block->instructions);
+         brw_exec_list_append(&instructions, &block->instructions);
       }
 
       delete cfg;

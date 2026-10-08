@@ -26,29 +26,12 @@
 
 #include "zink_types.h"
 
-struct zink_render_pass *
-zink_create_render_pass(struct zink_screen *screen,
-                        struct zink_render_pass_state *state,
-                        struct zink_render_pass_pipeline_state *pstate);
-
-void
-zink_destroy_render_pass(struct zink_screen *screen,
-                         struct zink_render_pass *rp);
-
-
-unsigned
-zink_begin_render_pass(struct zink_context *ctx);
-void
-zink_end_render_pass(struct zink_context *ctx);
-
 VkImageLayout
 zink_render_pass_attachment_get_barrier_info(const struct zink_rt_attrib *rt, bool color, VkPipelineStageFlags *pipeline, VkAccessFlags *access);
 VkImageLayout
 zink_tc_renderpass_info_parse(struct zink_context *ctx, const struct tc_renderpass_info *info, unsigned idx, VkPipelineStageFlags *pipeline, VkAccessFlags *access);
 bool
 zink_init_render_pass(struct zink_context *ctx);
-bool
-zink_render_update_swapchain(struct zink_context *ctx);
 void
 zink_render_fixup_swapchain(struct zink_context *ctx);
 void
@@ -60,5 +43,5 @@ zink_tc_init_zs_attachment(struct zink_context *ctx, const struct tc_renderpass_
 void
 zink_tc_init_color_attachment(struct zink_context *ctx, const struct tc_renderpass_info *info, unsigned i, struct zink_rt_attrib *rt);
 void
-zink_render_msaa_expand(struct zink_context *ctx, uint32_t msaa_expand_mask);
+zink_render_attachment_shadow(struct zink_context *ctx, uint32_t attachment_shadow_mask);
 #endif

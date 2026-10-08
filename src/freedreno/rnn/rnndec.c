@@ -125,6 +125,18 @@ const char *rnndec_decode_enum(struct rnndeccontext *ctx, const char *enumname, 
 	return NULL;
 }
 
+int rnndec_decode_enum_value(struct rnndeccontext *ctx, const char *enumname, const char *enumval)
+{
+	struct rnnenum *en = rnn_findenum (ctx->db, enumname);
+	if (en) {
+      for (int i = 0; i < en->valsnum; i++)
+         if (rnndec_varmatch(ctx, &en->vals[i]->varinfo) &&
+               en->vals[i]->valvalid && !strcmp(en->vals[i]->name, enumval))
+            return en->vals[i]->value;
+	}
+	return -1;
+}
+
 /* The name UNK%u is used as a placeholder for bitfields that exist but
  * have an unknown function.
  */
@@ -371,6 +383,7 @@ static struct rnndecaddrinfo *trymatch (struct rnndeccontext *ctx, struct rnndel
 				res = calloc (sizeof *res, 1);
 				res->typeinfo = &elems[i]->typeinfo;
 				res->width = elems[i]->width;
+				res->usage = elems[i]->usage;
 				asprintf (&res->name, "%s%s%s", ctx->colors->rname, elems[i]->name, ctx->colors->reset);
 				for (j = 0; j < indicesnum; j++)
 					res->name = appendidx(ctx, res->name, indices[j], NULL);
@@ -406,6 +419,8 @@ static struct rnndecaddrinfo *trymatch (struct rnndeccontext *ctx, struct rnndel
 					res = trymatch (ctx, elems[i]->subelems, elems[i]->subelemsnum, offset, write, dwidth, nind, nindnum);
 					if (!res)
 						continue;
+					if (!res->usage)
+						res->usage = elems[i]->usage;
 					if (!elems[i]->name)
 						return res;
 					asprintf (&name, "%s%s%s", ctx->colors->rname, elems[i]->name, ctx->colors->reset);
@@ -433,6 +448,8 @@ static struct rnndecaddrinfo *trymatch (struct rnndeccontext *ctx, struct rnndel
 					free(name);
 					free(res->name);
 					res->name = tmp;
+					if (!res->usage)
+						res->usage = elems[i]->usage;
 					return res;
 				}
 				res = calloc (sizeof *res, 1);

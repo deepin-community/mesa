@@ -121,7 +121,7 @@ glthread_unmarshal_batch(void *job, void *gdata, int thread_index)
       glthread_update_global_locking(ctx);
 
    /* Execute the GL calls. */
-   _glapi_set_dispatch(ctx->Dispatch.Current);
+   _mesa_glapi_set_dispatch(ctx->Dispatch.Current);
 
    /* Here we lock the mutexes once globally if possible. If not, we just
     * fallback to the individual API calls doing it.
@@ -190,7 +190,7 @@ glthread_thread_initialization(void *job, void *gdata, int thread_index)
    struct gl_context *ctx = (struct gl_context*)job;
 
    st_set_background_context(ctx, &ctx->GLThread.stats);
-   _glapi_set_context(ctx);
+   _mesa_glapi_set_context(ctx);
 }
 
 static void
@@ -214,8 +214,8 @@ _mesa_glthread_init(struct gl_context *ctx)
    struct glthread_state *glthread = &ctx->GLThread;
    assert(!glthread->enabled);
 
-   if (!screen->get_param(screen, PIPE_CAP_MAP_UNSYNCHRONIZED_THREAD_SAFE) ||
-       !screen->get_param(screen, PIPE_CAP_ALLOW_MAPPED_BUFFERS_DURING_EXECUTION))
+   if (!screen->caps.map_unsynchronized_thread_safe ||
+       !screen->caps.allow_mapped_buffers_during_execution)
       return;
 
    if (!util_queue_init(&glthread->queue, "gl", MARSHAL_MAX_BATCHES - 2,
@@ -284,7 +284,7 @@ _mesa_glthread_destroy(struct gl_context *ctx)
          util_queue_fence_destroy(&glthread->batches[i].fence);
 
       _mesa_DeinitHashTable(&glthread->VAOs, free_vao, NULL);
-      _mesa_glthread_release_upload_buffer(ctx);
+      _mesa_glthread_release_upload_buffer(ctx, false);
    }
 }
 
@@ -299,11 +299,11 @@ void _mesa_glthread_enable(struct gl_context *ctx)
    ctx->GLApi = ctx->MarshalExec;
 
    /* glthread takes over all thread scheduling. */
-   ctx->st->pin_thread_counter = ST_THREAD_SCHEDULER_DISABLED;
+   ctx->st->thread_scheduler_disabled = true;
 
    /* Update the dispatch only if the dispatch is current. */
-   if (_glapi_get_dispatch() == ctx->Dispatch.Current) {
-       _glapi_set_dispatch(ctx->GLApi);
+   if (GET_DISPATCH() == ctx->Dispatch.Current) {
+       _mesa_glapi_set_dispatch(ctx->GLApi);
    }
 }
 
@@ -319,17 +319,17 @@ void _mesa_glthread_disable(struct gl_context *ctx)
 
    /* Re-enable thread scheduling in st/mesa when glthread is disabled. */
    if (ctx->pipe->set_context_param && util_thread_scheduler_enabled())
-      ctx->st->pin_thread_counter = 0;
+      ctx->st->thread_scheduler_disabled = false;
 
    /* Update the dispatch only if the dispatch is current. */
-   if (_glapi_get_dispatch() == ctx->MarshalExec) {
-       _glapi_set_dispatch(ctx->GLApi);
+   if (GET_DISPATCH() == ctx->MarshalExec) {
+       _mesa_glapi_set_dispatch(ctx->GLApi);
    }
 
    /* Unbind VBOs in all VAOs that glthread bound for non-VBO vertex uploads
     * to restore original states.
     */
-   if (ctx->API != API_OPENGL_CORE)
+   if (!_mesa_is_desktop_gl_core(ctx))
       _mesa_glthread_unbind_uploaded_vbos(ctx);
 }
 
@@ -418,9 +418,9 @@ _mesa_glthread_finish(struct gl_context *ctx)
       /* Since glthread_unmarshal_batch changes the dispatch to direct,
        * restore it after it's done.
        */
-      struct _glapi_table *dispatch = _glapi_get_dispatch();
+      struct _glapi_table *dispatch = GET_DISPATCH();
       glthread_unmarshal_batch(next, NULL, 0);
-      _glapi_set_dispatch(dispatch);
+      _mesa_glapi_set_dispatch(dispatch);
 
       /* It's not a sync because we don't enqueue partial batches, but
        * it would be a sync if we did. So count it anyway.

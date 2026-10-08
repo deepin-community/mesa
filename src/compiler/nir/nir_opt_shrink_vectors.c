@@ -94,8 +94,8 @@ shrink_dest_to_read_mask(nir_def *def, bool shrink_start)
    nir_intrinsic_instr *intr = NULL;
    nir_src *offset_src = NULL;
 
-   if (def->parent_instr->type == nir_instr_type_intrinsic) {
-      intr = nir_instr_as_intrinsic(def->parent_instr);
+   if (nir_def_is_intrinsic(def)) {
+      intr = nir_def_as_intrinsic(def);
       offset_src = nir_get_io_offset_src(intr);
    }
 
@@ -114,6 +114,7 @@ shrink_dest_to_read_mask(nir_def *def, bool shrink_start)
 
       if (first_bit) {
          assert(shrink_start);
+         assume(comps < NIR_MAX_VEC_COMPONENTS);
 
          if (nir_intrinsic_has_component(intr)) {
             unsigned new_component = nir_intrinsic_component(intr) + first_bit;
@@ -129,12 +130,12 @@ shrink_dest_to_read_mask(nir_def *def, bool shrink_start)
             }
 
             nir_builder b = nir_builder_at(nir_before_instr(&intr->instr));
-            nir_src_rewrite(offset_src, nir_iadd_imm(&b, offset_src->ssa, offset));
+            nir_add_io_offset(&b, intr, offset);
          }
 
          /* Reswizzle sources, which must be ALU since they have swizzle */
          assert(first_bit + comps <= NIR_MAX_VEC_COMPONENTS);
-         uint8_t swizzle[NIR_MAX_VEC_COMPONENTS] = { 0 };
+         uint8_t swizzle[NIR_MAX_VEC_COMPONENTS + 1] = { 0 };
          for (unsigned i = 0; i < comps; ++i) {
             swizzle[first_bit + i] = i;
          }
@@ -172,6 +173,9 @@ shrink_intrinsic_to_non_sparse(nir_intrinsic_instr *instr)
    case nir_intrinsic_image_deref_sparse_load:
       instr->intrinsic = nir_intrinsic_image_deref_load;
       break;
+   case nir_intrinsic_image_heap_sparse_load:
+      instr->intrinsic = nir_intrinsic_image_heap_load;
+      break;
    default:
       break;
    }
@@ -180,19 +184,13 @@ shrink_intrinsic_to_non_sparse(nir_intrinsic_instr *instr)
 }
 
 static bool
-opt_shrink_vector(nir_builder *b, nir_alu_instr *instr)
+create_smaller_vec(nir_builder *b, nir_alu_instr *vec, nir_component_mask_t mask)
 {
-   nir_def *def = &instr->def;
-   unsigned mask = nir_def_components_read(def);
-
-   /* If nothing was read, leave it up to DCE. */
-   if (mask == 0)
+   /* Leave these for copy propagation. */
+   if (util_is_power_of_two_or_zero(mask))
       return false;
 
-   /* don't remove any channels if used by non-ALU */
-   if (!is_only_used_by_alu(def))
-      return false;
-
+   nir_def *def = &vec->def;
    uint8_t reswizzle[NIR_MAX_VEC_COMPONENTS] = { 0 };
    nir_scalar srcs[NIR_MAX_VEC_COMPONENTS] = { 0 };
    unsigned num_components = 0;
@@ -200,7 +198,7 @@ opt_shrink_vector(nir_builder *b, nir_alu_instr *instr)
       if (!((mask >> i) & 0x1))
          continue;
 
-      nir_scalar scalar = nir_get_scalar(instr->src[i].src.ssa, instr->src[i].swizzle[0]);
+      nir_scalar scalar = nir_scalar_resolved(def, i);
 
       /* Try reuse a component with the same value */
       unsigned j;
@@ -218,16 +216,69 @@ opt_shrink_vector(nir_builder *b, nir_alu_instr *instr)
       }
    }
 
+   /* Don't create unsupported vector sizes. */
+   if (!nir_num_components_valid(num_components))
+      return false;
+
    /* return if no component was removed */
    if (num_components == def->num_components)
       return false;
 
    /* create new vecN and replace uses */
    nir_def *new_vec = nir_vec_scalars(b, srcs, num_components);
-   nir_def_rewrite_uses(def, new_vec);
+
+   nir_foreach_use_safe(src, def) {
+      if (nir_src_components_read(src) & mask)
+         nir_src_rewrite(src, new_vec);
+   }
    reswizzle_alu_uses(new_vec, reswizzle);
 
    return true;
+}
+
+static bool
+opt_shrink_or_split_vector(nir_builder *b, nir_alu_instr *vec)
+{
+   /* Try to split vec into multiple distinct smaller vecs. */
+   nir_component_mask_t use_masks[NIR_MAX_VEC_COMPONENTS] = { 0 };
+   unsigned use_mask_count = 0;
+
+   nir_foreach_use_including_if(src, &vec->def) {
+      /* don't remove any channels if used by non-ALU */
+      if (nir_src_is_if(src) || nir_src_parent_instr(src)->type != nir_instr_type_alu)
+         return false;
+
+      nir_component_mask_t read = nir_src_components_read(src);
+      bool mask_found = false;
+      for (unsigned i = 0; i < use_mask_count; i++) {
+         if (!(use_masks[i] & read))
+            continue;
+
+         use_masks[i] |= read;
+
+         /* Merge overlapping use_masks. */
+         unsigned k = i + 1;
+         for (unsigned j = i + 1; j < use_mask_count; j++) {
+            if (use_masks[i] & use_masks[j])
+               use_masks[i] |= use_masks[j];
+            else
+               use_masks[k++] = use_masks[j];
+         }
+         use_mask_count = k;
+
+         mask_found = true;
+         break;
+      }
+
+      if (!mask_found)
+         use_masks[use_mask_count++] = read;
+   }
+
+   bool progress = false;
+   for (unsigned i = 0; i < use_mask_count; i++)
+      progress |= create_smaller_vec(b, vec, use_masks[i]);
+
+   return progress;
 }
 
 static bool
@@ -239,17 +290,10 @@ opt_shrink_vectors_alu(nir_builder *b, nir_alu_instr *instr)
    if (def->num_components == 1)
       return false;
 
-   switch (instr->op) {
-   /* don't use nir_op_is_vec() as not all vector sizes are supported. */
-   case nir_op_vec4:
-   case nir_op_vec3:
-   case nir_op_vec2:
-      return opt_shrink_vector(b, instr);
-   default:
-      if (nir_op_infos[instr->op].output_size != 0)
-         return false;
-      break;
-   }
+   if (nir_op_is_vec(instr->op))
+      return opt_shrink_or_split_vector(b, instr);
+   if (nir_op_infos[instr->op].output_size != 0)
+      return false;
 
    /* don't remove any channels if used by non-ALU */
    if (!is_only_used_by_alu(def))
@@ -320,19 +364,23 @@ opt_shrink_vectors_intrinsic(nir_builder *b, nir_intrinsic_instr *instr,
    switch (instr->intrinsic) {
    case nir_intrinsic_load_uniform:
    case nir_intrinsic_load_ubo:
+   case nir_intrinsic_load_ubo_vec4:
    case nir_intrinsic_load_input:
    case nir_intrinsic_load_per_primitive_input:
    case nir_intrinsic_load_input_vertex:
    case nir_intrinsic_load_per_vertex_input:
    case nir_intrinsic_load_interpolated_input:
    case nir_intrinsic_load_ssbo:
+   case nir_intrinsic_load_ssbo_intel:
    case nir_intrinsic_load_push_constant:
+   case nir_intrinsic_load_push_data_intel:
    case nir_intrinsic_load_constant:
    case nir_intrinsic_load_shared:
    case nir_intrinsic_load_global:
    case nir_intrinsic_load_global_constant:
    case nir_intrinsic_load_kernel_input:
-   case nir_intrinsic_load_scratch: {
+   case nir_intrinsic_load_scratch:
+   case nir_intrinsic_load_attribute_pan: {
       /* Must be a vectorized intrinsic that we can resize. */
       assert(instr->num_components != 0);
 
@@ -346,6 +394,7 @@ opt_shrink_vectors_intrinsic(nir_builder *b, nir_intrinsic_instr *instr,
    case nir_intrinsic_image_sparse_load:
    case nir_intrinsic_bindless_image_sparse_load:
    case nir_intrinsic_image_deref_sparse_load:
+   case nir_intrinsic_image_heap_sparse_load:
       return shrink_intrinsic_to_non_sparse(instr);
    default:
       return false;
@@ -478,7 +527,7 @@ opt_shrink_vectors_phi(nir_builder *b, nir_phi_instr *instr)
          if (src_idx != alu->src[src_idx].swizzle[0]) {
             mask |= src_read_mask;
          }
-      } else if (!nir_alu_src_is_trivial_ssa(alu, src_idx)) {
+      } else if (!nir_alu_has_trivial_src(alu, src_idx)) {
          mask |= src_read_mask;
       }
    }
@@ -511,7 +560,7 @@ opt_shrink_vectors_phi(nir_builder *b, nir_phi_instr *instr)
     * used only in the phi, the movs will disappear later after copy propagate.
     */
    nir_foreach_phi_src(phi_src, instr) {
-      b->cursor = nir_after_instr_and_phis(phi_src->src.ssa->parent_instr);
+      b->cursor = nir_after_instr_and_phis(nir_def_instr(phi_src->src.ssa));
 
       nir_alu_src alu_src = {
          .src = nir_src_for_ssa(phi_src->src.ssa)
@@ -577,12 +626,7 @@ nir_opt_shrink_vectors(nir_shader *shader, bool shrink_start)
          }
       }
 
-      if (progress) {
-         nir_metadata_preserve(impl,
-                               nir_metadata_control_flow);
-      } else {
-         nir_metadata_preserve(impl, nir_metadata_all);
-      }
+      nir_progress(progress, impl, nir_metadata_control_flow);
    }
 
    return progress;

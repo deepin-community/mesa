@@ -14,6 +14,7 @@
 #include "util/list.h"
 #include "util/slab.h"
 #include "util/u_blitter.h"
+#include "util/u_dynarray.h"
 #include "util/u_string.h"
 #include "util/u_threaded_context.h"
 #include "util/perf/u_trace.h"
@@ -110,12 +111,6 @@ struct fd_streamout_stateobj {
    unsigned verts_written;
 };
 
-#define MAX_GLOBAL_BUFFERS 16
-struct fd_global_bindings_stateobj {
-   struct pipe_resource *buf[MAX_GLOBAL_BUFFERS];
-   uint32_t enabled_mask;
-};
-
 /* group together the vertex and vertexbuf state.. for ease of passing
  * around, and because various internal operations (gmem<->mem, etc)
  * need their own vertex state:
@@ -138,7 +133,6 @@ enum fd_dirty_3d_state {
    FD_DIRTY_VIEWPORT = BIT(8),
    FD_DIRTY_VTXSTATE = BIT(9),
    FD_DIRTY_VTXBUF = BIT(10),
-   FD_DIRTY_MIN_SAMPLES = BIT(11),
    FD_DIRTY_SCISSOR = BIT(12),
    FD_DIRTY_STREAMOUT = BIT(13),
    FD_DIRTY_UCP = BIT(14),
@@ -186,7 +180,6 @@ fd_print_dirty_state(BITMASK_ENUM(fd_dirty_3d_state) dirty)
          STATE(VIEWPORT),
          STATE(VTXSTATE),
          STATE(VTXBUF),
-         STATE(MIN_SAMPLES),
          STATE(SCISSOR),
          STATE(STREAMOUT),
          STATE(UCP),
@@ -249,7 +242,7 @@ enum fd_buffer_mask {
    FD_BUFFER_LRZ = BIT(15),
 };
 
-#define MAX_HW_SAMPLE_PROVIDERS 10
+#define MAX_HW_SAMPLE_PROVIDERS 11
 struct fd_hw_sample_provider;
 struct fd_hw_sample;
 
@@ -318,6 +311,8 @@ struct fd_context {
     * be counted against non-perfcounter queries")
     */
    bool active_queries dt;
+
+   uint32_t occlusion_queries_active dt;
 
    /* shaders used by clear, and gmem->mem blits: */
    struct fd_program_stateobj solid_prog; // TODO move to screen?
@@ -450,7 +445,7 @@ struct fd_context {
     * specific bitmask of state "groups".
     */
    uint32_t gen_dirty_map[NUM_DIRTY_BITS];
-   uint32_t gen_dirty_shader_map[PIPE_SHADER_TYPES][NUM_DIRTY_SHADER_BITS];
+   uint32_t gen_dirty_shader_map[MESA_SHADER_STAGES][NUM_DIRTY_SHADER_BITS];
 
    /* Bitmask of all possible gen_dirty bits: */
    uint32_t gen_all_dirty;
@@ -465,17 +460,17 @@ struct fd_context {
    BITMASK_ENUM(fd_dirty_3d_state) dirty_resource dt;
 
    /* per shader-stage dirty status: */
-   BITMASK_ENUM(fd_dirty_shader_state) dirty_shader[PIPE_SHADER_TYPES] dt;
+   BITMASK_ENUM(fd_dirty_shader_state) dirty_shader[MESA_SHADER_STAGES] dt;
 
    /* As above, but also needs draw time resource tracking: */
-   BITMASK_ENUM(fd_dirty_shader_state) dirty_shader_resource[PIPE_SHADER_TYPES] dt;
+   BITMASK_ENUM(fd_dirty_shader_state) dirty_shader_resource[MESA_SHADER_STAGES] dt;
 
    void *compute dt;
    struct pipe_blend_state *blend dt;
    struct pipe_rasterizer_state *rasterizer dt;
    struct pipe_depth_stencil_alpha_state *zsa dt;
 
-   struct fd_texture_stateobj tex[PIPE_SHADER_TYPES] dt;
+   struct fd_texture_stateobj tex[MESA_SHADER_STAGES] dt;
 
    struct fd_program_stateobj prog dt;
    uint32_t bound_shader_stages dt;
@@ -485,7 +480,6 @@ struct fd_context {
    struct pipe_blend_color blend_color dt;
    struct pipe_stencil_ref stencil_ref dt;
    unsigned sample_mask dt;
-   unsigned min_samples dt;
 
    /* 1x1 grid, max 4x MSAA: */
    uint8_t sample_locations[4] dt;
@@ -501,38 +495,16 @@ struct fd_context {
    struct {
       unsigned x, y;
    } guardband dt;
-   struct fd_constbuf_stateobj constbuf[PIPE_SHADER_TYPES] dt;
-   struct fd_shaderbuf_stateobj shaderbuf[PIPE_SHADER_TYPES] dt;
-   struct fd_shaderimg_stateobj shaderimg[PIPE_SHADER_TYPES] dt;
+   struct fd_constbuf_stateobj constbuf[MESA_SHADER_STAGES] dt;
+   struct fd_shaderbuf_stateobj shaderbuf[MESA_SHADER_STAGES] dt;
+   struct fd_shaderimg_stateobj shaderimg[MESA_SHADER_STAGES] dt;
    struct fd_streamout_stateobj streamout dt;
-   struct fd_global_bindings_stateobj global_bindings dt;
+   struct util_dynarray global_bindings dt;
    struct pipe_clip_state ucp dt;
 
    struct pipe_query *cond_query dt;
    bool cond_cond dt; /* inverted rendering condition */
    uint cond_mode dt;
-
-   /* Private memory is a memory space where each fiber gets its own piece of
-    * memory, in addition to registers. It is backed by a buffer which needs
-    * to be large enough to hold the contents of every possible wavefront in
-    * every core of the GPU. Because it allocates space via the internal
-    * wavefront ID which is shared between all currently executing shaders,
-    * the same buffer can be reused by all shaders, as long as all shaders
-    * sharing the same buffer use the exact same configuration. There are two
-    * inputs to the configuration, the amount of per-fiber space and whether
-    * to use the newer per-wave or older per-fiber layout. We only ever
-    * increase the size, and shaders with a smaller size requirement simply
-    * use the larger existing buffer, so that we only need to keep track of
-    * one buffer and its size, but we still need to keep track of per-fiber
-    * and per-wave buffers separately so that we never use the same buffer
-    * for different layouts. pvtmem[0] is for per-fiber, and pvtmem[1] is for
-    * per-wave.
-    */
-   struct {
-      struct fd_bo *bo;
-      uint32_t per_fiber_size;
-      uint32_t per_sp_size;
-   } pvtmem[2] dt;
 
    /* maps per-shader-stage state plus variant key to hw
     * program stateobj:
@@ -633,6 +605,9 @@ struct fd_context {
     */
    struct fd_vertex_state blit_vbuf_state;
 
+   /* Custom f16 blit shader: */
+   void *f16_blit_fs[PIPE_MAX_TEXTURE_TYPES] dt;
+
    /*
     * Info about state of previous draw, for state that comes from
     * pipe_draw_info (ie. not part of a CSO).  This allows us to
@@ -709,7 +684,7 @@ dirty_shader_to_dirty_state(BITMASK_ENUM(fd_dirty_shader_state) dirty)
 }
 
 static inline void
-fd_context_dirty_shader(struct fd_context *ctx, enum pipe_shader_type shader,
+fd_context_dirty_shader(struct fd_context *ctx, mesa_shader_stage shader,
                         BITMASK_ENUM(fd_dirty_shader_state) dirty)
    assert_dt
 {
@@ -732,7 +707,7 @@ fd_context_all_dirty(struct fd_context *ctx) assert_dt
     */
    ctx->gen_dirty = ctx->gen_all_dirty;
 
-   for (unsigned i = 0; i < PIPE_SHADER_TYPES; i++) {
+   for (unsigned i = 0; i < MESA_SHADER_STAGES; i++) {
       ctx->dirty_shader[i] = (enum fd_dirty_shader_state) ~0;
       ctx->dirty_shader_resource[i] = (enum fd_dirty_shader_state) ~0;
    }
@@ -745,7 +720,7 @@ fd_context_all_clean(struct fd_context *ctx) assert_dt
    ctx->dirty = (enum fd_dirty_3d_state)0;
    ctx->dirty_resource = (enum fd_dirty_3d_state)0;
    ctx->gen_dirty = 0;
-   for (unsigned i = 0; i < PIPE_SHADER_TYPES; i++) {
+   for (unsigned i = 0; i < MESA_SHADER_STAGES; i++) {
       ctx->dirty_shader[i] = (enum fd_dirty_shader_state)0;
       ctx->dirty_shader_resource[i] = (enum fd_dirty_shader_state)0;
    }
@@ -769,7 +744,7 @@ fd_context_add_map(struct fd_context *ctx, uint32_t dirty, uint32_t gen_dirty)
  * specific dirty bit
  */
 static inline void
-fd_context_add_shader_map(struct fd_context *ctx, enum pipe_shader_type shader,
+fd_context_add_shader_map(struct fd_context *ctx, mesa_shader_stage shader,
                           BITMASK_ENUM(fd_dirty_shader_state) dirty, uint32_t gen_dirty)
 {
    u_foreach_bit (b, dirty) {
@@ -788,7 +763,7 @@ void fd_context_switch_from(struct fd_context *ctx) assert_dt;
 void fd_context_switch_to(struct fd_context *ctx,
                           struct fd_batch *batch) assert_dt;
 struct fd_batch *fd_context_batch(struct fd_context *ctx) assert_dt;
-struct fd_batch *fd_context_batch_locked(struct fd_context *ctx) assert_dt;
+struct fd_batch *fd_context_batch_draw(struct fd_context *ctx) assert_dt;
 struct fd_batch *fd_context_batch_nondraw(struct fd_context *ctx) assert_dt;
 
 void fd_context_setup_common_vbos(struct fd_context *ctx);

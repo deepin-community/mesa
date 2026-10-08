@@ -48,14 +48,14 @@ st_interop_query_device_info(struct st_context *st,
 
    /* PCI values are obsolete on version >= 4 of the interface */
    if (out->version < 4) {
-      out->pci_segment_group = screen->get_param(screen, PIPE_CAP_PCI_GROUP);
-      out->pci_bus = screen->get_param(screen, PIPE_CAP_PCI_BUS);
-      out->pci_device = screen->get_param(screen, PIPE_CAP_PCI_DEVICE);
-      out->pci_function = screen->get_param(screen, PIPE_CAP_PCI_FUNCTION);
+      out->pci_segment_group = screen->caps.pci_group;
+      out->pci_bus = screen->caps.pci_bus;
+      out->pci_device = screen->caps.pci_device;
+      out->pci_function = screen->caps.pci_function;
    }
 
-   out->vendor_id = screen->get_param(screen, PIPE_CAP_VENDOR_ID);
-   out->device_id = screen->get_param(screen, PIPE_CAP_DEVICE_ID);
+   out->vendor_id = screen->caps.vendor_id;
+   out->device_id = screen->caps.device_id;
 
    if (out->version > 1 && screen->interop_query_device_info)
       out->driver_data_size = screen->interop_query_device_info(screen,
@@ -383,11 +383,35 @@ st_interop_flush_objects(struct st_context *st,
                          unsigned count, struct mesa_glinterop_export_in *objects,
                          struct mesa_glinterop_flush_out *out)
 {
+   GET_CURRENT_CONTEXT(cur_ctx);
    struct gl_context *ctx = st->ctx;
    bool flush_out_struct = false;
 
    if (!ctx->screen->resource_get_handle && !ctx->screen->interop_export_object)
       return MESA_GLINTEROP_UNSUPPORTED;
+
+   for (unsigned i = 0; i < count; ++i) {
+      if (objects[i].version >= 2) {
+         flush_out_struct = true;
+         break;
+      }
+   }
+
+   /* If we don't have a current context bound, there is nothing to flush */
+   if (!cur_ctx) {
+      if (flush_out_struct) {
+         if (out->sync)
+            *out->sync = NULL;
+         if (out->fence_fd)
+            *out->fence_fd = -1;
+         out->version = MIN2(out->version, 1);
+      } else {
+         GLsync *sync = (GLsync *)out;
+         *sync = NULL;
+      }
+
+      return MESA_GLINTEROP_SUCCESS;
+   }
 
    /* Wait for glthread to finish to get up-to-date GL object lookups. */
    _mesa_glthread_finish(st->ctx);
@@ -396,10 +420,6 @@ st_interop_flush_objects(struct st_context *st,
 
    for (unsigned i = 0; i < count; ++i) {
       int ret = flush_object(ctx, &objects[i]);
-
-      if (objects[i].version >= 2)
-         flush_out_struct = true;
-
       if (ret != MESA_GLINTEROP_SUCCESS) {
          simple_mtx_unlock(&ctx->Shared->Mutex);
          return ret;
@@ -417,6 +437,7 @@ st_interop_flush_objects(struct st_context *st,
             struct pipe_fence_handle *fence = NULL;
             ctx->pipe->flush(ctx->pipe, &fence, PIPE_FLUSH_FENCE_FD | PIPE_FLUSH_ASYNC);
             *out->fence_fd = ctx->screen->fence_get_fd(ctx->screen, fence);
+            ctx->screen->fence_reference(ctx->screen, &fence, NULL);
          }
          out->version = MIN2(out->version, 1);
       } else {

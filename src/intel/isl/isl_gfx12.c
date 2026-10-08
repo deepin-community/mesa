@@ -44,10 +44,10 @@ isl_gfx125_filter_tiling(const struct isl_device *dev,
    /* Clear flags unsupported on this hardware */
    assert(ISL_GFX_VERX10(dev) == 125);
 
-   *flags &= ISL_TILING_LINEAR_BIT |
-             ISL_TILING_X_BIT |
-             ISL_TILING_4_BIT |
-             ISL_TILING_64_BIT;
+   *flags &= isl_device_get_supported_tilings(dev);
+
+   if (info->usage & ISL_SURF_USAGE_SOFTWARE_DETILING)
+      *flags &= (1 << dev->shader_tiling) | ISL_TILING_LINEAR_BIT;
 
    if (isl_surf_usage_is_depth_or_stencil(info->usage)) {
       *flags &= ISL_TILING_4_BIT | ISL_TILING_64_BIT;
@@ -135,6 +135,18 @@ isl_gfx125_filter_tiling(const struct isl_device *dev,
     */
    if (info->usage & ISL_SURF_USAGE_CPB_BIT)
       *flags &= ISL_TILING_4_BIT | ISL_TILING_64_BIT;
+
+   /* From ATS-M PRMs, Volume 2a: Command Reference: Instructions,
+    * MFX_SURFACE_STATE,
+    *
+    *    "For optimizing memory efficiency based on access patterns, only
+    *     TileY is supported."
+    *
+    * The other media engines have similar limitations, TileY is the only
+    * well-supported tiling mode that can easily be used on all of them.
+    */
+   if (info->usage & ISL_SURF_USAGE_VIDEO_DECODE_BIT)
+      *flags &= ISL_TILING_4_BIT;
 }
 
 void

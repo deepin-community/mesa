@@ -21,7 +21,9 @@
  * IN THE SOFTWARE.
  */
 
-#include "v3dv_private.h"
+#include "v3dv_device.h"
+#include "v3dv_cmd_buffer.h"
+#include "v3dv_entrypoints.h"
 #include "compiler/nir/nir_builder.h"
 
 #include "vk_common_entrypoints.h"
@@ -36,7 +38,7 @@ get_set_event_cs(const nir_shader_compiler_options *options)
       nir_vulkan_resource_index(&b, 2, 32, nir_imm_int(&b, 0),
                                 .desc_set = 0,
                                 .binding = 0,
-                                .desc_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+                                .desc_type = nir_descriptor_type_storage_buffer);
 
    nir_def *offset =
       nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 0, .range = 4);
@@ -60,7 +62,7 @@ get_wait_event_cs(const nir_shader_compiler_options *options)
       nir_vulkan_resource_index(&b, 2, 32, nir_imm_int(&b, 0),
                                 .desc_set = 0,
                                 .binding = 0,
-                                .desc_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+                                .desc_type = nir_descriptor_type_storage_buffer);
 
    nir_def *offset =
       nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 0, .range = 4);
@@ -70,9 +72,7 @@ get_wait_event_cs(const nir_shader_compiler_options *options)
          nir_load_ssbo(&b, 1, 8, buf, offset, .access = 0, .align_mul = 4);
       nir_def *value = nir_i2i32(&b, load);
 
-      nir_if *if_stmt = nir_push_if(&b, nir_ieq_imm(&b, value, 1));
-      nir_jump(&b, nir_jump_break);
-      nir_pop_if(&b, if_stmt);
+      nir_break_if(&b, nir_ieq_imm(&b, value, 1));
    nir_pop_loop(&b, loop);
 
    return b.shader;

@@ -47,6 +47,7 @@ enum fd_param_id {
    FD_SUSPEND_COUNT, /* # of times the GPU has suspended, and potentially lost state */
    FD_SYSPROF,       /* Settable (for CAP_SYS_ADMIN) param for system profiling */
    FD_VA_SIZE,       /* GPU virtual address size */
+   FD_UCHE_TRAP_BASE,
 };
 
 /**
@@ -178,6 +179,7 @@ enum fd_version {
    FD_VERSION_VA_SIZE = 9,
 };
 enum fd_version fd_device_version(struct fd_device *dev);
+void fd_device_disable_explicit_sync_heuristic(struct fd_device *dev);
 
 bool fd_has_syncobj(struct fd_device *dev);
 

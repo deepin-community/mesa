@@ -33,11 +33,7 @@
 #include "vl_compositor_cs.h"
 
 struct cs_viewport {
-   float scale_x;
-   float scale_y;
    struct u_rect area;
-   float crop_x; /* src */
-   float crop_y;
    int translate_x; /* dst */
    int translate_y;
    float sampler0_w;
@@ -48,6 +44,9 @@ struct cs_viewport {
    float chroma_clamp_y;
    float chroma_offset_x;
    float chroma_offset_y;
+   float proj[2][4];
+   float chroma_proj[2][4];
+   int skip_prim_trc;
 };
 
 struct cs_shader {
@@ -57,7 +56,7 @@ struct cs_shader {
    unsigned num_samplers;
    nir_variable *samplers[3];
    nir_variable *image;
-   nir_def *params[8];
+   nir_def *params[18];
    nir_def *fone;
    nir_def *fzero;
 };
@@ -66,6 +65,12 @@ enum coords_flags {
    COORDS_LUMA          = 0x0,
    COORDS_CHROMA        = 0x1,
    COORDS_CHROMA_OFFSET = 0x2,
+};
+
+enum color_conversion {
+   YUV2RGB,
+   RGB2YUV,
+   PRIMARIES,
 };
 
 static nir_def *cs_create_shader(struct vl_compositor *c, struct cs_shader *s)
@@ -79,17 +84,20 @@ static nir_def *cs_create_shader(struct vl_compositor *c, struct cs_shader *s)
 
       layout (std140, binding = 0) uniform ubo
       {
-         vec4 csc_mat[3];      // params[0-2]
-         float luma_min;       // params[3].x
-         float luma_max;       // params[3].y
-         vec2 scale;           // params[3].zw
-         vec2 crop;            // params[4].xy
+         vec4 yuv2rgb[3];      // params[0-2]
+         vec2 chroma_offset;   // params[3].zw
+         int trc_in;           // params[4].x
+         int trc_out;          // params[4].y
          ivec2 translate;      // params[4].zw
          vec2 sampler0_wh;     // params[5].xy
          vec2 subsample_ratio; // params[5].zw
          vec2 coord_clamp;     // params[6].xy
          vec2 chroma_clamp;    // params[6].zw
-         vec2 chroma_offset;   // params[7].xy
+         vec4 proj[3];         // params[7-8]
+         vec4 chroma_proj[3];  // params[9-10]
+         vec4 rgb2yuv[3];      // params[11-13]
+         vec4 primaries[3];    // params[14-16]
+         int skip_prim_trc;    // params[17].x
       };
 
       void main()
@@ -102,8 +110,7 @@ static nir_def *cs_create_shader(struct vl_compositor *c, struct cs_shader *s)
       glsl_sampler_type(sampler_dim, /*is_shadow*/ false, s->array, GLSL_TYPE_FLOAT);
    const struct glsl_type *image_type =
       glsl_image_type(GLSL_SAMPLER_DIM_2D, /*is_array*/ false, GLSL_TYPE_FLOAT);
-   const nir_shader_compiler_options *options =
-      c->pipe->screen->get_compiler_options(c->pipe->screen, PIPE_SHADER_IR_NIR, PIPE_SHADER_COMPUTE);
+   const nir_shader_compiler_options *options = c->pipe->screen->nir_options[MESA_SHADER_COMPUTE];
 
    s->b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, options, "vl:%s", s->name);
    nir_builder *b = &s->b;
@@ -138,7 +145,7 @@ static nir_def *cs_create_shader(struct vl_compositor *c, struct cs_shader *s)
 
 static void *cs_create_shader_state(struct vl_compositor *c, struct cs_shader *s)
 {
-   c->pipe->screen->finalize_nir(c->pipe->screen, s->b.shader);
+   c->pipe->screen->finalize_nir(c->pipe->screen, s->b.shader, true);
 
    struct pipe_compute_state state = {0};
    state.ir_type = PIPE_SHADER_IR_NIR;
@@ -175,38 +182,32 @@ static inline nir_def *cs_chroma_subsampling(struct cs_shader *s, nir_def *src)
    return nir_fmul(b, src, nir_channels(b, s->params[5], 0x3 << 2));
 }
 
-static inline nir_def *cs_scale(struct cs_shader *s, nir_def *src)
+static inline nir_def *cs_proj(struct cs_shader *s, nir_def *src, unsigned flags)
 {
    /*
-      return src.xy / params[3].zw;
+      uint idx = flags & COORDS_CHROMA ? 9 : 7;
+      float x = dot(src.xy, params[idx]);
+      float y = dot(src.xy, params[idx + 1]);
+      return vec3(x, y, 1.0);
    */
    nir_builder *b = &s->b;
-   return nir_fdiv(b, src, nir_channels(b, s->params[3], 0x3 << 2));
-}
-
-static inline nir_def *cs_luma_key(struct cs_shader *s, nir_def *src)
-{
-   /*
-      bool luma_min = params[3].x >= src;
-      bool luma_max = params[3].y < src;
-      return float(luma_min || luma_max);
-   */
-   nir_builder *b = &s->b;
-   nir_def *luma_min = nir_fge(b, nir_channel(b, s->params[3], 0), src);
-   nir_def *luma_max = nir_flt(b, nir_channel(b, s->params[3], 1), src);
-   return nir_b2f32(b, nir_ior(b, luma_min, luma_max));
+   unsigned idx = flags & COORDS_CHROMA ? 9 : 7;
+   src = nir_vector_insert_imm(b, src, s->fone, 2);
+   nir_def *x = nir_fdot3(b, src, s->params[idx]);
+   nir_def *y = nir_fdot3(b, src, s->params[idx + 1]);
+   return nir_vec3(b, x, y, s->fzero);
 }
 
 static inline nir_def *cs_chroma_offset(struct cs_shader *s, nir_def *src, unsigned flags)
 {
    /*
-      vec2 offset = params[7].xy;
+      vec2 offset = params[3].zw;
       if (flags & COORDS_CHROMA)
          return src.xy + offset;
       return offset * -0.5 + src.xy;
    */
    nir_builder *b = &s->b;
-   nir_def *offset = nir_channels(b, s->params[7], 0x3);
+   nir_def *offset = nir_channels(b, s->params[3], 0x3 << 2);
    if (flags & COORDS_CHROMA)
       return nir_fadd(b, src, offset);
    return nir_ffma_imm1(b, offset, -0.5f, src);
@@ -242,28 +243,173 @@ static inline nir_def *cs_normalize(struct cs_shader *s, nir_def *src, unsigned 
    return nir_fdiv(b, src, div);
 }
 
-static inline nir_def *cs_crop(struct cs_shader *s, nir_def *src, unsigned flags)
+static nir_def *cs_color_conversion(struct cs_shader *s, nir_def *src,
+                                    unsigned comp, enum color_conversion conversion)
 {
    /*
-      vec2 crop = params[4].xy;
-      if (flags & COORDS_CHROMA)
-         crop = cs_chroma_subsampling(crop);
-      return src.xy + crop;
+      return dot(src, params[idx + comp]);
    */
    nir_builder *b = &s->b;
-   nir_def *crop = nir_channels(b, s->params[4], 0x3);
-   if (flags & COORDS_CHROMA)
-      crop = cs_chroma_subsampling(s, crop);
-   return nir_fadd(b, src, crop);
+   unsigned idx = 0;
+   if (conversion == RGB2YUV)
+      idx = 11;
+   else if (conversion == PRIMARIES)
+      idx = 14;
+   return nir_fdot4(b, src, s->params[idx + comp]);
 }
 
-static inline nir_def *cs_color_space_conversion(struct cs_shader *s, nir_def *src, unsigned comp)
+#define SDR_WHITE (203.0)
+#define PQ_C1     (3424.0 / 4096.0)
+#define PQ_C2     (2413.0 / 4096.0 * 32.0)
+#define PQ_C3     (2392.0 / 4096.0 * 32.0)
+#define PQ_M1     (2610.0 / 4096.0 * 0.25)
+#define PQ_M2     (2523.0 / 4096.0 * 128.0)
+
+static void cs_trc_to_linear(struct cs_shader *s, nir_def *src, nir_variable **out, unsigned trc)
 {
-   /*
-      return dot(src, params[comp]);
-   */
    nir_builder *b = &s->b;
-   return nir_fdot4(b, src, s->params[comp]);
+
+   for (unsigned i = 0; i < 3; ++i) {
+      nir_def *c = nir_fmax(b, nir_channel(b, src, i), s->fzero);
+      switch (trc) {
+      case PIPE_VIDEO_VPP_TRC_GAMMA22:
+         c = nir_fpow_imm(b, c, 2.2f);
+         break;
+      case PIPE_VIDEO_VPP_TRC_GAMMA28:
+         c = nir_fpow_imm(b, c, 2.8f);
+         break;
+      case PIPE_VIDEO_VPP_TRC_LINEAR:
+         break;
+      case PIPE_VIDEO_VPP_TRC_IEC61966_2_1:
+         /* sRGB */
+         nir_push_if(b, nir_fgt_imm(b, c, 0.04045f));
+            nir_def *p1 = nir_fadd_imm(b, c, 0.055f);
+            p1 = nir_fpow_imm(b, nir_fdiv_imm(b, p1, 1.055f), 2.4f);
+         nir_push_else(b, NULL);
+            nir_def *p2 = nir_fdiv_imm(b, c, 12.92f);
+         nir_pop_if(b, NULL);
+         c = nir_if_phi(b, p1, p2);
+         break;
+      case PIPE_VIDEO_VPP_TRC_SMPTE2084: {
+         /* PQ */
+         c = nir_fpow_imm(b, c, 1.0f / PQ_M2);
+         nir_def *d1 = nir_fmax(b, nir_fadd_imm(b, c, -PQ_C1), s->fzero);
+         nir_def *d2 = nir_fsub_imm(b, PQ_C2, nir_fmul_imm(b, c, PQ_C3));
+         c = nir_fmul_imm(b, nir_fpow_imm(b, nir_fdiv(b, d1, d2), 1.0f / PQ_M1), 10000.0f / SDR_WHITE);
+         break;
+      }
+      case PIPE_VIDEO_VPP_TRC_BT709:
+      case PIPE_VIDEO_VPP_TRC_SMPTE170M:
+      case PIPE_VIDEO_VPP_TRC_SMPTE240M:
+      case PIPE_VIDEO_VPP_TRC_IEC61966_2_4:
+      case PIPE_VIDEO_VPP_TRC_BT1361_ECG:
+      case PIPE_VIDEO_VPP_TRC_BT2020_10:
+      case PIPE_VIDEO_VPP_TRC_BT2020_12:
+      default:
+         /* BT.1886 Lb=0 Lw=1 */
+         c = nir_fpow_imm(b, c, 2.4f);
+         break;
+      }
+      nir_store_var(b, out[i], c, 0x1);
+   }
+}
+
+static void cs_trc_from_linear(struct cs_shader *s, nir_def *src, nir_variable **out, unsigned trc)
+{
+   nir_builder *b = &s->b;
+
+   for (unsigned i = 0; i < 3; ++i) {
+      nir_def *c = nir_fmax(b, nir_channel(b, src, i), s->fzero);
+      switch (trc) {
+      case PIPE_VIDEO_VPP_TRC_GAMMA22:
+         c = nir_fpow_imm(b, c, 1.0f / 2.2f);
+         break;
+      case PIPE_VIDEO_VPP_TRC_GAMMA28:
+         c = nir_fpow_imm(b, c, 1.0f / 2.8f);
+         break;
+      case PIPE_VIDEO_VPP_TRC_LINEAR:
+         break;
+      case PIPE_VIDEO_VPP_TRC_IEC61966_2_1:
+         /* sRGB */
+         nir_push_if(b, nir_fge_imm(b, c, 0.0031308f));
+            nir_def *p1 = nir_fpow_imm(b, c, 1.0f / 2.4f);
+            p1 = nir_fadd_imm(b, nir_fmul_imm(b, p1, 1.055f), -0.055f);
+         nir_push_else(b, NULL);
+            nir_def *p2 = nir_fmul_imm(b, c, 12.92f);
+         nir_pop_if(b, NULL);
+         c = nir_if_phi(b, p1, p2);
+         break;
+      case PIPE_VIDEO_VPP_TRC_SMPTE2084: {
+         /* PQ */
+         c = nir_fpow_imm(b, nir_fmul_imm(b, c, SDR_WHITE / 10000.0f), PQ_M1);
+         nir_def *d1 = nir_fadd_imm(b, nir_fmul_imm(b, c, PQ_C2), PQ_C1);
+         nir_def *d2 = nir_fadd_imm(b, nir_fmul_imm(b, c, PQ_C3), 1.0f);
+         c = nir_fpow_imm(b, nir_fdiv(b, d1, d2), PQ_M2);
+         break;
+      }
+      case PIPE_VIDEO_VPP_TRC_BT709:
+      case PIPE_VIDEO_VPP_TRC_SMPTE170M:
+      case PIPE_VIDEO_VPP_TRC_SMPTE240M:
+      case PIPE_VIDEO_VPP_TRC_IEC61966_2_4:
+      case PIPE_VIDEO_VPP_TRC_BT1361_ECG:
+      case PIPE_VIDEO_VPP_TRC_BT2020_10:
+      case PIPE_VIDEO_VPP_TRC_BT2020_12:
+      default:
+         /* BT.1886 Lb=0 Lw=1 */
+         c = nir_fpow_imm(b, c, 1.0f / 2.4f);
+         break;
+      }
+      nir_store_var(b, out[i], c, 0x1);
+   }
+}
+
+static nir_def *cs_trc_apply(struct cs_shader *s, nir_def *src, bool in,
+                             void (*trc_func)(struct cs_shader *, nir_def *, nir_variable **, unsigned))
+{
+   nir_builder *b = &s->b;
+   nir_def *trc = nir_channels(b, s->params[4], in ? 0x1 : 0x2);
+   nir_variable *col[3] = {
+      nir_local_variable_create(b->impl, glsl_float_type(), "col0"),
+      nir_local_variable_create(b->impl, glsl_float_type(), "col1"),
+      nir_local_variable_create(b->impl, glsl_float_type(), "col2"),
+   };
+
+   enum pipe_video_vpp_transfer_characteristic trcs[] = {
+      PIPE_VIDEO_VPP_TRC_GAMMA22,
+      PIPE_VIDEO_VPP_TRC_GAMMA28,
+      PIPE_VIDEO_VPP_TRC_LINEAR,
+      PIPE_VIDEO_VPP_TRC_IEC61966_2_1,
+      PIPE_VIDEO_VPP_TRC_SMPTE2084,
+   };
+
+   for (unsigned i = 0; i < ARRAY_SIZE(trcs); i++) {
+      nir_push_if(b, nir_ieq_imm(b, trc, trcs[i]));
+         trc_func(s, src, col, trcs[i]);
+      nir_push_else(b, NULL);
+   }
+   trc_func(s, src, col, PIPE_VIDEO_VPP_TRC_BT709);
+   for (unsigned i = 0; i < ARRAY_SIZE(trcs); i++)
+      nir_pop_if(b, NULL);
+
+   return nir_vec4(b, nir_load_var(b, col[0]), nir_load_var(b, col[1]),
+                      nir_load_var(b, col[2]), s->fone);
+}
+
+static nir_def *cs_prim_trc_conversion(struct cs_shader *s, nir_def *src)
+{
+   nir_push_if(&s->b, nir_ieq_imm(&s->b, nir_channel(&s->b, s->params[17], 0), 0));
+      nir_def *col[3];
+      nir_def *color = cs_trc_apply(s, src, true, cs_trc_to_linear);
+
+      for (unsigned i = 0; i < 3; i++)
+         col[i] = cs_color_conversion(s, color, i, PRIMARIES);
+
+      color = nir_vec4(&s->b, col[0], col[1], col[2], s->fone);
+      color = cs_trc_apply(s, color, false, cs_trc_from_linear);
+   nir_push_else(&s->b, NULL);
+   nir_pop_if(&s->b, NULL);
+
+   return nir_if_phi(&s->b, color, src);
 }
 
 static inline nir_def *cs_fetch_texel(struct cs_shader *s, nir_def *coords, unsigned sampler)
@@ -274,7 +420,23 @@ static inline nir_def *cs_fetch_texel(struct cs_shader *s, nir_def *coords, unsi
    nir_builder *b = &s->b;
    nir_deref_instr *tex_deref = nir_build_deref_var(b, s->samplers[sampler]);
    nir_component_mask_t mask = s->array ? 0x7 : 0x3;
-   return nir_tex_deref(b, tex_deref, tex_deref, nir_channels(b, coords, mask));
+   return nir_tex(b, nir_channels(b, coords, mask),
+                  .texture_deref = tex_deref, .sampler_deref = tex_deref);
+}
+
+static inline nir_def *cs_image_load(struct cs_shader *s, nir_def *pos)
+{
+   /*
+      imageLoad(image, pos.xy);
+   */
+   nir_builder *b = &s->b;
+   nir_def *zero = nir_imm_int(b, 0);
+   nir_def *sample = nir_imm_int(b, 0);
+   pos = nir_pad_vector_imm_int(b, pos, 0, 4);
+   enum glsl_sampler_dim sampler_dim = s->array ? GLSL_SAMPLER_DIM_2D : GLSL_SAMPLER_DIM_RECT;
+   return nir_image_deref_load(b, 4, 32, &nir_build_deref_var(b, s->image)->def, pos, sample, zero,
+                               .image_dim = sampler_dim,
+                               .image_array = s->array);
 }
 
 static inline void cs_image_store(struct cs_shader *s, nir_def *pos, nir_def *color)
@@ -302,8 +464,7 @@ static nir_def *cs_tex_coords(struct cs_shader *s, nir_def *coords, unsigned fla
    if (flags & COORDS_CHROMA)
       coords = cs_chroma_subsampling(s, coords);
 
-   coords = cs_scale(s, coords);
-   coords = cs_crop(s, coords, flags);
+   coords = cs_proj(s, coords, flags);
    coords = cs_clamp(s, coords, flags);
 
    return coords;
@@ -327,35 +488,57 @@ static void *create_video_buffer_shader(struct vl_compositor *c)
    for (unsigned i = 0; i < 3; ++i)
       col[i] = cs_fetch_texel(&s, pos[MIN2(i, 1)], i);
 
-   nir_def *alpha = cs_luma_key(&s, col[2]);
-
    nir_def *color = nir_vec4(b, col[0], col[1], col[2], s.fone);
    for (unsigned i = 0; i < 3; ++i)
-      col[i] = cs_color_space_conversion(&s, color, i);
+      col[i] = cs_color_conversion(&s, color, i, YUV2RGB);
 
-   color = nir_vec4(b, col[0], col[1], col[2], alpha);
+   color = nir_vec4(b, col[0], col[1], col[2], s.fone);
+   color = cs_prim_trc_conversion(&s, color);
    cs_image_store(&s, cs_translate(&s, ipos), color);
 
    return cs_create_shader_state(c, &s);
 }
 
-static void *create_yuv_progressive_shader(struct vl_compositor *c, bool y)
+static void *create_yuv_progressive_shader(struct vl_compositor *c, enum vl_compositor_plane plane)
 {
    struct cs_shader s = {
-      .name = y ? "yuv_progressive_y" : "yuv_progressive_uv",
+      .name = "yuv_progressive",
       .num_samplers = 3,
    };
    nir_builder *b = &s.b;
 
    nir_def *ipos = cs_create_shader(c, &s);
-   nir_def *pos = cs_tex_coords(&s, ipos, y ? COORDS_LUMA : COORDS_CHROMA);
+   nir_def *pos_luma = cs_tex_coords(&s, ipos, COORDS_LUMA);
+   nir_def *pos_chroma = cs_tex_coords(&s, ipos, COORDS_CHROMA |
+                                       (plane == VL_COMPOSITOR_PLANE_Y ? COORDS_CHROMA_OFFSET : 0));
 
-   nir_def *color;
-   if (y) {
-      color = nir_channel(b, cs_fetch_texel(&s, pos, 0), 0);
+   nir_def *col[3];
+   for (unsigned i = 0; i < 3; i++)
+      col[i] = cs_fetch_texel(&s, i == 0 ? pos_luma : pos_chroma, i);
+
+   nir_def *color = nir_vec4(b, col[0], col[1], col[2], s.fone);
+
+   for (unsigned i = 0; i < 3; i++)
+      col[i] = cs_color_conversion(&s, color, i, YUV2RGB);
+
+   color = nir_vec4(b, col[0], col[1], col[2], s.fone);
+   color = cs_prim_trc_conversion(&s, color);
+
+   for (unsigned i = 0; i < 3; i++)
+      col[i] = cs_color_conversion(&s, color, i, RGB2YUV);
+
+   color = nir_vec4(b, col[0], col[1], col[2], s.fone);
+
+   if (plane != VL_COMPOSITOR_PLANE_UV) {
+      unsigned c = 0;
+      if (plane == VL_COMPOSITOR_PLANE_U)
+         c = 1;
+      else if (plane == VL_COMPOSITOR_PLANE_V)
+         c = 2;
+      color = nir_channel(b, color, c);
    } else {
-      nir_def *col1 = cs_fetch_texel(&s, pos, 1);
-      nir_def *col2 = cs_fetch_texel(&s, pos, 2);
+      nir_def *col1 = nir_channel(b, color, 1);
+      nir_def *col2 = nir_channel(b, color, 2);
       color = nir_vec2(b, col1, col2);
    }
 
@@ -364,10 +547,10 @@ static void *create_yuv_progressive_shader(struct vl_compositor *c, bool y)
    return cs_create_shader_state(c, &s);
 }
 
-static void *create_rgb_yuv_shader(struct vl_compositor *c, bool y)
+static void *create_rgb_yuv_shader(struct vl_compositor *c, enum vl_compositor_plane plane)
 {
    struct cs_shader s = {
-      .name = y ? "rgb_yuv_y" : "rgb_yuv_uv",
+      .name = "rgb_yuv",
       .num_samplers = 1,
    };
    nir_builder *b = &s.b;
@@ -375,7 +558,7 @@ static void *create_rgb_yuv_shader(struct vl_compositor *c, bool y)
    nir_def *ipos = cs_create_shader(c, &s);
    nir_def *color = NULL;
 
-   if (y) {
+   if (plane == VL_COMPOSITOR_PLANE_Y) {
       nir_def *pos = cs_tex_coords(&s, ipos, COORDS_LUMA);
       color = cs_fetch_texel(&s, pos, 0);
    } else {
@@ -393,8 +576,7 @@ static void *create_rgb_yuv_shader(struct vl_compositor *c, bool y)
 
          vec4 col[4];
          for (uint i = 0; i < 4; ++i) {
-            pos[i] = cs_scale(pos[i]);
-            pos[i] = cs_crop(pos[i], COORDS_LUMA);
+            pos[i] = cs_proj(pos[i], COORDS_LUMA);
             pos[i] = cs_clamp(pos[i], COORDS_LUMA);
             col[i] = texture(samp[0], pos[i]);
          }
@@ -414,8 +596,7 @@ static void *create_rgb_yuv_shader(struct vl_compositor *c, bool y)
       pos[0] = nir_fadd(b, pos[0], nir_vec2(b, o_plus, o_plus));
 
       for (unsigned i = 0; i < 4; ++i) {
-         pos[i] = cs_scale(&s, pos[i]);
-         pos[i] = cs_crop(&s, pos[i], COORDS_LUMA);
+         pos[i] = cs_proj(&s, pos[i], COORDS_LUMA);
          pos[i] = cs_clamp(&s, pos[i], COORDS_LUMA);
 
          nir_def *c = cs_fetch_texel(&s, pos[i], 0);
@@ -425,12 +606,18 @@ static void *create_rgb_yuv_shader(struct vl_compositor *c, bool y)
    }
 
    color = nir_vector_insert_imm(b, color, s.fone, 3);
+   color = cs_prim_trc_conversion(&s, color);
 
-   if (y) {
-      color = cs_color_space_conversion(&s, color, 0);
+   if (plane != VL_COMPOSITOR_PLANE_UV) {
+      unsigned c = 0;
+      if (plane == VL_COMPOSITOR_PLANE_U)
+         c = 1;
+      else if (plane == VL_COMPOSITOR_PLANE_V)
+         c = 2;
+      color = cs_color_conversion(&s, color, c, RGB2YUV);
    } else {
-      nir_def *col1 = cs_color_space_conversion(&s, color, 1);
-      nir_def *col2 = cs_color_space_conversion(&s, color, 2);
+      nir_def *col1 = cs_color_conversion(&s, color, 1, RGB2YUV);
+      nir_def *col2 = cs_color_conversion(&s, color, 2, RGB2YUV);
       color = nir_vec2(b, col1, col2);
    }
 
@@ -457,10 +644,10 @@ static nir_def *create_weave_shader(struct vl_compositor *c, bool rgb, bool y)
       vec2 down_y = top_y;
       vec2 down_uv = top_uv;
 
-      top_y = cs_crop(cs_scale(top_y), COORDS_LUMA);
-      top_uv = cs_crop(cs_scale(top_uv), COORDS_CHROMA);
-      down_y = cs_crop(cs_scale(down_y), COORDS_LUMA);
-      down_uv = cs_crop(cs_scale(down_uv), COORDS_CHROMA);
+      top_y = cs_proj(top_y, COORDS_LUMA);
+      top_uv = cs_proj(top_uv, COORDS_CHROMA);
+      down_y = cs_proj(down_y, COORDS_LUMA);
+      down_uv = cs_proj(down_uv, COORDS_CHROMA);
 
       // Weave offset
       top_y = top_y + vec2(0.0, 0.25);
@@ -510,8 +697,7 @@ static nir_def *create_weave_shader(struct vl_compositor *c, bool rgb, bool y)
    nir_def *o_plus = nir_imm_vec2(b, 0.0f, 0.25f);
    nir_def *o_minus = nir_imm_vec2(b, 0.0f, -0.25f);
    for (unsigned i = 0; i < 4; ++i) {
-      pos[i] = cs_scale(&s, pos[i]);
-      pos[i] = cs_crop(&s, pos[i], i % 2 ? COORDS_CHROMA : COORDS_LUMA);
+      pos[i] = cs_proj(&s, pos[i], i % 2 ? COORDS_CHROMA : COORDS_LUMA);
       pos[i] = nir_fadd(b, pos[i], i < 2 ? o_plus : o_minus);
    }
 
@@ -547,10 +733,9 @@ static nir_def *create_weave_shader(struct vl_compositor *c, bool rgb, bool y)
    nir_def *color = nir_flrp(b, color_down, color_top, tex_layer);
 
    if (rgb) {
-      nir_def *alpha = cs_luma_key(&s, nir_channel(b, color, 2));
       for (unsigned i = 0; i < 3; ++i)
-         col[i] = cs_color_space_conversion(&s, color, i);
-      color = nir_vec4(b, col[0], col[1], col[2], alpha);
+         col[i] = cs_color_conversion(&s, color, i, YUV2RGB);
+      color = nir_vec4(b, col[0], col[1], col[2], s.fone);
    } else if (y) {
       color = nir_channel(b, color, 0);
    } else {
@@ -560,6 +745,29 @@ static nir_def *create_weave_shader(struct vl_compositor *c, bool rgb, bool y)
    }
 
    cs_image_store(&s, cs_translate(&s, ipos), color);
+
+   return cs_create_shader_state(c, &s);
+}
+
+static void *create_rgba_shader(struct vl_compositor *c)
+{
+   struct cs_shader s = {
+      .name = "rgba",
+      .num_samplers = 1,
+   };
+   nir_builder *b = &s.b;
+
+   nir_def *ipos = cs_create_shader(c, &s);
+   nir_def *pos = cs_tex_coords(&s, ipos, COORDS_LUMA);
+   nir_def *pos_out = cs_translate(&s, ipos);
+
+   nir_def *col = cs_fetch_texel(&s, pos, 0);
+   nir_def *blend = cs_image_load(&s, pos_out);
+
+   nir_def *color = nir_flrp(b, blend, col, nir_channel(b, col, 3));
+   color = nir_vector_insert_imm(b, color, s.fone, 3);
+
+   cs_image_store(&s, pos_out, color);
 
    return cs_create_shader_state(c, &s);
 }
@@ -577,11 +785,11 @@ cs_launch(struct vl_compositor *c,
 
    /* Bind the image */
    struct pipe_image_view image = {0};
-   image.resource = c->fb_state.cbufs[0]->texture;
+   image.resource = c->fb_state.cbufs[0].texture;
    image.shader_access = image.access = PIPE_IMAGE_ACCESS_READ_WRITE;
-   image.format = c->fb_state.cbufs[0]->texture->format;
+   image.format = c->fb_state.cbufs[0].texture->format;
 
-   ctx->set_shader_images(c->pipe, PIPE_SHADER_COMPUTE, 0, 1, 0, &image);
+   ctx->set_shader_images(c->pipe, MESA_SHADER_COMPUTE, 0, 1, 0, &image);
 
    /* Bind compute shader */
    ctx->bind_compute_state(ctx, cs);
@@ -630,6 +838,80 @@ calc_drawn_area(struct vl_compositor_state *s,
    return result;
 }
 
+static inline void
+calc_proj(struct vl_compositor_layer *layer,
+          struct pipe_resource *texture,
+          float m[2][4])
+{
+   unsigned mirror = layer->mirror;
+   float ratio_x = (float)texture->width0 / layer->sampler_views[0]->texture->width0;
+   float ratio_y = (float)texture->height0 / layer->sampler_views[0]->texture->height0;
+   float width = layer->sampler_views[0]->texture->width0;
+   float height = layer->sampler_views[0]->texture->height0;
+
+   memset(m, 0, sizeof(float) * 2 * 4);
+
+   switch (layer->rotate) {
+   default:
+   case VL_COMPOSITOR_ROTATE_0:
+      m[0][0] = 1.0;
+      m[1][1] = 1.0;
+      break;
+   case VL_COMPOSITOR_ROTATE_90:
+      m[0][1] = 1.0;
+      m[1][0] = -1.0;
+      m[1][2] = texture->height0;
+      width = layer->sampler_views[0]->texture->height0;
+      height = layer->sampler_views[0]->texture->width0;
+      if (mirror != VL_COMPOSITOR_MIRROR_NONE)
+         mirror = ~mirror;
+      break;
+   case VL_COMPOSITOR_ROTATE_180:
+      m[0][0] = 1.0;
+      m[1][1] = 1.0;
+      if (mirror == VL_COMPOSITOR_MIRROR_NONE)
+         mirror = VL_COMPOSITOR_MIRROR_HORIZONTAL | VL_COMPOSITOR_MIRROR_VERTICAL;
+      else
+         mirror = ~mirror;
+      break;
+   case VL_COMPOSITOR_ROTATE_270:
+      m[0][1] = -1.0;
+      m[1][0] = 1.0;
+      m[0][2] = texture->width0;
+      width = layer->sampler_views[0]->texture->height0;
+      height = layer->sampler_views[0]->texture->width0;
+      if (mirror != VL_COMPOSITOR_MIRROR_NONE)
+         mirror = ~mirror;
+      break;
+   }
+
+   if (mirror & VL_COMPOSITOR_MIRROR_HORIZONTAL) {
+      m[0][0] *= -1;
+      m[0][1] *= -1;
+      m[0][2] = texture->width0 - m[0][2];
+   }
+
+   if (mirror & VL_COMPOSITOR_MIRROR_VERTICAL) {
+      m[1][0] *= -1;
+      m[1][1] *= -1;
+      m[1][2] = texture->height0 - m[1][2];
+   }
+
+   float scale_x = (width * (layer->src.br.x - layer->src.tl.x)) / layer->viewport.scale[0];
+   float scale_y = (height * (layer->src.br.y - layer->src.tl.y)) / layer->viewport.scale[1];
+
+   m[0][0] *= scale_x;
+   m[0][1] *= scale_x;
+   m[1][0] *= scale_y;
+   m[1][1] *= scale_y;
+
+   float crop_x = (layer->src.tl.x * width) * ratio_x;
+   float crop_y = (layer->src.tl.y * height) * ratio_y;
+
+   m[0][2] += crop_x;
+   m[1][2] += crop_y;
+}
+
 static inline float
 chroma_offset_x(unsigned location)
 {
@@ -650,6 +932,13 @@ chroma_offset_y(unsigned location)
       return 0.0f;
 }
 
+static bool is_identity(vl_csc_matrix m)
+{
+   return m[0][0] == 1.0 && m[1][1] == 1.0 && m[2][2] == 1.0 &&
+          !m[0][1] && !m[0][2] && !m[0][3] && !m[1][0] && !m[1][2] &&
+          !m[1][3] && !m[2][0] && !m[2][1] && !m[2][3];
+}
+
 static bool
 set_viewport(struct vl_compositor_state *s,
              struct cs_viewport         *drawn,
@@ -666,18 +955,18 @@ set_viewport(struct vl_compositor_state *s,
    if (!ptr)
      return false;
 
-   memcpy(ptr, &s->csc_matrix, sizeof(vl_csc_matrix));
+   memcpy(ptr, &s->yuv2rgb, sizeof(vl_csc_matrix));
 
    float *ptr_float = (float *)ptr;
    ptr_float += sizeof(vl_csc_matrix) / sizeof(float);
-   *ptr_float++ = s->luma_min;
-   *ptr_float++ = s->luma_max;
-   *ptr_float++ = drawn->scale_x;
-   *ptr_float++ = drawn->scale_y;
-   *ptr_float++ = drawn->crop_x;
-   *ptr_float++ = drawn->crop_y;
+
+   ptr_float += 2; /* pad */
+   *ptr_float++ = drawn->chroma_offset_x;
+   *ptr_float++ = drawn->chroma_offset_y;
 
    int *ptr_int = (int *)ptr_float;
+   *ptr_int++ = s->in_transfer_characteristic;
+   *ptr_int++ = s->out_transfer_characteristic;
    *ptr_int++ = drawn->translate_x;
    *ptr_int++ = drawn->translate_y;
 
@@ -701,13 +990,24 @@ set_viewport(struct vl_compositor_state *s,
       *ptr_float++ = 1.0f;
    }
 
-
    *ptr_float++ = drawn->clamp_x;
    *ptr_float++ = drawn->clamp_y;
    *ptr_float++ = drawn->chroma_clamp_x;
    *ptr_float++ = drawn->chroma_clamp_y;
-   *ptr_float++ = drawn->chroma_offset_x;
-   *ptr_float++ = drawn->chroma_offset_y;
+
+   memcpy(ptr_float, drawn->proj, sizeof(drawn->proj));
+   ptr_float += sizeof(drawn->proj) / sizeof(float);
+   memcpy(ptr_float, drawn->chroma_proj, sizeof(drawn->chroma_proj));
+   ptr_float += sizeof(drawn->chroma_proj) / sizeof(float);
+
+   memcpy(ptr_float, &s->rgb2yuv, sizeof(vl_csc_matrix));
+   ptr_float += sizeof(vl_csc_matrix) / sizeof(float);
+
+   memcpy(ptr_float, &s->primaries, sizeof(vl_csc_matrix));
+   ptr_float += sizeof(vl_csc_matrix) / sizeof(float);
+
+   ptr_int = (int *)ptr_float;
+   *ptr_int++ = drawn->skip_prim_trc;
 
    pipe_buffer_unmap(s->pipe, buf_transfer);
 
@@ -732,15 +1032,7 @@ draw_layers(struct vl_compositor       *c,
          struct cs_viewport drawn;
 
          drawn.area = calc_drawn_area(s, layer);
-         drawn.scale_x = layer->viewport.scale[0] /
-            ((float)layer->sampler_views[0]->texture->width0 *
-             (layer->src.br.x - layer->src.tl.x));
-         drawn.scale_y  = layer->viewport.scale[1] /
-            ((float)layer->sampler_views[0]->texture->height0 *
-             (layer->src.br.y - layer->src.tl.y));
-         drawn.crop_x = layer->src.tl.x * layer->sampler_views[0]->texture->width0;
          drawn.translate_x = layer->viewport.translate[0];
-         drawn.crop_y = layer->src.tl.y * layer->sampler_views[0]->texture->height0;
          drawn.translate_y = layer->viewport.translate[1];
          drawn.sampler0_w = (float)layer->sampler_views[0]->texture->width0;
          drawn.sampler0_h = (float)layer->sampler_views[0]->texture->height0;
@@ -750,22 +1042,26 @@ draw_layers(struct vl_compositor       *c,
          drawn.chroma_clamp_y = (float)sampler1->texture->height0 * layer->src.br.y - 0.5;
          drawn.chroma_offset_x = chroma_offset_x(s->chroma_location);
          drawn.chroma_offset_y = chroma_offset_y(s->chroma_location);
+         drawn.skip_prim_trc = is_identity(s->primaries) &&
+            s->in_transfer_characteristic == s->out_transfer_characteristic;
+         calc_proj(layer, samplers[0]->texture, drawn.proj);
+         calc_proj(layer, sampler1->texture, drawn.chroma_proj);
          set_viewport(s, &drawn, samplers);
 
-         c->pipe->bind_sampler_states(c->pipe, PIPE_SHADER_COMPUTE, 0,
+         c->pipe->bind_sampler_states(c->pipe, MESA_SHADER_COMPUTE, 0,
                         num_sampler_views, layer->samplers);
-         c->pipe->set_sampler_views(c->pipe, PIPE_SHADER_COMPUTE, 0,
-                        num_sampler_views, 0, false, samplers);
+         c->pipe->set_sampler_views(c->pipe, MESA_SHADER_COMPUTE, 0,
+                        num_sampler_views, 0, samplers);
 
          cs_launch(c, layer->cs, &(drawn.area));
 
          /* Unbind. */
-         c->pipe->set_shader_images(c->pipe, PIPE_SHADER_COMPUTE, 0, 0, 1, NULL);
-         c->pipe->set_constant_buffer(c->pipe, PIPE_SHADER_COMPUTE, 0, false, NULL);
-         c->pipe->set_sampler_views(c->pipe, PIPE_SHADER_FRAGMENT, 0, 0,
-                        num_sampler_views, false, NULL);
+         c->pipe->set_shader_images(c->pipe, MESA_SHADER_COMPUTE, 0, 0, 1, NULL);
+         c->pipe->set_constant_buffer(c->pipe, MESA_SHADER_COMPUTE, 0, NULL);
+         c->pipe->set_sampler_views(c->pipe, MESA_SHADER_COMPUTE, 0, 0,
+                        num_sampler_views, NULL);
          c->pipe->bind_compute_state(c->pipe, NULL);
-         c->pipe->bind_sampler_states(c->pipe, PIPE_SHADER_COMPUTE, 0,
+         c->pipe->bind_sampler_states(c->pipe, MESA_SHADER_COMPUTE, 0,
                         num_sampler_views, NULL);
 
          if (dirty) {
@@ -789,27 +1085,26 @@ vl_compositor_cs_render(struct vl_compositor_state *s,
    assert(c && s);
    assert(dst_surface);
 
-   c->fb_state.width = dst_surface->width;
-   c->fb_state.height = dst_surface->height;
-   c->fb_state.cbufs[0] = dst_surface;
+   pipe_surface_size(dst_surface, &c->fb_state.width, &c->fb_state.height);
+   c->fb_state.cbufs[0] = *dst_surface;
 
    if (!s->scissor_valid) {
       s->scissor.minx = 0;
       s->scissor.miny = 0;
-      s->scissor.maxx = dst_surface->width;
-      s->scissor.maxy = dst_surface->height;
+      s->scissor.maxx = c->fb_state.width;
+      s->scissor.maxy = c->fb_state.height;
    }
 
    if (clear_dirty && dirty_area &&
        (dirty_area->x0 < dirty_area->x1 || dirty_area->y0 < dirty_area->y1)) {
 
       c->pipe->clear_render_target(c->pipe, dst_surface, &s->clear_color,
-                       0, 0, dst_surface->width, dst_surface->height, false);
+                       0, 0, c->fb_state.width, c->fb_state.height, false);
       dirty_area->x0 = dirty_area->y0 = VL_COMPOSITOR_MAX_DIRTY;
       dirty_area->x1 = dirty_area->y1 = VL_COMPOSITOR_MIN_DIRTY;
    }
 
-   pipe_set_constant_buffer(c->pipe, PIPE_SHADER_COMPUTE, 0, s->shader_params);
+   pipe_set_constant_buffer(c->pipe, MESA_SHADER_COMPUTE, 0, s->shader_params);
 
    draw_layers(c, s, dirty_area);
 }
@@ -830,22 +1125,34 @@ bool vl_compositor_cs_init_shaders(struct vl_compositor *c)
                 return false;
         }
 
+        c->cs_rgba = create_rgba_shader(c);
+        if (!c->cs_rgba) {
+                debug_printf("Unable to create rgba compute shader.\n");
+                return false;
+        }
+
         c->cs_yuv.weave.y = create_weave_shader(c, false, true);
         c->cs_yuv.weave.uv = create_weave_shader(c, false, false);
-        c->cs_yuv.progressive.y = create_yuv_progressive_shader(c, true);
-        c->cs_yuv.progressive.uv = create_yuv_progressive_shader(c, false);
+        c->cs_yuv.progressive.y = create_yuv_progressive_shader(c, VL_COMPOSITOR_PLANE_Y);
+        c->cs_yuv.progressive.uv = create_yuv_progressive_shader(c, VL_COMPOSITOR_PLANE_UV);
+        c->cs_yuv.progressive.u = create_yuv_progressive_shader(c, VL_COMPOSITOR_PLANE_U);
+        c->cs_yuv.progressive.v = create_yuv_progressive_shader(c, VL_COMPOSITOR_PLANE_V);
         if (!c->cs_yuv.weave.y || !c->cs_yuv.weave.uv) {
                 debug_printf("Unable to create YCbCr i-to-YCbCr p deint compute shader.\n");
                 return false;
         }
-        if (!c->cs_yuv.progressive.y || !c->cs_yuv.progressive.uv) {
+        if (!c->cs_yuv.progressive.y || !c->cs_yuv.progressive.uv ||
+            !c->cs_yuv.progressive.u || !c->cs_yuv.progressive.v) {
                 debug_printf("Unable to create YCbCr p-to-NV12 compute shader.\n");
                 return false;
         }
 
-        c->cs_rgb_yuv.y = create_rgb_yuv_shader(c, true);
-        c->cs_rgb_yuv.uv = create_rgb_yuv_shader(c, false);
-        if (!c->cs_rgb_yuv.y || !c->cs_rgb_yuv.uv) {
+        c->cs_rgb_yuv.y = create_rgb_yuv_shader(c, VL_COMPOSITOR_PLANE_Y);
+        c->cs_rgb_yuv.uv = create_rgb_yuv_shader(c, VL_COMPOSITOR_PLANE_UV);
+        c->cs_rgb_yuv.u = create_rgb_yuv_shader(c, VL_COMPOSITOR_PLANE_U);
+        c->cs_rgb_yuv.v = create_rgb_yuv_shader(c, VL_COMPOSITOR_PLANE_V);
+        if (!c->cs_rgb_yuv.y || !c->cs_rgb_yuv.uv ||
+            !c->cs_rgb_yuv.u || !c->cs_rgb_yuv.v) {
                 debug_printf("Unable to create RGB-to-NV12 compute shader.\n");
                 return false;
         }
@@ -861,6 +1168,8 @@ void vl_compositor_cs_cleanup_shaders(struct vl_compositor *c)
                 c->pipe->delete_compute_state(c->pipe, c->cs_video_buffer);
         if (c->cs_weave_rgb)
                 c->pipe->delete_compute_state(c->pipe, c->cs_weave_rgb);
+        if (c->cs_rgba)
+                c->pipe->delete_compute_state(c->pipe, c->cs_rgba);
         if (c->cs_yuv.weave.y)
                 c->pipe->delete_compute_state(c->pipe, c->cs_yuv.weave.y);
         if (c->cs_yuv.weave.uv)
@@ -869,8 +1178,16 @@ void vl_compositor_cs_cleanup_shaders(struct vl_compositor *c)
                 c->pipe->delete_compute_state(c->pipe, c->cs_yuv.progressive.y);
         if (c->cs_yuv.progressive.uv)
                 c->pipe->delete_compute_state(c->pipe, c->cs_yuv.progressive.uv);
+        if (c->cs_yuv.progressive.u)
+                c->pipe->delete_compute_state(c->pipe, c->cs_yuv.progressive.u);
+        if (c->cs_yuv.progressive.v)
+                c->pipe->delete_compute_state(c->pipe, c->cs_yuv.progressive.v);
         if (c->cs_rgb_yuv.y)
                 c->pipe->delete_compute_state(c->pipe, c->cs_rgb_yuv.y);
         if (c->cs_rgb_yuv.uv)
                 c->pipe->delete_compute_state(c->pipe, c->cs_rgb_yuv.uv);
+        if (c->cs_rgb_yuv.u)
+                c->pipe->delete_compute_state(c->pipe, c->cs_rgb_yuv.u);
+        if (c->cs_rgb_yuv.v)
+                c->pipe->delete_compute_state(c->pipe, c->cs_rgb_yuv.v);
 }

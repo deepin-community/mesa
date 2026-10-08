@@ -48,7 +48,7 @@ struct d3d12_descriptor_heap {
    ID3D12Device *dev;
    ID3D12DescriptorHeap *heap;
    uint32_t desc_size;
-   uint64_t cpu_base;
+   size_t cpu_base;
    uint64_t gpu_base;
    uint32_t size;
    uint32_t next;
@@ -79,7 +79,7 @@ d3d12_descriptor_heap_new(ID3D12Device *dev,
    heap->cpu_base = GetCPUDescriptorHandleForHeapStart(heap->heap).ptr;
    if (flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)
       heap->gpu_base = GetGPUDescriptorHandleForHeapStart(heap->heap).ptr;
-   util_dynarray_init(&heap->free_list, NULL);
+   heap->free_list = UTIL_DYNARRAY_INIT;
 
    return heap;
 }
@@ -157,11 +157,11 @@ d3d12_descriptor_heap_alloc_handle(struct d3d12_descriptor_heap *heap,
 void
 d3d12_descriptor_handle_free(struct d3d12_descriptor_handle *handle)
 {
-   const uint32_t index = handle->cpu_handle.ptr - handle->heap->cpu_base;
+   const uint32_t index = static_cast<uint32_t>(handle->cpu_handle.ptr - handle->heap->cpu_base);
    if (index + handle->heap->desc_size == handle->heap->next) {
       handle->heap->next = index;
    } else {
-      util_dynarray_append(&handle->heap->free_list, uint32_t, index);
+      util_dynarray_append(&handle->heap->free_list, index);
    }
 
    handle->heap = NULL;

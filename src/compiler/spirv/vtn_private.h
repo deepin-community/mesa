@@ -1,24 +1,6 @@
 /*
  * Copyright © 2015 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef _VTN_PRIVATE_H_
@@ -33,6 +15,7 @@
 #include "spirv.h"
 #include "spirv_info.h"
 #include "vtn_generator_ids.h"
+#include "spirv_internal_exts.h"
 
 extern uint32_t mesa_spirv_debug;
 
@@ -42,6 +25,7 @@ extern uint32_t mesa_spirv_debug;
 #define MESA_SPIRV_DEBUG_VALUES         (1u << 1)
 #define MESA_SPIRV_DEBUG_ASM            (1u << 2)
 #define MESA_SPIRV_DEBUG_COLOR          (1u << 3)
+#define MESA_SPIRV_DEBUG_OFFSETS        (1u << 4)
 
 struct vtn_builder;
 struct vtn_decoration;
@@ -295,6 +279,7 @@ enum vtn_base_type {
    vtn_base_type_function,
    vtn_base_type_event,
    vtn_base_type_cooperative_matrix,
+   vtn_base_type_buffer,
 };
 
 struct vtn_type {
@@ -362,9 +347,11 @@ struct vtn_type {
          bool packed:1;
       };
 
-      /* Members for pointer types */
+      /* Members for pointer and buffer types */
       struct {
-         /* For pointers, the vtn_type of the object pointed to. */
+         /* For regular pointers, the vtn_type of the object pointed to;
+          * for untyped pointers it must be NULL.
+          */
          struct vtn_type *pointed;
 
          /* Storage class for pointers */
@@ -413,6 +400,7 @@ struct vtn_type {
 };
 
 bool vtn_type_contains_block(struct vtn_builder *b, struct vtn_type *type);
+bool vtn_type_is_block_array(struct vtn_builder *b, struct vtn_type *type);
 
 bool vtn_types_compatible(struct vtn_builder *b,
                           struct vtn_type *t1, struct vtn_type *t2);
@@ -488,17 +476,23 @@ struct vtn_pointer {
 
    /** The referenced variable, if known
     *
-    * This field may be NULL if the pointer uses a (block_index, offset) pair
-    * instead of an access chain or if the access chain starts at a deref.
+    * This field may be NULL if the access chain starts at a deref.
     */
    struct vtn_variable *var;
 
-   /** The NIR deref corresponding to this pointer */
-   nir_deref_instr *deref;
+   /* The descriptor "index"
+    *
+    * The stores the logical descriptor index (if any) and the result of a
+    * vulkan_resource_index or vulkan_resource_reindex intrinsic.
+    */
+   struct nir_def *desc_index;
 
-   /** A (block_index, offset) pair representing a UBO or SSBO position. */
-   struct nir_def *block_index;
-   struct nir_def *offset;
+   /** The NIR deref corresponding to this pointer
+    *
+    * This may be NULL if it's a pointer to a block or acceleration structure,
+    * in which case desc_index is used instead.
+    **/
+   nir_deref_instr *deref;
 
    /* Access qualifiers */
    enum gl_access_qualifier access;
@@ -550,6 +544,7 @@ vtn_translate_scope(struct vtn_builder *b, SpvScope scope);
 
 struct vtn_image_pointer {
    nir_deref_instr *image;
+   unsigned format;
    nir_def *coord;
    nir_def *sample;
    nir_def *lod;
@@ -568,6 +563,9 @@ struct vtn_value {
 
    /* Valid when all the members of the value are undef. */
    bool is_undef_constant:1;
+
+   /* Marked as OpEntryPoint */
+   bool is_entrypoint:1;
 
    const char *name;
    struct vtn_decoration *decoration;
@@ -678,7 +676,7 @@ struct vtn_builder {
    /* Workaround discard bugs in HLSL -> SPIR-V compilers */
    bool convert_discard_to_demote;
 
-   gl_shader_stage entry_point_stage;
+   mesa_shader_stage entry_point_stage;
    const char *entry_point_name;
    struct vtn_value *entry_point;
    struct vtn_value *workgroup_size_builtin;
@@ -694,8 +692,7 @@ struct vtn_builder {
    /* Current function parameter index */
    unsigned func_param_idx;
 
-   /* false by default, set to true by the ContractionOff execution mode */
-   bool exact;
+   unsigned fp_math_ctrl[6];
 
    /* when a physical memory model is choosen */
    bool physical_ptrs;
@@ -827,7 +824,7 @@ vtn_constant_uint(struct vtn_builder *b, uint32_t value_id)
    case 16: return val->constant->values[0].u16;
    case 32: return val->constant->values[0].u32;
    case 64: return val->constant->values[0].u64;
-   default: unreachable("Invalid bit size");
+   default: UNREACHABLE("Invalid bit size");
    }
 }
 
@@ -845,7 +842,7 @@ vtn_constant_int(struct vtn_builder *b, uint32_t value_id)
    case 16: return val->constant->values[0].i16;
    case 32: return val->constant->values[0].i32;
    case 64: return val->constant->values[0].i64;
-   default: unreachable("Invalid bit size");
+   default: UNREACHABLE("Invalid bit size");
    }
 }
 
@@ -912,6 +909,10 @@ nir_def *
 vtn_pointer_to_offset(struct vtn_builder *b, struct vtn_pointer *ptr,
                       nir_def **index_out);
 
+struct vtn_pointer *
+vtn_cast_pointer(struct vtn_builder *b, struct vtn_pointer *p,
+                 struct vtn_type *pointed);
+
 nir_deref_instr *
 vtn_get_call_payload_for_location(struct vtn_builder *b, uint32_t location_id);
 
@@ -943,6 +944,9 @@ typedef void (*vtn_decoration_foreach_cb)(struct vtn_builder *,
 void vtn_foreach_decoration(struct vtn_builder *b, struct vtn_value *value,
                             vtn_decoration_foreach_cb cb, void *data);
 
+bool vtn_has_decoration(struct vtn_builder *b, struct vtn_value *value,
+                        SpvDecoration decoration);
+
 typedef void (*vtn_execution_mode_foreach_cb)(struct vtn_builder *,
                                               struct vtn_value *,
                                               const struct vtn_decoration *,
@@ -951,9 +955,12 @@ typedef void (*vtn_execution_mode_foreach_cb)(struct vtn_builder *,
 void vtn_foreach_execution_mode(struct vtn_builder *b, struct vtn_value *value,
                                 vtn_execution_mode_foreach_cb cb, void *data);
 
+nir_alu_type vtn_convert_op_src_type(SpvOp opcode);
+nir_alu_type vtn_convert_op_dst_type(SpvOp opcode);
+
 nir_op vtn_nir_alu_op_for_spirv_opcode(struct vtn_builder *b,
-                                       SpvOp opcode, bool *swap, bool *exact,
-                                       unsigned src_bit_size, unsigned dst_bit_size);
+                                       SpvOp opcode, bool *swap,
+                                       unsigned *extra_fp_math_ctrl);
 
 void vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
                     const uint32_t *w, unsigned count);
@@ -964,9 +971,9 @@ void vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
 void vtn_handle_bitcast(struct vtn_builder *b, const uint32_t *w,
                         unsigned count);
 
-void vtn_handle_no_contraction(struct vtn_builder *b, struct vtn_value *val);
+unsigned *vtn_fp_math_ctrl_for_base_type(struct vtn_builder *b, enum glsl_base_type base_type);
 
-void vtn_handle_fp_fast_math(struct vtn_builder *b, struct vtn_value *val);
+void vtn_handle_fp_fast_math(struct vtn_builder *b, struct vtn_value *dest_val, struct vtn_value *src0_val);
 
 void vtn_handle_subgroup(struct vtn_builder *b, SpvOp opcode,
                          const uint32_t *w, unsigned count);
@@ -980,7 +987,7 @@ bool vtn_handle_opencl_core_instruction(struct vtn_builder *b, SpvOp opcode,
                                         const uint32_t *w, unsigned count);
 
 struct vtn_builder* vtn_create_builder(const uint32_t *words, size_t word_count,
-                                       gl_shader_stage stage, const char *entry_point_name,
+                                       mesa_shader_stage stage, const char *entry_point_name,
                                        const struct spirv_to_nir_options *options);
 
 void vtn_handle_entry_point(struct vtn_builder *b, const uint32_t *w,
@@ -1035,12 +1042,12 @@ SpvMemorySemanticsMask vtn_mode_to_memory_semantics(enum vtn_variable_mode mode)
 void vtn_emit_memory_barrier(struct vtn_builder *b, SpvScope scope,
                              SpvMemorySemanticsMask semantics);
 
-bool vtn_value_is_relaxed_precision(struct vtn_builder *b, struct vtn_value *val);
 nir_def *
 vtn_mediump_downconvert(struct vtn_builder *b, enum glsl_base_type base_type, nir_def *def);
 struct vtn_ssa_value *
 vtn_mediump_downconvert_value(struct vtn_builder *b, struct vtn_ssa_value *src);
-void vtn_mediump_upconvert_value(struct vtn_builder *b, struct vtn_ssa_value *value);
+struct vtn_ssa_value *
+vtn_mediump_upconvert_value(struct vtn_builder *b, struct vtn_ssa_value *value);
 
 static inline int
 cmp_uint32_t(const void *pa, const void *pb)
@@ -1083,6 +1090,19 @@ struct vtn_ssa_value *vtn_cooperative_matrix_insert(struct vtn_builder *b, struc
 nir_deref_instr *vtn_create_cmat_temporary(struct vtn_builder *b,
                                            const struct glsl_type *t, const char *name);
 
-gl_shader_stage vtn_stage_for_execution_model(SpvExecutionModel model);
+mesa_shader_stage vtn_stage_for_execution_model(SpvExecutionModel model);
+
+static inline bool
+vtn_value_is_non_uniform(struct vtn_builder *b, struct vtn_value *value)
+{
+   if (vtn_has_decoration(b, value, SpvDecorationNonUniformEXT))
+      return true;
+
+   if (b->enabled_capabilities.DescriptorHeapEXT &&
+       !vtn_has_decoration(b, value, SpvDecorationUniform))
+      return true;
+
+   return false;
+}
 
 #endif /* _VTN_PRIVATE_H_ */

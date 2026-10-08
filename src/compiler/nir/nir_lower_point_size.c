@@ -42,10 +42,14 @@ lower_point_size_intrin(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
    if (intr->intrinsic == nir_intrinsic_store_deref) {
       nir_deref_instr *deref = nir_src_as_deref(intr->src[0]);
+      if (!nir_deref_mode_is(deref, nir_var_shader_out))
+         return false;
+
       nir_variable *var = nir_deref_instr_get_variable(deref);
       location = var->data.location;
       psiz_src = &intr->src[1];
-   } else if (intr->intrinsic == nir_intrinsic_store_output) {
+   } else if (intr->intrinsic == nir_intrinsic_store_output ||
+              intr->intrinsic == nir_intrinsic_store_per_view_output) {
       location = nir_intrinsic_io_semantics(intr).location;
       psiz_src = &intr->src[0];
    }
@@ -86,4 +90,27 @@ nir_lower_point_size(nir_shader *s, float min, float max)
    return nir_shader_intrinsics_pass(s, lower_point_size_intrin,
                                      nir_metadata_control_flow,
                                      minmax);
+}
+
+/*
+ * For hardware that requires point size writes when drawing points, this pass
+ * stores the default point size (1.0) if no point size is written by the
+ * shader. This is required to implement VK_KHR_maintenance5 and GLES
+ * geometry/tessellation semantics.
+ */
+bool
+nir_lower_default_point_size(nir_shader *nir)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+
+   if (nir->info.outputs_written & VARYING_BIT_PSIZ) {
+      return nir_no_progress(impl);
+   }
+
+   nir_builder b = nir_builder_at(nir_after_impl(impl));
+   nir_store_output(&b, nir_imm_float(&b, 1.0), nir_imm_int(&b, 0),
+                    .io_semantics.location = VARYING_SLOT_PSIZ);
+
+   nir->info.outputs_written |= VARYING_BIT_PSIZ;
+   return nir_progress(true, impl, nir_metadata_control_flow);
 }

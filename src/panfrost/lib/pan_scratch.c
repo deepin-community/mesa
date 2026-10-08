@@ -1,27 +1,6 @@
 /*
  * Copyright (C) 2019 Collabora, Ltd.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- *
- * Authors:
- *   Alyssa Rosenzweig <alyssa.rosenzweig@collabora.com>
+ * SPDX-License-Identifier: MIT
  */
 
 #include "util/macros.h"
@@ -64,7 +43,7 @@
 /* Computes log_stack_size = log2(ceil(s / 16)) */
 
 unsigned
-panfrost_get_stack_shift(unsigned stack_size)
+pan_get_stack_shift(unsigned stack_size)
 {
    if (stack_size)
       return util_logbase2_ceil(DIV_ROUND_UP(stack_size, 16));
@@ -75,8 +54,8 @@ panfrost_get_stack_shift(unsigned stack_size)
 /* Computes the aligned stack size given the shift and thread count. */
 
 unsigned
-panfrost_get_total_stack_size(unsigned thread_size, unsigned threads_per_core,
-                              unsigned core_id_range)
+pan_get_total_stack_size(unsigned thread_size, unsigned threads_per_core,
+                         unsigned core_id_range)
 {
    unsigned size_per_thread =
       (thread_size == 0) ? 0

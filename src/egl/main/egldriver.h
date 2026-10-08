@@ -76,6 +76,20 @@ struct mesa_glinterop_export_out;
 struct mesa_glinterop_flush_out;
 typedef struct __GLsync *GLsync;
 
+#define EGL_UUID_SIZE 16
+
+/**
+ * For use in EGL_EXT_device_query_name and EGL_EXT_device_persistent_id
+ */
+struct egl_device_info {
+   uint8_t device_uuid[EGL_UUID_SIZE];
+   uint8_t driver_uuid[EGL_UUID_SIZE];
+   /* Data below needs to be freed manually */
+   char *vendor_name;
+   char *renderer_name;
+   char *driver_name;
+};
+
 /**
  * The API dispatcher jumps through these functions
  */
@@ -144,16 +158,7 @@ struct _egl_driver {
    /* for EGL_ANDROID_native_fence_sync */
    EGLint (*DupNativeFenceFDANDROID)(_EGLDisplay *disp, _EGLSync *sync);
 
-   /* for EGL_NOK_swap_region */
-   EGLBoolean (*SwapBuffersRegionNOK)(_EGLDisplay *disp, _EGLSurface *surf,
-                                      EGLint numRects, const EGLint *rects);
-
-   /* for EGL_MESA_drm_image */
-   _EGLImage *(*CreateDRMImageMESA)(_EGLDisplay *disp, const EGLint *attr_list);
-   EGLBoolean (*ExportDRMImageMESA)(_EGLDisplay *disp, _EGLImage *img,
-                                    EGLint *name, EGLint *handle,
-                                    EGLint *stride);
-
+#ifdef HAVE_BIND_WL_DISPLAY
    /* for EGL_WL_bind_wayland_display */
    EGLBoolean (*BindWaylandDisplayWL)(_EGLDisplay *disp,
                                       struct wl_display *display);
@@ -166,16 +171,12 @@ struct _egl_driver {
    /* for EGL_WL_create_wayland_buffer_from_image */
    struct wl_buffer *(*CreateWaylandBufferFromImageWL)(_EGLDisplay *disp,
                                                        _EGLImage *img);
+#endif
 
    /* for EGL_EXT_swap_buffers_with_damage */
    EGLBoolean (*SwapBuffersWithDamageEXT)(_EGLDisplay *disp,
                                           _EGLSurface *surface,
                                           const EGLint *rects, EGLint n_rects);
-
-   /* for EGL_NV_post_sub_buffer */
-   EGLBoolean (*PostSubBufferNV)(_EGLDisplay *disp, _EGLSurface *surface,
-                                 EGLint x, EGLint y, EGLint width,
-                                 EGLint height);
 
    /* for EGL_EXT_buffer_age/EGL_KHR_partial_update */
    EGLint (*QueryBufferAge)(_EGLDisplay *disp, _EGLSurface *surface);
@@ -199,6 +200,10 @@ struct _egl_driver {
    /* for EGL_MESA_query_driver */
    const char *(*QueryDriverName)(_EGLDisplay *disp);
    char *(*QueryDriverConfig)(_EGLDisplay *disp);
+
+   /* for EGL_EXT_device_query_name and EGL_EXT_device_persistent_id */
+   bool (*QueryDeviceInfo)(const void* driver_device_identifier,
+                           struct egl_device_info *device_info);
 
    /* for OpenGL-OpenCL interop; see include/GL/mesa_glinterop.h */
    int (*GLInteropQueryDeviceInfo)(_EGLDisplay *disp, _EGLContext *ctx,

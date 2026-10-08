@@ -41,17 +41,15 @@
 
 static inline void
 surface_to_surfaceid(struct svga_winsys_context *swc, // IN
-                     struct pipe_surface *surface,    // IN
+                     struct svga_surface *s,          // IN
                      SVGA3dSurfaceImageId *id,        // OUT
                      unsigned flags)                  // IN
 {
-   if (surface) {
-      struct svga_surface *s = svga_surface(surface);
+   if (s) {
       swc->surface_relocation(swc, &id->sid, NULL, s->handle, flags);
       id->face = s->real_layer; /* faces have the same order */
       id->mipmap = s->real_level;
-   }
-   else {
+   } else {
       swc->surface_relocation(swc, &id->sid, NULL, NULL, flags);
       id->face = 0;
       id->mipmap = 0;
@@ -355,7 +353,7 @@ SVGA3D_DestroySurface(struct svga_winsys_context *swc,
                             SVGA_3D_CMD_SURFACE_DESTROY, sizeof *cmd, 1);
    if (!cmd)
       return PIPE_ERROR_OUT_OF_MEMORY;
-   
+
    swc->surface_relocation(swc, &cmd->sid, NULL, sid,
                            SVGA_RELOC_WRITE | SVGA_RELOC_INTERNAL);
    swc->commit(swc);
@@ -426,12 +424,10 @@ SVGA3D_SurfaceDMA(struct svga_winsys_context *swc,
    if (transfer == SVGA3D_WRITE_HOST_VRAM) {
       region_flags = SVGA_RELOC_READ;
       surface_flags = SVGA_RELOC_WRITE;
-   }
-   else if (transfer == SVGA3D_READ_HOST_VRAM) {
+   } else if (transfer == SVGA3D_READ_HOST_VRAM) {
       region_flags = SVGA_RELOC_WRITE;
       surface_flags = SVGA_RELOC_READ;
-   }
-   else {
+   } else {
       assert(0);
       return PIPE_ERROR_BAD_INPUT;
    }
@@ -482,18 +478,16 @@ SVGA3D_BufferDMA(struct svga_winsys_context *swc,
    SVGA3dCmdSurfaceDMASuffix *pSuffix;
    unsigned region_flags;
    unsigned surface_flags;
-   
+
    assert(!swc->have_gb_objects);
 
    if (transfer == SVGA3D_WRITE_HOST_VRAM) {
       region_flags = SVGA_RELOC_READ;
       surface_flags = SVGA_RELOC_WRITE;
-   }
-   else if (transfer == SVGA3D_READ_HOST_VRAM) {
+   } else if (transfer == SVGA3D_READ_HOST_VRAM) {
       region_flags = SVGA_RELOC_WRITE;
       surface_flags = SVGA_RELOC_READ;
-   }
-   else {
+   } else {
       assert(0);
       return PIPE_ERROR_BAD_INPUT;
    }
@@ -569,7 +563,7 @@ SVGA3D_BufferDMA(struct svga_winsys_context *swc,
 enum pipe_error
 SVGA3D_SetRenderTarget(struct svga_winsys_context *swc,
                        SVGA3dRenderTargetType type,   // IN
-                       struct pipe_surface *surface)  // IN
+                       struct svga_surface *surface)  // IN
 {
    SVGA3dCmdSetRenderTarget *cmd;
 
@@ -1036,8 +1030,8 @@ SVGA3D_BeginDrawPrimitives(struct svga_winsys_context *swc,
 
 enum pipe_error
 SVGA3D_BeginSurfaceCopy(struct svga_winsys_context *swc,
-                        struct pipe_surface *src,    // IN
-                        struct pipe_surface *dest,   // IN
+                        struct svga_surface *src,    // IN
+                        struct svga_surface *dest,   // IN
                         SVGA3dCopyBox **boxes,       // OUT
                         uint32 numBoxes)             // IN
 {
@@ -1079,8 +1073,8 @@ SVGA3D_BeginSurfaceCopy(struct svga_winsys_context *swc,
 
 enum pipe_error
 SVGA3D_SurfaceStretchBlt(struct svga_winsys_context *swc,
-                         struct pipe_surface *src,    // IN
-                         struct pipe_surface *dest,   // IN
+                         struct svga_surface *src,    // IN
+                         struct svga_surface *dest,   // IN
                          SVGA3dBox *boxSrc,           // IN
                          SVGA3dBox *boxDest,          // IN
                          SVGA3dStretchBltMode mode)   // IN
@@ -1370,7 +1364,7 @@ SVGA3D_BeginSetRenderState(struct svga_winsys_context *swc,
 
 static enum pipe_error
 SVGA3D_BeginGBQuery(struct svga_winsys_context *swc,
-		    SVGA3dQueryType type) // IN
+                    SVGA3dQueryType type) // IN
 {
    SVGA3dCmdBeginGBQuery *cmd;
 
@@ -1449,8 +1443,8 @@ SVGA3D_BeginQuery(struct svga_winsys_context *swc,
 
 static enum pipe_error
 SVGA3D_EndGBQuery(struct svga_winsys_context *swc,
-		  SVGA3dQueryType type,              // IN
-		  struct svga_winsys_buffer *buffer) // IN/OUT
+                  SVGA3dQueryType type,              // IN
+                  struct svga_winsys_buffer *buffer) // IN/OUT
 {
    SVGA3dCmdEndGBQuery *cmd;
 
@@ -1465,10 +1459,10 @@ SVGA3D_EndGBQuery(struct svga_winsys_context *swc,
    cmd->type = type;
 
    swc->mob_relocation(swc, &cmd->mobid, &cmd->offset, buffer,
-		       0, SVGA_RELOC_READ | SVGA_RELOC_WRITE);
+                       0, SVGA_RELOC_READ | SVGA_RELOC_WRITE);
 
    swc->commit(swc);
-   
+
    return PIPE_OK;
 }
 
@@ -1536,8 +1530,8 @@ SVGA3D_EndQuery(struct svga_winsys_context *swc,
 
 static enum pipe_error
 SVGA3D_WaitForGBQuery(struct svga_winsys_context *swc,
-		      SVGA3dQueryType type,              // IN
-		      struct svga_winsys_buffer *buffer) // IN/OUT
+                      SVGA3dQueryType type,              // IN
+                      struct svga_winsys_buffer *buffer) // IN/OUT
 {
    SVGA3dCmdWaitForGBQuery *cmd;
 
@@ -1552,7 +1546,7 @@ SVGA3D_WaitForGBQuery(struct svga_winsys_context *swc,
    cmd->type = type;
 
    swc->mob_relocation(swc, &cmd->mobid, &cmd->offset, buffer,
-		       0, SVGA_RELOC_READ | SVGA_RELOC_WRITE);
+                       0, SVGA_RELOC_READ | SVGA_RELOC_WRITE);
 
    swc->commit(swc);
 
@@ -1614,7 +1608,7 @@ enum pipe_error
 SVGA3D_BindGBShader(struct svga_winsys_context *swc,
                     struct svga_winsys_gb_shader *gbshader)
 {
-   SVGA3dCmdBindGBShader *cmd = 
+   SVGA3dCmdBindGBShader *cmd =
       SVGA3D_FIFOReserve(swc,
                          SVGA_3D_CMD_BIND_GB_SHADER,
                          sizeof *cmd,
@@ -1624,7 +1618,7 @@ SVGA3D_BindGBShader(struct svga_winsys_context *swc,
       return PIPE_ERROR_OUT_OF_MEMORY;
 
    swc->shader_relocation(swc, &cmd->shid, &cmd->mobid,
-			  &cmd->offsetInBytes, gbshader, 0);
+                          &cmd->offsetInBytes, gbshader, 0);
 
    swc->commit(swc);
 
@@ -1640,14 +1634,14 @@ SVGA3D_SetGBShader(struct svga_winsys_context *swc,
    SVGA3dCmdSetShader *cmd;
 
    assert(type == SVGA3D_SHADERTYPE_VS || type == SVGA3D_SHADERTYPE_PS);
-   
+
    cmd = SVGA3D_FIFOReserve(swc,
                             SVGA_3D_CMD_SET_SHADER,
                             sizeof *cmd,
                             2);  /* two relocations */
    if (!cmd)
       return PIPE_ERROR_OUT_OF_MEMORY;
-   
+
    cmd->cid = swc->cid;
    cmd->type = type;
    if (gbshader)
@@ -1667,7 +1661,7 @@ enum pipe_error
 SVGA3D_BindGBSurface(struct svga_winsys_context *swc,
                      struct svga_winsys_surface *surface)
 {
-   SVGA3dCmdBindGBSurface *cmd = 
+   SVGA3dCmdBindGBSurface *cmd =
       SVGA3D_FIFOReserve(swc,
                          SVGA_3D_CMD_BIND_GB_SURFACE,
                          sizeof *cmd,

@@ -72,7 +72,7 @@ radv_nir_export_multiview(nir_shader *nir)
          nir_store_var(&b, layer, nir_load_view_index(&b), 1);
 
          /* Update outputs_written to reflect that the pass added a new output. */
-         nir->info.outputs_written |= BITFIELD64_BIT(VARYING_SLOT_LAYER);
+         nir->info.outputs_written |= VARYING_BIT_LAYER;
 
          progress = true;
          if (nir->info.stage == MESA_SHADER_VERTEX)
@@ -82,10 +82,5 @@ radv_nir_export_multiview(nir_shader *nir)
          break;
    }
 
-   if (progress)
-      nir_metadata_preserve(impl, nir_metadata_control_flow);
-   else
-      nir_metadata_preserve(impl, nir_metadata_all);
-
-   return progress;
+   return nir_progress(progress, impl, nir_metadata_control_flow);
 }

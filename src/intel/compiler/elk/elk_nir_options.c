@@ -8,6 +8,8 @@
 #define COMMON_OPTIONS                                                        \
    .compact_arrays = true,                                                    \
    .discard_is_demote = true,                                                 \
+   .has_f2i_sat = true,                                                       \
+   .has_f2u_sat = true,                                                       \
    .has_uclz = true,                                                          \
    .lower_fdiv = true,                                                        \
    .lower_scmp = true,                                                        \
@@ -18,21 +20,23 @@
    .lower_usub_borrow = true,                                                 \
    .lower_flrp64 = true,                                                      \
    .lower_fisnormal = true,                                                   \
+   .lower_fquantize2f16 = true,                                               \
    .lower_isign = true,                                                       \
-   .lower_ldexp = true,                                                       \
    .lower_bitfield_extract = true,                                            \
    .lower_bitfield_insert = true,                                             \
    .lower_device_index_to_zero = true,                                        \
-   .vectorize_io = true,                                                      \
    .vectorize_tess_levels = true,                                             \
-   .use_interpolated_input_intrinsics = true,                                 \
    .scalarize_ddx = true,                                                     \
    .lower_insert_byte = true,                                                 \
    .lower_insert_word = true,                                                 \
    .vertex_id_zero_based = true,                                              \
    .lower_base_vertex = true,                                                 \
    .support_16bit_alu = true,                                                 \
-   .lower_uniforms_to_ubo = true
+   .lower_uniforms_to_ubo = true,                                             \
+   .support_indirect_inputs = BITFIELD_BIT(MESA_SHADER_TESS_CTRL) |           \
+                              BITFIELD_BIT(MESA_SHADER_TESS_EVAL) |           \
+                              BITFIELD_BIT(MESA_SHADER_FRAGMENT),             \
+   .support_indirect_outputs = (uint8_t)BITFIELD_MASK(MESA_SHADER_STAGES)
 
 #define COMMON_SCALAR_OPTIONS                                                 \
    .lower_to_scalar = true,                                                   \
@@ -50,6 +54,7 @@
    .avoid_ternary_with_two_constants = true,                                  \
    .has_pack_32_4x8 = true,                                                   \
    .max_unroll_iterations = 32,                                               \
+   .max_samples = 8,                                                          \
    .force_indirect_unrolling = nir_var_function_temp,                         \
    .divergence_analysis_options =                                             \
       (nir_divergence_single_patch_per_tcs_subgroup |                         \

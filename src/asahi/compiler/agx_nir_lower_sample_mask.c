@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "compiler/glsl/list.h"
+#include "compiler/list.h"
 #include "compiler/nir/nir_builder.h"
 #include "agx_compiler.h"
 #include "nir.h"
@@ -65,7 +65,7 @@
  * 5. zs_emit may be used in the shader exactly once to trigger tests.
  * sample_mask with 0 may be used to discard early.
  *
- * This pass lowers discard_agx to sample_mask instructions satisfying these
+ * This pass lowers demote_samples to sample_mask instructions satisfying these
  * rules. Other passes should not generate sample_mask instructions, as there
  * are too many footguns.
  */
@@ -78,11 +78,12 @@ static bool
 lower_discard_to_sample_mask_0(nir_builder *b, nir_intrinsic_instr *intr,
                                UNUSED void *data)
 {
-   if (intr->intrinsic != nir_intrinsic_discard_agx)
+   if (intr->intrinsic != nir_intrinsic_demote_samples)
       return false;
 
    b->cursor = nir_before_instr(&intr->instr);
-   nir_sample_mask_agx(b, intr->src[0].ssa, nir_imm_intN_t(b, 0, 16));
+   nir_sample_mask_agx(b, nir_u2u16(b, intr->src[0].ssa),
+                       nir_imm_intN_t(b, 0, 16));
    nir_instr_remove(&intr->instr);
    return true;
 }
@@ -95,7 +96,7 @@ last_discard_in_block(nir_block *block)
          continue;
 
       nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-      if (intr->intrinsic == nir_intrinsic_discard_agx)
+      if (intr->intrinsic == nir_intrinsic_demote_samples)
          return intr;
    }
 
@@ -146,7 +147,7 @@ run_tests_after_last_discard(nir_builder *b)
             b->cursor = nir_before_instr(&intr->instr);
 
             nir_def *all_samples = nir_imm_intN_t(b, ALL_SAMPLES, 16);
-            nir_def *killed = intr->src[0].ssa;
+            nir_def *killed = nir_u2u16(b, intr->src[0].ssa);
             nir_def *live = nir_ixor(b, killed, all_samples);
 
             nir_def *testing = nir_load_shader_part_tests_zs_agx(b);
@@ -213,11 +214,10 @@ agx_nir_lower_sample_mask(nir_shader *shader)
       }
    } else {
       /* regular shaders that don't use discard have nothing to lower */
-      nir_metadata_preserve(impl, nir_metadata_all);
-      return false;
+      return nir_no_progress(impl);
    }
 
-   nir_metadata_preserve(impl, nir_metadata_control_flow);
+   nir_progress(true, impl, nir_metadata_control_flow);
 
    nir_shader_intrinsics_pass(shader, lower_discard_to_sample_mask_0,
                               nir_metadata_control_flow, NULL);

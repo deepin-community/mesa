@@ -49,6 +49,78 @@ hk_memory_type_flags(const VkMemoryType *type,
    return flags;
 }
 
+static void
+hk_add_ext_bo_locked(struct hk_device *dev, struct agx_bo *bo)
+{
+   uint32_t id = bo->uapi_handle;
+
+   unsigned count = util_dynarray_num_elements(&dev->external_bos.list,
+                                               struct asahi_ccmd_submit_res);
+
+   for (unsigned i = 0; i < count; i++) {
+      struct asahi_ccmd_submit_res *p = util_dynarray_element(
+         &dev->external_bos.list, struct asahi_ccmd_submit_res, i);
+
+      if (p->res_id == id) {
+         ++*util_dynarray_element(&dev->external_bos.counts, unsigned, i);
+         return;
+      }
+   }
+
+   struct asahi_ccmd_submit_res res = {
+      .res_id = id,
+      .flags = ASAHI_EXTRES_READ | ASAHI_EXTRES_WRITE,
+   };
+   util_dynarray_append(&dev->external_bos.list, res);
+   util_dynarray_append_typed(&dev->external_bos.counts, unsigned, 1);
+}
+
+static void
+hk_add_ext_bo(struct hk_device *dev, struct agx_bo *bo)
+{
+   if (dev->dev.is_virtio) {
+      u_rwlock_wrlock(&dev->external_bos.lock);
+      hk_add_ext_bo_locked(dev, bo);
+      u_rwlock_wrunlock(&dev->external_bos.lock);
+   }
+}
+
+static void
+hk_remove_ext_bo_locked(struct hk_device *dev, struct agx_bo *bo)
+{
+   uint32_t id = bo->uapi_handle;
+   unsigned count = util_dynarray_num_elements(&dev->external_bos.list,
+                                               struct asahi_ccmd_submit_res);
+
+   for (unsigned i = 0; i < count; i++) {
+      struct asahi_ccmd_submit_res *p = util_dynarray_element(
+         &dev->external_bos.list, struct asahi_ccmd_submit_res, i);
+
+      if (p->res_id == id) {
+         unsigned *ctr =
+            util_dynarray_element(&dev->external_bos.counts, unsigned, i);
+         if (!--*ctr) {
+            *ctr = util_dynarray_pop(&dev->external_bos.counts, unsigned);
+            *p = util_dynarray_pop(&dev->external_bos.list,
+                                   struct asahi_ccmd_submit_res);
+         }
+         return;
+      }
+   }
+
+   UNREACHABLE("BO not found");
+}
+
+static void
+hk_remove_ext_bo(struct hk_device *dev, struct agx_bo *bo)
+{
+   if (dev->dev.is_virtio) {
+      u_rwlock_wrlock(&dev->external_bos.lock);
+      hk_remove_ext_bo_locked(dev, bo);
+      u_rwlock_wrunlock(&dev->external_bos.lock);
+   }
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_GetMemoryFdPropertiesKHR(VkDevice device,
                             VkExternalMemoryHandleTypeFlagBits handleType,
@@ -138,6 +210,8 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
       enum agx_bo_flags flags = 0;
       if (handle_types)
          flags |= AGX_BO_SHAREABLE;
+      if (type->propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
+         flags |= AGX_BO_WRITEBACK;
 
       mem->bo = agx_bo_create(&dev->dev, aligned_size, 0, flags, "App memory");
       if (!mem->bo) {
@@ -145,6 +219,16 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
          goto fail_alloc;
       }
    }
+
+   /* Shadow map in case this is used for a sparse resident buffer */
+   int ret = agx_bo_bind(&dev->dev, mem->bo,
+                         agx_rw_addr_to_ro(&dev->dev, mem->bo->va->addr),
+                         mem->bo->size, 0, DRM_ASAHI_BIND_READ);
+   if (ret)
+      return VK_ERROR_UNKNOWN;
+
+   if (mem->bo->flags & (AGX_BO_SHAREABLE | AGX_BO_SHARED))
+      hk_add_ext_bo(dev, mem->bo);
 
    if (fd_info && fd_info->handleType) {
       /* From the Vulkan spec:
@@ -190,6 +274,9 @@ hk_FreeMemory(VkDevice device, VkDeviceMemory _mem,
    struct hk_memory_heap *heap = &pdev->mem_heaps[type->heapIndex];
    p_atomic_add(&heap->used, -((int64_t)mem->bo->size));
 
+   if (mem->bo->flags & (AGX_BO_SHAREABLE | AGX_BO_SHARED))
+      hk_remove_ext_bo(dev, mem->bo);
+
    agx_bo_unreference(&dev->dev, mem->bo);
 
    vk_device_memory_destroy(&dev->vk, pAllocator, &mem->vk);
@@ -211,7 +298,7 @@ hk_MapMemory2KHR(VkDevice device, const VkMemoryMapInfoKHR *pMemoryMapInfo,
    const VkDeviceSize size = vk_device_memory_range(
       &mem->vk, pMemoryMapInfo->offset, pMemoryMapInfo->size);
 
-   UNUSED void *fixed_addr = NULL;
+   void *fixed_addr = NULL;
    if (pMemoryMapInfo->flags & VK_MEMORY_MAP_PLACED_BIT_EXT) {
       const VkMemoryMapPlacedInfoEXT *placed_info = vk_find_struct_const(
          pMemoryMapInfo->pNext, MEMORY_MAP_PLACED_INFO_EXT);
@@ -243,7 +330,8 @@ hk_MapMemory2KHR(VkDevice device, const VkMemoryMapInfoKHR *pMemoryMapInfo,
                        "Memory object already mapped.");
    }
 
-   mem->map = mem->bo->map;
+   mem->map = agx_bo_map_placed(mem->bo, fixed_addr);
+   assert(!fixed_addr || mem->map == fixed_addr);
    *ppData = mem->map + offset;
 
    return VK_SUCCESS;
@@ -259,19 +347,20 @@ hk_UnmapMemory2KHR(VkDevice device,
       return VK_SUCCESS;
 
    if (pMemoryUnmapInfo->flags & VK_MEMORY_UNMAP_RESERVE_BIT_EXT) {
-      unreachable("todo");
-#if 0
       VK_FROM_HANDLE(hk_device, dev, device);
 
-      int err = agx_bo_overmap(mem->bo, mem->map);
-      if (err) {
+      void *err = mmap(mem->bo->_map, mem->bo->size, PROT_NONE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+      if (err == MAP_FAILED) {
          return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
                           "Failed to map over original mapping");
       }
-#endif
+      mem->bo->_map = NULL;
    } else {
-      /* TODO */
-      //// agx_bo_unmap(mem->bo, mem->map);
+      if (mem->bo->_map) {
+         munmap(mem->bo->_map, mem->bo->size);
+         mem->bo->_map = NULL;
+      }
    }
 
    mem->map = NULL;
@@ -322,9 +411,9 @@ hk_GetMemoryFdKHR(VkDevice device, const VkMemoryGetFdInfoKHR *pGetFdInfo,
 
 VKAPI_ATTR uint64_t VKAPI_CALL
 hk_GetDeviceMemoryOpaqueCaptureAddress(
-   UNUSED VkDevice device, const VkDeviceMemoryOpaqueCaptureAddressInfo *pInfo)
+   UNUSED VkDevice device,
+   UNUSED const VkDeviceMemoryOpaqueCaptureAddressInfo *pInfo)
 {
-   VK_FROM_HANDLE(hk_device_memory, mem, pInfo->memory);
-
-   return mem->bo->va->addr;
+   /* Addresses are replayed at buffer and image creation, not memory. */
+   return 0;
 }

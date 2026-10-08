@@ -1,10 +1,19 @@
-#include <CL/cl_icd.h>
-#include <GL/gl.h>
-#include <EGL/egl.h>
+/*
+ * Copyright 2020 Red Hat.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+#include "CL/cl_icd.h"
+#include "GL/gl.h"
+#include "EGL/egl.h"
 #ifdef HAVE_X11_PLATFORM
-#include <GL/glx.h>
+#include "GL/glx.h"
 #endif
 #include "GL/mesa_glinterop.h"
+
+/* We include custom vendor headers last */
+#include "CL_intel/cl_ext_private.h"
 
 #define DECL_CL_STRUCT(name) struct name { const cl_icd_dispatch *dispatch; }
 DECL_CL_STRUCT(_cl_command_queue);

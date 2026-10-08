@@ -3,9 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include <stdio.h>
-#include "asahi/genxml/agx_pack.h"
 #include "pipe/p_state.h"
-#include "util/format/u_format.h"
 #include "util/half_float.h"
 #include "util/macros.h"
 #include "agx_device.h"
@@ -18,8 +16,7 @@ agx_const_buffer_ptr(struct agx_batch *batch, struct pipe_constant_buffer *cb)
    if (cb->buffer) {
       struct agx_resource *rsrc = agx_resource(cb->buffer);
       agx_batch_reads(batch, rsrc);
-
-      return rsrc->bo->va->addr + cb->buffer_offset;
+      return agx_map_gpu(rsrc) + cb->buffer_offset;
    } else {
       return 0;
    }
@@ -30,7 +27,6 @@ agx_upload_vbos(struct agx_batch *batch)
 {
    struct agx_context *ctx = batch->ctx;
    struct agx_vertex_elements *attribs = ctx->attributes;
-   struct agx_device *dev = agx_device(ctx->base.screen);
    uint64_t buffers[PIPE_MAX_ATTRIBS] = {0};
    size_t buf_sizes[PIPE_MAX_ATTRIBS] = {0};
 
@@ -42,19 +38,10 @@ agx_upload_vbos(struct agx_batch *batch)
          struct agx_resource *rsrc = agx_resource(vb.buffer.resource);
          agx_batch_reads(batch, rsrc);
 
-         buffers[vbo] = rsrc->bo->va->addr + vb.buffer_offset;
-         buf_sizes[vbo] = rsrc->layout.size_B - vb.buffer_offset;
+         buffers[vbo] = agx_map_gpu(rsrc) + vb.buffer_offset;
+         buf_sizes[vbo] = rsrc->layout.size_B - vb.buffer_offset -
+                          rsrc->layout.level_offsets_B[0];
       }
-   }
-
-   /* NULL vertex buffers read zeroes from NULL. This depends on soft fault.
-    * Without soft fault, we just upload zeroes to read from.
-    */
-   uint64_t sink = 0;
-
-   if (!agx_has_soft_fault(dev)) {
-      uint32_t zeroes[4] = {0};
-      sink = agx_pool_upload_aligned(&batch->pool, &zeroes, 16, 16);
    }
 
    for (unsigned i = 0; i < PIPE_MAX_ATTRIBS; ++i) {
@@ -62,7 +49,7 @@ agx_upload_vbos(struct agx_batch *batch)
       uint64_t addr;
 
       batch->uniforms.attrib_clamp[i] = agx_calculate_vbo_clamp(
-         buffers[buf], sink, attribs->key[i].format, buf_sizes[buf],
+         buffers[buf], attribs->key[i].format, buf_sizes[buf],
          attribs->key[i].stride, attribs->src_offsets[i], &addr);
 
       batch->uniforms.attrib_base[i] = addr;
@@ -93,7 +80,7 @@ agx_upload_uniforms(struct agx_batch *batch)
 }
 
 void
-agx_set_sampler_uniforms(struct agx_batch *batch, enum pipe_shader_type stage)
+agx_set_sampler_uniforms(struct agx_batch *batch, mesa_shader_stage stage)
 {
    struct agx_context *ctx = batch->ctx;
    struct agx_stage *st = &ctx->stage[stage];
@@ -116,7 +103,7 @@ agx_set_sampler_uniforms(struct agx_batch *batch, enum pipe_shader_type stage)
 }
 
 void
-agx_set_cbuf_uniforms(struct agx_batch *batch, enum pipe_shader_type stage)
+agx_set_cbuf_uniforms(struct agx_batch *batch, mesa_shader_stage stage)
 {
    struct agx_stage *st = &batch->ctx->stage[stage];
    struct agx_stage_uniforms *unif = &batch->stage_uniforms[stage];
@@ -128,7 +115,7 @@ agx_set_cbuf_uniforms(struct agx_batch *batch, enum pipe_shader_type stage)
 }
 
 void
-agx_set_ssbo_uniforms(struct agx_batch *batch, enum pipe_shader_type stage)
+agx_set_ssbo_uniforms(struct agx_batch *batch, mesa_shader_stage stage)
 {
    struct agx_stage *st = &batch->ctx->stage[stage];
    struct agx_stage_uniforms *unif = &batch->stage_uniforms[stage];
@@ -154,7 +141,7 @@ agx_set_ssbo_uniforms(struct agx_batch *batch, enum pipe_shader_type stage)
             agx_batch_reads(batch, rsrc);
          }
 
-         unif->ssbo_base[cb] = rsrc->bo->va->addr + sb->buffer_offset;
+         unif->ssbo_base[cb] = agx_map_gpu(rsrc) + sb->buffer_offset;
          unif->ssbo_size[cb] = st->ssbo[cb].buffer_size;
       } else {
          /* Invalid, so use the sink */

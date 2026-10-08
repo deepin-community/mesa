@@ -1,24 +1,6 @@
 /*
  * Copyright © 2011 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 /**
@@ -60,17 +42,20 @@ void
 elk_compute_vue_map(const struct intel_device_info *devinfo,
                     struct intel_vue_map *vue_map,
                     uint64_t slots_valid,
-                    bool separate,
+                    enum intel_vue_layout layout,
                     uint32_t pos_slots)
 {
+   assert(layout == INTEL_VUE_LAYOUT_FIXED ||
+          layout == INTEL_VUE_LAYOUT_SEPARATE);
+
    /* Keep using the packed/contiguous layout on old hardware - we only need
     * the SSO layout when using geometry/tessellation shaders or 32 FS input
     * varyings, which only exist on Gen >= 6.  It's also a bit more efficient.
     */
    if (devinfo->ver < 6)
-      separate = false;
+      layout = INTEL_VUE_LAYOUT_FIXED;
 
-   if (separate) {
+   if (layout == INTEL_VUE_LAYOUT_SEPARATE) {
       /* In SSO mode, we don't know whether the adjacent stage will
        * read/write gl_ClipDistance, which has a fixed slot location.
        * We have to assume the worst and reserve a slot for it, or else
@@ -79,12 +64,12 @@ elk_compute_vue_map(const struct intel_device_info *devinfo,
        * Note that we don't have to worry about COL/BFC, as those built-in
        * variables only exist in legacy GL, which only supports VS and FS.
        */
-      slots_valid |= BITFIELD64_BIT(VARYING_SLOT_CLIP_DIST0);
-      slots_valid |= BITFIELD64_BIT(VARYING_SLOT_CLIP_DIST1);
+      slots_valid |= VARYING_BIT_CLIP_DIST0;
+      slots_valid |= VARYING_BIT_CLIP_DIST1;
    }
 
    vue_map->slots_valid = slots_valid;
-   vue_map->separate = separate;
+   vue_map->layout = layout;
 
    /* gl_Layer, gl_ViewportIndex & gl_PrimitiveShadingRateEXT don't get their
     * own varying slots -- they are stored in the first VUE slot
@@ -146,9 +131,9 @@ elk_compute_vue_map(const struct intel_device_info *devinfo,
          }
       }
 
-      if (slots_valid & BITFIELD64_BIT(VARYING_SLOT_CLIP_DIST0))
+      if (slots_valid & VARYING_BIT_CLIP_DIST0)
          assign_vue_slot(vue_map, VARYING_SLOT_CLIP_DIST0, slot++);
-      if (slots_valid & BITFIELD64_BIT(VARYING_SLOT_CLIP_DIST1))
+      if (slots_valid & VARYING_BIT_CLIP_DIST1)
          assign_vue_slot(vue_map, VARYING_SLOT_CLIP_DIST1, slot++);
 
       /* Vertex URB Formats table says: "Vertex Header shall be padded at the
@@ -160,13 +145,13 @@ elk_compute_vue_map(const struct intel_device_info *devinfo,
        * ATTRIBUTE_SWIZZLE_INPUTATTR_FACING to swizzle them when doing
        * two-sided color.
        */
-      if (slots_valid & BITFIELD64_BIT(VARYING_SLOT_COL0))
+      if (slots_valid & VARYING_BIT_COL0)
          assign_vue_slot(vue_map, VARYING_SLOT_COL0, slot++);
-      if (slots_valid & BITFIELD64_BIT(VARYING_SLOT_BFC0))
+      if (slots_valid & VARYING_BIT_BFC0)
          assign_vue_slot(vue_map, VARYING_SLOT_BFC0, slot++);
-      if (slots_valid & BITFIELD64_BIT(VARYING_SLOT_COL1))
+      if (slots_valid & VARYING_BIT_COL1)
          assign_vue_slot(vue_map, VARYING_SLOT_COL1, slot++);
-      if (slots_valid & BITFIELD64_BIT(VARYING_SLOT_BFC1))
+      if (slots_valid & VARYING_BIT_BFC1)
          assign_vue_slot(vue_map, VARYING_SLOT_BFC1, slot++);
    }
 
@@ -198,7 +183,7 @@ elk_compute_vue_map(const struct intel_device_info *devinfo,
    uint64_t generics = slots_valid & ~BITFIELD64_MASK(VARYING_SLOT_VAR0);
    while (generics != 0) {
       const int varying = ffsll(generics) - 1;
-      if (separate) {
+      if (layout == INTEL_VUE_LAYOUT_SEPARATE) {
          slot = first_generic_slot + varying - VARYING_SLOT_VAR0;
       }
       assign_vue_slot(vue_map, varying, slot++);
@@ -224,7 +209,7 @@ elk_compute_tess_vue_map(struct intel_vue_map *vue_map,
    vue_map->slots_valid = vertex_slots;
 
    /* separate isn't really meaningful, but make sure it's initialized */
-   vue_map->separate = false;
+   vue_map->layout = INTEL_VUE_LAYOUT_FIXED;
 
    vertex_slots &= ~(VARYING_BIT_TESS_LEVEL_OUTER |
                      VARYING_BIT_TESS_LEVEL_INNER);
@@ -281,7 +266,7 @@ elk_compute_tess_vue_map(struct intel_vue_map *vue_map,
 }
 
 static const char *
-varying_name(elk_varying_slot slot, gl_shader_stage stage)
+varying_name(elk_varying_slot slot, mesa_shader_stage stage)
 {
    assume(slot < ELK_VARYING_SLOT_COUNT);
 
@@ -299,14 +284,17 @@ varying_name(elk_varying_slot slot, gl_shader_stage stage)
 
 void
 elk_print_vue_map(FILE *fp, const struct intel_vue_map *vue_map,
-                  gl_shader_stage stage)
+                  mesa_shader_stage stage)
 {
+   const char *layout_name =
+      vue_map->layout == INTEL_VUE_LAYOUT_FIXED ? "non-SSO" : "SSO";
+
    if (vue_map->num_per_vertex_slots > 0 || vue_map->num_per_patch_slots > 0) {
       fprintf(fp, "PUE map (%d slots, %d/patch, %d/vertex, %s)\n",
               vue_map->num_slots,
               vue_map->num_per_patch_slots,
               vue_map->num_per_vertex_slots,
-              vue_map->separate ? "SSO" : "non-SSO");
+              layout_name);
       for (int i = 0; i < vue_map->num_slots; i++) {
          if (vue_map->slot_to_varying[i] >= VARYING_SLOT_PATCH0) {
             fprintf(fp, "  [%d] VARYING_SLOT_PATCH%d\n", i,
@@ -317,8 +305,7 @@ elk_print_vue_map(FILE *fp, const struct intel_vue_map *vue_map,
          }
       }
    } else {
-      fprintf(fp, "VUE map (%d slots, %s)\n",
-              vue_map->num_slots, vue_map->separate ? "SSO" : "non-SSO");
+      fprintf(fp, "VUE map (%d slots, %s)\n", vue_map->num_slots, layout_name);
       for (int i = 0; i < vue_map->num_slots; i++) {
          fprintf(fp, "  [%d] %s\n", i,
                  varying_name(vue_map->slot_to_varying[i], stage));

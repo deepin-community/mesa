@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: MIT
 
 general_ir_test_files = files(
-  'array_refcount_test.cpp',
   'builtin_variable_test.cpp',
   'general_ir_test.cpp',
 )
@@ -19,7 +18,7 @@ test(
     general_ir_test_files,
     cpp_args : [cpp_msvc_compat_args],
     gnu_symbol_visibility : 'hidden',
-    include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux, inc_glsl],
+    include_directories : [inc_include, inc_src, inc_mesa, inc_gallium, inc_gallium_aux, inc_glsl],
     link_with : [libglsl, libglsl_standalone, libglsl_util],
     dependencies : [dep_clock, dep_thread, idep_gtest, idep_mesautil, idep_nir],
   ),
@@ -34,7 +33,7 @@ test(
     ['sampler_types_test.cpp', ir_expression_operation_h],
     cpp_args : [cpp_msvc_compat_args],
     gnu_symbol_visibility : 'hidden',
-    include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux, inc_glsl],
+    include_directories : [inc_include, inc_src, inc_mesa, inc_gallium, inc_gallium_aux, inc_glsl],
     link_with : [libglsl, libglsl_util],
     dependencies : [dep_thread, idep_gtest, idep_mesautil, idep_compiler],
   ),
@@ -71,16 +70,6 @@ if meson.can_run_host_binaries()
     ],
     suite : ['compiler', 'glsl'],
     timeout: 60,
-  )
-
-  test(
-    'glsl optimization',
-    prog_python,
-    args : [
-      files('optimization_test.py'),
-      '--test-runner', glsl_test
-    ],
-    suite : ['compiler', 'glsl'],
   )
 endif
 

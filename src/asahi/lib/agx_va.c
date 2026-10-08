@@ -13,7 +13,7 @@ agx_vma_heap(struct agx_device *dev, enum agx_va_flags flags)
 }
 
 struct agx_va *
-agx_va_alloc(struct agx_device *dev, uint32_t size_B, uint32_t align_B,
+agx_va_alloc(struct agx_device *dev, uint64_t size_B, uint64_t align_B,
              enum agx_va_flags flags, uint64_t fixed_va)
 {
    assert((fixed_va != 0) == !!(flags & AGX_VA_FIXED));
@@ -50,10 +50,14 @@ agx_va_alloc(struct agx_device *dev, uint32_t size_B, uint32_t align_B,
 }
 
 void
-agx_va_free(struct agx_device *dev, struct agx_va *va)
+agx_va_free(struct agx_device *dev, struct agx_va *va, bool unbind)
 {
    if (!va)
       return;
+
+   if (unbind) {
+      agx_bo_bind(dev, NULL, va->addr, va->size_B, 0, DRM_ASAHI_BIND_UNBIND);
+   }
 
    struct util_vma_heap *heap = agx_vma_heap(dev, va->flags);
 

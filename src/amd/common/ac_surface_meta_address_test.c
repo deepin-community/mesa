@@ -13,7 +13,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include <amdgpu.h>
 #include "drm-uapi/amdgpu_drm.h"
 #include "drm-uapi/drm_fourcc.h"
 
@@ -22,10 +21,10 @@
 #include "util/u_atomic.h"
 #include "util/u_math.h"
 #include "util/u_vector.h"
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 #include "addrlib/inc/addrinterface.h"
 
-#include "ac_surface_test_common.h"
+#include "ac_surface_test.h"
 
 /*
  * The main goal of this test is to validate that our dcc/htile addressing
@@ -315,7 +314,7 @@ static void run_dcc_address_test(const char *name, const struct radeon_info *inf
       swizzle_modes[num_swizzle_modes++] = ADDR_SW_256KB_R_X;
       break;
    default:
-      unreachable("unhandled gfx level");
+      UNREACHABLE("unhandled gfx level");
    }
 
    if (full) {
@@ -493,7 +492,7 @@ static void run_htile_address_test(const char *name, const struct radeon_info *i
       swizzle_modes[num_swizzle_modes++] = ADDR_SW_256KB_Z_X;
       break;
    default:
-      unreachable("unhandled gfx level");
+      UNREACHABLE("unhandled gfx level");
    }
 
    /* The test coverage is reduced for Gitlab CI because it timeouts. */
@@ -660,6 +659,10 @@ static void run_cmask_address_test(const char *name, const struct radeon_info *i
    if (info->gfx_level >= GFX11)
       return;
 
+   /* The test doesn't support GFX8- */
+   if (info->gfx_level < GFX9)
+      return;
+
    /* The test coverage is reduced for Gitlab CI because it timeouts. */
    if (!full) {
       first_size = last_size = 0;
@@ -708,34 +711,37 @@ int main(int argc, char **argv)
       puts("Specify --full to run the full test.");
 
    puts("DCC:");
-   for (unsigned i = 0; i < ARRAY_SIZE(testcases); ++i) {
-      struct radeon_info info = get_radeon_info(&testcases[i]);
+   for (unsigned i = 0; i < ARRAY_SIZE(ac_surface_fake_devices); ++i) {
+      struct radeon_info info = { .drm_major = 0 };
+      get_radeon_info(&info, &ac_surface_fake_devices[i]);
 
-      if (info.gfx_level >= GFX12)
+      if (info.gfx_level < GFX9 || info.gfx_level >= GFX12)
          continue;
 
-      run_dcc_address_test(testcases[i].name, &info, full);
+      run_dcc_address_test(ac_surface_fake_devices[i].name, &info, full);
    }
 
    puts("HTILE:");
-   for (unsigned i = 0; i < ARRAY_SIZE(testcases); ++i) {
-      struct radeon_info info = get_radeon_info(&testcases[i]);
+   for (unsigned i = 0; i < ARRAY_SIZE(ac_surface_fake_devices); ++i) {
+      struct radeon_info info = { .drm_major = 0 };
+      get_radeon_info(&info, &ac_surface_fake_devices[i]);
 
       /* Only GFX10+ is currently supported. GFX12 doesn't have HTILE. */
       if (info.gfx_level < GFX10 || info.gfx_level >= GFX12)
          continue;
 
-      run_htile_address_test(testcases[i].name, &info, full);
+      run_htile_address_test(ac_surface_fake_devices[i].name, &info, full);
    }
 
    puts("CMASK:");
-   for (unsigned i = 0; i < ARRAY_SIZE(testcases); ++i) {
-      struct radeon_info info = get_radeon_info(&testcases[i]);
+   for (unsigned i = 0; i < ARRAY_SIZE(ac_surface_fake_devices); ++i) {
+      struct radeon_info info = { .drm_major = 0 };
+      get_radeon_info(&info, &ac_surface_fake_devices[i]);
 
       if (info.gfx_level >= GFX11)
          continue;
 
-      run_cmask_address_test(testcases[i].name, &info, full);
+      run_cmask_address_test(ac_surface_fake_devices[i].name, &info, full);
    }
 
    return 0;

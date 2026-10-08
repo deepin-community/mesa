@@ -1,26 +1,7 @@
 /*
  * Copyright © 2018 Valve Corporation
  * Copyright © 2017 Red Hat
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
- *
+ * SPDX-License-Identifier: MIT
  */
 
 #include "vtn_private.h"
@@ -47,7 +28,7 @@ vtn_handle_amd_gcn_shader_instruction(struct vtn_builder *b, SpvOp ext_opcode,
       break;
    }
    default:
-      unreachable("Invalid opcode");
+      UNREACHABLE("Invalid opcode");
    }
 
    vtn_push_nir_ssa(b, w[2], def);
@@ -79,7 +60,7 @@ vtn_handle_amd_shader_ballot_instruction(struct vtn_builder *b, SpvOp ext_opcode
       op = nir_intrinsic_mbcnt_amd;
       break;
    default:
-      unreachable("Invalid opcode");
+      UNREACHABLE("Invalid opcode");
    }
 
    const struct glsl_type *dest_type = vtn_get_type(b, w[1])->type;
@@ -171,7 +152,7 @@ vtn_handle_amd_shader_trinary_minmax_instruction(struct vtn_builder *b, SpvOp ex
                      nir_imax(nb, src[1], src[2]));
       break;
    default:
-      unreachable("unknown opcode\n");
+      UNREACHABLE("unknown opcode\n");
       break;
    }
 
@@ -190,7 +171,7 @@ vtn_handle_amd_shader_explicit_vertex_parameter_instruction(struct vtn_builder *
       op = nir_intrinsic_interp_deref_at_vertex;
       break;
    default:
-      unreachable("unknown opcode");
+      UNREACHABLE("unknown opcode");
    }
 
    nir_intrinsic_instr *intrin = nir_intrinsic_instr_create(b->nb.shader, op);

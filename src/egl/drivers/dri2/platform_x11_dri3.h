@@ -24,7 +24,9 @@
 #define EGL_X11_DRI3_INCLUDED
 
 #include "platform_x11.h"
-
+#if !defined(HAVE_LIBDRM)
+#include "loader_dri3_helper.h"
+#endif
 _EGL_DRIVER_TYPECAST(dri3_egl_surface, _EGLSurface, obj)
 
 struct dri3_egl_surface {
@@ -35,7 +37,7 @@ struct dri3_egl_surface {
 extern const __DRIimageLoaderExtension dri3_image_loader_extension;
 extern struct dri2_egl_display_vtbl dri3_x11_display_vtbl;
 
-enum dri2_egl_driver_fail
-dri3_x11_connect(struct dri2_egl_display *dri2_dpy, bool zink, bool swrast);
+bool
+dri3_x11_connect(struct dri2_egl_display *dri2_dpy, bool swrast);
 
 #endif

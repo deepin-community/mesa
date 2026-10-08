@@ -98,7 +98,6 @@
 #include <mesa/main/queryobj.h>
 #include <mesa/main/rastpos.h>
 #include <mesa/main/readpix.h>
-#include <mesa/main/remap.h>
 #include <mesa/main/renderbuffer.h>
 #include <mesa/main/samplerobj.h>
 #include <mesa/main/scissor.h>
@@ -113,7 +112,6 @@
 #include <mesa/main/stencil.h>
 #include <mesa/main/syncobj.h>
 #include <mesa/main/texcompress.h>
-#include <mesa/main/texcompress_astc.h>
 #include <mesa/main/texcompress_bptc.h>
 #include <mesa/main/texcompress_cpal.h>
 #include <mesa/main/texcompress_etc.h>
@@ -179,7 +177,6 @@
 #include <mesa/state_tracker/st_shader_cache.h>
 #include <mesa/state_tracker/st_texture.h>
 #include <mesa/state_tracker/st_util.h>
-#include <mesa/state_tracker/st_vdpau.h>
 #include <mesa/vbo/vbo.h>
 #include <mesa/vbo/vbo_attrib.h>
 #include <mesa/vbo/vbo_exec.h>
@@ -229,7 +226,7 @@
 #include <util/log.h>
 #include <util/macros.h>
 #include <util/memstream.h>
-#include <util/mesa-sha1.h>
+#include <util/mesa-blake3.h>
 #include <util/mesa_cache_db.h>
 #include <util/os_file.h>
 #include <util/os_memory.h>
@@ -250,7 +247,7 @@
 #include <util/rounding.h>
 #include <util/rwlock.h>
 #include <util/set.h>
-#include <util/sha1/sha1.h>
+#include <util/mesa-blake3.h>
 #include <util/simple_mtx.h>
 #include <util/slab.h>
 #include <util/softfloat.h>
@@ -259,6 +256,7 @@
 #include <util/string_buffer.h>
 #include <util/strndup.h>
 #include <util/strtod.h>
+#include <util/texcompress_astc.h>
 #include <util/timespec.h>
 #include <util/u_atomic.h>
 #include <util/u_call_once.h>

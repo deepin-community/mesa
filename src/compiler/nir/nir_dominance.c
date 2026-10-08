@@ -46,7 +46,7 @@ init_block(nir_block *block, nir_function_impl *impl)
    block->dom_pre_index = UINT32_MAX;
    block->dom_post_index = 0;
 
-   _mesa_set_clear(block->dom_frontier, NULL);
+   _mesa_set_clear(&block->dom_frontier, NULL);
 
    return true;
 }
@@ -73,9 +73,7 @@ static bool
 calc_dominance(nir_block *block)
 {
    nir_block *new_idom = NULL;
-   set_foreach(block->predecessors, entry) {
-      nir_block *pred = (nir_block *)entry->key;
-
+   nir_foreach_pred(pred, block) {
       if (pred->imm_dom) {
          if (new_idom)
             new_idom = intersect(pred, new_idom);
@@ -95,16 +93,14 @@ calc_dominance(nir_block *block)
 static bool
 calc_dom_frontier(nir_block *block)
 {
-   if (block->predecessors->entries > 1) {
-      set_foreach(block->predecessors, entry) {
-         nir_block *runner = (nir_block *)entry->key;
-
+   if (nir_block_num_preds(block) > 1) {
+      nir_foreach_pred(runner, block) {
          /* Skip unreachable predecessors */
          if (runner->imm_dom == NULL)
             continue;
 
          while (runner != block->imm_dom) {
-            _mesa_set_add(runner->dom_frontier, block);
+            _mesa_set_add(&runner->dom_frontier, block);
             runner = runner->imm_dom;
          }
       }
@@ -135,8 +131,17 @@ calc_dom_children(nir_function_impl *impl)
    }
 
    nir_foreach_block_unstructured(block, impl) {
-      block->dom_children = ralloc_array(mem_ctx, nir_block *,
-                                         block->num_dom_children);
+      if (!block->num_dom_children) {
+         block->dom_children = NULL;
+         continue;
+      }
+
+      if (block->num_dom_children <= 3) {
+         block->dom_children = block->_dom_children_storage;
+      } else {
+         block->dom_children = ralloc_array(mem_ctx, nir_block *,
+                                            block->num_dom_children);
+      }
       block->num_dom_children = 0;
    }
 
@@ -148,7 +153,7 @@ calc_dom_children(nir_function_impl *impl)
 }
 
 static void
-calc_dfs_indicies(nir_block *block, uint32_t *index)
+calc_dfs_indices(nir_block *block, uint32_t *index)
 {
    /* UINT32_MAX has special meaning. See nir_block_dominates. */
    assert(*index < UINT32_MAX - 2);
@@ -156,7 +161,7 @@ calc_dfs_indicies(nir_block *block, uint32_t *index)
    block->dom_pre_index = (*index)++;
 
    for (unsigned i = 0; i < block->num_dom_children; i++)
-      calc_dfs_indicies(block->dom_children[i], index);
+      calc_dfs_indices(block->dom_children[i], index);
 
    block->dom_post_index = (*index)++;
 }
@@ -192,7 +197,7 @@ nir_calc_dominance_impl(nir_function_impl *impl)
    calc_dom_children(impl);
 
    uint32_t dfs_index = 1;
-   calc_dfs_indicies(start_block, &dfs_index);
+   calc_dfs_indices(start_block, &dfs_index);
 }
 
 void
@@ -201,35 +206,6 @@ nir_calc_dominance(nir_shader *shader)
    nir_foreach_function_impl(impl, shader) {
       nir_calc_dominance_impl(impl);
    }
-}
-
-static nir_block *
-block_return_if_reachable(nir_block *b)
-{
-   return (b && nir_block_is_reachable(b)) ? b : NULL;
-}
-
-/**
- * Computes the least common ancestor of two blocks.  If one of the blocks
- * is null or unreachable, the other block is returned or NULL if it's
- * unreachable.
- */
-nir_block *
-nir_dominance_lca(nir_block *b1, nir_block *b2)
-{
-   if (b1 == NULL || !nir_block_is_reachable(b1))
-      return block_return_if_reachable(b2);
-
-   if (b2 == NULL || !nir_block_is_reachable(b2))
-      return block_return_if_reachable(b1);
-
-   assert(nir_cf_node_get_function(&b1->cf_node) ==
-          nir_cf_node_get_function(&b2->cf_node));
-
-   assert(nir_cf_node_get_function(&b1->cf_node)->valid_metadata &
-          nir_metadata_dominance);
-
-   return intersect(b1, b2);
 }
 
 /**
@@ -300,7 +276,7 @@ nir_dump_dom_frontier_impl(nir_function_impl *impl, FILE *fp)
 {
    nir_foreach_block_unstructured(block, impl) {
       fprintf(fp, "DF(%u) = {", block->index);
-      set_foreach(block->dom_frontier, entry) {
+      set_foreach(&block->dom_frontier, entry) {
          nir_block *df = (nir_block *)entry->key;
          fprintf(fp, "%u, ", df->index);
       }

@@ -26,7 +26,7 @@
  *
  * Lower image operations by turning the image_deref_* into a image_* on an
  * index number or bindless_image_* intrinsic on a load_deref of the previous
- * deref source. All applicable indicies are also set so that fetching the
+ * deref source. All applicable indices are also set so that fetching the
  * variable in the backend wouldn't be needed anymore.
  */
 
@@ -98,7 +98,8 @@ lower_instr(nir_builder *b, nir_instr *instr, void *cb_data)
                          nir_build_deref_offset(b, deref, type_size_align_1),
                          var->data.driver_location);
    }
-   nir_rewrite_image_intrinsic(intrinsic, src, bindless);
+   nir_rewrite_image_intrinsic(intrinsic, src,
+      bindless ? nir_image_intrinsic_type_bindless : nir_image_intrinsic_type_default);
    if (!bindless)
       nir_intrinsic_set_range_base(intrinsic, range_base);
 

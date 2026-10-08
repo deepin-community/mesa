@@ -54,7 +54,8 @@ cs_program_emit(struct fd_ringbuffer *ring, struct ir3_shader_variant *v)
                      COND(v->has_ssbo, A4XX_HLSQ_CS_CONTROL_REG_SSBO_ENABLE) |
                      A4XX_HLSQ_CS_CONTROL_REG_CONSTLENGTH(v->constlen / 4));
 
-   uint32_t driver_param_base = v->const_state->offsets.driver_param * 4;
+   uint32_t driver_param_base =
+      v->const_state->allocs.consts[IR3_CONST_ALLOC_DRIVER_PARAMS].offset_vec4 * 4;
    uint32_t local_invocation_id, work_group_id, local_group_size_id,
       num_wg_id, work_dim_id, unused_id;
    local_invocation_id =
@@ -120,13 +121,13 @@ fd4_launch_grid(struct fd_context *ctx,
    if (!v)
       return;
 
-   if (ctx->dirty_shader[PIPE_SHADER_COMPUTE] & FD_DIRTY_SHADER_PROG)
+   if (ctx->dirty_shader[MESA_SHADER_COMPUTE] & FD_DIRTY_SHADER_PROG)
       cs_program_emit(ring, v);
 
    fd4_emit_cs_state(ctx, ring, v);
    fd4_emit_cs_consts(v, ring, ctx, info);
 
-   u_foreach_bit (i, ctx->global_bindings.enabled_mask)
+   util_dynarray_foreach (&ctx->global_bindings, struct pipe_resource *, res)
       nglobal++;
 
    if (nglobal > 0) {
@@ -137,10 +138,8 @@ fd4_launch_grid(struct fd_context *ctx,
        * payload:
        */
       OUT_PKT3(ring, CP_NOP, 2 * nglobal);
-      u_foreach_bit (i, ctx->global_bindings.enabled_mask) {
-         struct pipe_resource *prsc = ctx->global_bindings.buf[i];
-         OUT_RELOC(ring, fd_resource(prsc)->bo, 0, 0, 0);
-      }
+      util_dynarray_foreach (&ctx->global_bindings, struct pipe_resource *, res)
+         OUT_RELOC(ring, fd_resource(*res)->bo, 0, 0, 0);
    }
 
    const unsigned *local_size =

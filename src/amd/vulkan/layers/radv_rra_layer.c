@@ -9,7 +9,6 @@
 #include "radv_event.h"
 #include "radv_rra.h"
 #include "vk_acceleration_structure.h"
-#include "vk_common_entrypoints.h"
 
 VKAPI_ATTR VkResult VKAPI_CALL
 rra_QueuePresentKHR(VkQueue _queue, const VkPresentInfoKHR *pPresentInfo)
@@ -86,8 +85,15 @@ rra_init_accel_struct_data_buffer(VkDevice vk_device, struct radv_rra_accel_stru
    if (result != VK_SUCCESS)
       return result;
 
-   VkMemoryRequirements requirements;
-   vk_common_GetBufferMemoryRequirements(vk_device, buffer->buffer, &requirements);
+   VkDeviceBufferMemoryRequirements buffer_mem_req_info = {
+      .sType = VK_STRUCTURE_TYPE_DEVICE_BUFFER_MEMORY_REQUIREMENTS,
+      .pCreateInfo = &buffer_create_info,
+   };
+   VkMemoryRequirements2 requirements = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
+   };
+
+   radv_GetDeviceBufferMemoryRequirements(vk_device, &buffer_mem_req_info, &requirements);
 
    VkMemoryAllocateFlagsInfo flags_info = {
       .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
@@ -97,14 +103,20 @@ rra_init_accel_struct_data_buffer(VkDevice vk_device, struct radv_rra_accel_stru
    VkMemoryAllocateInfo alloc_info = {
       .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
       .pNext = &flags_info,
-      .allocationSize = requirements.size,
+      .allocationSize = requirements.memoryRequirements.size,
       .memoryTypeIndex = device->rra_trace.copy_memory_index,
    };
    result = radv_alloc_memory(device, &alloc_info, NULL, &buffer->memory, true);
    if (result != VK_SUCCESS)
       goto fail_buffer;
 
-   result = vk_common_BindBufferMemory(vk_device, buffer->buffer, buffer->memory, 0);
+   VkBindBufferMemoryInfo bind_info = {
+      .sType = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO,
+      .buffer = buffer->buffer,
+      .memory = buffer->memory,
+   };
+
+   result = radv_BindBufferMemory2(vk_device, 1, &bind_info);
    if (result != VK_SUCCESS)
       goto fail_memory;
 
@@ -171,7 +183,7 @@ exit:
 
 static void
 handle_accel_struct_write(VkCommandBuffer commandBuffer, VkAccelerationStructureKHR accelerationStructure,
-                          uint64_t size)
+                          uint64_t size, bool can_be_tlas)
 {
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
    VK_FROM_HANDLE(vk_acceleration_structure, accel_struct, accelerationStructure);
@@ -200,7 +212,19 @@ handle_accel_struct_write(VkCommandBuffer commandBuffer, VkAccelerationStructure
 
    radv_CmdPipelineBarrier2(commandBuffer, &dependencyInfo);
 
-   vk_common_CmdSetEvent(commandBuffer, data->build_event, 0);
+   VkMemoryBarrier2 mem_barrier = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+      .dstStageMask = VK_PIPELINE_STAGE_2_NONE,
+   };
+
+   VkDependencyInfo dep_info = {
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .memoryBarrierCount = 1,
+      .pMemoryBarriers = &mem_barrier,
+   };
+
+   radv_CmdSetEvent2(commandBuffer, data->build_event, &dep_info);
 
    if (!data->va) {
       data->va = vk_acceleration_structure_get_va(accel_struct);
@@ -220,6 +244,8 @@ handle_accel_struct_write(VkCommandBuffer commandBuffer, VkAccelerationStructure
       }
    }
 
+   data->can_be_tlas |= can_be_tlas;
+
    if (!data->buffer)
       return;
 
@@ -236,7 +262,7 @@ handle_accel_struct_write(VkCommandBuffer commandBuffer, VkAccelerationStructure
 
    VkCopyBufferInfo2 copyInfo = {
       .sType = VK_STRUCTURE_TYPE_COPY_BUFFER_INFO_2,
-      .srcBuffer = accel_struct->buffer,
+      .srcBuffer = vk_buffer_to_handle(accel_struct->buffer),
       .dstBuffer = data->buffer->buffer,
       .regionCount = 1,
       .pRegions = &region,
@@ -270,7 +296,8 @@ rra_CmdBuildAccelerationStructuresKHR(VkCommandBuffer commandBuffer, uint32_t in
                                                                        VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
                                                                        pInfos + i, primitive_counts, &size_info);
 
-      handle_accel_struct_write(commandBuffer, pInfos[i].dstAccelerationStructure, size_info.accelerationStructureSize);
+      handle_accel_struct_write(commandBuffer, pInfos[i].dstAccelerationStructure, size_info.accelerationStructureSize,
+                                pInfos[i].type == VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR);
    }
 
    simple_mtx_unlock(&device->rra_trace.data_mtx);
@@ -291,7 +318,7 @@ rra_CmdCopyAccelerationStructureKHR(VkCommandBuffer commandBuffer, const VkCopyA
    struct hash_entry *entry = _mesa_hash_table_search(device->rra_trace.accel_structs, src);
    struct radv_rra_accel_struct_data *data = entry->data;
 
-   handle_accel_struct_write(commandBuffer, pInfo->dst, data->size);
+   handle_accel_struct_write(commandBuffer, pInfo->dst, data->size, data->can_be_tlas);
 
    simple_mtx_unlock(&device->rra_trace.data_mtx);
 }
@@ -308,7 +335,7 @@ rra_CmdCopyMemoryToAccelerationStructureKHR(VkCommandBuffer commandBuffer,
    simple_mtx_lock(&device->rra_trace.data_mtx);
 
    VK_FROM_HANDLE(vk_acceleration_structure, dst, pInfo->dst);
-   handle_accel_struct_write(commandBuffer, pInfo->dst, dst->size);
+   handle_accel_struct_write(commandBuffer, pInfo->dst, dst->size, true);
 
    simple_mtx_unlock(&device->rra_trace.data_mtx);
 }
@@ -347,7 +374,16 @@ rra_QueueSubmit2KHR(VkQueue _queue, uint32_t submitCount, const VkSubmitInfo2 *p
    struct radv_device *device = radv_queue_device(queue);
 
    VkResult result = device->layer_dispatch.rra.QueueSubmit2KHR(_queue, submitCount, pSubmits, _fence);
-   if (result != VK_SUCCESS || !device->rra_trace.triggered)
+   if (result != VK_SUCCESS)
+      return result;
+
+   if (radv_bvh_stats_file()) {
+      result = radv_dump_bvh_stats(_queue);
+      if (result != VK_SUCCESS)
+         return result;
+   }
+
+   if (!device->rra_trace.triggered)
       return result;
 
    uint32_t total_trace_count = 0;

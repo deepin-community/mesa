@@ -15,6 +15,8 @@
 #include "vulkan/runtime/vk_command_buffer.h"
 
 #include "panvk_cmd_desc_state.h"
+#include "panvk_cmd_dispatch.h"
+#include "panvk_cmd_draw.h"
 #include "panvk_cmd_push_constant.h"
 #include "panvk_descriptor_set.h"
 #include "panvk_descriptor_set_layout.h"
@@ -29,10 +31,6 @@
 
 #include "genxml/gen_macros.h"
 
-#define MAX_BIND_POINTS 2 /* compute + graphics */
-#define MAX_VBS         16
-#define MAX_RTS         8
-
 struct panvk_batch {
    struct list_head node;
    struct util_dynarray jobs;
@@ -40,7 +38,7 @@ struct panvk_batch {
    struct pan_jc vtc_jc;
    struct pan_jc frag_jc;
    struct {
-      struct panfrost_ptr desc;
+      struct pan_ptr desc;
       uint32_t desc_stride;
       uint32_t bo_count;
 
@@ -51,11 +49,11 @@ struct panvk_batch {
    struct {
       struct pan_kmod_bo *src, *dst;
    } blit;
-   struct panfrost_ptr tls;
+   struct pan_ptr tls;
    struct {
       struct pan_tiler_context ctx;
-      struct panfrost_ptr heap_desc;
-      struct panfrost_ptr ctx_descs;
+      struct pan_ptr heap_desc;
+      struct pan_ptr ctx_descs;
       struct mali_tiler_heap_packed heap_templ;
       struct mali_tiler_context_packed ctx_templ;
    } tiler;
@@ -73,107 +71,6 @@ enum panvk_cmd_event_op_type {
 struct panvk_cmd_event_op {
    enum panvk_cmd_event_op_type type;
    struct panvk_event *event;
-};
-
-struct panvk_attrib_buf {
-   mali_ptr address;
-   unsigned size;
-};
-
-struct panvk_resolve_attachment {
-   VkResolveModeFlagBits mode;
-   struct panvk_image_view *dst_iview;
-};
-
-struct panvk_rendering_state {
-   VkRenderingFlags flags;
-   uint32_t layer_count;
-
-   enum vk_rp_attachment_flags bound_attachments;
-   struct {
-      struct panvk_image_view *iviews[MAX_RTS];
-      VkFormat fmts[MAX_RTS];
-      uint8_t samples[MAX_RTS];
-      struct panvk_resolve_attachment resolve[MAX_RTS];
-   } color_attachments;
-
-   struct pan_image_view zs_pview;
-
-   struct {
-      struct panvk_image_view *iview;
-      VkFormat fmt;
-      struct panvk_resolve_attachment resolve;
-   } z_attachment, s_attachment;
-
-   struct {
-      struct pan_fb_info info;
-      bool crc_valid[MAX_RTS];
-      uint32_t bo_count;
-      struct pan_kmod_bo *bos[MAX_RTS + 2];
-   } fb;
-};
-
-struct panvk_cmd_graphics_state {
-   struct panvk_descriptor_state desc_state;
-
-   struct {
-      struct vk_vertex_input_state vi;
-      struct vk_sample_locations_state sl;
-   } dynamic;
-
-   uint32_t dirty;
-
-   struct panvk_graphics_sysvals sysvals;
-
-   struct panvk_shader_link link;
-   bool linked;
-
-   struct {
-      const struct panvk_shader *shader;
-      mali_ptr rsd;
-#if PAN_ARCH <= 7
-      struct panvk_shader_desc_state desc;
-#endif
-   } fs;
-
-   struct {
-      const struct panvk_shader *shader;
-      mali_ptr attribs;
-      mali_ptr attrib_bufs;
-#if PAN_ARCH <= 7
-      struct panvk_shader_desc_state desc;
-#endif
-   } vs;
-
-   struct {
-      struct panvk_attrib_buf bufs[MAX_VBS];
-      unsigned count;
-   } vb;
-
-   /* Index buffer */
-   struct {
-      struct panvk_buffer *buffer;
-      uint64_t offset;
-      uint8_t index_size;
-      uint32_t first_vertex, base_vertex, base_instance;
-   } ib;
-
-   struct panvk_rendering_state render;
-
-   mali_ptr vpd;
-   mali_ptr push_uniforms;
-};
-
-struct panvk_cmd_compute_state {
-   struct panvk_descriptor_state desc_state;
-   const struct panvk_shader *shader;
-   struct panvk_compute_sysvals sysvals;
-   mali_ptr push_uniforms;
-#if PAN_ARCH <= 7
-   struct {
-      struct panvk_shader_desc_state desc;
-   } cs;
-#endif
 };
 
 struct panvk_cmd_buffer {
@@ -247,12 +144,9 @@ VkResult
    panvk_per_arch(cmd_prepare_tiler_context)(struct panvk_cmd_buffer *cmdbuf,
                                              uint32_t layer_idx);
 
-void panvk_per_arch(cmd_preload_fb_after_batch_split)(
-   struct panvk_cmd_buffer *cmdbuf);
-
 void panvk_per_arch(cmd_bind_shaders)(struct vk_command_buffer *vk_cmd,
                                       uint32_t stage_count,
-                                      const gl_shader_stage *stages,
+                                      const mesa_shader_stage *stages,
                                       struct vk_shader **const shaders);
 
 #endif

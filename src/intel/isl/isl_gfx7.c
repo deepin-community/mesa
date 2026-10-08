@@ -194,46 +194,15 @@ isl_gfx6_filter_tiling(const struct isl_device *dev,
                        isl_tiling_flags_t *flags)
 {
    /* IVB+ requires separate stencil */
-   assert(ISL_DEV_USE_SEPARATE_STENCIL(dev));
+   assert(dev->use_separate_stencil);
 
    /* Clear flags unsupported on this hardware */
    assert(ISL_GFX_VERX10(dev) < 125);
-   if (ISL_GFX_VER(dev) >= 12) {
-      *flags &= ISL_TILING_LINEAR_BIT |
-                ISL_TILING_X_BIT |
-                ISL_TILING_Y0_BIT |
-                ISL_TILING_ICL_Yf_BIT |
-                ISL_TILING_ICL_Ys_BIT;
-   } else if (ISL_GFX_VER(dev) >= 11) {
-      *flags &= ISL_TILING_LINEAR_BIT |
-                ISL_TILING_X_BIT |
-                ISL_TILING_W_BIT |
-                ISL_TILING_Y0_BIT |
-                ISL_TILING_ICL_Yf_BIT |
-                ISL_TILING_ICL_Ys_BIT;
-   } else if (ISL_GFX_VER(dev) >= 9) {
-      *flags &= ISL_TILING_LINEAR_BIT |
-                ISL_TILING_X_BIT |
-                ISL_TILING_W_BIT |
-                ISL_TILING_Y0_BIT |
-                ISL_TILING_SKL_Yf_BIT |
-                ISL_TILING_SKL_Ys_BIT;
-   } else {
-      *flags &= ISL_TILING_LINEAR_BIT |
-                ISL_TILING_X_BIT |
-                ISL_TILING_W_BIT |
-                ISL_TILING_Y0_BIT;
-   }
 
-   /* TODO: Investigate Yf failures (~5000 VK CTS failures at the time of this
-    *       writing).
-    */
-   if (isl_format_is_compressed(info->format) ||
-       info->samples > 1 ||
-       info->dim == ISL_SURF_DIM_3D) {
-      *flags &= ~ISL_TILING_SKL_Yf_BIT; /* FINISHME[SKL]: Support Yf */
-      *flags &= ~ISL_TILING_ICL_Yf_BIT; /* FINISHME[ICL]: Support Yf */
-   }
+   *flags &= isl_device_get_supported_tilings(dev);
+
+   if (info->usage & ISL_SURF_USAGE_SOFTWARE_DETILING)
+      *flags &= (1 << dev->shader_tiling) | ISL_TILING_LINEAR_BIT;
 
    if (isl_surf_usage_is_depth(info->usage)) {
       /* Depth requires Y. */
@@ -384,6 +353,15 @@ isl_gfx6_filter_tiling(const struct isl_device *dev,
         (dev->info->platform == INTEL_PLATFORM_SKL && dev->info->gt != 4))) {
           *flags &= ISL_TILING_LINEAR_BIT;
    }
+
+   /* From HSW PRMs, Volume 2b: Command Reference: Instructions,
+    * MFX_SURFACE_STATE,
+    *
+    *    "For optimizing memory efficiency based on access patterns, only
+    *     TileY is supported."
+    */
+   if (info->usage & ISL_SURF_USAGE_VIDEO_DECODE_BIT)
+      *flags &= ISL_TILING_Y0_BIT;
 }
 
 void

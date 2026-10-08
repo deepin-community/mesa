@@ -720,15 +720,30 @@ supports_nv_fragment_shader_interlock(const _mesa_glsl_parse_state *state)
 static bool
 shader_clock(const _mesa_glsl_parse_state *state)
 {
-   return state->ARB_shader_clock_enable;
+   return state->ARB_shader_clock_enable ||
+          state->EXT_shader_clock_enable;
 }
 
 static bool
 shader_clock_int64(const _mesa_glsl_parse_state *state)
 {
-   return state->ARB_shader_clock_enable &&
+   return (state->ARB_shader_clock_enable ||
+           state->EXT_shader_clock_enable) &&
           (state->ARB_gpu_shader_int64_enable ||
            state->AMD_gpu_shader_int64_enable);
+}
+
+static bool
+shader_clock_realtime(const _mesa_glsl_parse_state *state)
+{
+   return state->EXT_shader_realtime_clock_enable;
+}
+
+static bool
+shader_clock_realtime_int64(const _mesa_glsl_parse_state *state)
+{
+   return state->EXT_shader_realtime_clock_enable &&
+          state->ARB_gpu_shader_int64_enable;
 }
 
 static bool
@@ -838,9 +853,11 @@ ballot_khr_and_fp64(const _mesa_glsl_parse_state *state)
 }
 
 static bool
-compute_shader(const _mesa_glsl_parse_state *state)
+compute_or_mesh_shader(const _mesa_glsl_parse_state *state)
 {
-   return state->stage == MESA_SHADER_COMPUTE;
+   return state->stage == MESA_SHADER_COMPUTE ||
+      state->stage == MESA_SHADER_MESH ||
+      state->stage == MESA_SHADER_TASK;
 }
 
 static bool
@@ -852,7 +869,7 @@ compute_shader_supported(const _mesa_glsl_parse_state *state)
 static bool
 buffer_atomics_supported(const _mesa_glsl_parse_state *state)
 {
-   return compute_shader(state) || shader_storage_buffer_object(state);
+   return compute_or_mesh_shader(state) || shader_storage_buffer_object(state);
 }
 
 static bool
@@ -865,7 +882,7 @@ buffer_int64_atomics_supported(const _mesa_glsl_parse_state *state)
 static bool
 barrier_supported(const _mesa_glsl_parse_state *state)
 {
-   return compute_shader(state) ||
+   return compute_or_mesh_shader(state) ||
           state->stage == MESA_SHADER_TESS_CTRL;
 }
 
@@ -1117,6 +1134,12 @@ subgroup_quad_and_fp64(const _mesa_glsl_parse_state *state)
    return subgroup_quad(state) && fp64(state);
 }
 
+static bool
+mesh_shader(const _mesa_glsl_parse_state *state)
+{
+   return state->EXT_mesh_shader_enable;
+}
+
 /** @} */
 
 /******************************************************************************/
@@ -1140,19 +1163,21 @@ public:
    void initialize();
    void release();
    ir_function_signature *find(_mesa_glsl_parse_state *state,
-                               const char *name, exec_list *actual_parameters);
+                               const char *name, ir_exec_list *actual_parameters);
 
    /**
-    * A shader to hold all the built-in signatures; created by this module.
+    * A symbol table to hold all the built-in signatures; created by this
+    * module.
     *
     * This includes signatures for every built-in, regardless of version or
     * enabled extensions.  The availability predicate associated with each
     * signature allows matching_signature() to filter out the irrelevant ones.
     */
-   gl_shader *shader;
+   struct glsl_symbol_table *symbols;
 
 private:
    void *mem_ctx;
+   linear_ctx *linalloc;
 
    void create_shader();
    void create_intrinsics();
@@ -1192,7 +1217,7 @@ private:
     * point to the ir_variable that will hold the function return
     * value, or be \c NULL if the function has void return type.
     */
-   ir_call *call(ir_function *f, ir_variable *ret, exec_list params);
+   ir_call *call(ir_function *f, ir_variable *ret, ir_exec_list params);
 
    /** Create a new function and add the given signatures. */
    void add_function(const char *name, ...);
@@ -1517,6 +1542,11 @@ private:
    ir_function_signature *_shader_clock(builtin_available_predicate avail,
                                         const glsl_type *type);
 
+   ir_function_signature *_shader_clock_realtime_intrinsic(builtin_available_predicate avail,
+                                                           const glsl_type *type);
+   ir_function_signature *_shader_clock_realtime(builtin_available_predicate avail,
+                                                 const glsl_type *type);
+
    ir_function_signature *_vote_intrinsic(const glsl_type *type,
                                           builtin_available_predicate avail,
                                           enum ir_intrinsic_id id);
@@ -1563,6 +1593,12 @@ private:
    ir_function_signature *_quad_swap_intrinsic(const glsl_type *type, enum ir_intrinsic_id id);
    ir_function_signature *_quad_swap(const glsl_type *type, const char *intrinsic_name);
 
+   ir_function_signature *_emit_mesh_tasks_intrinsic();
+   ir_function_signature *_emit_mesh_tasks();
+
+   ir_function_signature *_set_mesh_outputs_intrinsic();
+   ir_function_signature *_set_mesh_outputs();
+
 #undef B0
 #undef B1
 #undef B2
@@ -1595,9 +1631,10 @@ enum image_function_flags {
  *  @{
  */
 builtin_builder::builtin_builder()
-   : shader(NULL)
+   : symbols(NULL)
 {
    mem_ctx = NULL;
+   linalloc = NULL;
 }
 
 builtin_builder::~builtin_builder()
@@ -1606,16 +1643,15 @@ builtin_builder::~builtin_builder()
 
    ralloc_free(mem_ctx);
    mem_ctx = NULL;
-
-   ralloc_free(shader);
-   shader = NULL;
+   linalloc = NULL;
+   symbols = NULL;
 
    simple_mtx_unlock(&builtins_lock);
 }
 
 ir_function_signature *
 builtin_builder::find(_mesa_glsl_parse_state *state,
-                      const char *name, exec_list *actual_parameters)
+                      const char *name, ir_exec_list *actual_parameters)
 {
    /* The shader currently being compiled requested a built-in function;
     * it needs to link against builtin_builder::shader in order to get them.
@@ -1626,7 +1662,7 @@ builtin_builder::find(_mesa_glsl_parse_state *state,
     */
    state->uses_builtin_functions = true;
 
-   ir_function *f = shader->symbols->get_function(name);
+   ir_function *f = symbols->get_function(name);
    if (f == NULL)
       return NULL;
 
@@ -1651,6 +1687,7 @@ builtin_builder::initialize()
    glsl_type_singleton_init_or_ref();
 
    mem_ctx = ralloc_context(NULL);
+   linalloc = linear_context(mem_ctx);
    create_shader();
    create_intrinsics();
    create_builtins();
@@ -1661,9 +1698,8 @@ builtin_builder::release()
 {
    ralloc_free(mem_ctx);
    mem_ctx = NULL;
-
-   ralloc_free(shader);
-   shader = NULL;
+   linalloc = NULL;
+   symbols = NULL;
 
    glsl_type_singleton_decref();
 }
@@ -1671,12 +1707,7 @@ builtin_builder::release()
 void
 builtin_builder::create_shader()
 {
-   /* The target doesn't actually matter.  There's no target for generic
-    * GLSL utility code that could be linked against any stage, so just
-    * arbitrarily pick GL_VERTEX_SHADER.
-    */
-   shader = _mesa_new_shader(0, MESA_SHADER_VERTEX);
-   shader->symbols = new(mem_ctx) glsl_symbol_table;
+   symbols = new(mem_ctx) glsl_symbol_table;
 }
 
 /** @} */
@@ -1899,7 +1930,7 @@ builtin_builder::create_intrinsics()
                                           ir_intrinsic_memory_barrier),
                 NULL);
    add_function("__intrinsic_group_memory_barrier",
-                _memory_barrier_intrinsic(compute_shader,
+                _memory_barrier_intrinsic(compute_or_mesh_shader,
                                           ir_intrinsic_group_memory_barrier),
                 NULL);
    add_function("__intrinsic_memory_barrier_atomic_counter",
@@ -1915,7 +1946,7 @@ builtin_builder::create_intrinsics()
                                           ir_intrinsic_memory_barrier_image),
                 NULL);
    add_function("__intrinsic_memory_barrier_shared",
-                _memory_barrier_intrinsic(compute_shader,
+                _memory_barrier_intrinsic(compute_or_mesh_shader,
                                           ir_intrinsic_memory_barrier_shared),
                 NULL);
 
@@ -1934,6 +1965,11 @@ builtin_builder::create_intrinsics()
                                         &glsl_type_builtin_uvec2),
                 NULL);
 
+   add_function("__intrinsic_shader_clock_realtime",
+                _shader_clock_realtime_intrinsic(shader_clock,
+                                                 &glsl_type_builtin_uvec2),
+                NULL);
+
    add_function("__intrinsic_vote_all",
                 _vote_intrinsic(&glsl_type_builtin_bool, vote_or_v460_desktop,
                                 ir_intrinsic_vote_all),
@@ -1946,8 +1982,11 @@ builtin_builder::create_intrinsics()
                 FIUBD_AVAIL(_vote_intrinsic, vote_or_v460_desktop, ir_intrinsic_vote_eq),
                 NULL);
 
-   add_function("__intrinsic_ballot",
+   add_function("__intrinsic_ballot_uint64",
                 _ballot_intrinsic(&glsl_type_builtin_uint64_t),
+                NULL);
+
+   add_function("__intrinsic_ballot_uvec4",
                 _ballot_intrinsic(&glsl_type_builtin_uvec4),
                 NULL);
 
@@ -2037,6 +2076,9 @@ builtin_builder::create_intrinsics()
                 FIUBD(_quad_swap_intrinsic, ir_intrinsic_quad_swap_vertical), NULL);
    add_function("__intrinsic_quad_swap_diagonal",
                 FIUBD(_quad_swap_intrinsic, ir_intrinsic_quad_swap_diagonal), NULL);
+
+   add_function("__intrinsic_emit_mesh_tasks", _emit_mesh_tasks_intrinsic(), NULL);
+   add_function("__intrinsic_set_mesh_outputs", _set_mesh_outputs_intrinsic(), NULL);
 }
 
 /**
@@ -5580,7 +5622,7 @@ builtin_builder::create_builtins()
                 NULL);
    add_function("groupMemoryBarrier",
                 _memory_barrier("__intrinsic_group_memory_barrier",
-                                compute_shader),
+                                compute_or_mesh_shader),
                 NULL);
    add_function("memoryBarrierAtomicCounter",
                 _memory_barrier("__intrinsic_memory_barrier_atomic_counter",
@@ -5596,7 +5638,7 @@ builtin_builder::create_builtins()
                 NULL);
    add_function("memoryBarrierShared",
                 _memory_barrier("__intrinsic_memory_barrier_shared",
-                                compute_shader),
+                                compute_or_mesh_shader),
                 NULL);
 
    add_function("ballotARB", _ballot(&glsl_type_builtin_uint64_t, ballot_arb), NULL);
@@ -5614,11 +5656,25 @@ builtin_builder::create_builtins()
                               &glsl_type_builtin_uvec2),
                 NULL);
 
+   add_function("clock2x32EXT",
+                _shader_clock(shader_clock,
+                              &glsl_type_builtin_uvec2),
+                NULL);
+
    add_function("clockARB",
                 _shader_clock(shader_clock_int64,
                               &glsl_type_builtin_uint64_t),
                 NULL);
 
+   add_function("clockRealtime2x32EXT",
+                _shader_clock_realtime(shader_clock_realtime,
+                                       &glsl_type_builtin_uvec2),
+                NULL);
+
+   add_function("clockRealtimeEXT",
+                  _shader_clock_realtime(shader_clock_realtime_int64,
+                                         &glsl_type_builtin_uint64_t),
+                  NULL);
    add_function("beginInvocationInterlockARB",
                 _invocation_interlock(
                    "__intrinsic_begin_invocation_interlock",
@@ -5985,6 +6041,9 @@ builtin_builder::create_builtins()
    add_function("subgroupQuadSwapDiagonal",
                 FIUBD(_quad_swap, "__intrinsic_quad_swap_diagonal"), NULL);
 
+   add_function("EmitMeshTasksEXT", _emit_mesh_tasks(), NULL);
+   add_function("SetMeshOutputsEXT", _set_mesh_outputs(), NULL);
+
 #undef F
 #undef FI
 #undef FIUDHF_VEC
@@ -5997,7 +6056,7 @@ builtin_builder::add_function(const char *name, ...)
 {
    va_list ap;
 
-   ir_function *f = new(mem_ctx) ir_function(name);
+   ir_function *f = new(linalloc) ir_function(name);
 
    va_start(ap, name);
    while (true) {
@@ -6006,7 +6065,7 @@ builtin_builder::add_function(const char *name, ...)
          break;
 
       if (false) {
-         exec_list stuff;
+         ir_exec_list stuff;
          stuff.push_tail(sig);
          validate_ir_tree(&stuff);
       }
@@ -6015,7 +6074,7 @@ builtin_builder::add_function(const char *name, ...)
    }
    va_end(ap);
 
-   shader->symbols->add_function(f);
+   symbols->add_function(f);
 }
 
 void
@@ -6062,7 +6121,7 @@ builtin_builder::add_image_function(const char *name,
       &glsl_type_builtin_uimage2DMSArray
    };
 
-   ir_function *f = new(mem_ctx) ir_function(name);
+   ir_function *f = new(linalloc) ir_function(name);
 
    for (unsigned i = 0; i < ARRAY_SIZE(types); ++i) {
       if (types[i]->sampled_type == GLSL_TYPE_FLOAT && !(flags & IMAGE_FUNCTION_SUPPORTS_FLOAT_DATA_TYPE))
@@ -6086,7 +6145,7 @@ builtin_builder::add_image_function(const char *name,
       f->add_signature(_image(prototype, types[i], intrinsic_name,
                               num_arguments, flags, intrinsic_id));
    }
-   shader->symbols->add_function(f);
+   symbols->add_function(f);
 }
 
 void
@@ -6211,7 +6270,7 @@ builtin_builder::add_image_functions(bool glsl)
 ir_variable *
 builtin_builder::in_var(const glsl_type *type, const char *name)
 {
-   return new(mem_ctx) ir_variable(type, name, ir_var_function_in);
+   return new(linalloc) ir_variable(type, name, ir_var_function_in);
 }
 
 ir_variable *
@@ -6233,7 +6292,7 @@ builtin_builder::in_mediump_var(const glsl_type *type, const char *name)
 ir_variable *
 builtin_builder::out_var(const glsl_type *type, const char *name)
 {
-   return new(mem_ctx) ir_variable(type, name, ir_var_function_out);
+   return new(linalloc) ir_variable(type, name, ir_var_function_out);
 }
 
 ir_variable *
@@ -6263,43 +6322,43 @@ builtin_builder::as_highp(ir_factory &body, ir_variable *var)
 ir_constant *
 builtin_builder::imm(float16_t f16, unsigned vector_elements)
 {
-   return new(mem_ctx) ir_constant(f16, vector_elements);
+   return new(linalloc) ir_constant(f16, vector_elements);
 }
 
 ir_constant *
 builtin_builder::imm(bool b, unsigned vector_elements)
 {
-   return new(mem_ctx) ir_constant(b, vector_elements);
+   return new(linalloc) ir_constant(b, vector_elements);
 }
 
 ir_constant *
 builtin_builder::imm(float f, unsigned vector_elements)
 {
-   return new(mem_ctx) ir_constant(f, vector_elements);
+   return new(linalloc) ir_constant(f, vector_elements);
 }
 
 ir_constant *
 builtin_builder::imm(int i, unsigned vector_elements)
 {
-   return new(mem_ctx) ir_constant(i, vector_elements);
+   return new(linalloc) ir_constant(i, vector_elements);
 }
 
 ir_constant *
 builtin_builder::imm(unsigned u, unsigned vector_elements)
 {
-   return new(mem_ctx) ir_constant(u, vector_elements);
+   return new(linalloc) ir_constant(u, vector_elements);
 }
 
 ir_constant *
 builtin_builder::imm(double d, unsigned vector_elements)
 {
-   return new(mem_ctx) ir_constant(d, vector_elements);
+   return new(linalloc) ir_constant(d, vector_elements);
 }
 
 ir_constant *
 builtin_builder::imm(const glsl_type *type, const ir_constant_data &data)
 {
-   return new(mem_ctx) ir_constant(type, &data);
+   return new(linalloc) ir_constant(type, &data);
 }
 
 #define IMM_FP(type, val) (glsl_type_is_double(type)) ? imm(val) : \
@@ -6308,13 +6367,13 @@ builtin_builder::imm(const glsl_type *type, const ir_constant_data &data)
 ir_dereference_variable *
 builtin_builder::var_ref(ir_variable *var)
 {
-   return new(mem_ctx) ir_dereference_variable(var);
+   return new(linalloc) ir_dereference_variable(var);
 }
 
 ir_dereference_array *
 builtin_builder::array_ref(ir_variable *var, int idx)
 {
-   return new(mem_ctx) ir_dereference_array(var, imm(idx));
+   return new(linalloc) ir_dereference_array(var, imm(idx));
 }
 
 /** Return an element of a matrix */
@@ -6327,7 +6386,7 @@ builtin_builder::matrix_elt(ir_variable *var, int column, int row)
 ir_dereference_record *
 builtin_builder::record_ref(ir_variable *var, const char *field)
 {
-   return new(mem_ctx) ir_dereference_record(var, field);
+   return new(linalloc) ir_dereference_record(var, field);
 }
 
 /**
@@ -6343,9 +6402,9 @@ builtin_builder::new_sig(const glsl_type *return_type,
    va_list ap;
 
    ir_function_signature *sig =
-      new(mem_ctx) ir_function_signature(return_type, avail);
+      new(linalloc) ir_function_signature(return_type, avail);
 
-   exec_list plist;
+   ir_exec_list plist;
    va_start(ap, num_params);
    for (int i = 0; i < num_params; i++) {
       plist.push_tail(va_arg(ap, ir_variable *));
@@ -6359,7 +6418,7 @@ builtin_builder::new_sig(const glsl_type *return_type,
 #define MAKE_SIG(return_type, avail, ...)  \
    ir_function_signature *sig =               \
       new_sig(return_type, avail, __VA_ARGS__);      \
-   ir_factory body(&sig->body, mem_ctx);             \
+   ir_factory body(&sig->body, linalloc);             \
    sig->is_defined = true;
 
 #define MAKE_INTRINSIC(return_type, id, avail, ...)  \
@@ -6482,11 +6541,11 @@ builtin_builder::asin_expr(ir_variable *x, float p0, float p1)
  * \c ir_call.
  */
 ir_call *
-builtin_builder::call(ir_function *f, ir_variable *ret, exec_list params)
+builtin_builder::call(ir_function *f, ir_variable *ret, ir_exec_list params)
 {
-   exec_list actual_params;
+   ir_exec_list actual_params;
 
-   foreach_in_list_safe(ir_instruction, ir, &params) {
+   ir_foreach_in_list_safe(ir_instruction, ir, &params) {
       ir_dereference_variable *d = ir->as_dereference_variable();
       if (d != NULL) {
          d->remove();
@@ -6506,7 +6565,7 @@ builtin_builder::call(ir_function *f, ir_variable *ret, exec_list params)
    ir_dereference_variable *deref =
       (glsl_type_is_void(sig->return_type) ? NULL : var_ref(ret));
 
-   return new(mem_ctx) ir_call(sig, deref, &actual_params);
+   return new(linalloc) ir_call(sig, deref, &actual_params);
 }
 
 ir_function_signature *
@@ -6833,7 +6892,7 @@ builtin_builder::_isinf(builtin_available_predicate avail, const glsl_type *type
          infinities.d[i] = INFINITY;
          break;
       default:
-         unreachable("unknown type");
+         UNREACHABLE("unknown type");
       }
    }
 
@@ -7028,8 +7087,8 @@ builtin_builder::_packFloat2x16(builtin_available_predicate avail)
    ir_variable *v = in_var(&glsl_type_builtin_f16vec2, "v");
    MAKE_SIG(&glsl_type_builtin_uint, avail, 1, v);
 
-   ir_rvalue *value = new(mem_ctx)ir_dereference_variable(v);
-   body.emit(ret(expr(ir_unop_pack_half_2x16, new(mem_ctx) ir_expression(ir_unop_f162f, &glsl_type_builtin_vec2, value, NULL))));
+   ir_rvalue *value = new(linalloc)ir_dereference_variable(v);
+   body.emit(ret(expr(ir_unop_pack_half_2x16, new(linalloc) ir_expression(ir_unop_f162f, &glsl_type_builtin_vec2, value, NULL))));
    return sig;
 }
 
@@ -7228,7 +7287,7 @@ builtin_builder::_refract(builtin_available_predicate avail, const glsl_type *ty
                            mul(eta, mul(eta, sub(IMM_FP(type, 1.0),
                                                  mul(n_dot_i, n_dot_i)))))));
    body.emit(if_tree(less(k, IMM_FP(type, 0.0)),
-                     ret(ir_constant::zero(mem_ctx, type)),
+                     ret(ir_constant::zero(linalloc, type)),
                      ret(sub(mul(eta, I),
                              mul(add(mul(eta, n_dot_i), sqrt(k)), N)))));
 
@@ -7741,8 +7800,8 @@ builtin_builder::_textureSize(builtin_available_predicate avail,
    MAKE_SIG(return_type, avail, 1, s);
    sig->return_precision = GLSL_PRECISION_HIGH;
 
-   ir_texture *tex = new(mem_ctx) ir_texture(ir_txs);
-   tex->set_sampler(new(mem_ctx) ir_dereference_variable(s), return_type);
+   ir_texture *tex = new(linalloc) ir_texture(ir_txs);
+   tex->set_sampler(new(linalloc) ir_dereference_variable(s), return_type);
 
    if (has_lod(sampler_type)) {
       ir_variable *lod = in_var(&glsl_type_builtin_int, "lod");
@@ -7764,8 +7823,8 @@ builtin_builder::_textureSamples(builtin_available_predicate avail,
    ir_variable *s = in_var(sampler_type, "sampler");
    MAKE_SIG(&glsl_type_builtin_int, avail, 1, s);
 
-   ir_texture *tex = new(mem_ctx) ir_texture(ir_texture_samples);
-   tex->set_sampler(new(mem_ctx) ir_dereference_variable(s), &glsl_type_builtin_int);
+   ir_texture *tex = new(linalloc) ir_texture(ir_texture_samples);
+   tex->set_sampler(new(linalloc) ir_dereference_variable(s), &glsl_type_builtin_int);
    body.emit(ret(tex));
 
    return sig;
@@ -7779,7 +7838,7 @@ builtin_builder::_is_sparse_texels_resident(void)
 
    ir_variable *retval = body.make_temp(&glsl_type_builtin_bool, "retval");
    ir_function *f =
-      shader->symbols->get_function("__intrinsic_is_sparse_texels_resident");
+      symbols->get_function("__intrinsic_is_sparse_texels_resident");
 
    body.emit(call(f, retval, sig->parameters));
    body.emit(ret(retval));
@@ -7810,7 +7869,7 @@ builtin_builder::_texture(ir_texture_opcode opcode,
    /* The sampler and coordinate always exist; add optional parameters later. */
    MAKE_SIG(type, avail, 2, s, P);
 
-   ir_texture *tex = new(mem_ctx) ir_texture(opcode, flags & TEX_SPARSE);
+   ir_texture *tex = new(linalloc) ir_texture(opcode, flags & TEX_SPARSE);
    tex->set_sampler(var_ref(s), return_type);
 
    const int coord_size = glsl_get_sampler_coordinate_components(sampler_type);
@@ -7861,7 +7920,7 @@ builtin_builder::_texture(ir_texture_opcode opcode,
    if (flags & (TEX_OFFSET | TEX_OFFSET_NONCONST)) {
       int offset_size = coord_size - (sampler_type->sampler_array ? 1 : 0);
       ir_variable *offset =
-         new(mem_ctx) ir_variable(glsl_ivec_type(offset_size), "offset",
+         new(linalloc) ir_variable(glsl_ivec_type(offset_size), "offset",
                                   (flags & TEX_OFFSET) ? ir_var_const_in : ir_var_function_in);
       sig->parameters.push_tail(offset);
       tex->offset = var_ref(offset);
@@ -7869,7 +7928,7 @@ builtin_builder::_texture(ir_texture_opcode opcode,
 
    if (flags & TEX_OFFSET_ARRAY) {
       ir_variable *offsets =
-         new(mem_ctx) ir_variable(glsl_array_type(&glsl_type_builtin_ivec2, 4, 0),
+         new(linalloc) ir_variable(glsl_array_type(&glsl_type_builtin_ivec2, 4, 0),
                                   "offsets", ir_var_const_in);
       sig->parameters.push_tail(offsets);
       tex->offset = var_ref(offsets);
@@ -7890,7 +7949,7 @@ builtin_builder::_texture(ir_texture_opcode opcode,
    if (opcode == ir_tg4) {
       if (flags & TEX_COMPONENT) {
          ir_variable *component =
-            new(mem_ctx) ir_variable(&glsl_type_builtin_int, "comp", ir_var_const_in);
+            new(linalloc) ir_variable(&glsl_type_builtin_int, "comp", ir_var_const_in);
          sig->parameters.push_tail(component);
          tex->lod_info.component = var_ref(component);
       }
@@ -7935,7 +7994,7 @@ builtin_builder::_textureCubeArrayShadow(ir_texture_opcode opcode,
    const glsl_type *type = sparse ? &glsl_type_builtin_int : return_type;
    MAKE_SIG(type, avail, 3, s, P, compare);
 
-   ir_texture *tex = new(mem_ctx) ir_texture(opcode, sparse);
+   ir_texture *tex = new(linalloc) ir_texture(opcode, sparse);
    tex->set_sampler(var_ref(s), return_type);
 
    tex->coordinate = var_ref(P);
@@ -7991,7 +8050,7 @@ builtin_builder::_texelFetch(builtin_available_predicate avail,
    /* The sampler and coordinate always exist; add optional parameters later. */
    MAKE_SIG(type, avail, 2, s, P);
 
-   ir_texture *tex = new(mem_ctx) ir_texture(ir_txf, sparse);
+   ir_texture *tex = new(linalloc) ir_texture(ir_txf, sparse);
    tex->coordinate = var_ref(P);
    tex->set_sampler(var_ref(s), return_type);
 
@@ -8010,7 +8069,7 @@ builtin_builder::_texelFetch(builtin_available_predicate avail,
 
    if (offset_type != NULL) {
       ir_variable *offset =
-         new(mem_ctx) ir_variable(offset_type, "offset", ir_var_const_in);
+         new(linalloc) ir_variable(offset_type, "offset", ir_var_const_in);
       sig->parameters.push_tail(offset);
       tex->offset = var_ref(offset);
    }
@@ -8034,8 +8093,8 @@ builtin_builder::_EmitVertex()
 {
    MAKE_SIG(&glsl_type_builtin_void, gs_only, 0);
 
-   ir_rvalue *stream = new(mem_ctx) ir_constant(0, 1);
-   body.emit(new(mem_ctx) ir_emit_vertex(stream));
+   ir_rvalue *stream = new(linalloc) ir_constant(0, 1);
+   body.emit(new(linalloc) ir_emit_vertex(stream));
 
    return sig;
 }
@@ -8051,11 +8110,11 @@ builtin_builder::_EmitStreamVertex(builtin_available_predicate avail,
     *     integral expression."
     */
    ir_variable *stream =
-      new(mem_ctx) ir_variable(stream_type, "stream", ir_var_const_in);
+      new(linalloc) ir_variable(stream_type, "stream", ir_var_const_in);
 
    MAKE_SIG(&glsl_type_builtin_void, avail, 1, stream);
 
-   body.emit(new(mem_ctx) ir_emit_vertex(var_ref(stream)));
+   body.emit(new(linalloc) ir_emit_vertex(var_ref(stream)));
 
    return sig;
 }
@@ -8065,8 +8124,8 @@ builtin_builder::_EndPrimitive()
 {
    MAKE_SIG(&glsl_type_builtin_void, gs_only, 0);
 
-   ir_rvalue *stream = new(mem_ctx) ir_constant(0, 1);
-   body.emit(new(mem_ctx) ir_end_primitive(stream));
+   ir_rvalue *stream = new(linalloc) ir_constant(0, 1);
+   body.emit(new(linalloc) ir_end_primitive(stream));
 
    return sig;
 }
@@ -8082,11 +8141,11 @@ builtin_builder::_EndStreamPrimitive(builtin_available_predicate avail,
     *     expression."
     */
    ir_variable *stream =
-      new(mem_ctx) ir_variable(stream_type, "stream", ir_var_const_in);
+      new(linalloc) ir_variable(stream_type, "stream", ir_var_const_in);
 
    MAKE_SIG(&glsl_type_builtin_void, avail, 1, stream);
 
-   body.emit(new(mem_ctx) ir_end_primitive(var_ref(stream)));
+   body.emit(new(linalloc) ir_end_primitive(var_ref(stream)));
 
    return sig;
 }
@@ -8096,7 +8155,7 @@ builtin_builder::_barrier()
 {
    MAKE_SIG(&glsl_type_builtin_void, barrier_supported, 0);
 
-   body.emit(new(mem_ctx) ir_barrier());
+   body.emit(new(linalloc) ir_barrier());
    return sig;
 }
 
@@ -8110,7 +8169,7 @@ builtin_builder::_textureQueryLod(builtin_available_predicate avail,
    /* The sampler and coordinate always exist; add optional parameters later. */
    MAKE_SIG(&glsl_type_builtin_vec2, avail, 2, s, coord);
 
-   ir_texture *tex = new(mem_ctx) ir_texture(ir_lod);
+   ir_texture *tex = new(linalloc) ir_texture(ir_lod);
    tex->coordinate = var_ref(coord);
    tex->set_sampler(var_ref(s), &glsl_type_builtin_vec2);
 
@@ -8127,7 +8186,7 @@ builtin_builder::_textureQueryLevels(builtin_available_predicate avail,
    const glsl_type *return_type = &glsl_type_builtin_int;
    MAKE_SIG(return_type, avail, 1, s);
 
-   ir_texture *tex = new(mem_ctx) ir_texture(ir_query_levels);
+   ir_texture *tex = new(linalloc) ir_texture(ir_query_levels);
    tex->set_sampler(var_ref(s), return_type);
 
    body.emit(ret(tex));
@@ -8145,7 +8204,7 @@ builtin_builder::_textureSamplesIdentical(builtin_available_predicate avail,
    const glsl_type *return_type = &glsl_type_builtin_bool;
    MAKE_SIG(return_type, avail, 2, s, P);
 
-   ir_texture *tex = new(mem_ctx) ir_texture(ir_samples_identical);
+   ir_texture *tex = new(linalloc) ir_texture(ir_samples_identical);
    tex->coordinate = var_ref(P);
    tex->set_sampler(var_ref(s), return_type);
 
@@ -8497,9 +8556,9 @@ builtin_builder::_mulExtended(const glsl_type *type)
 
    ir_variable *unpack_val = body.make_temp(unpack_type, "_unpack_val");
 
-   ir_expression *mul_res = new(mem_ctx) ir_expression(ir_binop_mul, mul_type,
-                                                       new(mem_ctx)ir_dereference_variable(x),
-                                                       new(mem_ctx)ir_dereference_variable(y));
+   ir_expression *mul_res = new(linalloc) ir_expression(ir_binop_mul, mul_type,
+                                                       new(linalloc)ir_dereference_variable(x),
+                                                       new(linalloc)ir_dereference_variable(y));
 
    if (type->vector_elements == 1) {
       body.emit(assign(unpack_val, expr(unpack_op, mul_res)));
@@ -8630,7 +8689,7 @@ builtin_builder::_atomic_counter_op(const char *intrinsic,
    MAKE_SIG(&glsl_type_builtin_uint, avail, 1, counter);
 
    ir_variable *retval = body.make_temp(&glsl_type_builtin_uint, "atomic_retval");
-   body.emit(call(shader->symbols->get_function(intrinsic), retval,
+   body.emit(call(symbols->get_function(intrinsic), retval,
                   sig->parameters));
    body.emit(ret(retval));
    return sig;
@@ -8655,13 +8714,13 @@ builtin_builder::_atomic_counter_op1(const char *intrinsic,
 
       body.emit(assign(neg_data, neg(data)));
 
-      exec_list parameters;
+      ir_exec_list parameters;
 
-      parameters.push_tail(new(mem_ctx) ir_dereference_variable(counter));
-      parameters.push_tail(new(mem_ctx) ir_dereference_variable(neg_data));
+      parameters.push_tail(new(linalloc) ir_dereference_variable(counter));
+      parameters.push_tail(new(linalloc) ir_dereference_variable(neg_data));
 
       ir_function *const func =
-         shader->symbols->get_function("__intrinsic_atomic_add");
+         symbols->get_function("__intrinsic_atomic_add");
       ir_instruction *const c = call(func, retval, parameters);
 
       assert(c != NULL);
@@ -8669,7 +8728,7 @@ builtin_builder::_atomic_counter_op1(const char *intrinsic,
 
       body.emit(c);
    } else {
-      body.emit(call(shader->symbols->get_function(intrinsic), retval,
+      body.emit(call(symbols->get_function(intrinsic), retval,
                      sig->parameters));
    }
 
@@ -8687,7 +8746,7 @@ builtin_builder::_atomic_counter_op2(const char *intrinsic,
    MAKE_SIG(&glsl_type_builtin_uint, avail, 3, counter, compare, data);
 
    ir_variable *retval = body.make_temp(&glsl_type_builtin_uint, "atomic_retval");
-   body.emit(call(shader->symbols->get_function(intrinsic), retval,
+   body.emit(call(symbols->get_function(intrinsic), retval,
                   sig->parameters));
    body.emit(ret(retval));
    return sig;
@@ -8705,7 +8764,7 @@ builtin_builder::_atomic_op2(const char *intrinsic,
    atomic->data.implicit_conversion_prohibited = true;
 
    ir_variable *retval = body.make_temp(type, "atomic_retval");
-   body.emit(call(shader->symbols->get_function(intrinsic), retval,
+   body.emit(call(symbols->get_function(intrinsic), retval,
                   sig->parameters));
    body.emit(ret(retval));
    return sig;
@@ -8724,7 +8783,7 @@ builtin_builder::_atomic_op3(const char *intrinsic,
    atomic->data.implicit_conversion_prohibited = true;
 
    ir_variable *retval = body.make_temp(type, "atomic_retval");
-   body.emit(call(shader->symbols->get_function(intrinsic), retval,
+   body.emit(call(symbols->get_function(intrinsic), retval,
                   sig->parameters));
    body.emit(ret(retval));
    return sig;
@@ -8941,8 +9000,8 @@ builtin_builder::_image(image_prototype_ctr prototype,
                                                    num_arguments, flags);
 
    if (flags & IMAGE_FUNCTION_EMIT_STUB) {
-      ir_factory body(&sig->body, mem_ctx);
-      ir_function *f = shader->symbols->get_function(intrinsic_name);
+      ir_factory body(&sig->body, linalloc);
+      ir_function *f = symbols->get_function(intrinsic_name);
 
       if (flags & IMAGE_FUNCTION_RETURNS_VOID) {
          body.emit(call(f, NULL, sig->parameters));
@@ -8999,7 +9058,7 @@ builtin_builder::_memory_barrier(const char *intrinsic_name,
                                  builtin_available_predicate avail)
 {
    MAKE_SIG(&glsl_type_builtin_void, avail, 0);
-   body.emit(call(shader->symbols->get_function(intrinsic_name),
+   body.emit(call(symbols->get_function(intrinsic_name),
                   NULL, sig->parameters));
    return sig;
 }
@@ -9020,8 +9079,14 @@ builtin_builder::_ballot(const glsl_type *type, builtin_available_predicate avai
    MAKE_SIG(type, avail, 1, value);
    ir_variable *retval = body.make_temp(type, "retval");
 
-   body.emit(call(shader->symbols->get_function("__intrinsic_ballot"),
-                  retval, sig->parameters));
+   if (type == &glsl_type_builtin_uint64_t) {
+      body.emit(call(symbols->get_function("__intrinsic_ballot_uint64"),
+                     retval, sig->parameters));
+   } else {
+      assert(type == &glsl_type_builtin_uvec4);
+      body.emit(call(symbols->get_function("__intrinsic_ballot_uvec4"),
+                     retval, sig->parameters));
+   }
    body.emit(ret(retval));
    return sig;
 }
@@ -9042,7 +9107,7 @@ builtin_builder::_inverse_ballot()
    MAKE_SIG(&glsl_type_builtin_bool, ballot_khr, 1, value);
    ir_variable *retval = body.make_temp(&glsl_type_builtin_bool, "retval");
 
-   body.emit(call(shader->symbols->get_function("__intrinsic_inverse_ballot"),
+   body.emit(call(symbols->get_function("__intrinsic_inverse_ballot"),
                   retval, sig->parameters));
    body.emit(ret(retval));
    return sig;
@@ -9068,7 +9133,7 @@ builtin_builder::_ballot_bit_extract()
    MAKE_SIG(&glsl_type_builtin_bool, ballot_khr, 2, value, index);
    ir_variable *retval = body.make_temp(&glsl_type_builtin_bool, "retval");
 
-   body.emit(call(shader->symbols->get_function("__intrinsic_ballot_bit_extract"),
+   body.emit(call(symbols->get_function("__intrinsic_ballot_bit_extract"),
                   retval, sig->parameters));
    body.emit(ret(retval));
    return sig;
@@ -9090,7 +9155,7 @@ builtin_builder::_ballot_bit(const char *intrinsic_name)
    MAKE_SIG(&glsl_type_builtin_uint, ballot_khr, 1, value);
    ir_variable *retval = body.make_temp(&glsl_type_builtin_uint, "retval");
 
-   body.emit(call(shader->symbols->get_function(intrinsic_name), retval, sig->parameters));
+   body.emit(call(symbols->get_function(intrinsic_name), retval, sig->parameters));
    body.emit(ret(retval));
    return sig;
 }
@@ -9113,7 +9178,7 @@ builtin_builder::_read_first_invocation(const glsl_type *type, builtin_available
    MAKE_SIG(type, avail, 1, value);
    ir_variable *retval = body.make_temp(type, "retval");
 
-   body.emit(call(shader->symbols->get_function("__intrinsic_read_first_invocation"),
+   body.emit(call(symbols->get_function("__intrinsic_read_first_invocation"),
                   retval, sig->parameters));
    body.emit(ret(retval));
    return sig;
@@ -9139,7 +9204,7 @@ builtin_builder::_read_invocation(const glsl_type *type, builtin_available_predi
    MAKE_SIG(type, avail, 2, value, invocation);
    ir_variable *retval = body.make_temp(type, "retval");
 
-   body.emit(call(shader->symbols->get_function("__intrinsic_read_invocation"),
+   body.emit(call(symbols->get_function("__intrinsic_read_invocation"),
                   retval, sig->parameters));
    body.emit(ret(retval));
    return sig;
@@ -9158,7 +9223,7 @@ builtin_builder::_invocation_interlock(const char *intrinsic_name,
                                        builtin_available_predicate avail)
 {
    MAKE_SIG(&glsl_type_builtin_void, avail, 0);
-   body.emit(call(shader->symbols->get_function(intrinsic_name),
+   body.emit(call(symbols->get_function(intrinsic_name),
                   NULL, sig->parameters));
    return sig;
 }
@@ -9179,7 +9244,35 @@ builtin_builder::_shader_clock(builtin_available_predicate avail,
 
    ir_variable *retval = body.make_temp(&glsl_type_builtin_uvec2, "clock_retval");
 
-   body.emit(call(shader->symbols->get_function("__intrinsic_shader_clock"),
+   body.emit(call(symbols->get_function("__intrinsic_shader_clock"),
+                  retval, sig->parameters));
+
+   if (type == &glsl_type_builtin_uint64_t) {
+      body.emit(ret(expr(ir_unop_pack_uint_2x32, retval)));
+   } else {
+      body.emit(ret(retval));
+   }
+
+   return sig;
+}
+
+ir_function_signature *
+builtin_builder::_shader_clock_realtime_intrinsic(builtin_available_predicate avail,
+                                                  const glsl_type *type)
+{
+   MAKE_INTRINSIC(type, ir_intrinsic_shader_clock_realtime, avail, 0);
+   return sig;
+}
+
+ir_function_signature *
+builtin_builder::_shader_clock_realtime(builtin_available_predicate avail,
+                                        const glsl_type *type)
+{
+   MAKE_SIG(type, avail, 0);
+
+   ir_variable *retval = body.make_temp(&glsl_type_builtin_uvec2, "clock_retval");
+
+   body.emit(call(symbols->get_function("__intrinsic_shader_clock_realtime"),
                   retval, sig->parameters));
 
    if (type == &glsl_type_builtin_uint64_t) {
@@ -9212,7 +9305,7 @@ builtin_builder::_vote(const glsl_type *type,
 
    ir_variable *retval = body.make_temp(&glsl_type_builtin_bool, "retval");
 
-   body.emit(call(shader->symbols->get_function(intrinsic_name),
+   body.emit(call(symbols->get_function(intrinsic_name),
                   retval, sig->parameters));
    body.emit(ret(retval));
    return sig;
@@ -9233,7 +9326,7 @@ builtin_builder::_helper_invocation()
 
    ir_variable *retval = body.make_temp(&glsl_type_builtin_bool, "retval");
 
-   body.emit(call(shader->symbols->get_function("__intrinsic_helper_invocation"),
+   body.emit(call(symbols->get_function("__intrinsic_helper_invocation"),
                   retval, sig->parameters));
    body.emit(ret(retval));
 
@@ -9253,7 +9346,7 @@ builtin_builder::_subgroup_barrier(const char *intrinsic_name,
                                    builtin_available_predicate avail)
 {
    MAKE_SIG(&glsl_type_builtin_void, avail, 0);
-   body.emit(call(shader->symbols->get_function(intrinsic_name), NULL, sig->parameters));
+   body.emit(call(symbols->get_function(intrinsic_name), NULL, sig->parameters));
    return sig;
 }
 
@@ -9271,7 +9364,7 @@ builtin_builder::_elect()
 
    ir_variable *retval = body.make_temp(&glsl_type_builtin_bool, "retval");
 
-   body.emit(call(shader->symbols->get_function("__intrinsic_elect"), retval, sig->parameters));
+   body.emit(call(symbols->get_function("__intrinsic_elect"), retval, sig->parameters));
    body.emit(ret(retval));
 
    return sig;
@@ -9299,7 +9392,7 @@ builtin_builder::_shuffle(const glsl_type *type)
 
    ir_variable *retval = body.make_temp(type, "retval");
 
-   body.emit(call(shader->symbols->get_function("__intrinsic_shuffle"), retval, sig->parameters));
+   body.emit(call(symbols->get_function("__intrinsic_shuffle"), retval, sig->parameters));
    body.emit(ret(retval));
    return sig;
 }
@@ -9326,7 +9419,7 @@ builtin_builder::_shuffle_xor(const glsl_type *type)
 
    ir_variable *retval = body.make_temp(type, "retval");
 
-   body.emit(call(shader->symbols->get_function("__intrinsic_shuffle_xor"),
+   body.emit(call(symbols->get_function("__intrinsic_shuffle_xor"),
                   retval, sig->parameters));
    body.emit(ret(retval));
    return sig;
@@ -9353,7 +9446,7 @@ builtin_builder::_shuffle_up(const glsl_type *type)
             2, value, delta);
    ir_variable *retval = body.make_temp(type, "retval");
 
-   body.emit(call(shader->symbols->get_function("__intrinsic_shuffle_up"),
+   body.emit(call(symbols->get_function("__intrinsic_shuffle_up"),
                   retval, sig->parameters));
    body.emit(ret(retval));
    return sig;
@@ -9380,7 +9473,7 @@ builtin_builder::_shuffle_down(const glsl_type *type)
             2, value, delta);
    ir_variable *retval = body.make_temp(type, "retval");
 
-   body.emit(call(shader->symbols->get_function("__intrinsic_shuffle_down"),
+   body.emit(call(symbols->get_function("__intrinsic_shuffle_down"),
                   retval, sig->parameters));
    body.emit(ret(retval));
    return sig;
@@ -9404,7 +9497,7 @@ builtin_builder::_subgroup_arithmetic(const glsl_type *type, const char *intrins
             1, value);
 
    ir_variable *retval = body.make_temp(type, "retval");
-   body.emit(call(shader->symbols->get_function(intrinsic_name), retval, sig->parameters));
+   body.emit(call(symbols->get_function(intrinsic_name), retval, sig->parameters));
    body.emit(ret(retval));
    return sig;
 }
@@ -9414,7 +9507,7 @@ builtin_builder::_subgroup_clustered_intrinsic(const glsl_type *type, enum ir_in
 {
    ir_variable *value = in_var(type, "value");
    ir_variable *size =
-      new(mem_ctx) ir_variable(&glsl_type_builtin_uint, "clusterSize", ir_var_const_in);
+      new(linalloc) ir_variable(&glsl_type_builtin_uint, "clusterSize", ir_var_const_in);
 
    MAKE_INTRINSIC(type, id,
                   glsl_type_is_double(type) ? subgroup_clustered_and_fp64 : subgroup_clustered,
@@ -9427,13 +9520,13 @@ builtin_builder::_subgroup_clustered(const glsl_type *type, const char *intrinsi
 {
    ir_variable *value = in_var(type, "value");
    ir_variable *size =
-      new(mem_ctx) ir_variable(&glsl_type_builtin_uint, "clusterSize", ir_var_const_in);
+      new(linalloc) ir_variable(&glsl_type_builtin_uint, "clusterSize", ir_var_const_in);
 
    MAKE_SIG(type, glsl_type_is_double(type) ? subgroup_clustered_and_fp64 : subgroup_clustered,
             2, value, size);
 
    ir_variable *retval = body.make_temp(type, "retval");
-   body.emit(call(shader->symbols->get_function(intrinsic_name), retval, sig->parameters));
+   body.emit(call(symbols->get_function(intrinsic_name), retval, sig->parameters));
    body.emit(ret(retval));
    return sig;
 }
@@ -9459,7 +9552,7 @@ builtin_builder::_quad_broadcast(const glsl_type *type)
             2, value, id);
    ir_variable *retval = body.make_temp(type, "retval");
 
-   body.emit(call(shader->symbols->get_function("__intrinsic_quad_broadcast"),
+   body.emit(call(symbols->get_function("__intrinsic_quad_broadcast"),
                   retval, sig->parameters));
    body.emit(ret(retval));
    return sig;
@@ -9483,8 +9576,50 @@ builtin_builder::_quad_swap(const glsl_type *type, const char *intrinsic_name)
             1, value);
 
    ir_variable *retval = body.make_temp(type, "retval");
-   body.emit(call(shader->symbols->get_function(intrinsic_name), retval, sig->parameters));
+   body.emit(call(symbols->get_function(intrinsic_name), retval, sig->parameters));
    body.emit(ret(retval));
+   return sig;
+}
+
+ir_function_signature *builtin_builder::_emit_mesh_tasks_intrinsic()
+{
+   ir_variable *x = in_var(&glsl_type_builtin_uint, "num_group_x");
+   ir_variable *y = in_var(&glsl_type_builtin_uint, "num_group_y");
+   ir_variable *z = in_var(&glsl_type_builtin_uint, "num_group_z");
+   MAKE_INTRINSIC(&glsl_type_builtin_void, ir_intrinsic_emit_mesh_tasks,
+                  mesh_shader, 3, x, y, z);
+   return sig;
+}
+
+ir_function_signature *builtin_builder::_emit_mesh_tasks()
+{
+   ir_variable *x = in_var(&glsl_type_builtin_uint, "num_group_x");
+   ir_variable *y = in_var(&glsl_type_builtin_uint, "num_group_y");
+   ir_variable *z = in_var(&glsl_type_builtin_uint, "num_group_z");
+   MAKE_SIG(&glsl_type_builtin_void, mesh_shader, 3, x, y, z);
+
+   body.emit(call(symbols->get_function("__intrinsic_emit_mesh_tasks"),
+                  NULL, sig->parameters));
+   return sig;
+}
+
+ir_function_signature *builtin_builder::_set_mesh_outputs_intrinsic()
+{
+   ir_variable *vc = in_var(&glsl_type_builtin_uint, "vertex_count");
+   ir_variable *pc = in_var(&glsl_type_builtin_uint, "primitive_count");
+   MAKE_INTRINSIC(&glsl_type_builtin_void, ir_intrinsic_set_mesh_outputs,
+                  mesh_shader, 2, vc, pc);
+   return sig;
+}
+
+ir_function_signature *builtin_builder::_set_mesh_outputs()
+{
+   ir_variable *vc = in_var(&glsl_type_builtin_uint, "vertex_count");
+   ir_variable *pc = in_var(&glsl_type_builtin_uint, "primitive_count");
+   MAKE_SIG(&glsl_type_builtin_void, mesh_shader, 2, vc, pc);
+
+   body.emit(call(symbols->get_function("__intrinsic_set_mesh_outputs"),
+                  NULL, sig->parameters));
    return sig;
 }
 
@@ -9521,7 +9656,7 @@ _mesa_glsl_builtin_functions_decref()
 
 ir_function_signature *
 _mesa_glsl_find_builtin_function(_mesa_glsl_parse_state *state,
-                                 const char *name, exec_list *actual_parameters)
+                                 const char *name, ir_exec_list *actual_parameters)
 {
    ir_function_signature *s;
    simple_mtx_lock(&builtins_lock);
@@ -9537,9 +9672,9 @@ _mesa_glsl_has_builtin_function(_mesa_glsl_parse_state *state, const char *name)
    ir_function *f;
    bool ret = false;
    simple_mtx_lock(&builtins_lock);
-   f = builtins.shader->symbols->get_function(name);
+   f = builtins.symbols->get_function(name);
    if (f != NULL) {
-      foreach_in_list(ir_function_signature, sig, &f->signatures) {
+      ir_foreach_in_list(ir_function_signature, sig, &f->signatures) {
          if (sig->is_builtin_available(state)) {
             ret = true;
             break;
@@ -9551,10 +9686,10 @@ _mesa_glsl_has_builtin_function(_mesa_glsl_parse_state *state, const char *name)
    return ret;
 }
 
-gl_shader *
-_mesa_glsl_get_builtin_function_shader()
+struct glsl_symbol_table *
+_mesa_glsl_get_builtin_function_symbols()
 {
-   return builtins.shader;
+   return builtins.symbols;
 }
 
 
@@ -9562,11 +9697,11 @@ _mesa_glsl_get_builtin_function_shader()
  * Get the function signature for main from a shader
  */
 ir_function_signature *
-_mesa_get_main_function_signature(glsl_symbol_table *symbols)
+_mesa_get_main_function_signature(glsl_symbol_table *symbol_table)
 {
-   ir_function *const f = symbols->get_function("main");
+   ir_function *const f = symbol_table->get_function("main");
    if (f != NULL) {
-      exec_list void_parameters;
+      ir_exec_list void_parameters;
 
       /* Look for the 'void main()' signature and ensure that it's defined.
        * This keeps the linker from accidentally pick a shader that just

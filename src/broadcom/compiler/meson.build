@@ -6,6 +6,7 @@ libbroadcom_compiler_files = files(
   'vir.c',
   'vir_dump.c',
   'vir_live_variables.c',
+  'vir_opt_alu.c',
   'vir_opt_constant_alu.c',
   'vir_opt_copy_propagate.c',
   'vir_opt_dead_code.c',
@@ -17,6 +18,7 @@ libbroadcom_compiler_files = files(
   'qpu_validate.c',
   'v3d_tex.c',
   'v3d_compiler.h',
+  'v3d_nir_lower_blend.c',
   'v3d_nir_lower_io.c',
   'v3d_nir_lower_image_load_store.c',
   'v3d_nir_lower_line_smooth.c',
@@ -24,6 +26,7 @@ libbroadcom_compiler_files = files(
   'v3d_nir_lower_logic_ops.c',
   'v3d_nir_lower_scratch.c',
   'v3d_nir_lower_txf_ms.c',
+  'v3d_nir_lower_load_output.c',
   'v3d_packing.c',
 )
 

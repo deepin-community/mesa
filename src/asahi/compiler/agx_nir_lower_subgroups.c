@@ -25,19 +25,6 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    b->cursor = nir_before_instr(&intr->instr);
 
    switch (intr->intrinsic) {
-   case nir_intrinsic_vote_any: {
-      /* We don't have vote instructions, but we have efficient ballots */
-      nir_def *ballot = nir_ballot(b, 1, 32, intr->src[0].ssa);
-      nir_def_rewrite_uses(&intr->def, nir_ine_imm(b, ballot, 0));
-      return true;
-   }
-
-   case nir_intrinsic_vote_all: {
-      nir_def *ballot = nir_ballot(b, 1, 32, nir_inot(b, intr->src[0].ssa));
-      nir_def_rewrite_uses(&intr->def, nir_ieq_imm(b, ballot, 0));
-      return true;
-   }
-
    case nir_intrinsic_quad_vote_any: {
       nir_def *ballot = nir_quad_ballot_agx(b, 16, intr->src[0].ssa);
       nir_def_rewrite_uses(&intr->def, nir_ine_imm(b, ballot, 0));
@@ -151,7 +138,7 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       b->cursor = nir_after_instr(&intr->instr);
       intr->intrinsic = nir_intrinsic_exclusive_scan;
       nir_def *accum = nir_build_alu2(b, red_op, data, &intr->def);
-      nir_def_rewrite_uses_after(&intr->def, accum, accum->parent_instr);
+      nir_def_rewrite_uses_after(&intr->def, accum);
       return true;
    }
 
@@ -181,13 +168,9 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 }
 
 static bool
-lower_subgroup_filter(const nir_instr *instr, UNUSED const void *data)
+lower_subgroup_filter(const nir_intrinsic_instr *intr, UNUSED const void *data)
 {
-   if (instr->type != nir_instr_type_intrinsic)
-      return false;
-
    /* Use default behaviour for everything but scans */
-   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
    if (intr->intrinsic != nir_intrinsic_exclusive_scan &&
        intr->intrinsic != nir_intrinsic_inclusive_scan &&
        intr->intrinsic != nir_intrinsic_reduce)
@@ -205,7 +188,9 @@ lower_subgroup_filter(const nir_instr *instr, UNUSED const void *data)
 
    switch (nir_intrinsic_reduction_op(intr)) {
    case nir_op_imul:
-      /* no imul hardware scan, always lower it */
+   case nir_op_fmin:
+   case nir_op_fmax:
+      /* no hardware scan for this opcode, always lower it */
       return true;
 
    case nir_op_iadd:
@@ -236,6 +221,7 @@ agx_nir_lower_subgroups(nir_shader *s)
       .lower_rotate_to_shuffle = true,
       .lower_subgroup_masks = true,
       .lower_reduce = true,
+      .lower_vote = true,
       .ballot_components = 1,
       .ballot_bit_size = 32,
       .subgroup_size = 32,

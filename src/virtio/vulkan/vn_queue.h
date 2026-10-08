@@ -16,6 +16,12 @@
 struct vn_queue {
    struct vn_queue_base base;
 
+   /* emulated queue shares base queue id and ring_idx with another queue */
+   bool emulated;
+
+   /* whether this queue supports venus feedback */
+   bool can_feedback;
+
    /* only used if renderer supports multiple timelines */
    uint32_t ring_idx;
 
@@ -30,8 +36,34 @@ struct vn_queue {
 
    /* for vn_queue_submission storage */
    struct vn_cached_storage storage;
+
+   /* for async queue present */
+   struct {
+      /* Protects VkQueue host access except async present states. */
+      simple_mtx_t queue_mutex;
+      /* Protects state transitions: initialized, pending and join. */
+      mtx_t mutex;
+      /* Wake up async present thread upon presentation. */
+      cnd_t cond;
+      /* This is the async present thread. */
+      thrd_t thread;
+      /* Avoid extra locking on async present thread. */
+      pid_t tid;
+      /* Track whether the async present thread has been initialized. */
+      bool initialized;
+      /* Track whether the present is still pending acquired. */
+      bool pending;
+      /* Track whether to join the async present thread. */
+      bool join;
+      /* This is a deep copy of the requested presentation. */
+      VkPresentInfoKHR *info;
+      /* Track the result of the presentation. */
+      VkResult result;
+      /* This is used by vtest to properly wait before present. */
+      VkFence fence;
+   } async_present;
 };
-VK_DEFINE_HANDLE_CASTS(vn_queue, base.base.base, VkQueue, VK_OBJECT_TYPE_QUEUE)
+VK_DEFINE_HANDLE_CASTS(vn_queue, base.vk.base, VkQueue, VK_OBJECT_TYPE_QUEUE)
 
 enum vn_sync_type {
    /* no payload */
@@ -77,13 +109,21 @@ struct vn_fence {
       /* non-NULL if VN_PERF_NO_FENCE_FEEDBACK is disabled */
       struct vn_feedback_slot *slot;
       VkCommandBuffer *commands;
+
+      /* Indicate whether the fence status in the feedback slot is pollable.
+       * When pollable is false, the fence feedback has been suspended and the
+       * slot won't be signaled to VK_SUCCESS.
+       * - suspend: submit on queues not supporting feedback
+       * - resume: vn_ResetFences will reset pollable to true
+       */
+      bool pollable;
    } feedback;
 
    bool is_external;
    struct vn_sync_payload_external external_payload;
 };
 VK_DEFINE_NONDISP_HANDLE_CASTS(vn_fence,
-                               base.base,
+                               base.vk,
                                VkFence,
                                VK_OBJECT_TYPE_FENCE)
 
@@ -117,21 +157,44 @@ struct vn_semaphore {
       /* Lock for accessing free/pending sfb cmds */
       simple_mtx_t cmd_mtx;
 
-      /* Cached counter value to track if an async sem wait call is needed */
-      uint64_t signaled_counter;
+      /* Indicate whether the timeline semaphore counter value in the feedback
+       * slot is pollable. When pollable is false, the semaphore feedback has
+       * been suspended and the slot won't be signaled to the pending counter.
+       * - suspend: submit on queues not supporting feedback
+       * - resume if any of below occurs:
+       *   - vn_SignalSemaphore
+       *   - when the queried counter value is no smaller than the suspended
+       *     counter value
+       */
+      bool pollable;
+
+      /* When feedback is active, signaled_counter is the cached counter value
+       * to track if an async sem wait call is needed.
+       *
+       * When feedback is suspended, suspended_counter tracks the greatest
+       * signal counter value submitted on queues not supporting feedback.
+       *
+       * They share the same storage and the value is monotonic.
+       */
+      union {
+         uint64_t signaled_counter;
+         uint64_t suspended_counter;
+      };
 
       /* Lock for checking if an async sem wait call is needed based on
        * the current counter value and signaled_counter to ensure async
        * wait order across threads.
+       *
+       * Also lock to protect suspended_counter and pollable updates.
        */
-      simple_mtx_t async_wait_mtx;
+      simple_mtx_t counter_mtx;
    } feedback;
 
    bool is_external;
    struct vn_sync_payload_external external_payload;
 };
 VK_DEFINE_NONDISP_HANDLE_CASTS(vn_semaphore,
-                               base.base,
+                               base.vk,
                                VkSemaphore,
                                VK_OBJECT_TYPE_SEMAPHORE)
 
@@ -145,14 +208,8 @@ struct vn_event {
    struct vn_feedback_slot *feedback_slot;
 };
 VK_DEFINE_NONDISP_HANDLE_CASTS(vn_event,
-                               base.base,
+                               base.vk,
                                VkEvent,
                                VK_OBJECT_TYPE_EVENT)
-
-void
-vn_fence_signal_wsi(struct vn_device *dev, struct vn_fence *fence);
-
-void
-vn_semaphore_signal_wsi(struct vn_device *dev, struct vn_semaphore *sem);
 
 #endif /* VN_QUEUE_H */

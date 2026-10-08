@@ -22,24 +22,33 @@
  */
 
 #include "v3d_util.h"
+#include "v3d_limits.h"
 #include "util/macros.h"
+#include "util/u_math.h"
 
 /* Choose a number of workgroups per supergroup that maximizes
  * lane occupancy. We can pack up to 16 workgroups into a supergroup.
  */
 uint32_t
 v3d_csd_choose_workgroups_per_supergroup(struct v3d_device_info *devinfo,
-                                         bool has_subgroups,
+                                         bool can_use_supergroups,
                                          bool has_tsy_barrier,
                                          uint32_t threads,
                                          uint32_t num_wgs,
                                          uint32_t wg_size)
 {
-   /* FIXME: subgroups may restrict supergroup packing. For now, we disable it
-    * completely if the shader uses subgroups.
+   /* FIXME: Some subgroups may restrict supergroup packing. For now,
+    * if the shader has subgroups, we only allow the ones that support
+    * supergroup packing.
     */
-   if (has_subgroups)
+   if (!can_use_supergroups)
            return 1;
+
+   /* If the workgroup size is a multiple of 16 (elements per batch),
+    * the lane occupancy is already maximized.
+    */
+   if (wg_size % 16 == 0)
+      return 1;
 
    /* Compute maximum number of batches in a supergroup for this workgroup size.
     * Each batch is 16 elements, and we can have up to 16 work groups in a
@@ -56,11 +65,13 @@ v3d_csd_choose_workgroups_per_supergroup(struct v3d_device_info *devinfo,
     * available, so we can have at least 2 supergroups executing in parallel
     * and we don't stall all our QPU threads when a supergroup hits a barrier.
     */
+   uint32_t max_wgs_per_sg = 16;
+
    if (has_tsy_barrier) {
       uint32_t max_qpu_threads = devinfo->qpu_count * threads;
       max_batches_per_sg = MIN2(max_batches_per_sg, max_qpu_threads / 2);
+      max_wgs_per_sg = max_batches_per_sg * 16 / wg_size;
    }
-   uint32_t max_wgs_per_sg = max_batches_per_sg * 16 / wg_size;
 
    uint32_t best_wgs_per_sg = 1;
    uint32_t best_unused_lanes = 16;
@@ -154,8 +165,6 @@ v3d_choose_tile_size(const struct v3d_device_info *devinfo,
        * configuration item) or active in the subpass for which we are enabling
        * the bit (which we can't tell until later, when we record commands for
        * the subpass). If it is the latter, then we cannot use this feature.
-       *
-       * FIXME: pending handling double_buffer.
        */
       const uint32_t color_bpp = total_color_bpp * (msaa ? 4 : 1);
       const uint32_t depth_bpp = 4 * (msaa ? 4 : 1);
@@ -167,8 +176,8 @@ v3d_choose_tile_size(const struct v3d_device_info *devinfo,
          idx++;
       } while (idx < ARRAY_SIZE(tile_sizes) / 2);
 
-      /* FIXME: pending handling double_buffer */
-      assert(!double_buffer);
+      if (double_buffer)
+         idx += 1;
    } else {
       /* On V3D 4.x tile size is selected based on the number of RTs, the
        * maximum bpp across all of them and whether 4x MSAA is used.
@@ -213,7 +222,7 @@ v3d_translate_pipe_swizzle(enum pipe_swizzle swizzle)
    case PIPE_SWIZZLE_W:
       return 2 + swizzle;
    default:
-      unreachable("unknown swizzle");
+      UNREACHABLE("unknown swizzle");
    }
 }
 
@@ -240,7 +249,7 @@ v3d_hw_prim_type(enum mesa_prim prim_type)
       return 8 + (prim_type - MESA_PRIM_LINES_ADJACENCY);
 
    default:
-      unreachable("Unsupported primitive type");
+      UNREACHABLE("Unsupported primitive type");
    }
 }
 
@@ -255,8 +264,52 @@ v3d_internal_bpp_words(uint32_t internal_bpp)
         case 2 /* V3D_INTERNAL_BPP_128 */:
                 return 4;
         default:
-                unreachable("Unsupported internal BPP");
+                UNREACHABLE("Unsupported internal BPP");
         }
+}
+
+void
+v3d_tile_alloc_sizes(uint32_t layers,
+                     uint32_t tiles_x,
+                     uint32_t tiles_y,
+                     uint32_t draws,
+                     uint32_t page_size,
+                     uint32_t *tile_alloc_size,
+                     uint32_t *tile_state_size)
+{
+   assert(layers > 0);
+   /* The PTB will request the tile alloc initial size per tile at start
+    * of tile binning. The size must match the initial block size
+    * configured in the TILE_BINNING_MODE_CFG packet.
+    */
+   uint32_t tiles_size =
+      layers * tiles_x * tiles_y * V3D_TILE_ALLOC_INITIAL_BLOCK_SIZE;
+
+   /* The PTB allocates in aligned 4k chunks after the initial setup. */
+   uint32_t alloc_size = align(tiles_size, 4096);
+
+   /* Include the first two chunk allocations that the PTB does so that
+    * we definitely clear the OOM condition before triggering one (the HW
+    * won't trigger OOM during the first allocations).
+    */
+   alloc_size += 8192;
+
+   /* Pre-allocate a continuation pool so the GPU rarely has to stall
+    * waiting for the kernel OOM handler. Each draw call writes per-tile
+    * BCL state (primitives, uniforms, shader records) whose size scales
+    * with both the number of tiles and the number of draws. Use the
+    * product (tiles_size * draws) / 2 as an estimate, capped at 512 KB
+    * to avoid over-allocating on high draw-count scenes. Align the
+    * total to page_size.
+    * The formula assumes the initial block size of 128B, so if it is
+    * changed it needs to be adjusted.
+    */
+   STATIC_ASSERT(V3D_TILE_ALLOC_INITIAL_BLOCK_SIZE == 128);
+   alloc_size += MIN2((tiles_size * draws) / 2, 512 * 1024);
+   alloc_size = align(alloc_size, page_size);
+
+   *tile_alloc_size = alloc_size;
+   *tile_state_size = layers * tiles_x * tiles_y * 256;
 }
 
 uint32_t

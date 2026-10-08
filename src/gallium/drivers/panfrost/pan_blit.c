@@ -1,35 +1,13 @@
 /*
  * Copyright (C) 2014 Broadcom
  * Copyright (C) 2019 Collabora, Ltd.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- *
- * Authors (Collabora):
- *   Tomeu Vizoso <tomeu.vizoso@collabora.com>
- *   Alyssa Rosenzweig <alyssa.rosenzweig@collabora.com>
- *
+ * SPDX-License-Identifier: MIT
  */
 
 #include "util/format/u_format.h"
 #include "pan_context.h"
 #include "pan_resource.h"
+#include "pan_trace.h"
 #include "pan_util.h"
 
 void
@@ -42,21 +20,21 @@ panfrost_blitter_save(struct panfrost_context *ctx,
                                     util_last_bit(ctx->vb_mask));
    util_blitter_save_vertex_elements(blitter, ctx->vertex);
    util_blitter_save_vertex_shader(blitter,
-                                   ctx->uncompiled[PIPE_SHADER_VERTEX]);
+                                   ctx->uncompiled[MESA_SHADER_VERTEX]);
    util_blitter_save_rasterizer(blitter, ctx->rasterizer);
    util_blitter_save_viewport(blitter, &ctx->pipe_viewport);
-   util_blitter_save_so_targets(blitter, 0, NULL);
+   util_blitter_save_so_targets(blitter, 0, NULL, 0);
 
    if (blitter_op & PAN_SAVE_FRAGMENT_STATE) {
       if (blitter_op & PAN_SAVE_FRAGMENT_CONSTANT)
          util_blitter_save_fragment_constant_buffer_slot(
-            blitter, ctx->constant_buffer[PIPE_SHADER_FRAGMENT].cb);
+            blitter, ctx->constant_buffer[MESA_SHADER_FRAGMENT].cb);
 
       util_blitter_save_blend(blitter, ctx->blend);
       util_blitter_save_depth_stencil_alpha(blitter, ctx->depth_stencil);
       util_blitter_save_stencil_ref(blitter, &ctx->stencil_ref);
       util_blitter_save_fragment_shader(blitter,
-                                        ctx->uncompiled[PIPE_SHADER_FRAGMENT]);
+                                        ctx->uncompiled[MESA_SHADER_FRAGMENT]);
       util_blitter_save_sample_mask(blitter, ctx->sample_mask,
                                     ctx->min_samples);
       util_blitter_save_scissor(blitter, &ctx->scissor);
@@ -67,11 +45,11 @@ panfrost_blitter_save(struct panfrost_context *ctx,
 
    if (blitter_op & PAN_SAVE_TEXTURES) {
       util_blitter_save_fragment_sampler_states(
-         blitter, ctx->sampler_count[PIPE_SHADER_FRAGMENT],
-         (void **)(&ctx->samplers[PIPE_SHADER_FRAGMENT]));
+         blitter, ctx->sampler_count[MESA_SHADER_FRAGMENT],
+         (void **)(&ctx->samplers[MESA_SHADER_FRAGMENT]));
       util_blitter_save_fragment_sampler_views(
-         blitter, ctx->sampler_view_count[PIPE_SHADER_FRAGMENT],
-         (struct pipe_sampler_view **)&ctx->sampler_views[PIPE_SHADER_FRAGMENT]);
+         blitter, ctx->sampler_view_count[MESA_SHADER_FRAGMENT],
+         (struct pipe_sampler_view **)&ctx->sampler_views[MESA_SHADER_FRAGMENT]);
    }
 
    if (!(blitter_op & PAN_DISABLE_RENDER_COND)) {
@@ -85,6 +63,8 @@ void
 panfrost_blit_no_afbc_legalization(struct pipe_context *pipe,
                                    const struct pipe_blit_info *info)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_BLIT);
+
    struct panfrost_context *ctx = pan_context(pipe);
 
    panfrost_blitter_save(ctx, info->render_condition_enable
@@ -96,13 +76,15 @@ panfrost_blit_no_afbc_legalization(struct pipe_context *pipe,
 void
 panfrost_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_BLIT);
+
    struct panfrost_context *ctx = pan_context(pipe);
 
    if (info->render_condition_enable && !panfrost_render_condition_check(ctx))
       return;
 
    if (!util_blitter_is_blit_supported(ctx->blitter, info))
-      unreachable("Unsupported blit\n");
+      UNREACHABLE("Unsupported blit\n");
 
    /* Legalize here because it could trigger a recursive blit otherwise */
    struct panfrost_resource *src = pan_resource(info->src.resource);
@@ -113,5 +95,7 @@ panfrost_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
    enum pipe_format dst_view_format = util_format_linear(info->dst.format);
    pan_legalize_format(ctx, dst, dst_view_format, true, false);
 
+   panfrost_flush_all_batches(ctx, "Blit");
    panfrost_blit_no_afbc_legalization(pipe, info);
+   panfrost_flush_all_batches(ctx, "Blit");
 }

@@ -43,7 +43,7 @@
 
 #include "mesa_interface.h"
 #include "gbm_driint.h"
-#include "gbmint.h"
+#include <gbm_backend_abi.h>
 #include "loader_dri_helper.h"
 #include "kopper_interface.h"
 #include "loader.h"
@@ -56,7 +56,7 @@
 #include "gbm_backend_abi.h"
 
 /* For importing wl_buffer */
-#if HAVE_WAYLAND_PLATFORM
+#if HAVE_BIND_WL_DISPLAY
 #include "wayland-drm.h"
 #endif
 
@@ -194,9 +194,17 @@ swrast_get_image(struct dri_drawable *driDrawable,
                          data, surf->dri_private);
 }
 
-static const __DRIuseInvalidateExtension use_invalidate = {
-   .base = { __DRI_USE_INVALIDATE, 1 }
-};
+static void
+kopper_get_drawable_info(struct dri_drawable *driDrawable,
+                         int           *width,
+                         int           *height,
+                         void          *loaderPrivate)
+{
+   struct gbm_dri_surface *surf = loaderPrivate;
+
+   *width = surf->base.v0.width;
+   *height = surf->base.v0.height;
+}
 
 static const __DRIimageLookupExtension image_lookup_extension = {
    .base = { __DRI_IMAGE_LOOKUP, 2 },
@@ -226,11 +234,11 @@ static const __DRIkopperLoaderExtension kopper_loader_extension = {
     .base = { __DRI_KOPPER_LOADER, 1 },
 
     .SetSurfaceCreateInfo   = NULL,
+    .GetDrawableInfo        = kopper_get_drawable_info,
 };
 
 static const __DRIextension *gbm_dri_screen_extensions[] = {
    &image_lookup_extension.base,
-   &use_invalidate.base,
    &image_loader_extension.base,
    &swrast_loader_extension.base,
    &kopper_loader_extension.base,
@@ -273,15 +281,23 @@ fail:
 }
 
 static int
-dri_screen_create(struct gbm_dri_device *dri, bool driver_name_is_inferred)
+dri_screen_create(struct gbm_dri_device *dri)
 {
    char *driver_name;
+   int ret;
 
    driver_name = loader_get_driver_for_fd(dri->base.v0.fd);
    if (!driver_name)
       return -1;
 
-   return dri_screen_create_for_driver(dri, driver_name, driver_name_is_inferred);
+   ret = dri_screen_create_for_driver(dri, driver_name, /*driver_name_is_inferred=*/false);
+   if (ret) {
+      /* Note: driver_name freed by called function */
+      driver_name = strdup("zink");
+      ret = dri_screen_create_for_driver(dri, driver_name, /*driver_name_is_inferred=*/true);
+   }
+
+   return ret;
 }
 
 static int
@@ -315,8 +331,10 @@ static const struct gbm_dri_visual gbm_dri_visuals_table[] = {
    { GBM_FORMAT_BGRA8888, PIPE_FORMAT_A8R8G8B8_UNORM },
    { GBM_FORMAT_RGBX8888, PIPE_FORMAT_X8B8G8R8_UNORM },
    { GBM_FORMAT_RGBA8888, PIPE_FORMAT_A8B8G8R8_UNORM },
+   { GBM_FORMAT_RGB888, PIPE_FORMAT_B8G8R8_UNORM },
    { GBM_FORMAT_XRGB8888, PIPE_FORMAT_B8G8R8X8_UNORM },
    { GBM_FORMAT_ARGB8888, PIPE_FORMAT_B8G8R8A8_UNORM },
+   { GBM_FORMAT_BGR888, PIPE_FORMAT_R8G8B8_UNORM },
    { GBM_FORMAT_XBGR8888, PIPE_FORMAT_R8G8B8X8_UNORM },
    { GBM_FORMAT_ABGR8888, PIPE_FORMAT_R8G8B8A8_UNORM },
    { GBM_FORMAT_XRGB2101010, PIPE_FORMAT_B10G10R10X2_UNORM },
@@ -327,6 +345,14 @@ static const struct gbm_dri_visual gbm_dri_visuals_table[] = {
    { GBM_FORMAT_ABGR16161616, PIPE_FORMAT_R16G16B16A16_UNORM },
    { GBM_FORMAT_XBGR16161616F, PIPE_FORMAT_R16G16B16X16_FLOAT },
    { GBM_FORMAT_ABGR16161616F, PIPE_FORMAT_R16G16B16A16_FLOAT },
+   { DRM_FORMAT_R16F,          PIPE_FORMAT_R16_FLOAT },
+   { DRM_FORMAT_R32F,          PIPE_FORMAT_R32_FLOAT },
+   { DRM_FORMAT_GR1616F,       PIPE_FORMAT_R16G16_FLOAT },
+   { DRM_FORMAT_GR3232F,       PIPE_FORMAT_R32G32_FLOAT },
+   { DRM_FORMAT_BGR161616,     PIPE_FORMAT_R16G16B16_UNORM },
+   { DRM_FORMAT_BGR161616F,    PIPE_FORMAT_R16G16B16_FLOAT },
+   { DRM_FORMAT_BGR323232F,    PIPE_FORMAT_R32G32B32_FLOAT },
+   { DRM_FORMAT_ABGR32323232F, PIPE_FORMAT_R32G32B32A32_FLOAT },
 };
 
 static int
@@ -654,7 +680,7 @@ gbm_dri_bo_import(struct gbm_device *gbm,
    }
 
    switch (type) {
-#if HAVE_WAYLAND_PLATFORM
+#if HAVE_BIND_WL_DISPLAY
    case GBM_BO_IMPORT_WL_BUFFER:
    {
       struct wl_drm_buffer *wb;
@@ -899,14 +925,8 @@ gbm_dri_bo_create(struct gbm_device *gbm,
       dri_use |= __DRI_IMAGE_USE_LINEAR;
    if (usage & GBM_BO_USE_PROTECTED)
       dri_use |= __DRI_IMAGE_USE_PROTECTED;
-   if (usage & GBM_BO_USE_FRONT_RENDERING) {
-      assert (!(usage & GBM_BO_EXPLICIT_FLUSH));
+   if (usage & GBM_BO_USE_FRONT_RENDERING)
       dri_use |= __DRI_IMAGE_USE_FRONT_RENDERING;
-   }
-   if (usage & GBM_BO_EXPLICIT_FLUSH) {
-      assert (!(usage & GBM_BO_USE_FRONT_RENDERING));
-      dri_use |= __DRI_IMAGE_USE_BACKBUFFER;
-   }
 
    /* Gallium drivers requires shared in order to get the handle/stride */
    dri_use |= __DRI_IMAGE_USE_SHARE;
@@ -1040,7 +1060,7 @@ gbm_dri_bo_map(struct gbm_bo *_bo,
       dri->context = driCreateContextAttribs(dri->screen,
                                              __DRI_API_OPENGL,
                                              NULL, NULL, 0, NULL,
-                                             &error, NULL);
+                                             &error, NULL, true);
    }
    assert(dri->context);
    mtx_unlock(&dri->mutex);
@@ -1084,10 +1104,16 @@ gbm_dri_surface_create(struct gbm_device *gbm,
 		       uint32_t format, uint32_t flags,
                        const uint64_t *modifiers, const unsigned count)
 {
+   struct gbm_dri_device *dri = gbm_dri_device(gbm);
    struct gbm_dri_surface *surf;
 
    if (count)
       assert(modifiers);
+
+   if (count > 0 && !dri->screen->base.screen->resource_create_with_modifiers) {
+      errno = ENOSYS;
+      return NULL;
+   }
 
    /* It's acceptable to create an image with INVALID modifier in the list,
     * but it cannot be on the only modifier (since it will certainly fail
@@ -1110,7 +1136,7 @@ gbm_dri_surface_create(struct gbm_device *gbm,
    surf->base.v0.width = width;
    surf->base.v0.height = height;
    surf->base.v0.format = core->v0.format_canonicalize(format);
-   surf->base.v0.flags = flags | GBM_BO_EXPLICIT_FLUSH;
+   surf->base.v0.flags = flags;
    if (!modifiers) {
       assert(!count);
       return &surf->base;
@@ -1202,7 +1228,7 @@ dri_device_create(int fd, uint32_t gbm_backend_version)
 
    force_sw = debug_get_bool_option("GBM_ALWAYS_SOFTWARE", false);
    if (!force_sw) {
-      ret = dri_screen_create(dri, false);
+      ret = dri_screen_create(dri);
       if (ret)
          ret = dri_screen_create_sw(dri, true);
    } else {
@@ -1215,9 +1241,9 @@ dri_device_create(int fd, uint32_t gbm_backend_version)
    struct dri_screen *screen = dri->screen;
    struct pipe_screen *pscreen = screen->base.screen;
 #ifdef HAVE_LIBDRM
-   if (pscreen->get_param(pscreen, PIPE_CAP_DMABUF) & DRM_PRIME_CAP_IMPORT)
+   if (pscreen->caps.dmabuf & DRM_PRIME_CAP_IMPORT)
       dri->has_dmabuf_import = true;
-   if (pscreen->get_param(pscreen, PIPE_CAP_DMABUF) & DRM_PRIME_CAP_EXPORT)
+   if (pscreen->caps.dmabuf & DRM_PRIME_CAP_EXPORT)
       dri->has_dmabuf_export = true;
 #endif
    dri->has_compression_modifiers = pscreen->query_compression_rates &&

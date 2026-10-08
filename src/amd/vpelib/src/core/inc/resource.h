@@ -33,14 +33,17 @@
 #include "opp.h"
 #include "vector.h"
 #include "hw_shared.h"
+#include "color_bg.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 struct vpe_priv;
+struct vpe_cmd_output;
 struct vpe_cmd_info;
 struct segment_ctx;
+enum vpe_stream_type;
 
 #define MIN_VPE_CMD    (1024)
 #define MIN_NUM_CONFIG (16)
@@ -61,12 +64,6 @@ struct resource {
     struct vpe_priv *vpe_priv;
     struct vpec      vpec;
 
-    bool (*check_input_color_space)(struct vpe_priv *vpe_priv, enum vpe_surface_pixel_format format,
-        const struct vpe_color_space *vcs);
-
-    bool (*check_output_color_space)(struct vpe_priv *vpe_priv,
-        enum vpe_surface_pixel_format format, const struct vpe_color_space *vcs);
-
     bool (*check_h_mirror_support)(bool *input_mirror, bool *output_miror);
 
     enum vpe_status (*calculate_segments)(
@@ -74,9 +71,13 @@ struct resource {
 
     enum vpe_status(*check_bg_color_support)(struct vpe_priv* vpe_priv, struct vpe_color* bg_color);
 
+    void (*bg_color_convert)(enum color_space output_cs, struct transfer_func *output_tf,
+        enum vpe_surface_pixel_format pixel_format, struct vpe_color *mpc_bg_color,
+        struct vpe_color *opp_bg_color, bool enable_3dlut);
+
     enum vpe_status (*set_num_segments)(struct vpe_priv *vpe_priv, struct stream_ctx *stream_ctx,
         struct scaler_data *scl_data, struct vpe_rect *src_rect, struct vpe_rect *dst_rect,
-        uint32_t *max_seg_width);
+        uint32_t *max_seg_width, uint32_t recout_width_alignment);
 
     bool (*split_bg_gap)(struct vpe_rect *gaps, const struct vpe_rect *target_rect,
         uint32_t max_width, uint16_t max_gaps, uint16_t *num_gaps, uint16_t num_instances);
@@ -84,8 +85,10 @@ struct resource {
     void (*calculate_dst_viewport_and_active)(
         struct segment_ctx *segment_ctx, uint32_t max_seg_width);
 
+    uint16_t (*get_bg_stream_idx)(struct vpe_priv *vpe_priv);
+
     uint16_t (*find_bg_gaps)(struct vpe_priv *vpe_priv, const struct vpe_rect *target_rect,
-        struct vpe_rect *gaps, uint16_t max_gaps);
+        struct vpe_rect *gaps, uint32_t alignment, uint16_t max_gaps);
 
     void (*create_bg_segments)(
         struct vpe_priv *vpe_priv, struct vpe_rect *gaps, uint16_t gaps_cnt, enum vpe_cmd_ops ops);
@@ -101,6 +104,18 @@ struct resource {
     void (*get_bufs_req)(struct vpe_priv *vpe_priv, struct vpe_bufs_req *req);
 
     enum vpe_status (*check_mirror_rotation_support)(const struct vpe_stream *stream);
+
+    enum vpe_status (*update_blnd_gamma)(struct vpe_priv *vpe_priv,
+        const struct vpe_build_param *param, const struct vpe_stream *stream,
+        struct transfer_func *blnd_tf);
+
+    enum vpe_status (*update_output_gamma)(struct vpe_priv *vpe_priv,
+        const struct vpe_build_param *param, struct transfer_func *output_tf,
+        bool geometric_scaling);
+
+    bool (*validate_cached_param)(struct vpe_priv *vpe_priv, const struct vpe_build_param *param);
+
+    enum vpe_status (*calculate_shaper)(struct vpe_priv *vpe_priv, struct stream_ctx *stream_ctx);
 
     // Indicates the nominal range hdr input content should be in during processing.
     int internal_hdr_normalization;
@@ -126,7 +141,8 @@ enum vpe_status vpe_construct_resource(
 void vpe_destroy_resource(struct vpe_priv *vpe_priv, struct resource *res);
 
 /** alloc segment ctx*/
-struct segment_ctx *vpe_alloc_segment_ctx(struct vpe_priv *vpe_priv, uint16_t num_segments);
+enum vpe_status vpe_alloc_segment_ctx(
+    struct vpe_priv *vpe_priv, struct stream_ctx *stream_ctx, uint16_t num_segments);
 
 /** stream ctx */
 struct stream_ctx *vpe_alloc_stream_ctx(struct vpe_priv *vpe_priv, uint32_t num_streams);
@@ -144,11 +160,15 @@ struct pipe_ctx *vpe_pipe_find_owner(struct vpe_priv *vpe_priv, uint32_t stream_
 void vpe_clip_stream(
     struct vpe_rect *src_rect, struct vpe_rect *dst_rect, const struct vpe_rect *target_rect);
 
-void calculate_scaling_ratios(struct scaler_data *scl_data, struct vpe_rect *src_rect,
+void vpe_calculate_scaling_ratios(struct scaler_data *scl_data, struct vpe_rect *src_rect,
     struct vpe_rect *dst_rect, enum vpe_surface_pixel_format format);
+
+enum lut3d_type vpe_get_stream_lut3d_type(struct stream_ctx *stream_ctx);
 
 uint16_t vpe_get_num_segments(struct vpe_priv *vpe_priv, const struct vpe_rect *src,
     const struct vpe_rect *dst, const uint32_t max_seg_width);
+
+bool vpe_should_generate_cmd_info(struct stream_ctx *stream_ctx);
 
 enum vpe_status vpe_resource_build_scaling_params(struct segment_ctx *segment);
 
@@ -163,6 +183,14 @@ void vpe_frontend_config_callback(
 
 void vpe_backend_config_callback(
     void *ctx, uint64_t cfg_base_gpu, uint64_t cfg_base_cpu, uint64_t size, uint32_t pipe_idx);
+
+bool vpe_rec_is_equal(struct vpe_rect rec1, struct vpe_rect rec2);
+
+const struct vpe_caps *vpe_get_capability(enum vpe_ip_level ip_level);
+
+void vpe_setup_check_funcs(struct vpe_check_support_funcs *funcs, enum vpe_ip_level ip_level);
+
+uint32_t vpe_get_recout_width_alignment(const struct vpe_build_param *params);
 
 #ifdef __cplusplus
 }

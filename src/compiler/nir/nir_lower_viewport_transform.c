@@ -34,34 +34,58 @@
  * "Coordinate Transformation" of the OpenGL ES 3.2 full specification.
  *
  * This pass must run before lower_vars/lower_io such that derefs are
- * still in place.
+ * still in place. This pass must run after lower_io_to_temporaries so
+ * that the transformed position is not visible to user code.
  */
 
 #include "nir/nir.h"
 #include "nir/nir_builder.h"
 
+/* Vulkan spec requires float accuracy to ~10^-5, so we need to differentiate
+ * between W=0 and W=10^-5. Clamping 1/W to 2^15 gives a bit of margin on top
+ * of this. */
+#define MAX_W_RECIP_ABS (float)(1l << 15)
+
 static bool
 lower_viewport_transform_instr(nir_builder *b, nir_intrinsic_instr *intr,
                                void *data)
 {
-   if (intr->intrinsic != nir_intrinsic_store_deref)
-      return false;
+   gl_varying_slot location = VARYING_SLOT_MAX;
+   nir_src *pos_src = NULL;
 
-   nir_variable *var = nir_intrinsic_get_var(intr, 0);
-   if (var->data.mode != nir_var_shader_out ||
-       var->data.location != VARYING_SLOT_POS)
+   if (intr->intrinsic == nir_intrinsic_store_deref) {
+      nir_deref_instr *deref = nir_src_as_deref(intr->src[0]);
+      if (!nir_deref_mode_is(deref, nir_var_shader_out))
+         return false;
+
+      nir_variable *var = nir_deref_instr_get_variable(deref);
+      location = var->data.location;
+      pos_src = &intr->src[1];
+   } else if (intr->intrinsic == nir_intrinsic_store_output ||
+              intr->intrinsic == nir_intrinsic_store_per_view_output) {
+      location = nir_intrinsic_io_semantics(intr).location;
+      pos_src = &intr->src[0];
+   }
+
+   if (location != VARYING_SLOT_POS)
       return false;
 
    b->cursor = nir_before_instr(&intr->instr);
 
    /* Grab the source and viewport */
-   nir_def *input_point = intr->src[1].ssa;
+   nir_def *input_point = pos_src->ssa;
+   assert(input_point->num_components == 4);
    nir_def *scale = nir_load_viewport_scale(b);
    nir_def *offset = nir_load_viewport_offset(b);
 
    /* World space to normalised device coordinates to screen space */
 
    nir_def *w_recip = nir_frcp(b, nir_channel(b, input_point, 3));
+
+   /* Clamp w_recip so that small w does not result in Inf or unacceptable
+    * precision loss relative to clipping pre-transform. */
+   w_recip = nir_fclamp(b, w_recip, nir_imm_float(b, -MAX_W_RECIP_ABS),
+                        nir_imm_float(b, MAX_W_RECIP_ABS));
 
    nir_def *ndc_point = nir_fmul(b, nir_trim_vector(b, input_point, 3),
                                  w_recip);
@@ -82,7 +106,7 @@ lower_viewport_transform_instr(nir_builder *b, nir_intrinsic_instr *intr,
                                     nir_channel(b, screen, 2),
                                     w_recip);
 
-   nir_src_rewrite(&intr->src[1], screen_space);
+   nir_src_rewrite(pos_src, screen_space);
    return true;
 }
 
@@ -92,6 +116,6 @@ nir_lower_viewport_transform(nir_shader *shader)
    assert((shader->info.stage == MESA_SHADER_VERTEX) || (shader->info.stage == MESA_SHADER_GEOMETRY) || (shader->info.stage == MESA_SHADER_TESS_EVAL));
 
    return nir_shader_intrinsics_pass(shader, lower_viewport_transform_instr,
-                                       nir_metadata_control_flow,
-                                       NULL);
+                                     nir_metadata_control_flow,
+                                     NULL);
 }

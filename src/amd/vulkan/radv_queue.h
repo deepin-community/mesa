@@ -16,6 +16,7 @@
 #include "radv_radeon_winsys.h"
 
 struct radv_physical_device;
+struct radv_cmd_stream;
 struct radv_device;
 
 struct radv_queue_ring_info {
@@ -25,10 +26,10 @@ struct radv_queue_ring_info {
    uint32_t compute_scratch_waves;
    uint32_t esgs_ring_size;
    uint32_t gsvs_ring_size;
-   uint32_t attr_ring_size;
    bool tess_rings;
    bool task_rings;
    bool mesh_scratch_ring;
+   bool ge_rings;
    bool gds;
    bool gds_oa;
    bool sample_positions;
@@ -58,15 +59,16 @@ struct radv_queue_state {
    struct radeon_winsys_bo *tess_rings_bo;
    struct radeon_winsys_bo *task_rings_bo;
    struct radeon_winsys_bo *mesh_scratch_ring_bo;
-   struct radeon_winsys_bo *attr_ring_bo;
+   struct radeon_winsys_bo *ge_rings_bo;
    struct radeon_winsys_bo *gds_bo;
    struct radeon_winsys_bo *gds_oa_bo;
 
-   struct radeon_cmdbuf *initial_preamble_cs;
-   struct radeon_cmdbuf *initial_full_flush_preamble_cs;
-   struct radeon_cmdbuf *continue_preamble_cs;
-   struct radeon_cmdbuf *gang_wait_preamble_cs;
-   struct radeon_cmdbuf *gang_wait_postamble_cs;
+   struct radv_cmd_stream *initial_preamble_cs;
+   struct radv_cmd_stream *initial_full_flush_preamble_cs;
+   struct radv_cmd_stream *continue_preamble_cs;
+   struct radv_cmd_stream *gang_wait_preamble_cs;
+   struct radv_cmd_stream *gang_wait_postamble_cs;
+   struct radv_cmd_stream *flush_postamble_cs; /* GFX6 only */
 
    /* the uses_shadow_regs here will be set only for general queue */
    bool uses_shadow_regs;
@@ -101,18 +103,35 @@ radv_queue_device(const struct radv_queue *queue)
 
 int radv_queue_init(struct radv_device *device, struct radv_queue *queue, int idx,
                     const VkDeviceQueueCreateInfo *create_info,
-                    const VkDeviceQueueGlobalPriorityCreateInfoKHR *global_priority);
+                    const VkDeviceQueueGlobalPriorityCreateInfo *global_priority);
 
 void radv_queue_finish(struct radv_queue *queue);
 
-enum radeon_ctx_priority radv_get_queue_global_priority(const VkDeviceQueueGlobalPriorityCreateInfoKHR *pObj);
+enum radeon_ctx_priority radv_get_queue_global_priority(const VkDeviceQueueGlobalPriorityCreateInfo *pObj);
 
-void radv_emit_graphics(struct radv_device *device, struct radeon_cmdbuf *cs);
+void radv_emit_graphics(struct radv_device *device, struct radv_cmd_stream *cs);
 
-bool radv_queue_internal_submit(struct radv_queue *queue, struct radeon_cmdbuf *cs);
+bool radv_queue_internal_submit(struct radv_queue *queue, struct ac_cmdbuf *cs);
 
 enum amd_ip_type radv_queue_ring(const struct radv_queue *queue);
 
 enum amd_ip_type radv_queue_family_to_ring(const struct radv_physical_device *dev, enum radv_queue_family f);
+
+static inline enum radeon_ctx_priority
+vk_to_radeon_priority(VkQueueGlobalPriority priority)
+{
+   switch (priority) {
+   case VK_QUEUE_GLOBAL_PRIORITY_REALTIME:
+      return RADEON_CTX_PRIORITY_REALTIME;
+   case VK_QUEUE_GLOBAL_PRIORITY_HIGH:
+      return RADEON_CTX_PRIORITY_HIGH;
+   case VK_QUEUE_GLOBAL_PRIORITY_MEDIUM:
+      return RADEON_CTX_PRIORITY_MEDIUM;
+   case VK_QUEUE_GLOBAL_PRIORITY_LOW:
+      return RADEON_CTX_PRIORITY_LOW;
+   default:
+      return RADEON_CTX_PRIORITY_INVALID;
+   }
+}
 
 #endif /* RADV_QUEUE_H */

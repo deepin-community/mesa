@@ -112,7 +112,7 @@ validate_immediate(struct i915_context *i915, unsigned *batch_space)
 static void
 emit_immediate_s5(struct i915_context *i915, uint32_t imm)
 {
-   struct i915_surface *surf = i915_surface(i915->framebuffer.cbufs[0]);
+   struct i915_surface *surf = i915_surface(i915->fb_cbufs[0]);
 
    if (surf) {
       uint32_t writemask = imm & S5_WRITEDISABLE_MASK;
@@ -335,7 +335,7 @@ emit_constants(struct i915_context *i915)
          const uint32_t *c;
          if (i915->fs->constant_flags[i] == I915_CONSTFLAG_USER) {
             /* grab user-defined constant */
-            c = (uint32_t *)i915_buffer(i915->constants[PIPE_SHADER_FRAGMENT])
+            c = (uint32_t *)i915_buffer(i915->constants[MESA_SHADER_FRAGMENT])
                    ->data;
             c += 4 * i;
          } else {

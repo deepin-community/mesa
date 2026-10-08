@@ -11,13 +11,11 @@ computerator_files = [
 ]
 
 computerator_cpp_args = cpp.get_supported_arguments([
-  '-Wno-sign-compare',
   '-Wno-array-bounds',
+  '-Wno-c++11-narrowing',
+  '-Wno-narrowing',
+  '-Wno-sign-compare',
 ])
-
-if meson.is_cross_build()
-  computerator_cpp_args += '-Wno-array-bounds'
-endif
 
 computerator = executable(
   'computerator',
@@ -30,6 +28,7 @@ computerator = executable(
   link_with : [
     libfreedreno_drm,
     libfreedreno_ir3,
+    libfreedreno_layout,
     libfreedreno_perfcntrs,
     libfreedreno_common,
   ],

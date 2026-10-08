@@ -3,10 +3,10 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "util/lut.h"
 #include "util/macros.h"
 #include "agx_builder.h"
 #include "agx_compiler.h"
-#include "agx_minifloat.h"
 #include "agx_opcodes.h"
 
 /* AGX peephole optimizer responsible for instruction combining. It operates in
@@ -248,6 +248,58 @@ agx_optimizer_fmov_rev(agx_instr *I, agx_instr *use)
    return true;
 }
 
+static bool
+agx_icond_is_unsigned(enum agx_icond cond)
+{
+   switch (cond) {
+   case AGX_ICOND_UEQ:
+   case AGX_ICOND_ULT:
+   case AGX_ICOND_UGT:
+      return true;
+
+   case AGX_ICOND_SEQ:
+   case AGX_ICOND_SLT:
+   case AGX_ICOND_SGT:
+      return false;
+   }
+
+   UNREACHABLE("invalid condition");
+}
+
+static bool
+agx_supports_zext(agx_instr *I, unsigned s)
+{
+   switch (I->op) {
+   case AGX_OPCODE_IADD:
+   case AGX_OPCODE_IMAD:
+   case AGX_OPCODE_INTL:
+   case AGX_OPCODE_FFS:
+   case AGX_OPCODE_BITREV:
+   case AGX_OPCODE_BFI:
+   case AGX_OPCODE_BFEIL:
+   case AGX_OPCODE_EXTR:
+   case AGX_OPCODE_BITOP:
+   case AGX_OPCODE_WHILE_ICMP:
+   case AGX_OPCODE_IF_ICMP:
+   case AGX_OPCODE_ELSE_ICMP:
+   case AGX_OPCODE_BREAK_IF_ICMP:
+   case AGX_OPCODE_ICMP_BALLOT:
+   case AGX_OPCODE_ICMP_QUAD_BALLOT:
+      return true;
+
+   case AGX_OPCODE_ICMP:
+   case AGX_OPCODE_ICMPSEL:
+      /* Only the comparisons can be extended, not the selection. And we can
+       * only zero-extend with unsigned comparison. Presumably the hardware
+       * sign-extends with signed comparisons but we don't handle that yet.
+       */
+      return (s < 2) && agx_icond_is_unsigned(I->icond);
+
+   default:
+      return false;
+   }
+}
+
 static void
 agx_optimizer_copyprop(agx_context *ctx, agx_instr **defs, agx_instr *I)
 {
@@ -264,7 +316,8 @@ agx_optimizer_copyprop(agx_context *ctx, agx_instr **defs, agx_instr *I)
        * RA pseudo instructions don't handle size conversions. This should be
        * refined in the future.
        */
-      if (def->src[0].size != src.size)
+      if (def->src[0].size != src.size &&
+          !(def->src[0].size < src.size && agx_supports_zext(I, s)))
          continue;
 
       /* Optimize split(64-bit uniform) so we can get better copyprop of the
@@ -301,6 +354,16 @@ agx_optimizer_copyprop(agx_context *ctx, agx_instr **defs, agx_instr *I)
          continue;
 
       agx_replace_src(I, s, def->src[0]);
+
+      /* If we are zero-extending into an instruction that distinguishes sign
+       * and zero extend, make sure we pick zero-extend.
+       */
+      if (def->src[0].size < src.size &&
+          (I->op == AGX_OPCODE_IMAD || I->op == AGX_OPCODE_IADD)) {
+
+         assert(agx_supports_zext(I, s));
+         I->src[s].abs = true;
+      }
    }
 }
 
@@ -353,7 +416,7 @@ agx_optimizer_if_not(agx_instr **defs, agx_instr *I)
    agx_instr *def = defs[I->src[0].value];
    if (def->op != AGX_OPCODE_BITOP ||
        !agx_is_equiv(def->src[1], agx_immediate(1)) ||
-       def->truth_table != AGX_BITOP_XOR)
+       def->truth_table != UTIL_LUT2(a ^ b))
       return;
 
    /* Fuse */
@@ -451,20 +514,29 @@ agx_optimizer_bitop(agx_instr **defs, agx_instr *I)
       agx_index src = I->src[s];
       agx_instr *def = defs[src.value];
 
-      /* Check for not src */
-      if (def->op != AGX_OPCODE_NOT)
+      /* If we find a not, select new operation and fuse */
+      if (def->op == AGX_OPCODE_NOT) {
+         I->truth_table = util_lut2_invert_source(I->truth_table, s);
+         I->src[s] = def->src[0];
+      }
+   }
+}
+
+/*
+ * Fuse sign-extends into addition-like instructions:
+ */
+static void
+agx_optimizer_signext(agx_instr **defs, agx_instr *I)
+{
+   agx_foreach_ssa_src(I, s) {
+      agx_index src = I->src[s];
+      agx_instr *def = defs[src.value];
+
+      if (def == NULL || def->op != AGX_OPCODE_SIGNEXT)
          continue;
 
-      /* Select new operation */
-      if (s == 0) {
-         I->truth_table =
-            ((I->truth_table & 0x5) << 1) | ((I->truth_table & 0xa) >> 1);
-      } else if (s == 1) {
-         I->truth_table = ((I->truth_table & 0x3) << 2) | (I->truth_table >> 2);
-      }
-
-      /* Fuse */
-      I->src[s] = def->src[0];
+      agx_replace_src(I, s, def->src[0]);
+      assert(!I->src[s].abs && "sign-extended");
    }
 }
 
@@ -504,6 +576,8 @@ agx_optimizer_forward(agx_context *ctx)
          agx_optimizer_ballot(ctx, defs, I);
       } else if (I->op == AGX_OPCODE_BITOP) {
          agx_optimizer_bitop(defs, I);
+      } else if (I->op == AGX_OPCODE_IADD || I->op == AGX_OPCODE_IMAD) {
+         agx_optimizer_signext(defs, I);
       }
    }
 
@@ -525,7 +599,7 @@ void
 agx_optimizer_backward(agx_context *ctx)
 {
    agx_instr **uses = calloc(ctx->alloc, sizeof(*uses));
-   BITSET_WORD *multiple = calloc(BITSET_WORDS(ctx->alloc), sizeof(*multiple));
+   BITSET_WORD *multiple = BITSET_CALLOC(ctx->alloc);
 
    agx_foreach_block_rev(ctx, block) {
       /* Phi sources are logically read at the end of predecessor, so process

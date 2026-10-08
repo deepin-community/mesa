@@ -88,14 +88,13 @@ v3d_fence_wait(struct v3d_screen *screen,
 
         ret = drmSyncobjCreate(screen->fd, 0, &syncobj);
         if (ret) {
-                fprintf(stderr, "Failed to create syncobj to wait on: %d\n",
-                        ret);
+                mesa_loge("Failed to create syncobj to wait on: %d", ret);
                 return false;
         }
 
         ret = drmSyncobjImportSyncFile(screen->fd, syncobj, fence->fd);
         if (ret) {
-                fprintf(stderr, "Failed to import fence to syncobj: %d\n", ret);
+                mesa_loge("Failed to import fence to syncobj: %d", ret);
                 return false;
         }
 
@@ -148,10 +147,12 @@ v3d_fence_create_fd(struct pipe_context *pctx, struct pipe_fence_handle **pf,
 
 static void
 v3d_fence_server_sync(struct pipe_context *pctx,
-                      struct pipe_fence_handle *pfence)
+                      struct pipe_fence_handle *pfence,
+                      uint64_t value)
 {
         struct v3d_context *v3d = (struct v3d_context*)pctx;
         struct v3d_fence *fence = (struct v3d_fence *)pfence;
+        assert(!value);
 
         MESA_TRACE_FUNC();
 

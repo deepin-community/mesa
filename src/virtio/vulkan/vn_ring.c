@@ -5,7 +5,9 @@
 
 #include "vn_ring.h"
 
+#if !DETECT_OS_WINDOWS
 #include <sys/resource.h>
+#endif
 
 #include "venus-protocol/vn_protocol_driver_transport.h"
 
@@ -14,6 +16,9 @@
 #include "vn_renderer.h"
 
 #define VN_RING_IDLE_TIMEOUT_NS (1ull * 1000 * 1000)
+
+/* for better recycle of the vn_ring_submit batch */
+#define VN_MIN_SHMEM_COUNT (2)
 
 static_assert(ATOMIC_INT_LOCK_FREE == 2 && sizeof(atomic_uint) == 4,
               "vn_ring_shared requires lock-free 32-bit atomic_uint");
@@ -98,9 +103,14 @@ vn_ring_store_tail(struct vn_ring *ring)
 {
    /* the renderer is expected to load the tail with memory_order_acquire,
     * forming a release-acquire ordering
+    *
+    * To avoid incompatibility between the compiler implementations used by
+    * the driver and the renderer, seq_cst ordering is picked here, which has
+    * required a full mfence instruction. Then the renderer side acquire is
+    * ensured to be ordered after the cache flush of ring cs updates.
     */
    return atomic_store_explicit(ring->shared.tail, ring->cur,
-                                memory_order_release);
+                                memory_order_seq_cst);
 }
 
 uint32_t
@@ -161,7 +171,12 @@ vn_ring_retire_submits(struct vn_ring *ring, uint32_t seqno)
       for (uint32_t i = 0; i < submit->shmem_count; i++)
          vn_renderer_shmem_unref(renderer, submit->shmems[i]);
 
-      list_move_to(&submit->head, &ring->free_submits);
+      if (submit->shmem_count <= VN_MIN_SHMEM_COUNT) {
+         list_move_to(&submit->head, &ring->free_submits);
+      } else {
+         list_del(&submit->head);
+         free(submit);
+      }
    }
 }
 
@@ -171,7 +186,7 @@ vn_ring_get_seqno_status(struct vn_ring *ring, uint32_t seqno)
    return vn_ring_ge_seqno(ring, vn_ring_load_head(ring), seqno);
 }
 
-static void
+void
 vn_ring_wait_seqno(struct vn_ring *ring, uint32_t seqno)
 {
    /* A renderer wait incurs several hops and the renderer might poll
@@ -275,7 +290,7 @@ vn_ring_create(struct vn_instance *instance,
 {
    VN_TRACE_FUNC();
 
-   const VkAllocationCallbacks *alloc = &instance->base.base.alloc;
+   const VkAllocationCallbacks *alloc = &instance->base.vk.alloc;
 
    struct vn_ring *ring = vk_zalloc(alloc, sizeof(*ring), VN_DEFAULT_ALIGN,
                                     VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
@@ -325,11 +340,13 @@ vn_ring_create(struct vn_instance *instance,
     * VK_MESA_VENUS_PROTOCOL_SPEC_VERSION >= 2  */
    int prio = 0;
    bool ring_priority = false;
+#if !DETECT_OS_WINDOWS
    if (instance->renderer->info.vk_mesa_venus_protocol_spec_version >= 2) {
       errno = 0;
       prio = getpriority(PRIO_PROCESS, 0);
       ring_priority = is_tls_ring && !(prio == -1 && errno);
    }
+#endif /* !DETECT_OS_WINDOWS */
    const struct VkRingPriorityInfoMESA priority_info = {
       .sType = VK_STRUCTURE_TYPE_RING_PRIORITY_INFO_MESA,
       .priority = prio,
@@ -369,14 +386,19 @@ vn_ring_destroy(struct vn_ring *ring)
 {
    VN_TRACE_FUNC();
 
-   const VkAllocationCallbacks *alloc = &ring->instance->base.base.alloc;
+   const VkAllocationCallbacks *alloc = &ring->instance->base.vk.alloc;
 
    uint32_t destroy_ring_data[4];
    struct vn_cs_encoder local_enc = VN_CS_ENCODER_INITIALIZER_LOCAL(
       destroy_ring_data, sizeof(destroy_ring_data));
    vn_encode_vkDestroyRingMESA(&local_enc, 0, ring->id);
-   vn_renderer_submit_simple(ring->instance->renderer, destroy_ring_data,
-                             vn_cs_encoder_get_len(&local_enc));
+
+   /* With the shmem cache, vkDestroyRingMESA must be a synchronous call to
+    * ensure renderer side ring destruction has finished before the same shmem
+    * gets reused by other things.
+    */
+   vn_renderer_submit_simple_sync(ring->instance->renderer, destroy_ring_data,
+                                  vn_cs_encoder_get_len(&local_enc));
 
    mtx_destroy(&ring->roundtrip_mutex);
 
@@ -404,18 +426,17 @@ vn_ring_get_id(struct vn_ring *ring)
 static struct vn_ring_submit *
 vn_ring_get_submit(struct vn_ring *ring, uint32_t shmem_count)
 {
-   const uint32_t min_shmem_count = 2;
    struct vn_ring_submit *submit;
 
-   /* TODO this could be simplified if we could omit shmem_count */
-   if (shmem_count <= min_shmem_count &&
+   if (shmem_count <= VN_MIN_SHMEM_COUNT &&
        !list_is_empty(&ring->free_submits)) {
       submit =
          list_first_entry(&ring->free_submits, struct vn_ring_submit, head);
       list_del(&submit->head);
    } else {
-      const size_t submit_size = offsetof(
-         struct vn_ring_submit, shmems[MAX2(shmem_count, min_shmem_count)]);
+      const size_t submit_size =
+         offsetof(struct vn_ring_submit,
+                  shmems[MAX2(shmem_count, VN_MIN_SHMEM_COUNT)]);
       submit = malloc(submit_size);
    }
 

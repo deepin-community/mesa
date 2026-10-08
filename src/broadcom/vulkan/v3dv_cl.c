@@ -21,7 +21,8 @@
  * IN THE SOFTWARE.
  */
 
-#include "v3dv_private.h"
+#include "v3dv_device.h"
+#include "v3dv_cmd_buffer.h"
 
 /* We don't expect that the packets we use in this file change across hw
  * versions, so we just explicitly set the V3D_VERSION and include v3dx_pack
@@ -75,7 +76,6 @@ cl_alloc_bo(struct v3dv_cl *cl, uint32_t space, enum
    uint32_t unusable_space = 0;
    struct v3d_device_info *devinfo = &cl->job->device->devinfo;
    uint32_t cle_readahead = devinfo->cle_readahead;
-   uint32_t cle_buffer_min_size = devinfo->cle_buffer_min_size;
    switch (chain_type) {
    case V3D_CL_BO_CHAIN_WITH_BRANCH:
       unusable_space = cle_readahead + cl_packet_length(BRANCH);
@@ -91,13 +91,13 @@ cl_alloc_bo(struct v3dv_cl *cl, uint32_t space, enum
     * of allocations with large command buffers. This has a very significant
     * impact on the number of draw calls per second reported by vkoverhead.
     */
-   space = align(space + unusable_space, cle_buffer_min_size);
+   space = align(space + unusable_space, devinfo->page_size);
    if (cl->bo)
       space = MAX2(cl->bo->size * 2, space);
 
    struct v3dv_bo *bo = v3dv_bo_alloc(cl->job->device, space, "CL", true);
    if (!bo) {
-      fprintf(stderr, "failed to allocate memory for command list\n");
+      mesa_loge("failed to allocate memory for command list\n");
       v3dv_flag_oom(NULL, cl->job);
       return false;
    }
@@ -106,7 +106,7 @@ cl_alloc_bo(struct v3dv_cl *cl, uint32_t space, enum
 
    bool ok = v3dv_bo_map(cl->job->device, bo, bo->size);
    if (!ok) {
-      fprintf(stderr, "failed to map command list buffer\n");
+      mesa_loge("failed to map command list buffer\n");
       v3dv_flag_oom(NULL, cl->job);
       return false;
    }

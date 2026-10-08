@@ -3,8 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "asahi/lib/agx_nir_passes.h"
-#include "compiler/glsl_types.h"
+#include "asahi/compiler/agx_nir.h"
 #include "compiler/nir/nir_builder.h"
 #include "util/bitset.h"
 #include "agx_state.h"
@@ -12,7 +11,6 @@
 #include "nir_builder_opcodes.h"
 #include "nir_intrinsics.h"
 #include "nir_intrinsics_indices.h"
-#include "shader_enums.h"
 
 /*
  * Lower binding table textures and images to texture state registers and (if
@@ -48,24 +46,18 @@ lower(nir_builder *b, nir_instr *instr, void *data)
 
    if (instr->type == nir_instr_type_intrinsic) {
       nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-      nir_intrinsic_op bindless_op;
-
-#define CASE(op)                                                               \
-   case nir_intrinsic_##op:                                                    \
-      bindless_op = nir_intrinsic_bindless_##op;                               \
-      break;
 
       switch (intr->intrinsic) {
-         CASE(image_load)
-         CASE(image_store)
-         CASE(image_size)
-         CASE(image_samples)
-         CASE(image_atomic)
-         CASE(image_atomic_swap)
+      case nir_intrinsic_image_load:
+      case nir_intrinsic_image_store:
+      case nir_intrinsic_image_size:
+      case nir_intrinsic_image_samples:
+      case nir_intrinsic_image_atomic:
+      case nir_intrinsic_image_atomic_swap:
+         break;
       default:
          return false;
       }
-#undef CASE
 
       nir_def *index = intr->src[0].ssa;
       nir_scalar index_scalar = nir_scalar_resolved(index, 0);
@@ -93,17 +85,9 @@ lower(nir_builder *b, nir_instr *instr, void *data)
          }
       }
 
-      nir_atomic_op op = nir_atomic_op_iadd /* irrelevant */;
-      if (nir_intrinsic_has_atomic_op(intr))
-         op = nir_intrinsic_atomic_op(intr);
-
-      /* Otherwise, lower to bindless */
-      intr->intrinsic = bindless_op;
-
-      if (nir_intrinsic_has_atomic_op(intr))
-         nir_intrinsic_set_atomic_op(intr, op);
-
-      /* The driver uploads enough null texture/PBE descriptors for robustness
+      /* Otherwise, lower to bindless...
+       *
+       * The driver uploads enough null texture/PBE descriptors for robustness
        * given the shader limit, but we still need to clamp since we're lowering
        * to bindless so the hardware doesn't know the limit.
        *
@@ -115,7 +99,9 @@ lower(nir_builder *b, nir_instr *instr, void *data)
          nir_imm_intN_t(b, b->shader->info.num_images - 1, index->bit_size));
 
       index = nir_iadd_imm(b, nir_imul_imm(b, index, 2), offset);
-      nir_src_rewrite(&intr->src[0], nir_load_texture_handle_agx(b, index));
+
+      nir_rewrite_image_intrinsic(intr, nir_load_texture_handle_agx(b, index),
+                                  nir_image_intrinsic_type_bindless);
    } else if (instr->type == nir_instr_type_tex) {
       nir_tex_instr *tex = nir_instr_as_tex(instr);
 

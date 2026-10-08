@@ -30,6 +30,10 @@
 #include "util/u_handle_table.h"
 #include "va_private.h"
 
+#ifndef VA_PICTURE_H264_NON_EXISTING
+#define VA_PICTURE_H264_NON_EXISTING 0x00000020
+#endif
+
 static void resetReferencePictureDesc(struct pipe_h264_picture_desc *h264,
                                       unsigned int i)
 {
@@ -46,7 +50,6 @@ void vlVaHandlePictureParameterBufferH264(vlVaDriver *drv, vlVaContext *context,
 {
    VAPictureParameterBufferH264 *h264 = buf->data;
    unsigned int top_or_bottom_field;
-   bool is_ref;
    unsigned i;
 
    assert(buf->size >= sizeof(VAPictureParameterBufferH264) && buf->num_elements == 1);
@@ -62,7 +65,8 @@ void vlVaHandlePictureParameterBufferH264(vlVaDriver *drv, vlVaContext *context,
    context->desc.h264.num_ref_frames = h264->num_ref_frames;
    context->desc.h264.pps->sps->chroma_format_idc = h264->seq_fields.bits.chroma_format_idc;
    /*residual_colour_transform_flag*/
-   /*gaps_in_frame_num_value_allowed_flag*/
+   context->desc.h264.pps->sps->gaps_in_frame_num_value_allowed_flag =
+      h264->seq_fields.bits.gaps_in_frame_num_value_allowed_flag;
    context->desc.h264.pps->sps->frame_mbs_only_flag =
       h264->seq_fields.bits.frame_mbs_only_flag;
    context->desc.h264.pps->sps->mb_adaptive_frame_field_flag =
@@ -117,8 +121,10 @@ void vlVaHandlePictureParameterBufferH264(vlVaDriver *drv, vlVaContext *context,
 
    if (context->decoder && (context->templat.max_references != context->desc.h264.num_ref_frames)) {
       context->templat.max_references = MIN2(context->desc.h264.num_ref_frames, 16);
+      mtx_lock(&context->mutex);
       context->decoder->destroy(context->decoder);
       context->decoder = NULL;
+      mtx_unlock(&context->mutex);
    } else if (!context->decoder && context->desc.h264.num_ref_frames > 0)
       context->templat.max_references = MIN2(context->desc.h264.num_ref_frames, 16);
 
@@ -134,16 +140,14 @@ void vlVaHandlePictureParameterBufferH264(vlVaDriver *drv, vlVaContext *context,
 
       top_or_bottom_field = h264->ReferenceFrames[i].flags &
          (VA_PICTURE_H264_TOP_FIELD | VA_PICTURE_H264_BOTTOM_FIELD);
-      is_ref = !!(h264->ReferenceFrames[i].flags &
-         (VA_PICTURE_H264_SHORT_TERM_REFERENCE | VA_PICTURE_H264_LONG_TERM_REFERENCE));
       context->desc.h264.is_long_term[i] = !!(h264->ReferenceFrames[i].flags &
           VA_PICTURE_H264_LONG_TERM_REFERENCE);
-      context->desc.h264.top_is_reference[i] =
-         !!(h264->ReferenceFrames[i].flags & VA_PICTURE_H264_TOP_FIELD) ||
-         ((!top_or_bottom_field) && is_ref);
-      context->desc.h264.bottom_is_reference[i] =
-         !!(h264->ReferenceFrames[i].flags & VA_PICTURE_H264_BOTTOM_FIELD) ||
-         ((!top_or_bottom_field) && is_ref);
+      context->desc.h264.top_is_reference[i] = !top_or_bottom_field ||
+         !!(h264->ReferenceFrames[i].flags & VA_PICTURE_H264_TOP_FIELD);
+      context->desc.h264.bottom_is_reference[i] = !top_or_bottom_field ||
+         !!(h264->ReferenceFrames[i].flags & VA_PICTURE_H264_BOTTOM_FIELD);
+      context->desc.h264.is_non_existing[i] =
+         !!(h264->ReferenceFrames[i].flags & VA_PICTURE_H264_NON_EXISTING);
       context->desc.h264.field_order_cnt_list[i][0] =
          top_or_bottom_field != VA_PICTURE_H264_BOTTOM_FIELD ?
          h264->ReferenceFrames[i].TopFieldOrderCnt: INT_MAX;
@@ -181,8 +185,17 @@ void vlVaHandleSliceParameterBufferH264(vlVaContext *context, vlVaBuffer *buf)
    for (uint32_t buffer_idx = 0; buffer_idx < buf->num_elements; buffer_idx++, h264++) {
       uint32_t slice_index = context->desc.h264.slice_count + buffer_idx;
 
-      ASSERTED const size_t max_pipe_h264_slices = ARRAY_SIZE(context->desc.h264.slice_parameter.slice_data_offset);
+      const size_t max_pipe_h264_slices = ARRAY_SIZE(context->desc.h264.slice_parameter.slice_data_offset);
       assert(slice_index < max_pipe_h264_slices);
+      if (slice_index >= max_pipe_h264_slices) {
+         static bool warn_once = true;
+         if (warn_once) {
+            fprintf(stderr, "Warning: Number of slices (%d) provided exceed driver's max supported (%d), stop handling remaining slices.\n",
+               slice_index + 1, (int)max_pipe_h264_slices);
+            warn_once = false;
+         }
+         return;
+      }
 
       context->desc.h264.slice_parameter.slice_info_present = true;
       context->desc.h264.slice_parameter.slice_type[slice_index] = h264->slice_type;

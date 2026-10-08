@@ -34,9 +34,115 @@
 #include "util/u_video.h"
 #include "vl/vl_video_buffer.h"
 #include "util/u_sampler.h"
+#include "util/u_surface.h"
 #include "frontend/winsys_handle.h"
 #include "d3d12_format.h"
 #include "d3d12_screen.h"
+
+#ifdef _WIN32
+static bool
+d3d12_video_buffer_get_read_only_resource(struct pipe_video_buffer *buffer,
+                                          struct pipe_context *pipe,
+                                          struct pipe_resource **pReadOnlyResource,
+                                          uint32_t *pSubresourceIndex)
+{
+   if( !buffer || !pipe || !pReadOnlyResource || !pSubresourceIndex )
+      return false;
+
+   *pReadOnlyResource = nullptr;
+   *pSubresourceIndex = 0;
+
+   struct d3d12_video_buffer *d3d12_buf = (struct d3d12_video_buffer *) buffer;
+
+   // If we have already created a read-only resource for this buffer, reuse it
+   if (d3d12_buf->readonly_resource)
+   {
+      *pReadOnlyResource = (struct pipe_resource *) d3d12_buf->readonly_resource;
+      *pSubresourceIndex = d3d12_buf->subresource_index;
+      return true;
+   }
+
+   // Get pipe resources from the video buffer
+   struct pipe_resource *buf_resources[VL_NUM_COMPONENTS];
+   memset( buf_resources, 0, sizeof( buf_resources ) );
+   buffer->get_resources( buffer, &buf_resources[0] );
+
+   if( !buf_resources[0] )
+      return false;
+
+   // Get the winsys handle for the resource
+   struct winsys_handle src_wshandle = {};
+   src_wshandle.type = WINSYS_HANDLE_TYPE_D3D12_RES;
+
+   if( !pipe->screen->resource_get_handle( pipe->screen, pipe, buf_resources[0], &src_wshandle, 0 /*usage*/ ) ||
+       !src_wshandle.com_obj )
+   {
+      return false;
+   }
+
+   // Create a read-only shared handle from the D3D12 resource
+   HANDLE originalHandle = nullptr;
+
+   // First, create a shared handle with full access from the original resource
+   struct d3d12_screen *screen = (struct d3d12_screen *) pipe->screen;
+   HRESULT hr = screen->dev->CreateSharedHandle( static_cast<ID3D12Resource *>( src_wshandle.com_obj ),
+                                                nullptr,       // Security attributes (default)
+                                                GENERIC_ALL,   // Full access for the original handle
+                                                nullptr,       // Name
+                                                &originalHandle );
+   if( FAILED( hr ) )
+      return false;
+
+   // Duplicate the handle with restricted (read-only) access rights
+   // This creates a new handle that can only be used for reading
+   assert(originalHandle);
+   src_wshandle = {};
+   src_wshandle.type = WINSYS_HANDLE_TYPE_FD;
+   BOOL duplicateResult = DuplicateHandle( GetCurrentProcess(),   // Source process handle
+                                           originalHandle,        // Source handle
+                                           GetCurrentProcess(),   // Target process handle
+                                           &src_wshandle.handle,  // Target handle
+                                           GENERIC_READ,          // Desired access (read-only)
+                                           FALSE,                 // Inherit handle
+                                           0 );                   // Options
+
+   // Clean up the original handle since we only need the read-only version
+   CloseHandle( originalHandle );
+
+   assert( src_wshandle.handle );
+   if( !duplicateResult || !src_wshandle.handle )
+   {
+      debug_printf( "[d3d12_video_buffer_get_read_only_resource] Invalid handle for reconstructed picture resource\n" );
+      return false;
+   }
+
+   // Create a winsys handle for the read-only resource
+   // and import it back as a pipe_resource
+   *pReadOnlyResource = pipe->screen->resource_from_handle( pipe->screen, NULL, &src_wshandle, 0 /*usage*/ );
+
+   CloseHandle( src_wshandle.handle );  // Close our local copy of the handle after import
+
+   if( !*pReadOnlyResource )
+   {
+      assert( *pReadOnlyResource );
+      debug_printf( "[d3d12_video_buffer_get_read_only_resource] Failed to import reconstructed picture resource\n" );
+      return false;
+   }
+
+   // Cache the resource for future use
+   // The d3d12_video_buffer manages the lifetime of this resource
+   // and the app is given a weak reference to it via pReadOnlyResource
+   // The cached resource will be destroyed when the video buffer is destroyed
+   d3d12_buf->readonly_resource = (void*) *pReadOnlyResource;
+
+   // Return the subresource index
+   // from the video buffer which will contain the subresource index
+   // if the underlying resource uses texture arrays
+   *pSubresourceIndex = d3d12_buf->subresource_index;
+
+   return true;
+}
+#endif // _WIN32
 
 static struct pipe_video_buffer *
 d3d12_video_buffer_create_impl(struct pipe_context *pipe,
@@ -64,7 +170,10 @@ d3d12_video_buffer_create_impl(struct pipe_context *pipe,
    pD3D12VideoBuffer->base.height        = tmpl->height;
    pD3D12VideoBuffer->base.interlaced    = tmpl->interlaced;
    pD3D12VideoBuffer->base.contiguous_planes = true;
-   pD3D12VideoBuffer->base.associated_data = nullptr;
+   pD3D12VideoBuffer->base.associated_data = &pD3D12VideoBuffer->d3d12_video_buffer_associated_data;
+#ifdef _WIN32
+   pD3D12VideoBuffer->d3d12_video_buffer_associated_data.get_read_only_resource = d3d12_video_buffer_get_read_only_resource;
+#endif // _WIN32
    pD3D12VideoBuffer->idx_texarray_slots = 0;
    pD3D12VideoBuffer->m_spVideoTexArrayDPBPoolInUse.reset();
 
@@ -105,7 +214,7 @@ d3d12_video_buffer_create_impl(struct pipe_context *pipe,
       // YUV 4:2:0 formats in D3D12 always require multiple of 2 dimensions
       // We must respect the input dimensions of the imported resource handle (e.g no extra aligning)
       resource_creation_info->width0     = align(pD3D12VideoBuffer->base.width, 2);
-      resource_creation_info->height0    = align(pD3D12VideoBuffer->base.height, 2);
+      resource_creation_info->height0    = static_cast<uint16_t>(align(pD3D12VideoBuffer->base.height, 2));
 
       // WINSYS_HANDLE_TYPE_D3D12_RES implies taking ownership of the reference
       if(handle->type == WINSYS_HANDLE_TYPE_D3D12_RES)
@@ -125,7 +234,7 @@ d3d12_video_buffer_create_impl(struct pipe_context *pipe,
       // When creating (e.g not importing) resources we allocate
       // with a higher alignment to maximize HW compatibility
       resource_creation_info->width0     = align(pD3D12VideoBuffer->base.width, 2);
-      resource_creation_info->height0    = align(pD3D12VideoBuffer->base.height, 16);
+      resource_creation_info->height0    = static_cast<uint16_t>(align(pD3D12VideoBuffer->base.height, 16));
 
       pD3D12VideoBuffer->texture = (struct d3d12_resource *) pipe->screen->resource_create(pipe->screen, resource_creation_info);
    }
@@ -139,7 +248,7 @@ d3d12_video_buffer_create_impl(struct pipe_context *pipe,
       goto failed;
    }
 
-   d3d12_promote_to_permanent_residency((struct d3d12_screen*) pipe->screen, pD3D12VideoBuffer->texture);
+   d3d12_promote_to_permanent_residency((struct d3d12_screen*) pipe->screen, &pD3D12VideoBuffer->texture, 1);
 
    pD3D12VideoBuffer->num_planes = util_format_get_num_planes(pD3D12VideoBuffer->texture->overall_format);
    return &pD3D12VideoBuffer->base;
@@ -159,6 +268,12 @@ d3d12_video_buffer_from_handle(struct pipe_context *pipe,
                                struct winsys_handle *handle,
                                unsigned usage)
 {
+   if (handle && handle->type == WINSYS_HANDLE_TYPE_D3D12_RES && handle->modifier == 2) // modifier==2 means "place on resource"
+   {
+      struct pipe_resource* resource = (struct pipe_resource*) handle->com_obj;
+      return d3d12_video_buffer_create_impl(pipe, tmpl, resource, d3d12_video_buffer_creation_mode::place_on_resource, NULL, 0);
+   }
+
    struct pipe_video_buffer updated_template = {};
    if ((handle->format == PIPE_FORMAT_NONE) || (tmpl == nullptr) || (tmpl->buffer_format == PIPE_FORMAT_NONE) ||
        (tmpl->width == 0) || (tmpl->height == 0)) {
@@ -176,7 +291,7 @@ d3d12_video_buffer_from_handle(struct pipe_context *pipe,
          }
       }
       D3D12_RESOURCE_DESC res_desc = GetDesc(d3d12_res);
-      updated_template.width = res_desc.Width;
+      updated_template.width = static_cast<unsigned int>(res_desc.Width);
       updated_template.height = res_desc.Height;
       updated_template.buffer_format = d3d12_get_pipe_format(res_desc.Format);
       handle->format = updated_template.buffer_format;
@@ -234,12 +349,6 @@ d3d12_video_buffer_destroy(struct pipe_video_buffer *buffer)
       pD3D12VideoBuffer->base.associated_data = nullptr;
    }
 
-   for (uint i = 0; i < pD3D12VideoBuffer->surfaces.size(); ++i) {
-      if (pD3D12VideoBuffer->surfaces[i] != NULL) {
-         pipe_surface_reference(&pD3D12VideoBuffer->surfaces[i], NULL);
-      }
-   }
-
    for (uint i = 0; i < pD3D12VideoBuffer->sampler_view_planes.size(); ++i) {
       if (pD3D12VideoBuffer->sampler_view_planes[i] != NULL) {
          pipe_sampler_view_reference(&pD3D12VideoBuffer->sampler_view_planes[i], NULL);
@@ -250,6 +359,11 @@ d3d12_video_buffer_destroy(struct pipe_video_buffer *buffer)
       if (pD3D12VideoBuffer->sampler_view_components[i] != NULL) {
          pipe_sampler_view_reference(&pD3D12VideoBuffer->sampler_view_components[i], NULL);
       }
+   }
+
+   // Clean up readonly_resource
+   if (pD3D12VideoBuffer->readonly_resource) {
+      pipe_resource_reference((struct pipe_resource**)&pD3D12VideoBuffer->readonly_resource, NULL);
    }
 
    delete pD3D12VideoBuffer;
@@ -265,26 +379,17 @@ d3d12_video_buffer_destroy_associated_data(void *associated_data)
 /**
  * get an individual surfaces for each plane
  */
-struct pipe_surface **
+struct pipe_surface *
 d3d12_video_buffer_get_surfaces(struct pipe_video_buffer *buffer)
 {
    assert(buffer);
    struct d3d12_video_buffer *pD3D12VideoBuffer = (struct d3d12_video_buffer *) buffer;
    struct pipe_context *      pipe              = pD3D12VideoBuffer->base.context;
-   struct pipe_surface        surface_template  = {};
 
    // DPB buffers don't support views
    if ((pD3D12VideoBuffer->base.bind & PIPE_BIND_VIDEO_DECODE_DPB) ||
        (pD3D12VideoBuffer->base.bind & PIPE_BIND_VIDEO_ENCODE_DPB))
       return nullptr;
-
-   if (!pipe->create_surface)
-      return nullptr;
-
-   // Some video frameworks iterate over [0..VL_MAX_SURFACES) and ignore the nullptr entries
-   // So we have to null initialize the other surfaces not used from [num_planes..VL_MAX_SURFACES)
-   // Like in src/gallium/frontends/va/surface.c
-   pD3D12VideoBuffer->surfaces.resize(VL_MAX_SURFACES, nullptr);
 
    // pCurPlaneResource refers to the planar resource, not the overall resource.
    // in d3d12_resource this is handled by having a linked list of planes with
@@ -293,28 +398,24 @@ d3d12_video_buffer_get_surfaces(struct pipe_video_buffer *buffer)
    struct pipe_resource *pCurPlaneResource = &pD3D12VideoBuffer->texture->base.b;
 
    for (uint PlaneSlice = 0; PlaneSlice < pD3D12VideoBuffer->num_planes; ++PlaneSlice) {
-      if (!pD3D12VideoBuffer->surfaces[PlaneSlice]) {
-         memset(&surface_template, 0, sizeof(surface_template));
-         surface_template.format =
-            util_format_get_plane_format(pD3D12VideoBuffer->texture->overall_format, PlaneSlice);
+      struct pipe_surface surface_template = {};
+      surface_template.format = util_format_get_plane_format(pD3D12VideoBuffer->texture->overall_format, PlaneSlice);
+      surface_template.texture = pCurPlaneResource;
 
-         pD3D12VideoBuffer->surfaces[PlaneSlice] =
-            pipe->create_surface(pipe, pCurPlaneResource, &surface_template);
+      if (!pipe->screen->is_format_supported(pipe->screen, surface_template.format, PIPE_TEXTURE_2D,
+                                             0, 0, PIPE_BIND_RENDER_TARGET))
+         goto error;
 
-         if (!pD3D12VideoBuffer->surfaces[PlaneSlice]) {
-            goto error;
-         }
-      }
+      pD3D12VideoBuffer->surfaces[PlaneSlice] = surface_template;
       pCurPlaneResource = pCurPlaneResource->next;
    }
 
-   return pD3D12VideoBuffer->surfaces.data();
+   for (uint i = pD3D12VideoBuffer->num_planes; i < VL_MAX_SURFACES; i++)
+      memset(&pD3D12VideoBuffer->surfaces[i], 0, sizeof(struct pipe_surface));
+
+   return pD3D12VideoBuffer->surfaces;
 
 error:
-   for (uint PlaneSlice = 0; PlaneSlice < pD3D12VideoBuffer->num_planes; ++PlaneSlice) {
-      pipe_surface_reference(&pD3D12VideoBuffer->surfaces[PlaneSlice], NULL);
-   }
-
    return nullptr;
 }
 
@@ -495,7 +596,7 @@ d3d12_video_create_dpb_buffer(struct pipe_video_codec *codec,
          tmpl.bind |= PIPE_BIND_VIDEO_ENCODE_DPB;
 
       bTextureArray = (pD3D12Enc->m_currentEncodeCapabilities.m_SupportFlags &
-         D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RECONSTRUCTED_FRAMES_REQUIRE_TEXTURE_ARRAYS);
+         D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RECONSTRUCTED_FRAMES_REQUIRE_TEXTURE_ARRAYS) != 0;
    }
 
    if (bTextureArray)
@@ -527,7 +628,7 @@ d3d12_video_create_dpb_buffer_texarray(struct pipe_video_codec *codec,
    if (!pD3D12Enc->m_pVideoTexArrayDPBPool)
    {
       pipe_resource resource_creation_info = {};
-      resource_creation_info.array_size = d3d12_video_encoder_get_current_max_dpb_capacity(pD3D12Enc);
+      resource_creation_info.array_size = static_cast<uint16_t>(d3d12_video_encoder_get_current_max_dpb_capacity(pD3D12Enc) + pD3D12Enc->m_MaxQueueAsyncDepth + 1u);
       assert(resource_creation_info.array_size <= 32); // uint32_t used as a usage bitmap into m_pVideoTexArrayDPBPool
       buf = (d3d12_video_buffer*) d3d12_video_buffer_create_impl(codec->context, templat, &resource_creation_info, d3d12_video_buffer_creation_mode::create_resource, NULL, 0);
       pD3D12Enc->m_pVideoTexArrayDPBPool = &buf->texture->base.b;
@@ -547,6 +648,7 @@ d3d12_video_create_dpb_buffer_texarray(struct pipe_video_codec *codec,
       if (((*pD3D12Enc->m_spVideoTexArrayDPBPoolInUse) & (1 << i)) == 0)
       {
          buf->idx_texarray_slots = i;
+         buf->subresource_index = i;
          (*pD3D12Enc->m_spVideoTexArrayDPBPoolInUse) |= (1 << buf->idx_texarray_slots); // Mark i-th bit as used
          bFoundEmptySlot = true;
          break;

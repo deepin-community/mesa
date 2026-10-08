@@ -10,6 +10,18 @@
 #include <amdgpu.h>
 #endif
 
+/**
+ * When adding new caps to the end of the capset struct, a value of
+ * zero should be the fallback.  Ie. a newer guest on an older host
+ * will see a zero value.
+ *
+ * For boolean caps, use 1/~0 for true/false
+ */
+#define VIRTGPU_CAP_BOOL_UNSUPPORTED_BY_HOST  0
+#define VIRTGPU_CAP_BOOL_FALSE               ~0
+#define VIRTGPU_CAP_BOOL_TRUE                 1
+
+
 struct virgl_renderer_capset_drm {
    uint32_t wire_format_version;
    /* Underlying drm device version: */
@@ -18,6 +30,7 @@ struct virgl_renderer_capset_drm {
    uint32_t version_patchlevel;
 #define VIRTGPU_DRM_CONTEXT_MSM      1
 #define VIRTGPU_DRM_CONTEXT_AMDGPU   2
+#define VIRTGPU_DRM_CONTEXT_I915     3
    uint32_t context_type;
    uint32_t pad;
    union {
@@ -32,16 +45,30 @@ struct virgl_renderer_capset_drm {
          uint64_t chip_id;
          uint32_t max_freq;
          uint32_t highest_bank_bit;
+         uint64_t ubwc_swizzle;
+         uint64_t macrotile_mode;
+         uint32_t has_raytracing;  /* VIRTGPU_CAP_BOOL_x */
+         uint32_t has_preemption;  /* VIRTGPU_CAP_BOOL_x */
+         uint64_t uche_trap_base;
       } msm;  /* context_type == VIRTGPU_DRM_CONTEXT_MSM */
       struct {
          uint32_t address32_hi;
-         uint32_t __pad;
+         uint32_t has_vm_always_valid : 1;
+         uint32_t __pad : 31;
 #ifdef ENABLE_DRM_AMDGPU
          struct amdgpu_buffer_size_alignments alignments;
          struct amdgpu_gpu_info gpu_info;
 #endif
          char marketing_name[128];
       } amdgpu;   /* context_type == VIRTGPU_DRM_CONTEXT_AMDGPU */
+      struct {
+         uint32_t pci_bus;
+         uint32_t pci_dev;
+         uint32_t pci_func;
+         uint32_t pci_revision_id;
+         uint32_t pci_domain;
+         uint32_t pci_device_id;
+      } intel;  /* context_type == VIRTGPU_DRM_CONTEXT_I915 */
    } u;
 };
 

@@ -27,8 +27,10 @@
 
 #include "pipe/p_context.h"
 #include "pipe/p_video_codec.h"
+#include "vl/vl_defines.h"
 #include <vector>
 #include "d3d12_video_types.h"
+#include "d3d12_interop_public.h"
 
 ///
 /// Pipe video buffer interface starts
@@ -77,7 +79,7 @@ d3d12_video_buffer_get_sampler_view_components(struct pipe_video_buffer *buffer)
 /**
  * get an individual surfaces for each plane
  */
-struct pipe_surface **
+struct pipe_surface *
 d3d12_video_buffer_get_surfaces(struct pipe_video_buffer *buffer);
 
 /*
@@ -92,20 +94,24 @@ d3d12_video_buffer_destroy_associated_data(void *associated_data);
 struct d3d12_video_buffer
 {
    pipe_video_buffer                       base;
-   struct d3d12_resource *                 texture;
-   uint                                    num_planes;
-   std::vector<pipe_surface *>      surfaces;
+   struct d3d12_resource *                 texture = nullptr;
+   uint                                    num_planes = 0;
+   struct pipe_surface              surfaces[VL_MAX_SURFACES];
    std::vector<pipe_sampler_view *> sampler_view_planes;
    std::vector<pipe_sampler_view *> sampler_view_components;
 
    // Indicates the subresource index into the texture.array_size
    // that corresponds to this video buffer object
-   uint                             idx_texarray_slots;
+   uint                             idx_texarray_slots = 0;
 
    // Used by d3d12_video_buffer_destroy() when using texture array mode
    // in the function d3d12_video_enc::d3d12_video_create_dpb_buffer()
    // Points to the same address as d3d12_video_encoder::m_spVideoTexArrayDPBPoolInUse
    std::shared_ptr<uint32_t> m_spVideoTexArrayDPBPoolInUse;
+   struct d3d12_interop_video_buffer_associated_data d3d12_video_buffer_associated_data = {};
+
+   uint32_t subresource_index = 0;
+   void* readonly_resource = nullptr;
 };
 
 ///

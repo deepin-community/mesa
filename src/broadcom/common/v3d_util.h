@@ -29,9 +29,31 @@
 #include "compiler/shader_enums.h"
 #include "util/format/u_formats.h"
 
+#if USE_V3D_SIMULATOR
+#  include "simulator/v3d_simulator.h"
+#else
+#  include "xf86drm.h"
+#endif
+
+/* Helper to call hw ver specific functions */
+#define v3d_X(devinfo, thing) ({                                \
+        __typeof(&v3d42_##thing) v3d_X_thing;                   \
+        switch (devinfo->ver) {                                 \
+        case 42:                                                \
+                v3d_X_thing = &v3d42_##thing;                   \
+                break;                                          \
+        case 71:                                                \
+                v3d_X_thing = &v3d71_##thing;                   \
+                break;                                          \
+        default:                                                \
+                UNREACHABLE("Unsupported hardware generation"); \
+        }                                                       \
+        v3d_X_thing;                                            \
+})
+
 uint32_t
 v3d_csd_choose_workgroups_per_supergroup(struct v3d_device_info *devinfo,
-                                         bool has_subgroups,
+                                         bool can_use_supergroups,
                                          bool has_tsy_barrier,
                                          uint32_t threads,
                                          uint32_t num_wgs,
@@ -72,11 +94,30 @@ log2_tile_size(uint32_t size)
         case 64:
                 return 3;
         default:
-                unreachable("Unsupported tile width/height");
+                UNREACHABLE("Unsupported tile width/height");
         }
 }
+
+void
+v3d_tile_alloc_sizes(uint32_t layers,
+                     uint32_t tiles_x,
+                     uint32_t tiles_y,
+                     uint32_t draws,
+                     uint32_t page_size,
+                     uint32_t *tile_alloc_size,
+                     uint32_t *tile_state_size);
 
 uint32_t
 v3d_compute_rt_row_row_stride_128_bits(uint32_t tile_width,
                                        uint32_t bpp);
+
+static inline int
+v3d_ioctl(int fd, unsigned long request, void *arg)
+{
+#if USE_V3D_SIMULATOR
+        return v3d_simulator_ioctl(fd, request, arg);
+#else
+        return drmIoctl(fd, request, arg);
+#endif
+}
 #endif

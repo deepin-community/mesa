@@ -108,7 +108,7 @@ image_binding_grow(const struct anv_device *device,
    switch (binding) {
    case ANV_IMAGE_MEMORY_BINDING_MAIN:
       /* The caller must not pre-translate BINDING_PLANE_i to BINDING_MAIN. */
-      unreachable("ANV_IMAGE_MEMORY_BINDING_MAIN");
+      UNREACHABLE("ANV_IMAGE_MEMORY_BINDING_MAIN");
    case ANV_IMAGE_MEMORY_BINDING_PLANE_0:
    case ANV_IMAGE_MEMORY_BINDING_PLANE_1:
    case ANV_IMAGE_MEMORY_BINDING_PLANE_2:
@@ -119,7 +119,7 @@ image_binding_grow(const struct anv_device *device,
       assert(offset == ANV_OFFSET_IMPLICIT);
       break;
    case ANV_IMAGE_MEMORY_BINDING_END:
-      unreachable("ANV_IMAGE_MEMORY_BINDING_END");
+      UNREACHABLE("ANV_IMAGE_MEMORY_BINDING_END");
    }
 
    struct anv_image_memory_range *container =
@@ -192,7 +192,6 @@ memory_range_merge(struct anv_image_memory_range *a,
       return;
 
    assert(a->offset == 0);
-   assert(anv_is_aligned(a->offset, a->alignment));
    assert(anv_is_aligned(b.offset, b.alignment));
 
    a->alignment = MAX2(a->alignment, b.alignment);
@@ -239,7 +238,7 @@ choose_isl_surf_usage(VkImageCreateFlags vk_create_flags,
    case VK_IMAGE_ASPECT_PLANE_2_BIT:
       break;
    default:
-      unreachable("bad VkImageAspect");
+      UNREACHABLE("bad VkImageAspect");
    }
 
    if (vk_usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) {
@@ -272,7 +271,7 @@ choose_isl_tiling_flags(const struct intel_device_info *devinfo,
 
    switch (base_info->tiling) {
    default:
-      unreachable("bad VkImageTiling");
+      UNREACHABLE("bad VkImageTiling");
    case VK_IMAGE_TILING_OPTIMAL:
       flags = ISL_TILING_ANY_MASK;
       break;
@@ -1162,14 +1161,6 @@ alloc_private_binding(struct anv_device *device,
    if (binding->memory_range.size == 0)
       return VK_SUCCESS;
 
-   const VkImageSwapchainCreateInfoKHR *swapchain_info =
-      vk_find_struct_const(create_info->pNext, IMAGE_SWAPCHAIN_CREATE_INFO_KHR);
-
-   if (swapchain_info && swapchain_info->swapchain != VK_NULL_HANDLE) {
-      /* The image will be bound to swapchain memory. */
-      return VK_SUCCESS;
-   }
-
    return anv_device_alloc_bo(device, "image-binding-private",
                               binding->memory_range.size, 0, 0,
                               &binding->address.bo);
@@ -1312,14 +1303,6 @@ anv_image_finish(struct anv_image *image)
    vk_image_finish(&image->vk);
 }
 
-static struct anv_image *
-anv_swapchain_get_image(VkSwapchainKHR swapchain,
-                        uint32_t index)
-{
-   VkImage image = wsi_common_get_image(swapchain, index);
-   return anv_image_from_handle(image);
-}
-
 static VkResult
 anv_image_init_from_create_info(struct anv_device *device,
                                 struct anv_image *image,
@@ -1358,20 +1341,11 @@ VkResult anv_CreateImage(
 {
    ANV_FROM_HANDLE(anv_device, device, _device);
 
-#ifndef VK_USE_PLATFORM_ANDROID_KHR
-   /* Ignore swapchain creation info on Android. Since we don't have an
-    * implementation in Mesa, we're guaranteed to access an Android object
-    * incorrectly.
-    */
-   const VkImageSwapchainCreateInfoKHR *swapchain_info =
-      vk_find_struct_const(pCreateInfo->pNext, IMAGE_SWAPCHAIN_CREATE_INFO_KHR);
-   if (swapchain_info && swapchain_info->swapchain != VK_NULL_HANDLE) {
+   if (wsi_common_is_swapchain_image(pCreateInfo)) {
       return wsi_common_create_swapchain_image(&device->physical->wsi_device,
                                                pCreateInfo,
-                                               swapchain_info->swapchain,
                                                pImage);
    }
-#endif
 
    struct anv_image *image =
       vk_object_zalloc(&device->vk, pAllocator, sizeof(*image),
@@ -1609,130 +1583,156 @@ void anv_GetDeviceImageSparseMemoryRequirements(
    *pSparseMemoryRequirementCount = 0;
 }
 
-VkResult anv_BindImageMemory2(
-    VkDevice                                    _device,
-    uint32_t                                    bindInfoCount,
-    const VkBindImageMemoryInfo*                pBindInfos)
+static VkResult
+anv_bind_image_memory(struct anv_device *device,
+                      const VkBindImageMemoryInfo *bind_info)
 {
-   ANV_FROM_HANDLE(anv_device, device, _device);
+   ANV_FROM_HANDLE(anv_device_memory, mem, bind_info->memory);
+   ANV_FROM_HANDLE(anv_image, image, bind_info->image);
+   bool did_bind = false;
 
-   for (uint32_t i = 0; i < bindInfoCount; i++) {
-      const VkBindImageMemoryInfo *bind_info = &pBindInfos[i];
-      ANV_FROM_HANDLE(anv_device_memory, mem, bind_info->memory);
-      ANV_FROM_HANDLE(anv_image, image, bind_info->image);
-      bool did_bind = false;
+   const VkBindMemoryStatusKHR *bind_status =
+      vk_find_struct_const(bind_info->pNext, BIND_MEMORY_STATUS_KHR);
 
-      /* Resolve will alter the image's aspects, do this first. */
-      if (mem && mem->ahw)
-         resolve_ahw_image(device, image, mem);
+   /* Resolve will alter the image's aspects, do this first. */
+   if (mem && mem->ahw)
+      resolve_ahw_image(device, image, mem);
 
-      vk_foreach_struct_const(s, bind_info->pNext) {
-         switch (s->sType) {
-         case VK_STRUCTURE_TYPE_BIND_IMAGE_PLANE_MEMORY_INFO: {
-            const VkBindImagePlaneMemoryInfo *plane_info =
-               (const VkBindImagePlaneMemoryInfo *) s;
+   vk_foreach_struct_const(s, bind_info->pNext) {
+      switch (s->sType) {
+      case VK_STRUCTURE_TYPE_BIND_IMAGE_PLANE_MEMORY_INFO: {
+         const VkBindImagePlaneMemoryInfo *plane_info =
+            (const VkBindImagePlaneMemoryInfo *) s;
 
-            /* Workaround for possible spec bug.
-             *
-             * Unlike VkImagePlaneMemoryRequirementsInfo, which requires that
-             * the image be disjoint (that is, multi-planar format and
-             * VK_IMAGE_CREATE_DISJOINT_BIT), VkBindImagePlaneMemoryInfo allows
-             * the image to be non-disjoint and requires only that the image
-             * have the DISJOINT flag. In this case, regardless of the value of
-             * VkImagePlaneMemoryRequirementsInfo::planeAspect, the behavior is
-             * the same as if VkImagePlaneMemoryRequirementsInfo were omitted.
-             */
-            if (!image->disjoint)
-               break;
-
-            struct anv_image_binding *binding =
-               image_aspect_to_binding(image, plane_info->planeAspect);
-
-            binding->address = (struct anv_address) {
-               .bo = mem->bo,
-               .offset = bind_info->memoryOffset,
-            };
-
-            did_bind = true;
+         /* Workaround for possible spec bug.
+          *
+          * Unlike VkImagePlaneMemoryRequirementsInfo, which requires that
+          * the image be disjoint (that is, multi-planar format and
+          * VK_IMAGE_CREATE_DISJOINT_BIT), VkBindImagePlaneMemoryInfo allows
+          * the image to be non-disjoint and requires only that the image
+          * have the DISJOINT flag. In this case, regardless of the value of
+          * VkImagePlaneMemoryRequirementsInfo::planeAspect, the behavior is
+          * the same as if VkImagePlaneMemoryRequirementsInfo were omitted.
+          */
+         if (!image->disjoint)
             break;
-         }
-         case VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_SWAPCHAIN_INFO_KHR: {
-            /* Ignore this struct on Android, we cannot access swapchain
-             * structures there.
-             */
-#ifndef VK_USE_PLATFORM_ANDROID_KHR
-            const VkBindImageMemorySwapchainInfoKHR *swapchain_info =
-               (const VkBindImageMemorySwapchainInfoKHR *) s;
-            struct anv_image *swapchain_image =
-               anv_swapchain_get_image(swapchain_info->swapchain,
-                                       swapchain_info->imageIndex);
-            assert(swapchain_image);
-            assert(image->vk.aspects == swapchain_image->vk.aspects);
-            assert(mem == NULL);
 
-            for (int j = 0; j < ARRAY_SIZE(image->bindings); ++j) {
-               assert(memory_ranges_equal(image->bindings[j].memory_range,
-                                          swapchain_image->bindings[j].memory_range));
-               image->bindings[j].address = swapchain_image->bindings[j].address;
-            }
+         struct anv_image_binding *binding =
+            image_aspect_to_binding(image, plane_info->planeAspect);
 
-            /* We must bump the private binding's bo's refcount because, unlike the other
-             * bindings, its lifetime is not application-managed.
-             */
-            struct anv_bo *private_bo =
-               image->bindings[ANV_IMAGE_MEMORY_BINDING_PRIVATE].address.bo;
-            if (private_bo)
-               anv_bo_ref(private_bo);
-
-            did_bind = true;
-#endif
-            break;
-         }
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wswitch"
-         case VK_STRUCTURE_TYPE_NATIVE_BUFFER_ANDROID: {
-            const VkNativeBufferANDROID *gralloc_info =
-               (const VkNativeBufferANDROID *)s;
-            VkResult result = anv_image_bind_from_gralloc(device, image,
-                                                          gralloc_info);
-            if (result != VK_SUCCESS)
-               return result;
-            did_bind = true;
-            break;
-         }
-#pragma GCC diagnostic pop
-         default:
-            vk_debug_ignored_stype(s->sType);
-            break;
-         }
-      }
-
-      if (!did_bind) {
-         assert(!image->disjoint);
-
-         image->bindings[ANV_IMAGE_MEMORY_BINDING_MAIN].address =
-            (struct anv_address) {
-               .bo = mem->bo,
-               .offset = bind_info->memoryOffset,
-            };
+         binding->address = (struct anv_address) {
+            .bo = mem->bo,
+            .offset = bind_info->memoryOffset,
+         };
 
          did_bind = true;
+         break;
+      }
+      case VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_SWAPCHAIN_INFO_KHR: {
+         /* Ignore this struct on Android, we cannot access swapchain
+          * structures there.
+          */
+#ifndef VK_USE_PLATFORM_ANDROID_KHR
+         const VkBindImageMemorySwapchainInfoKHR *swapchain_info =
+           (const VkBindImageMemorySwapchainInfoKHR *) s;
+         mem = anv_device_memory_from_handle(wsi_common_get_memory(
+               swapchain_info->swapchain, swapchain_info->imageIndex));
+         struct anv_image *swapchain_image = mem->dedicated_image;
+         assert(swapchain_image);
+         assert(image->vk.aspects == swapchain_image->vk.aspects);
+
+         /* Remove the internally allocated private binding since we're going
+          * to replace everything with BOs from the WSI image, we don't want
+          * to leak the current BO.
+          */
+         struct anv_bo *private_bo =
+            image->bindings[ANV_IMAGE_MEMORY_BINDING_PRIVATE].address.bo;
+         if (private_bo) {
+            assert(image->bindings[ANV_IMAGE_MEMORY_BINDING_PRIVATE].memory_range.size);
+
+            anv_device_release_bo(device, private_bo);
+            image->bindings[ANV_IMAGE_MEMORY_BINDING_PRIVATE].address.bo = NULL;
+         }
+
+         for (int j = 0; j < ARRAY_SIZE(image->bindings); ++j) {
+            assert(memory_ranges_equal(image->bindings[j].memory_range,
+                                       swapchain_image->bindings[j].memory_range));
+            image->bindings[j].address = swapchain_image->bindings[j].address;
+         }
+
+         /* We must bump the private binding's bo's refcount because, unlike the other
+          * bindings, its lifetime is not application-managed.
+          */
+         private_bo = image->bindings[ANV_IMAGE_MEMORY_BINDING_PRIVATE].address.bo;
+         if (private_bo)
+            anv_bo_ref(private_bo);
+
+         did_bind = true;
+#endif
+         break;
+      }
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wswitch"
+      case VK_STRUCTURE_TYPE_NATIVE_BUFFER_ANDROID: {
+         const VkNativeBufferANDROID *gralloc_info =
+            (const VkNativeBufferANDROID *)s;
+         VkResult result = anv_image_bind_from_gralloc(device, image,
+                                                       gralloc_info);
+         if (result != VK_SUCCESS)
+            return result;
+         did_bind = true;
+         break;
+      }
+#pragma GCC diagnostic pop
+      default:
+         vk_debug_ignored_stype(s->sType);
+         break;
       }
    }
+
+   if (!did_bind) {
+      assert(!image->disjoint);
+
+      image->bindings[ANV_IMAGE_MEMORY_BINDING_MAIN].address =
+         (struct anv_address) {
+         .bo = mem->bo,
+         .offset = bind_info->memoryOffset,
+      };
+
+      did_bind = true;
+   }
+
+   if (bind_status)
+      *bind_status->pResult = VK_SUCCESS;
 
    return VK_SUCCESS;
 }
 
-void anv_GetImageSubresourceLayout(
-    VkDevice                                    device,
-    VkImage                                     _image,
-    const VkImageSubresource*                   subresource,
-    VkSubresourceLayout*                        layout)
+VkResult anv_BindImageMemory2(
+   VkDevice                                    _device,
+   uint32_t                                    bindInfoCount,
+   const VkBindImageMemoryInfo*                pBindInfos)
 {
-   ANV_FROM_HANDLE(anv_image, image, _image);
+   ANV_FROM_HANDLE(anv_device, device, _device);
+   VkResult result = VK_SUCCESS;
+
+   for (uint32_t i = 0; i < bindInfoCount; i++) {
+      VkResult res = anv_bind_image_memory(device, &pBindInfos[i]);
+      if (result == VK_SUCCESS && res != VK_SUCCESS)
+         result = res;
+   }
+
+   return result;
+}
+
+static void
+anv_get_image_subresource_layout(const struct anv_image *image,
+                                 const VkImageSubresource2KHR *subresource,
+                                 VkSubresourceLayout2KHR *layout)
+{
    const struct anv_surface *surface;
 
-   assert(__builtin_popcount(subresource->aspectMask) == 1);
+   assert(__builtin_popcount(subresource->imageSubresource.aspectMask) == 1);
 
    /* The Vulkan spec requires that aspectMask be
     * VK_IMAGE_ASPECT_MEMORY_PLANE_i_BIT_EXT if tiling is
@@ -1752,7 +1752,7 @@ void anv_GetImageSubresourceLayout(
    if (image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
       /* TODO(chadv): Drop this workaround when WSI gets fixed. */
       uint32_t mem_plane;
-      switch (subresource->aspectMask) {
+      switch (subresource->imageSubresource.aspectMask) {
       case VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT:
       case VK_IMAGE_ASPECT_PLANE_0_BIT:
          mem_plane = 0;
@@ -1766,7 +1766,7 @@ void anv_GetImageSubresourceLayout(
          mem_plane = 2;
          break;
       default:
-         unreachable("bad VkImageAspectFlags");
+         UNREACHABLE("bad VkImageAspectFlags");
       }
 
       if (mem_plane == 1 && isl_drm_modifier_has_aux(image->vk.drm_format_mod)) {
@@ -1783,31 +1783,83 @@ void anv_GetImageSubresourceLayout(
       }
    } else {
       const uint32_t plane =
-         anv_image_aspect_to_plane(image, subresource->aspectMask);
+         anv_image_aspect_to_plane(image, subresource->imageSubresource.aspectMask);
       surface = &image->planes[plane].primary_surface;
    }
 
-   layout->offset = surface->memory_range.offset;
-   layout->rowPitch = surface->isl.row_pitch_B;
-   layout->depthPitch = isl_surf_get_array_pitch(&surface->isl);
-   layout->arrayPitch = isl_surf_get_array_pitch(&surface->isl);
+   layout->subresourceLayout.offset = surface->memory_range.offset;
+   layout->subresourceLayout.rowPitch = surface->isl.row_pitch_B;
+   layout->subresourceLayout.depthPitch = isl_surf_get_array_pitch(&surface->isl);
+   layout->subresourceLayout.arrayPitch = isl_surf_get_array_pitch(&surface->isl);
 
-   if (subresource->mipLevel > 0 || subresource->arrayLayer > 0) {
+   if (subresource->imageSubresource.mipLevel > 0 ||
+      subresource->imageSubresource.arrayLayer > 0) {
       assert(surface->isl.tiling == ISL_TILING_LINEAR);
 
       uint64_t offset_B;
       isl_surf_get_image_offset_B_tile_sa(&surface->isl,
-                                          subresource->mipLevel,
-                                          subresource->arrayLayer,
+                                          subresource->imageSubresource.mipLevel,
+                                          subresource->imageSubresource.arrayLayer,
                                           0 /* logical_z_offset_px */,
                                           &offset_B, NULL, NULL);
-      layout->offset += offset_B;
-      layout->size = layout->rowPitch * u_minify(image->vk.extent.height,
-                                                 subresource->mipLevel) *
-                     image->vk.extent.depth;
+
+      layout->subresourceLayout.offset += offset_B;
+      layout->subresourceLayout.size =
+         layout->subresourceLayout.rowPitch *
+         u_minify(image->vk.extent.height,
+                  subresource->imageSubresource.mipLevel) *
+         image->vk.extent.depth;
    } else {
-      layout->size = surface->memory_range.size;
+      layout->subresourceLayout.size = surface->memory_range.size;
    }
+}
+
+void anv_GetImageSubresourceLayout(
+    VkDevice                                    device,
+    VkImage                                     _image,
+    const VkImageSubresource*                   pSubresource,
+    VkSubresourceLayout*                        pLayout)
+{
+   ANV_FROM_HANDLE(anv_image, image, _image);
+
+   VkImageSubresource2KHR subresource = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_SUBRESOURCE_2_KHR,
+      .imageSubresource = *pSubresource,
+   };
+   VkSubresourceLayout2KHR layout = {
+      .sType = VK_STRUCTURE_TYPE_SUBRESOURCE_LAYOUT_2_KHR
+   };
+   anv_get_image_subresource_layout(image, &subresource, &layout);
+
+   *pLayout = layout.subresourceLayout;
+}
+
+void anv_GetDeviceImageSubresourceLayoutKHR(
+    VkDevice                                    _device,
+    const VkDeviceImageSubresourceInfoKHR*      pInfo,
+    VkSubresourceLayout2KHR*                    pLayout)
+{
+   ANV_FROM_HANDLE(anv_device, device, _device);
+
+   struct anv_image image = { 0 };
+
+   if (anv_image_init_from_create_info(device, &image, pInfo->pCreateInfo) != VK_SUCCESS) {
+      pLayout->subresourceLayout = (VkSubresourceLayout) { 0, };
+      return;
+   }
+
+   anv_get_image_subresource_layout(&image, pInfo->pSubresource, pLayout);
+}
+
+void anv_GetImageSubresourceLayout2KHR(
+    VkDevice                                    device,
+    VkImage                                     _image,
+    const VkImageSubresource2KHR*               pSubresource,
+    VkSubresourceLayout2KHR*                    pLayout)
+{
+   ANV_FROM_HANDLE(anv_image, image, _image);
+
+   anv_get_image_subresource_layout(image, pSubresource, pLayout);
 }
 
 /**
@@ -1854,7 +1906,7 @@ anv_layout_to_aux_state(const struct intel_device_info * const devinfo,
    switch (layout) {
    /* Invalid layouts */
    case VK_IMAGE_LAYOUT_MAX_ENUM:
-      unreachable("Invalid image layout.");
+      UNREACHABLE("Invalid image layout.");
 
    /* Undefined layouts
     *
@@ -1891,7 +1943,7 @@ anv_layout_to_aux_state(const struct intel_device_info * const devinfo,
       case ISL_AUX_STATE_COMPRESSED_NO_CLEAR:
          return ISL_AUX_STATE_COMPRESSED_NO_CLEAR;
       default:
-         unreachable("unexpected isl_aux_state");
+         UNREACHABLE("unexpected isl_aux_state");
       }
    }
 
@@ -1945,7 +1997,7 @@ anv_layout_to_aux_state(const struct intel_device_info * const devinfo,
          break;
 
       default:
-         unreachable("Unsupported aux usage");
+         UNREACHABLE("Unsupported aux usage");
       }
    }
 
@@ -1969,7 +2021,7 @@ anv_layout_to_aux_state(const struct intel_device_info * const devinfo,
       }
 
    default:
-      unreachable("Unsupported aux usage");
+      UNREACHABLE("Unsupported aux usage");
    }
 }
 
@@ -2007,7 +2059,7 @@ anv_layout_to_aux_usage(const struct intel_device_info * const devinfo,
 
    switch (aux_state) {
    case ISL_AUX_STATE_CLEAR:
-      unreachable("We never use this state");
+      UNREACHABLE("We never use this state");
 
    case ISL_AUX_STATE_PARTIAL_CLEAR:
       assert(image->vk.aspects & VK_IMAGE_ASPECT_ANY_COLOR_BIT_ANV);
@@ -2017,6 +2069,7 @@ anv_layout_to_aux_usage(const struct intel_device_info * const devinfo,
 
    case ISL_AUX_STATE_COMPRESSED_CLEAR:
    case ISL_AUX_STATE_COMPRESSED_NO_CLEAR:
+   case ISL_AUX_STATE_COMPRESSED_HIER_DEPTH:
       return image->planes[plane].aux_usage;
 
    case ISL_AUX_STATE_RESOLVED:
@@ -2041,7 +2094,7 @@ anv_layout_to_aux_usage(const struct intel_device_info * const devinfo,
       return ISL_AUX_USAGE_NONE;
    }
 
-   unreachable("Invalid isl_aux_state");
+   UNREACHABLE("Invalid isl_aux_state");
 }
 
 /**
@@ -2080,7 +2133,8 @@ anv_layout_to_fast_clear_type(const struct intel_device_info * const devinfo,
 
    switch (aux_state) {
    case ISL_AUX_STATE_CLEAR:
-      unreachable("We never use this state");
+   case ISL_AUX_STATE_COMPRESSED_HIER_DEPTH:
+      UNREACHABLE("We never use this state");
 
    case ISL_AUX_STATE_PARTIAL_CLEAR:
    case ISL_AUX_STATE_COMPRESSED_CLEAR:
@@ -2114,7 +2168,7 @@ anv_layout_to_fast_clear_type(const struct intel_device_info * const devinfo,
       return ANV_FAST_CLEAR_NONE;
    }
 
-   unreachable("Invalid isl_aux_state");
+   UNREACHABLE("Invalid isl_aux_state");
 }
 
 
@@ -2136,7 +2190,7 @@ remap_swizzle(VkComponentSwizzle swizzle,
    case VK_COMPONENT_SWIZZLE_B:     return format_swizzle.b;
    case VK_COMPONENT_SWIZZLE_A:     return format_swizzle.a;
    default:
-      unreachable("Invalid swizzle");
+      UNREACHABLE("Invalid swizzle");
    }
 }
 
@@ -2340,7 +2394,7 @@ anv_CreateImageView(VkDevice _device,
    ANV_FROM_HANDLE(anv_image, image, pCreateInfo->image);
    struct anv_image_view *iview;
 
-   iview = vk_image_view_create(&device->vk, false, pCreateInfo,
+   iview = vk_image_view_create(&device->vk, pCreateInfo,
                                 pAllocator, sizeof(*iview));
    if (iview == NULL)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
@@ -2521,6 +2575,11 @@ anv_CreateBufferView(VkDevice _device,
    if (!view)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
+   const VkBufferUsageFlags2CreateInfoKHR *view_usage_info =
+      vk_find_struct_const(pCreateInfo->pNext, BUFFER_USAGE_FLAGS_2_CREATE_INFO_KHR);
+   const VkBufferUsageFlags buffer_usage =
+      view_usage_info != NULL ? view_usage_info->usage : buffer->vk.usage;
+
    struct anv_format_plane format;
    format = anv_get_format_plane(device->info, pCreateInfo->format,
                                  0, VK_IMAGE_TILING_LINEAR);
@@ -2532,7 +2591,7 @@ anv_CreateBufferView(VkDevice _device,
 
    view->address = anv_address_add(buffer->address, pCreateInfo->offset);
 
-   if (buffer->vk.usage & VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT) {
+   if (buffer_usage & VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT) {
       view->surface_state = alloc_surface_state(device);
 
       anv_fill_buffer_surface_state(device, view->surface_state,
@@ -2543,7 +2602,7 @@ anv_CreateBufferView(VkDevice _device,
       view->surface_state = (struct anv_state){ 0 };
    }
 
-   if (buffer->vk.usage & VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT) {
+   if (buffer_usage & VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT) {
       view->storage_surface_state = alloc_surface_state(device);
       view->lowered_storage_surface_state = alloc_surface_state(device);
 
@@ -2609,4 +2668,15 @@ anv_DestroyBufferView(VkDevice _device, VkBufferView bufferView,
                           view->lowered_storage_surface_state);
 
    vk_object_free(&device->vk, pAllocator, view);
+}
+
+void anv_GetRenderingAreaGranularityKHR(
+    VkDevice                                    _device,
+    const VkRenderingAreaInfoKHR*               pRenderingAreaInfo,
+    VkExtent2D*                                 pGranularity)
+{
+   *pGranularity = (VkExtent2D) {
+      .width = 1,
+      .height = 1,
+   };
 }

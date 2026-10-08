@@ -1,25 +1,6 @@
 /*
  * Copyright (C) 2023 Collabora Ltd.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- *
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef __PAN_CSF_H__
@@ -46,14 +27,17 @@ struct pan_csf_tiler_oom_ctx {
    uint32_t counter;
 
    /* Alternative framebuffer descriptors for incremental rendering */
-   struct panfrost_ptr fbds[PAN_INCREMENTAL_RENDERING_PASS_COUNT];
+   struct pan_ptr fbds[PAN_INCREMENTAL_RENDERING_PASS_COUNT];
 
    /* Bounding Box (Register 42 and 43) */
    uint32_t bbox_min;
    uint32_t bbox_max;
 
    /* Tiler descriptor address */
-   mali_ptr tiler_desc;
+   uint64_t tiler_desc;
+
+   /* Address of the region reserved for saving registers. */
+   uint64_t dump_addr;
 } PACKED;
 
 struct panfrost_csf_batch {
@@ -64,16 +48,15 @@ struct panfrost_csf_batch {
 
       /* CS state, written through the CS, and checked when PAN_MESA_DEBUG=sync.
        */
-      struct panfrost_ptr state;
-
-      /* CS load/store tracker if extra checks are enabled. */
-      struct cs_load_store_tracker *ls_tracker;
+      struct pan_ptr state;
    } cs;
 
    /* Pool used to allocate CS chunks. */
    struct panfrost_pool cs_chunk_pool;
 
-   struct panfrost_ptr tiler_oom_ctx;
+   struct pan_ptr tiler_oom_ctx;
+
+   struct mali_tiler_context_packed *pending_tiler_desc;
 };
 
 struct panfrost_csf_context {
@@ -84,6 +67,8 @@ struct panfrost_csf_context {
       uint32_t handle;
       struct panfrost_bo *desc_bo;
    } heap;
+
+   enum pipe_reset_status reset_status;
 
    /* Temporary geometry buffer. Used as a FIFO by the tiler. */
    struct panfrost_bo *tmp_geom_bo;
@@ -110,16 +95,18 @@ struct pipe_draw_start_count_bias;
 int GENX(csf_init_context)(struct panfrost_context *ctx);
 void GENX(csf_cleanup_context)(struct panfrost_context *ctx);
 
-void GENX(csf_init_batch)(struct panfrost_batch *batch);
+int GENX(csf_init_batch)(struct panfrost_batch *batch);
 void GENX(csf_cleanup_batch)(struct panfrost_batch *batch);
 int GENX(csf_submit_batch)(struct panfrost_batch *batch);
 
+void GENX(csf_prepare_tiler)(struct panfrost_batch *batch,
+                             struct pan_fb_info *fb);
 void GENX(csf_preload_fb)(struct panfrost_batch *batch, struct pan_fb_info *fb);
 void GENX(csf_emit_fbds)(struct panfrost_batch *batch, struct pan_fb_info *fb,
                          struct pan_tls_info *tls);
 void GENX(csf_emit_fragment_job)(struct panfrost_batch *batch,
                                  const struct pan_fb_info *pfb);
-void GENX(csf_emit_batch_end)(struct panfrost_batch *batch);
+int GENX(csf_emit_batch_end)(struct panfrost_batch *batch);
 void GENX(csf_launch_xfb)(struct panfrost_batch *batch,
                           const struct pipe_draw_info *info, unsigned count);
 void GENX(csf_launch_grid)(struct panfrost_batch *batch,

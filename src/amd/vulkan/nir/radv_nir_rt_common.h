@@ -7,22 +7,32 @@
 #ifndef RADV_RT_COMMON_H
 #define RADV_RT_COMMON_H
 
-#include "nir/nir.h"
-#include "nir/nir_builder.h"
+#include "nir/nir_defines.h"
 #include "vk_nir_convert_ycbcr.h"
 
 #include "compiler/spirv/spirv.h"
 
 struct radv_device;
+struct radv_physical_device;
 
-nir_def *build_addr_to_node(nir_builder *b, nir_def *addr);
+bool radv_use_bvh_stack_rtn(const struct radv_physical_device *pdevice);
+
+nir_def *radv_build_bvh_stack_rtn_addr(nir_builder *b, nir_def *stack_idx, const struct radv_physical_device *pdev,
+                                       uint32_t workgroup_size, uint32_t stack_base, uint32_t max_stack_entries);
+
+nir_def *build_addr_to_node(struct radv_device *device, nir_builder *b, nir_def *addr, nir_def *flags);
 
 nir_def *nir_build_vec3_mat_mult(nir_builder *b, nir_def *vec, nir_def *matrix[], bool translation);
 
-void nir_build_wto_matrix_load(nir_builder *b, nir_def *instance_addr, nir_def **out);
+nir_def *radv_load_vertex_position(struct radv_device *device, nir_builder *b, nir_def *primitive_addr, uint32_t index);
 
-nir_def *radv_load_vertex_position(struct radv_device *device, nir_builder *b, nir_def *instance_addr,
-                                   nir_def *primitive_id, uint32_t index);
+void radv_load_wto_matrix(struct radv_device *device, nir_builder *b, nir_def *instance_addr, nir_def **out);
+
+void radv_load_otw_matrix(struct radv_device *device, nir_builder *b, nir_def *instance_addr, nir_def **out);
+
+nir_def *radv_load_custom_instance(struct radv_device *device, nir_builder *b, nir_def *instance_addr);
+
+nir_def *radv_load_instance_id(struct radv_device *device, nir_builder *b, nir_def *instance_addr);
 
 struct radv_ray_traversal_args;
 
@@ -94,13 +104,21 @@ struct radv_ray_traversal_vars {
     */
    nir_deref_instr *previous_node;
 
+   nir_deref_instr *parent_node;
+
    /* When entering an instance these are the instance node and the root node of the BLAS */
    nir_deref_instr *instance_top_node;
    nir_deref_instr *instance_bottom_node;
 
+   /* Whether the current iteration revisits the last triangle node to handle the second triangle. */
+   nir_deref_instr *second_iteration;
+
    /* Information about the current instance used for culling. */
    nir_deref_instr *instance_addr;
    nir_deref_instr *sbt_offset_and_flags;
+
+   /* If non-NULL, contains a boolean flag whether to break after the current iteration. */
+   nir_deref_instr *break_flag;
 
    /* Statistics. Iteration count in the low 16 bits, candidate instance counts in the high 16 bits. */
    nir_deref_instr *iteration_instance_count;
@@ -117,16 +135,16 @@ struct radv_ray_traversal_args {
    struct radv_ray_traversal_vars vars;
 
    /* The increment/decrement used for radv_ray_traversal_vars::stack, and how many entries are
-    * available. stack_base is the base address of the stack. */
+    * available. */
    uint32_t stack_stride;
    uint32_t stack_entries;
-   uint32_t stack_base;
 
    uint32_t set_flags;
    uint32_t unset_flags;
 
    bool ignore_cull_mask;
 
+   bool use_bvh_stack_rtn;
    radv_rt_stack_store_cb stack_store_cb;
    radv_rt_stack_load_cb stack_load_cb;
 
@@ -146,5 +164,8 @@ struct radv_ray_traversal_args {
  */
 nir_def *radv_build_ray_traversal(struct radv_device *device, nir_builder *b,
                                   const struct radv_ray_traversal_args *args);
+
+nir_def *radv_build_ray_traversal_gfx12(struct radv_device *device, nir_builder *b,
+                                        const struct radv_ray_traversal_args *args);
 
 #endif /* RADV_NIR_RT_COMMON_H */

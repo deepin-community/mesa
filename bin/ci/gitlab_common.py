@@ -16,9 +16,11 @@ from functools import cache
 from pathlib import Path
 
 GITLAB_URL = "https://gitlab.freedesktop.org"
-TOKEN_DIR = Path(os.getenv("XDG_CONFIG_HOME") or Path.home() / ".config")
+TOKEN_DIR = Path(os.environ.get("XDG_CONFIG_HOME", "")
+                 if os.environ.get("XDG_CONFIG_HOME", None)
+                 else Path.home() / ".config")
 
-# Known GitLab token prefixes: https://docs.gitlab.com/ee/security/token_overview.html#token-prefixes
+# Known GitLab token prefixes: https://docs.gitlab.com/security/tokens/#token-prefixes
 TOKEN_PREFIXES: dict[str, str] = {
     "Personal access token": "glpat-",
     "OAuth Application Secret": "gloas-",
@@ -39,8 +41,9 @@ def print_once(*args, **kwargs):
     print(*args, **kwargs)
 
 
-def pretty_duration(seconds):
+def pretty_duration(seconds: int | float) -> str:
     """Pretty print duration"""
+    seconds = int(seconds)
     hours, rem = divmod(seconds, 3600)
     minutes, seconds = divmod(rem, 60)
     if hours:
@@ -175,3 +178,7 @@ def wait_for_pipeline(projects, sha: str, timeout=None):
             print(" not found", flush=True)
             return (None, None)
         time.sleep(1)
+
+@cache
+def is_gitlab_job() -> bool:
+    return os.getenv("CI_JOB_ID") is not None

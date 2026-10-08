@@ -47,6 +47,7 @@ struct etna_blend_state {
 
    uint32_t PE_LOGIC_OP;
    uint32_t PE_DITHER[2];
+   uint32_t PS_MSAA_CONFIG;
 };
 
 static inline struct etna_blend_state *
@@ -64,8 +65,5 @@ etna_update_blend(struct etna_context *ctx);
 
 void
 etna_set_blend_color(struct pipe_context *pctx, const struct pipe_blend_color *bc);
-
-bool
-etna_update_blend_color(struct etna_context *ctx);
 
 #endif

@@ -9,6 +9,7 @@
 #include "util/u_memory.h"
 #include "util/u_math.h"
 #include "util/u_inlines.h"
+#include "util/u_framebuffer.h"
 #include "util/u_dynarray.h"
 
 #include "nvc0/nvc0_winsys.h"
@@ -236,6 +237,8 @@ struct nvc0_context {
    struct list_head tex_head;
    struct list_head img_head;
 
+   struct pipe_surface *fb_cbufs[PIPE_MAX_COLOR_BUFS];
+   struct pipe_surface *fb_zsbuf;
    struct pipe_framebuffer_state framebuffer;
    bool sample_locations_enabled;
    uint8_t sample_locations[2 * 4 * 8];
@@ -269,11 +272,6 @@ struct nvc0_context {
 
    struct nvc0_blitctx *blit;
 
-   /* NOTE: some of these surfaces may reference buffers */
-   struct pipe_surface *surfaces[2][NVC0_MAX_SURFACE_SLOTS];
-   uint16_t surfaces_dirty[2];
-   uint16_t surfaces_valid[2];
-
    struct pipe_shader_buffer buffers[6][NVC0_MAX_BUFFERS];
    uint32_t buffers_dirty[6];
    uint32_t buffers_valid[6];
@@ -298,12 +296,12 @@ static inline unsigned
 nvc0_shader_stage(unsigned pipe)
 {
    switch (pipe) {
-   case PIPE_SHADER_VERTEX: return 0;
-   case PIPE_SHADER_TESS_CTRL: return 1;
-   case PIPE_SHADER_TESS_EVAL: return 2;
-   case PIPE_SHADER_GEOMETRY: return 3;
-   case PIPE_SHADER_FRAGMENT: return 4;
-   case PIPE_SHADER_COMPUTE: return 5;
+   case MESA_SHADER_VERTEX: return 0;
+   case MESA_SHADER_TESS_CTRL: return 1;
+   case MESA_SHADER_TESS_EVAL: return 2;
+   case MESA_SHADER_GEOMETRY: return 3;
+   case MESA_SHADER_FRAGMENT: return 4;
+   case MESA_SHADER_COMPUTE: return 5;
    default:
       assert(!"invalid PIPE_SHADER type");
       return 0;
@@ -314,9 +312,9 @@ static inline void
 nvc0_resource_fence(struct nvc0_context *nvc0, struct nv04_resource *res, uint32_t flags)
 {
    if (res->mm) {
-      nouveau_fence_ref(nvc0->base.fence, &res->fence);
+      nouveau_fence_ref(nvc0->base.fence, &res->fence, nvc0->base.screen);
       if (flags & NOUVEAU_BO_WR)
-         nouveau_fence_ref(nvc0->base.fence, &res->fence_wr);
+         nouveau_fence_ref(nvc0->base.fence, &res->fence_wr, nvc0->base.screen);
    }
 }
 
@@ -380,6 +378,7 @@ bool nvc0_state_validate_3d(struct nvc0_context *, uint32_t);
 
 /* nvc0_surface.c */
 extern void nvc0_clear(struct pipe_context *, unsigned buffers,
+                       uint32_t color_clear_mask, uint8_t stencil_clear_mask,
                        const struct pipe_scissor_state *scissor_state,
                        const union pipe_color_union *color,
                        double depth, unsigned stencil);

@@ -8,7 +8,9 @@
 #pragma once
 
 #include "asahi/lib/agx_device.h"
+#include "util/rwlock.h"
 #include "util/simple_mtx.h"
+#include "util/u_dynarray.h"
 #include "agx_bg_eot.h"
 #include "agx_pack.h"
 #include "agx_scratch.h"
@@ -26,10 +28,6 @@
 
 struct hk_physical_device;
 struct vk_pipeline_cache;
-
-/* Fixed offsets for reserved null image descriptors */
-#define HK_NULL_TEX_OFFSET (0)
-#define HK_NULL_PBE_OFFSET (24)
 
 typedef void (*hk_internal_builder_t)(struct nir_builder *b, const void *key);
 
@@ -68,28 +66,20 @@ struct hk_device {
    struct agx_device dev;
    struct agxdecode_ctx *decode_ctx;
 
-   struct hk_descriptor_table images;
    struct hk_descriptor_table occlusion_queries;
    struct hk_sampler_heap samplers;
-
-   struct hk_queue queue;
-
-   struct vk_pipeline_cache *mem_cache;
 
    struct vk_meta_device meta;
    struct agx_bg_eot_cache bg_eot;
 
    struct {
       struct agx_bo *bo;
-      struct agx_usc_sampler_packed txf_sampler;
-      struct agx_usc_uniform_packed image_heap;
-      uint64_t null_sink, zero_sink;
-      uint64_t geometry_state;
+      uint64_t heap;
    } rodata;
 
    struct hk_internal_shaders prolog_epilog;
    struct hk_internal_shaders kernels;
-   struct hk_api_shader *write_shader;
+   struct hk_api_shader *null_fs;
 
    /* Indirected for common secondary emulation */
    struct vk_device_dispatch_table cmd_dispatch;
@@ -100,6 +90,7 @@ struct hk_device {
     * expected to be a legitimate problem. If it is, we can rework later.
     */
    struct agx_bo *heap;
+   util_once_flag heap_init_once;
 
    struct {
       struct agx_scratch vs, fs, cs;
@@ -107,6 +98,12 @@ struct hk_device {
    } scratch;
 
    uint32_t perftest;
+
+   struct {
+      struct u_rwlock lock;
+      struct util_dynarray list;
+      struct util_dynarray counts;
+   } external_bos;
 };
 
 VK_DEFINE_HANDLE_CASTS(hk_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)
@@ -137,14 +134,14 @@ VkResult hk_sampler_heap_add(struct hk_device *dev,
 void hk_sampler_heap_remove(struct hk_device *dev, struct hk_rc_sampler *rc);
 
 static inline struct agx_scratch *
-hk_device_scratch_locked(struct hk_device *dev, enum pipe_shader_type stage)
+hk_device_scratch_locked(struct hk_device *dev, mesa_shader_stage stage)
 {
    simple_mtx_assert_locked(&dev->scratch.lock);
 
    switch (stage) {
-   case PIPE_SHADER_FRAGMENT:
+   case MESA_SHADER_FRAGMENT:
       return &dev->scratch.fs;
-   case PIPE_SHADER_VERTEX:
+   case MESA_SHADER_VERTEX:
       return &dev->scratch.vs;
    default:
       return &dev->scratch.cs;
@@ -152,7 +149,7 @@ hk_device_scratch_locked(struct hk_device *dev, enum pipe_shader_type stage)
 }
 
 static inline void
-hk_device_alloc_scratch(struct hk_device *dev, enum pipe_shader_type stage,
+hk_device_alloc_scratch(struct hk_device *dev, mesa_shader_stage stage,
                         unsigned size)
 {
    simple_mtx_lock(&dev->scratch.lock);

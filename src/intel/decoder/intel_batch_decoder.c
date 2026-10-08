@@ -23,6 +23,7 @@
 
 #include "intel_decoder.h"
 #include "intel_decoder_private.h"
+#include "intel/common/intel_gem.h"
 
 #include "util/macros.h"
 #include "util/u_debug.h"
@@ -61,7 +62,7 @@ intel_batch_decode_ctx_init(struct intel_batch_decode_ctx *ctx,
    ctx->get_state_size = get_state_size;
    ctx->user_data = user_data;
    ctx->fp = fp;
-   ctx->flags = parse_enable_string(getenv("INTEL_DECODE"), flags, debug_control);
+   ctx->flags = parse_enable_string(os_get_option("INTEL_DECODE"), flags, debug_control);
    ctx->max_vbo_decoded_lines = -1; /* No limit! */
    ctx->engine = INTEL_ENGINE_CLASS_RENDER;
 
@@ -75,7 +76,7 @@ intel_batch_decode_ctx_init(struct intel_batch_decode_ctx *ctx,
    ctx->stats =
       _mesa_hash_table_create(NULL, _mesa_hash_string, _mesa_key_string_equal);
 
-   const char *filters = getenv("INTEL_DECODE_FILTERS");
+   const char *filters = os_get_option("INTEL_DECODE_FILTERS");
    if (filters != NULL) {
       ctx->filters =
          _mesa_hash_table_create(NULL, _mesa_hash_string, _mesa_key_string_equal);
@@ -134,7 +135,7 @@ ctx_get_bo(struct intel_batch_decode_ctx *ctx, bool ppgtt, uint64_t addr)
        * bits. In order to correctly handle those aub dumps, we need to mask
        * off the top 16 bits.
        */
-      addr &= (~0ull >> 16);
+      addr = intel_48b_address(addr);
    }
 
    struct intel_batch_decode_bo bo = ctx->get_bo(ctx->user_data, ppgtt, addr);
@@ -182,31 +183,6 @@ ctx_disassemble_program(struct intel_batch_decode_ctx *ctx,
    ctx->disassemble_program(ctx, ksp, short_name, name);
 }
 
-/* Heuristic to determine whether a uint32_t is probably actually a float
- * (http://stackoverflow.com/a/2953466)
- */
-
-static bool
-probably_float(uint32_t bits)
-{
-   int exp = ((bits & 0x7f800000U) >> 23) - 127;
-   uint32_t mant = bits & 0x007fffff;
-
-   /* +- 0.0 */
-   if (exp == -127 && mant == 0)
-      return true;
-
-   /* +- 1 billionth to 1 billion */
-   if (-30 <= exp && exp <= 30)
-      return true;
-
-   /* some value with only a few binary digits */
-   if ((mant & 0x0000ffff) == 0)
-      return true;
-
-   return false;
-}
-
 static void
 ctx_print_buffer(struct intel_batch_decode_ctx *ctx,
                  struct intel_batch_decode_bo bo,
@@ -231,7 +207,7 @@ ctx_print_buffer(struct intel_batch_decode_ctx *ctx,
       }
       fprintf(ctx->fp, column_count == 0 ? "  " : " ");
 
-      if ((ctx->flags & INTEL_BATCH_DECODE_FLOATS) && probably_float(*dw))
+      if ((ctx->flags & INTEL_BATCH_DECODE_FLOATS) && util_is_probably_float(*dw))
          fprintf(ctx->fp, "  %8.2f", *(float *) dw);
       else
          fprintf(ctx->fp, "  0x%08x", *dw);
@@ -407,7 +383,6 @@ dump_samplers(struct intel_batch_decode_ctx *ctx, uint32_t offset, int count)
 
    if (count * sampler_state_size >= bo.size) {
       fprintf(ctx->fp, "  sampler state ends after bo ends\n");
-      assert(!"sampler state ends after bo ends");
       return;
    }
 
@@ -504,7 +479,11 @@ handle_compute_walker(struct intel_batch_decode_ctx *ctx,
    struct intel_field_iterator iter;
    intel_field_iterator_init(&iter, inst, p, 0, false);
    while (intel_field_iterator_next(&iter)) {
-      if (strcmp(iter.name, "Interface Descriptor") == 0) {
+      if (strcmp(iter.name, "body") == 0) {
+         intel_field_iterator_init(&iter, iter.struct_desc,
+                                   &iter.p[iter.start_bit / 32],
+                                   0, false);
+      } else if (strcmp(iter.name, "Interface Descriptor") == 0) {
          handle_interface_descriptor_data(ctx, iter.struct_desc,
                                           &iter.p[iter.start_bit / 32]);
       }
@@ -1494,6 +1473,7 @@ struct custom_decoder state_handlers[] = {
 /* Special printing of instructions */
 struct custom_decoder custom_decoders[] = {
    { "COMPUTE_WALKER", handle_compute_walker },
+   { "EXECUTE_INDIRECT_DISPATCH", handle_compute_walker },
    { "MEDIA_CURBE_LOAD", handle_media_curbe_load },
    { "3DSTATE_VERTEX_BUFFERS", handle_3dstate_vertex_buffers },
    { "3DSTATE_INDEX_BUFFER", handle_3dstate_index_buffer },
@@ -1579,15 +1559,14 @@ compare_inst_ptr(const void *v1, const void *v2)
 static void
 intel_print_accumulated_instrs(struct intel_batch_decode_ctx *ctx)
 {
-   struct util_dynarray arr;
-   util_dynarray_init(&arr, NULL);
+   struct util_dynarray arr = UTIL_DYNARRAY_INIT;
 
    hash_table_foreach(ctx->commands, entry) {
       struct inst_ptr inst = {
          .inst = (struct intel_group *)entry->key,
          .ptr  = entry->data,
       };
-      util_dynarray_append(&arr, struct inst_ptr, inst);
+      util_dynarray_append(&arr, inst);
    }
    qsort(util_dynarray_begin(&arr),
          util_dynarray_num_elements(&arr, struct inst_ptr),
@@ -1881,15 +1860,14 @@ compare_inst_stat(const void *v1, const void *v2)
 void
 intel_batch_print_stats(struct intel_batch_decode_ctx *ctx)
 {
-   struct util_dynarray arr;
-   util_dynarray_init(&arr, NULL);
+   struct util_dynarray arr = UTIL_DYNARRAY_INIT;
 
    hash_table_foreach(ctx->stats, entry) {
       struct inst_stat inst = {
          .name = (const char *)entry->key,
          .count = (uintptr_t)entry->data,
       };
-      util_dynarray_append(&arr, struct inst_stat, inst);
+      util_dynarray_append(&arr, inst);
    }
    qsort(util_dynarray_begin(&arr),
          util_dynarray_num_elements(&arr, struct inst_stat),

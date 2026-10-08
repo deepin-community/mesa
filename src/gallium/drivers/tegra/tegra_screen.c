@@ -73,31 +73,6 @@ tegra_screen_get_device_vendor(struct pipe_screen *pscreen)
 }
 
 static int
-tegra_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
-{
-   struct tegra_screen *screen = to_tegra_screen(pscreen);
-
-   return screen->gpu->get_param(screen->gpu, param);
-}
-
-static float
-tegra_screen_get_paramf(struct pipe_screen *pscreen, enum pipe_capf param)
-{
-   struct tegra_screen *screen = to_tegra_screen(pscreen);
-
-   return screen->gpu->get_paramf(screen->gpu, param);
-}
-
-static int
-tegra_screen_get_shader_param(struct pipe_screen *pscreen, enum pipe_shader_type shader,
-                              enum pipe_shader_cap param)
-{
-   struct tegra_screen *screen = to_tegra_screen(pscreen);
-
-   return screen->gpu->get_shader_param(screen->gpu, shader, param);
-}
-
-static int
 tegra_screen_get_video_param(struct pipe_screen *pscreen,
                              enum pipe_video_profile profile,
                              enum pipe_video_entrypoint entrypoint,
@@ -107,18 +82,6 @@ tegra_screen_get_video_param(struct pipe_screen *pscreen,
 
    return screen->gpu->get_video_param(screen->gpu, profile, entrypoint,
                                        param);
-}
-
-static int
-tegra_screen_get_compute_param(struct pipe_screen *pscreen,
-                               enum pipe_shader_ir ir_type,
-                               enum pipe_compute_cap param,
-                               void *retp)
-{
-   struct tegra_screen *screen = to_tegra_screen(pscreen);
-
-   return screen->gpu->get_compute_param(screen->gpu, ir_type, param,
-                                         retp);
 }
 
 static uint64_t
@@ -444,20 +407,6 @@ tegra_screen_query_memory_info(struct pipe_screen *pscreen,
    screen->gpu->query_memory_info(screen->gpu, info);
 }
 
-static const void *
-tegra_screen_get_compiler_options(struct pipe_screen *pscreen,
-                                  enum pipe_shader_ir ir,
-                                  enum pipe_shader_type shader)
-{
-   struct tegra_screen *screen = to_tegra_screen(pscreen);
-   const void *options = NULL;
-
-   if (screen->gpu->get_compiler_options)
-      options = screen->gpu->get_compiler_options(screen->gpu, ir, shader);
-
-   return options;
-}
-
 static struct disk_cache *
 tegra_screen_get_disk_shader_cache(struct pipe_screen *pscreen)
 {
@@ -605,11 +554,7 @@ tegra_screen_create(int fd)
    screen->base.get_vendor = tegra_screen_get_vendor;
    screen->base.get_device_vendor = tegra_screen_get_device_vendor;
    screen->base.get_screen_fd = tegra_screen_get_fd;
-   screen->base.get_param = tegra_screen_get_param;
-   screen->base.get_paramf = tegra_screen_get_paramf;
-   screen->base.get_shader_param = tegra_screen_get_shader_param;
    screen->base.get_video_param = tegra_screen_get_video_param;
-   screen->base.get_compute_param = tegra_screen_get_compute_param;
    screen->base.get_timestamp = tegra_screen_get_timestamp;
    screen->base.context_create = tegra_screen_context_create;
    screen->base.is_format_supported = tegra_screen_is_format_supported;
@@ -635,7 +580,6 @@ tegra_screen_create(int fd)
    screen->base.get_driver_query_group_info = tegra_screen_get_driver_query_group_info;
    screen->base.query_memory_info = tegra_screen_query_memory_info;
 
-   screen->base.get_compiler_options = tegra_screen_get_compiler_options;
    screen->base.get_disk_shader_cache = tegra_screen_get_disk_shader_cache;
 
    screen->base.resource_create_with_modifiers = tegra_screen_resource_create_with_modifiers;
@@ -643,6 +587,11 @@ tegra_screen_create(int fd)
    screen->base.is_dmabuf_modifier_supported = tegra_screen_is_dmabuf_modifier_supported;
    screen->base.get_dmabuf_modifier_planes = tegra_screen_get_dmabuf_modifier_planes;
    screen->base.memobj_create_from_handle = tegra_screen_memobj_create_from_handle;
+
+   memcpy((void *)&screen->base.caps, &screen->gpu->caps, sizeof(screen->base.caps));
+   memcpy((void *)screen->base.shader_caps, screen->gpu->shader_caps, sizeof(screen->base.shader_caps));
+   memcpy((void *)&screen->base.compute_caps, &screen->gpu->compute_caps, sizeof(screen->base.compute_caps));
+   memcpy((void *)&screen->base.nir_options, &screen->gpu->nir_options, sizeof(screen->base.nir_options));
 
    return &screen->base;
 }

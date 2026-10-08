@@ -50,7 +50,7 @@ assert_register_is_aligned(const agx_instr *I, agx_index reg)
       return;
    }
 
-   unreachable("Invalid register size");
+   UNREACHABLE("Invalid register size");
 }
 
 /* Texturing has its own operands */
@@ -58,11 +58,10 @@ static unsigned
 agx_pack_sample_coords(const agx_instr *I, agx_index index, bool *flag,
                        bool *is_16)
 {
-   /* TODO: Do we have a use case for 16-bit coords? */
-   pack_assert_msg(I, index.size == AGX_SIZE_32, "32-bit coordinates");
+   pack_assert_msg(I, index.size <= AGX_SIZE_32, "32-bit coordinates");
    pack_assert_msg(I, index.value < 0x100, "coordinate register bound");
 
-   *is_16 = false;
+   *is_16 = index.size == AGX_SIZE_16;
    *flag = index.discard;
    return index.value;
 }
@@ -88,7 +87,7 @@ agx_pack_texture(const agx_instr *I, agx_index base, agx_index index,
       pack_assert(I, base.type == AGX_INDEX_UNIFORM);
       pack_assert(I, base.size == AGX_SIZE_64);
       pack_assert(I, (base.value & 3) == 0);
-      pack_assert(I, index.size == AGX_SIZE_32);
+      pack_assert(I, index.size <= AGX_SIZE_32);
 
       /* Bindless */
       *packed_base = base.value >> 2;
@@ -169,7 +168,7 @@ agx_pack_pbe_lod(const agx_instr *I, agx_index index, bool *flag)
    else if (index.type == AGX_INDEX_REGISTER)
       *flag = false;
    else
-      unreachable("Invalid PBE LOD type");
+      UNREACHABLE("Invalid PBE LOD type");
 
    return index.value;
 }
@@ -367,7 +366,7 @@ agx_pack_sample_mask_src(const agx_instr *I, agx_index src)
 {
    unsigned value = src.value;
    unsigned packed_value =
-      (value & BITFIELD_MASK(6)) | (((value >> 6) & BITFIELD_MASK(2)) << 10);
+      (value & BITFIELD_MASK(6)) | (((value >> 6) & BITFIELD_MASK(2)) << 8);
 
    if (src.type == AGX_INDEX_IMMEDIATE) {
       pack_assert(I, value < 0x100);
@@ -556,7 +555,7 @@ agx_pack_alu(struct util_dynarray *emission, agx_instr *I)
 
 static void
 agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
-               agx_instr *I, bool needs_g13x_coherency)
+               agx_instr *I, enum u_tristate needs_g13x_coherency)
 {
    switch (I->op) {
    case AGX_OPCODE_LD_TILE:
@@ -579,8 +578,8 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
       unsigned C = I->explicit_coords ? coords.value : 0;
 
       uint64_t raw = agx_opcodes_info[I->op].encoding.exact |
-                     ((uint64_t)(D & BITFIELD_MASK(8)) << 7) | (St << 22) |
-                     ((uint64_t)(I->format) << 24) |
+                     ((uint64_t)((D >> 1) & BITFIELD_MASK(7)) << 8) |
+                     (St << 22) | ((uint64_t)(I->format) << 24) |
                      ((uint64_t)(C & BITFIELD_MASK(6)) << 16) |
                      ((uint64_t)(I->pixel_offset & BITFIELD_MASK(7)) << 28) |
                      (load || I->explicit_coords ? (1ull << 35) : 0) |
@@ -601,6 +600,7 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
       unsigned T = I->src[0].value;
       bool Tt = I->src[0].type == AGX_INDEX_IMMEDIATE;
       pack_assert(I, Tt || I->src[0].type == AGX_INDEX_REGISTER);
+      pack_assert(I, S < (1 << 10));
       uint32_t raw = 0xc1 | (Tt ? BITFIELD_BIT(8) : 0) |
                      ((T & BITFIELD_MASK(6)) << 9) | ((S & 0xff) << 16) |
                      ((T >> 6) << 24) | ((S >> 8) << 26);
@@ -626,6 +626,9 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
       bool perspective = (I->op == AGX_OPCODE_ITERPROJ);
       unsigned D = agx_pack_alu_dst(I, I->dest[0]);
       unsigned channels = (I->channels & 0x3);
+
+      /* Destination cache not supported, mask off */
+      D &= ~1;
 
       agx_index src_I = I->src[0];
       pack_assert(I, src_I.type == AGX_INDEX_IMMEDIATE ||
@@ -796,6 +799,16 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
       unsigned R = agx_pack_atomic_dest(I, I->dest[0], &Rt);
       unsigned S = agx_pack_atomic_source(I, I->src[0]);
 
+      /* Due to a hardware quirk, there is a bit in the atomic instruction that
+       * differs based on the target GPU. So, if we're packing an atomic, the
+       * shader must be keyed to a particular GPU (either needs_g13x_coherency
+       * or not needs_g13x_coherency). Assert that here.
+       *
+       * needs_g13x_coherency == U_TRISTATE_UNSET is only allowed for shaders
+       * that do not use atomics and are therefore portable across devices.
+       */
+      assert(needs_g13x_coherency != U_TRISTATE_UNSET);
+
       uint64_t raw =
          agx_opcodes_info[I->op].encoding.exact |
          (((uint64_t)I->atomic_opc) << 6) | ((R & BITFIELD_MASK(6)) << 10) |
@@ -805,7 +818,7 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
          (((uint64_t)((O >> 4) & BITFIELD_MASK(4))) << 32) |
          (((uint64_t)((A >> 4) & BITFIELD_MASK(4))) << 36) |
          (((uint64_t)(R >> 6)) << 40) |
-         (needs_g13x_coherency ? BITFIELD64_BIT(45) : 0) |
+         (needs_g13x_coherency == U_TRISTATE_YES ? BITFIELD64_BIT(45) : 0) |
          (Rt ? BITFIELD64_BIT(47) : 0) | (((uint64_t)S) << 48) |
          (((uint64_t)(O >> 8)) << 56);
 
@@ -883,10 +896,11 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
       }
 
       uint32_t extend = ((U & BITFIELD_MASK(5)) << 0) | (kill << 5) |
-                        ((I->dim >> 3) << 7) | ((R >> 6) << 8) |
-                        ((C >> 6) << 10) | ((D >> 6) << 12) | ((T >> 6) << 14) |
-                        ((O & BITFIELD_MASK(6)) << 16) | (I->gather << 23) |
-                        (I->offset << 27) | ((S >> 6) << 28) | ((O >> 6) << 30);
+                        (I->sparse ? (1 << 6) : 0) | ((I->dim >> 3) << 7) |
+                        ((R >> 6) << 8) | ((C >> 6) << 10) | ((D >> 6) << 12) |
+                        ((T >> 6) << 14) | ((O & BITFIELD_MASK(6)) << 16) |
+                        (I->gather << 23) | (I->offset << 27) |
+                        ((S >> 6) << 28) | ((O >> 6) << 30);
 
       bool L = (extend != 0);
 
@@ -898,8 +912,8 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
          (q2 << 30) | (((uint64_t)(T & BITFIELD_MASK(6))) << 32) |
          (((uint64_t)Tt) << 38) |
          (((uint64_t)(I->dim & BITFIELD_MASK(3))) << 40) |
-         (((uint64_t)q3) << 43) | (((uint64_t)I->mask) << 48) |
-         (((uint64_t)lod_mode) << 52) |
+         (((uint64_t)q3) << 43) | (Cs ? BITFIELD64_BIT(47) : 0) |
+         (((uint64_t)I->mask) << 48) | (((uint64_t)lod_mode) << 52) |
          (((uint64_t)(S & BITFIELD_MASK(6))) << 56) | (((uint64_t)St) << 62) |
          (((uint64_t)I->scoreboard) << 63);
 
@@ -907,6 +921,25 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
       if (L)
          memcpy(util_dynarray_grow_bytes(emission, 1, 4), &extend, 4);
 
+      break;
+   }
+
+   case AGX_OPCODE_TEX_STATE_STORE:
+   case AGX_OPCODE_SAMPLER_STATE_STORE: {
+      unsigned U, Tt, T = agx_pack_texture(I, I->src[0], I->src[1], &U, &Tt);
+
+      pack_assert(I, U < (1 << 4));
+      pack_assert(I, (T & 1) == 0);
+      pack_assert(I, T < (1 << 24));
+      pack_assert(I, I->imm < (1 << 7));
+
+      uint64_t raw =
+         agx_opcodes_info[I->op].encoding.exact | (I->imm << 8) |
+         (I->scoreboard << 16) | ((uint64_t)T << 26) |
+         ((I->src[1].type == AGX_INDEX_IMMEDIATE) ? (1ul << 58) : 0) |
+         ((uint64_t)U << 59);
+
+      memcpy(util_dynarray_grow_bytes(emission, 1, 8), &raw, 8);
       break;
    }
 
@@ -1038,7 +1071,7 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
          .skip_to_end = I->op == AGX_OPCODE_JMP_EXEC_NONE_AFTER,
       };
 
-      util_dynarray_append(fixups, struct agx_branch_fixup, fixup);
+      util_dynarray_append(fixups, fixup);
 
       /* The rest of the instruction is fixed */
       struct agx_opcode_info info = agx_opcodes_info[I->op];
@@ -1140,6 +1173,12 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
       break;
    }
 
+   case AGX_OPCODE_EXPORT:
+      /* Zero-byte pseudo-op. This remains until late for the benefit of
+       * register cache optimizations.
+       */
+      return;
+
    default:
       agx_pack_alu(emission, I);
       return;
@@ -1191,7 +1230,7 @@ agx_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    if (!ctx->key->no_stop || ctx->is_preamble) {
       for (unsigned i = 0; i < 8; ++i) {
          uint16_t trap = agx_opcodes_info[AGX_OPCODE_TRAP].encoding.exact;
-         util_dynarray_append(emission, uint16_t, trap);
+         util_dynarray_append(emission, trap);
       }
    }
 }

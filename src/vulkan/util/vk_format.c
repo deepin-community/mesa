@@ -254,13 +254,11 @@ const enum pipe_format vk_format_map[] = {
 
    /* Missing PVRTC */
 
-   /* Missing ASTC SFLOAT */
-
    /* Missing more planes */
 };
 
 enum pipe_format
-vk_format_to_pipe_format(enum VkFormat vkformat)
+vk_format_to_pipe_format(VkFormat vkformat)
 {
    if (vkformat >= ARRAY_SIZE(vk_format_map)) {
       switch (vkformat) {
@@ -270,6 +268,8 @@ vk_format_to_pipe_format(enum VkFormat vkformat)
          return PIPE_FORMAT_X4R12_UNORM;
       case VK_FORMAT_R10X6G10X6_UNORM_2PACK16:
          return PIPE_FORMAT_X6R10X6G10_UNORM;
+      case VK_FORMAT_R10X6G10X6B10X6A10X6_UNORM_4PACK16:
+         return PIPE_FORMAT_X6R10X6G10X6B10X6A10_UNORM;
       case VK_FORMAT_R12X4G12X4_UNORM_2PACK16:
          return PIPE_FORMAT_X4R12X4G12_UNORM;
       case VK_FORMAT_G8B8G8R8_422_UNORM:
@@ -283,7 +283,7 @@ vk_format_to_pipe_format(enum VkFormat vkformat)
       case VK_FORMAT_G8_B8_R8_3PLANE_422_UNORM:
          return PIPE_FORMAT_Y8_U8_V8_422_UNORM;
       case VK_FORMAT_G8_B8R8_2PLANE_422_UNORM:
-         return PIPE_FORMAT_Y8_U8V8_422_UNORM;
+         return PIPE_FORMAT_NV16;
       case VK_FORMAT_G8_B8_R8_3PLANE_444_UNORM:
          return PIPE_FORMAT_Y8_U8_V8_444_UNORM;
       case VK_FORMAT_G16_B16_R16_3PLANE_420_UNORM:
@@ -300,6 +300,14 @@ vk_format_to_pipe_format(enum VkFormat vkformat)
          return PIPE_FORMAT_X6G10_X6B10X6R10_420_UNORM;
       case VK_FORMAT_G12X4_B12X4R12X4_2PLANE_420_UNORM_3PACK16:
          return PIPE_FORMAT_X4G12_X4B12X4R12_420_UNORM;
+      case VK_FORMAT_G8_B8R8_2PLANE_444_UNORM:
+         return PIPE_FORMAT_G8_B8R8_444_UNORM;
+      case VK_FORMAT_G10X6_B10X6R10X6_2PLANE_444_UNORM_3PACK16:
+         return PIPE_FORMAT_X6G10_X6B10X6R10_444_UNORM;
+      case VK_FORMAT_G12X4_B12X4R12X4_2PLANE_444_UNORM_3PACK16:
+         return PIPE_FORMAT_X4G12_X4B12X4R12_444_UNORM;
+      case VK_FORMAT_G16_B16R16_2PLANE_444_UNORM:
+         return PIPE_FORMAT_Y16_U16V16_444_UNORM;
       case VK_FORMAT_A4R4G4B4_UNORM_PACK16:
          return PIPE_FORMAT_B4G4R4A4_UNORM;
       case VK_FORMAT_A4B4G4R4_UNORM_PACK16:
@@ -308,6 +316,36 @@ vk_format_to_pipe_format(enum VkFormat vkformat)
          return PIPE_FORMAT_A8_UNORM;
       case VK_FORMAT_A1B5G5R5_UNORM_PACK16_KHR:
          return PIPE_FORMAT_R5G5B5A1_UNORM;
+
+      case VK_FORMAT_ASTC_4x4_SFLOAT_BLOCK:
+         return PIPE_FORMAT_ASTC_4x4_FLOAT;
+      case VK_FORMAT_ASTC_5x4_SFLOAT_BLOCK:
+         return PIPE_FORMAT_ASTC_5x4_FLOAT;
+      case VK_FORMAT_ASTC_5x5_SFLOAT_BLOCK:
+         return PIPE_FORMAT_ASTC_5x5_FLOAT;
+      case VK_FORMAT_ASTC_6x5_SFLOAT_BLOCK:
+         return PIPE_FORMAT_ASTC_6x5_FLOAT;
+      case VK_FORMAT_ASTC_6x6_SFLOAT_BLOCK:
+         return PIPE_FORMAT_ASTC_6x6_FLOAT;
+      case VK_FORMAT_ASTC_8x5_SFLOAT_BLOCK:
+         return PIPE_FORMAT_ASTC_8x5_FLOAT;
+      case VK_FORMAT_ASTC_8x6_SFLOAT_BLOCK:
+         return PIPE_FORMAT_ASTC_8x6_FLOAT;
+      case VK_FORMAT_ASTC_8x8_SFLOAT_BLOCK:
+         return PIPE_FORMAT_ASTC_8x8_FLOAT;
+      case VK_FORMAT_ASTC_10x5_SFLOAT_BLOCK:
+         return PIPE_FORMAT_ASTC_10x5_FLOAT;
+      case VK_FORMAT_ASTC_10x6_SFLOAT_BLOCK:
+         return PIPE_FORMAT_ASTC_10x6_FLOAT;
+      case VK_FORMAT_ASTC_10x8_SFLOAT_BLOCK:
+         return PIPE_FORMAT_ASTC_10x8_FLOAT;
+      case VK_FORMAT_ASTC_10x10_SFLOAT_BLOCK:
+         return PIPE_FORMAT_ASTC_10x10_FLOAT;
+      case VK_FORMAT_ASTC_12x10_SFLOAT_BLOCK:
+         return PIPE_FORMAT_ASTC_12x10_FLOAT;
+      case VK_FORMAT_ASTC_12x12_SFLOAT_BLOCK:
+         return PIPE_FORMAT_ASTC_12x12_FLOAT;
+
       default:
          return PIPE_FORMAT_NONE;
       }
@@ -428,6 +466,7 @@ static const VkFormat formats[PIPE_FORMAT_COUNT] = {
    [PIPE_FORMAT_X6R10_UNORM] = VK_FORMAT_R10X6_UNORM_PACK16,
    [PIPE_FORMAT_X4R12_UNORM] = VK_FORMAT_R12X4_UNORM_PACK16,
    [PIPE_FORMAT_X6R10X6G10_UNORM] = VK_FORMAT_R10X6G10X6_UNORM_2PACK16,
+   [PIPE_FORMAT_X6R10X6G10X6B10X6A10_UNORM] = VK_FORMAT_R10X6G10X6B10X6A10X6_UNORM_4PACK16,
    [PIPE_FORMAT_X4R12X4G12_UNORM] = VK_FORMAT_R12X4G12X4_UNORM_2PACK16,
    [PIPE_FORMAT_G8B8_G8R8_UNORM] = VK_FORMAT_G8B8G8R8_422_UNORM,
    [PIPE_FORMAT_B8G8_R8G8_UNORM] = VK_FORMAT_B8G8R8G8_422_UNORM,
@@ -494,32 +533,46 @@ static const VkFormat formats[PIPE_FORMAT_COUNT] = {
 
    [PIPE_FORMAT_ASTC_4x4] = VK_FORMAT_ASTC_4x4_UNORM_BLOCK,
    [PIPE_FORMAT_ASTC_4x4_SRGB] = VK_FORMAT_ASTC_4x4_SRGB_BLOCK,
+   [PIPE_FORMAT_ASTC_4x4_FLOAT] = VK_FORMAT_ASTC_4x4_SFLOAT_BLOCK,
    [PIPE_FORMAT_ASTC_5x4] = VK_FORMAT_ASTC_5x4_UNORM_BLOCK,
    [PIPE_FORMAT_ASTC_5x4_SRGB] = VK_FORMAT_ASTC_5x4_SRGB_BLOCK,
+   [PIPE_FORMAT_ASTC_5x4_FLOAT] = VK_FORMAT_ASTC_5x4_SFLOAT_BLOCK,
    [PIPE_FORMAT_ASTC_5x5] = VK_FORMAT_ASTC_5x5_UNORM_BLOCK,
    [PIPE_FORMAT_ASTC_5x5_SRGB] = VK_FORMAT_ASTC_5x5_SRGB_BLOCK,
+   [PIPE_FORMAT_ASTC_5x5_FLOAT] = VK_FORMAT_ASTC_5x5_SFLOAT_BLOCK,
    [PIPE_FORMAT_ASTC_6x5] = VK_FORMAT_ASTC_6x5_UNORM_BLOCK,
    [PIPE_FORMAT_ASTC_6x5_SRGB] = VK_FORMAT_ASTC_6x5_SRGB_BLOCK,
+   [PIPE_FORMAT_ASTC_6x5_FLOAT] = VK_FORMAT_ASTC_6x5_SFLOAT_BLOCK,
    [PIPE_FORMAT_ASTC_6x6] = VK_FORMAT_ASTC_6x6_UNORM_BLOCK,
    [PIPE_FORMAT_ASTC_6x6_SRGB] = VK_FORMAT_ASTC_6x6_SRGB_BLOCK,
+   [PIPE_FORMAT_ASTC_6x6_FLOAT] = VK_FORMAT_ASTC_6x6_SFLOAT_BLOCK,
    [PIPE_FORMAT_ASTC_8x5] = VK_FORMAT_ASTC_8x5_UNORM_BLOCK,
    [PIPE_FORMAT_ASTC_8x5_SRGB] = VK_FORMAT_ASTC_8x5_SRGB_BLOCK,
+   [PIPE_FORMAT_ASTC_8x5_FLOAT] = VK_FORMAT_ASTC_8x5_SFLOAT_BLOCK,
    [PIPE_FORMAT_ASTC_8x6] = VK_FORMAT_ASTC_8x6_UNORM_BLOCK,
    [PIPE_FORMAT_ASTC_8x6_SRGB] = VK_FORMAT_ASTC_8x6_SRGB_BLOCK,
+   [PIPE_FORMAT_ASTC_8x6_FLOAT] = VK_FORMAT_ASTC_8x6_SFLOAT_BLOCK,
    [PIPE_FORMAT_ASTC_8x8] = VK_FORMAT_ASTC_8x8_UNORM_BLOCK,
    [PIPE_FORMAT_ASTC_8x8_SRGB] = VK_FORMAT_ASTC_8x8_SRGB_BLOCK,
+   [PIPE_FORMAT_ASTC_8x8_FLOAT] = VK_FORMAT_ASTC_8x8_SFLOAT_BLOCK,
    [PIPE_FORMAT_ASTC_10x5] = VK_FORMAT_ASTC_10x5_UNORM_BLOCK,
    [PIPE_FORMAT_ASTC_10x5_SRGB] = VK_FORMAT_ASTC_10x5_SRGB_BLOCK,
+   [PIPE_FORMAT_ASTC_10x5_FLOAT] = VK_FORMAT_ASTC_10x5_SFLOAT_BLOCK,
    [PIPE_FORMAT_ASTC_10x6] = VK_FORMAT_ASTC_10x6_UNORM_BLOCK,
    [PIPE_FORMAT_ASTC_10x6_SRGB] = VK_FORMAT_ASTC_10x6_SRGB_BLOCK,
+   [PIPE_FORMAT_ASTC_10x6_FLOAT] = VK_FORMAT_ASTC_10x6_SFLOAT_BLOCK,
    [PIPE_FORMAT_ASTC_10x8] = VK_FORMAT_ASTC_10x8_UNORM_BLOCK,
    [PIPE_FORMAT_ASTC_10x8_SRGB] = VK_FORMAT_ASTC_10x8_SRGB_BLOCK,
+   [PIPE_FORMAT_ASTC_10x8_FLOAT] = VK_FORMAT_ASTC_10x8_SFLOAT_BLOCK,
    [PIPE_FORMAT_ASTC_10x10] = VK_FORMAT_ASTC_10x10_UNORM_BLOCK,
    [PIPE_FORMAT_ASTC_10x10_SRGB] = VK_FORMAT_ASTC_10x10_SRGB_BLOCK,
+   [PIPE_FORMAT_ASTC_10x10_FLOAT] = VK_FORMAT_ASTC_10x10_SFLOAT_BLOCK,
    [PIPE_FORMAT_ASTC_12x10] = VK_FORMAT_ASTC_12x10_UNORM_BLOCK,
    [PIPE_FORMAT_ASTC_12x10_SRGB] = VK_FORMAT_ASTC_12x10_SRGB_BLOCK,
+   [PIPE_FORMAT_ASTC_12x10_FLOAT] = VK_FORMAT_ASTC_12x10_SFLOAT_BLOCK,
    [PIPE_FORMAT_ASTC_12x12] = VK_FORMAT_ASTC_12x12_UNORM_BLOCK,
    [PIPE_FORMAT_ASTC_12x12_SRGB] = VK_FORMAT_ASTC_12x12_SRGB_BLOCK,
+   [PIPE_FORMAT_ASTC_12x12_FLOAT] = VK_FORMAT_ASTC_12x12_SFLOAT_BLOCK,
 };
 
 VkFormat
@@ -600,6 +653,24 @@ vk_format_get_plane_format(VkFormat format, unsigned plane_id)
 }
 
 VkFormat
+vk_format_get_plane_aspect_format(VkFormat format, const VkImageAspectFlags aspect)
+{
+   assert(aspect & vk_format_aspects(format));
+
+   switch(aspect) {
+   case VK_IMAGE_ASPECT_PLANE_0_BIT:
+      return vk_format_get_plane_format(format, 0);
+   case VK_IMAGE_ASPECT_PLANE_1_BIT:
+      return vk_format_get_plane_format(format, 1);
+   case VK_IMAGE_ASPECT_PLANE_2_BIT:
+      return vk_format_get_plane_format(format, 2);
+   default:
+      assert(vk_format_get_plane_count(format) == 1);
+      return format;
+   }
+}
+
+VkFormat
 vk_format_get_aspect_format(VkFormat format, const VkImageAspectFlags aspect)
 {
    assert(util_bitcount(aspect) == 1);
@@ -613,13 +684,11 @@ vk_format_get_aspect_format(VkFormat format, const VkImageAspectFlags aspect)
    case VK_IMAGE_ASPECT_STENCIL_BIT:
       return vk_format_stencil_only(format);
    case VK_IMAGE_ASPECT_PLANE_0_BIT:
-      return vk_format_get_plane_format(format, 0);
    case VK_IMAGE_ASPECT_PLANE_1_BIT:
-      return vk_format_get_plane_format(format, 1);
    case VK_IMAGE_ASPECT_PLANE_2_BIT:
-      return vk_format_get_plane_format(format, 2);
+      return vk_format_get_plane_aspect_format(format, aspect);
    default:
-      unreachable("Cannot translate format aspect");
+      UNREACHABLE("Cannot translate format aspect");
    }
 }
 
@@ -652,7 +721,7 @@ vk_component_mapping_to_pipe_swizzle(VkComponentMapping mapping,
          out_swizzle[i] = PIPE_SWIZZLE_1;
          break;
       default:
-         unreachable("unknown swizzle");
+         UNREACHABLE("unknown swizzle");
       }
    }
 }
@@ -852,7 +921,7 @@ swizzled_color_component(const VkClearColorValue *color,
    case VK_COMPONENT_SWIZZLE_G:        return color->uint32[1];
    case VK_COMPONENT_SWIZZLE_B:        return color->uint32[2];
    case VK_COMPONENT_SWIZZLE_A:        return color->uint32[3];
-   default: unreachable("Invalid component swizzle");
+   default: UNREACHABLE("Invalid component swizzle");
    }
 }
 
@@ -866,18 +935,4 @@ vk_swizzle_color_value(VkClearColorValue color,
       swizzled_color_component(&color, swizzle.b, 2, is_int),
       swizzled_color_component(&color, swizzle.a, 3, is_int),
    }};
-}
-
-VkFormat
-vk_select_android_external_format(const void *next, VkFormat default_format)
-{
-   const VkExternalFormatANDROID *android_format = vk_find_struct_const(next, EXTERNAL_FORMAT_ANDROID);
-
-   if (android_format && android_format->externalFormat) {
-      assert(default_format == VK_FORMAT_UNDEFINED);
-      assert((VkFormat)android_format->externalFormat != VK_FORMAT_UNDEFINED);
-      return (VkFormat)android_format->externalFormat;
-   }
-
-   return default_format;
 }

@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: MIT
  */
 #include "AndroidHardwareBuffer.h"
+#include "util/detect_os.h"
 
-#if defined(__ANDROID__) || defined(__linux__)
+#if DETECT_OS_ANDROID || DETECT_OS_LINUX
 #include <drm_fourcc.h>
 #define DRM_FORMAT_YVU420_ANDROID fourcc_code('9', '9', '9', '7')
 #define DRM_FORMAT_D16_UNORM fourcc_code('9', '9', '9', '6')
@@ -66,11 +67,15 @@ VkResult getAndroidHardwareBufferPropertiesANDROID(
     gfxstream::Gralloc* grallocHelper, const AHardwareBuffer* buffer,
     VkAndroidHardwareBufferPropertiesANDROID* pProperties) {
     VkAndroidHardwareBufferFormatPropertiesANDROID* ahbFormatProps =
-        vk_find_struct<VkAndroidHardwareBufferFormatPropertiesANDROID>(pProperties);
+        vk_find_struct(pProperties, ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID);
 
     const auto format = grallocHelper->getFormat(buffer);
     if (ahbFormatProps) {
         switch (format) {
+            case AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM:
+                ahbFormatProps->format = VK_FORMAT_B8G8R8A8_UNORM;
+                ahbFormatProps->externalFormat = DRM_FORMAT_ARGB8888;
+                break;
             case AHARDWAREBUFFER_FORMAT_R8_UNORM:
                 ahbFormatProps->format = VK_FORMAT_R8_UNORM;
                 ahbFormatProps->externalFormat = DRM_FORMAT_R8;
@@ -126,6 +131,9 @@ VkResult getAndroidHardwareBufferPropertiesANDROID(
             default:
                 ahbFormatProps->format = VK_FORMAT_UNDEFINED;
                 ahbFormatProps->externalFormat = DRM_FORMAT_INVALID;
+                mesa_loge("Unhandled AHB format:%u", format);
+                break;
+
         }
 
         // The formatFeatures member must include
@@ -160,7 +168,7 @@ VkResult getAndroidHardwareBufferPropertiesANDROID(
         ahbFormatProps->suggestedXChromaOffset = VK_CHROMA_LOCATION_MIDPOINT;
         ahbFormatProps->suggestedYChromaOffset = VK_CHROMA_LOCATION_MIDPOINT;
 
-#if defined(__ANDROID__) || defined(__linux__)
+#if DETECT_OS_ANDROID || DETECT_OS_LINUX
         if (android_format_is_yuv(format)) {
             uint32_t drmFormat = grallocHelper->getFormatDrmFourcc(buffer);
             ahbFormatProps->externalFormat = static_cast<uint64_t>(drmFormat);
@@ -182,7 +190,7 @@ VkResult getAndroidHardwareBufferPropertiesANDROID(
                 //  * V (CR) comes from the R-channel (after swizzle)
                 //
                 // See
-                // https://www.khronos.org/registry/vulkan/specs/1.3-extensions/html/vkspec.html#textures-sampler-YCbCr-conversion
+                // https://docs.vulkan.org/spec/latest/chapters/textures.html#textures-sampler-YCbCr-conversion
                 //
                 // To match the above, the guest needs to swizzle such that:
                 //

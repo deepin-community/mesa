@@ -259,18 +259,20 @@ _mesa_BindFragmentShaderATI(GLuint id)
       newProg = ctx->Shared->DefaultFragmentShader;
    }
    else {
+      _mesa_HashLockMutex(&ctx->Shared->ATIShaders);
       newProg = (struct ati_fragment_shader *)
-         _mesa_HashLookup(&ctx->Shared->ATIShaders, id);
+         _mesa_HashLookupLocked(&ctx->Shared->ATIShaders, id);
       if (!newProg || newProg == &DummyShader) {
 	 /* allocate a new program now */
 	 newProg = _mesa_new_ati_fragment_shader(ctx, id);
 	 if (!newProg) {
 	    _mesa_error(ctx, GL_OUT_OF_MEMORY, "glBindFragmentShaderATI");
+            _mesa_HashUnlockMutex(&ctx->Shared->ATIShaders);
 	    return;
 	 }
-	 _mesa_HashInsert(&ctx->Shared->ATIShaders, id, newProg);
+	 _mesa_HashInsertLocked(&ctx->Shared->ATIShaders, id, newProg);
       }
-
+      _mesa_HashUnlockMutex(&ctx->Shared->ATIShaders);
    }
 
    /* do actual bind */
@@ -849,7 +851,7 @@ _mesa_SetFragmentShaderConstantATI(GLuint dst, const GLfloat * value)
    }
    else {
       FLUSH_VERTICES(ctx, 0, 0);
-      ctx->NewDriverState |= ST_NEW_FS_CONSTANTS;
+      ST_SET_STATE(ctx->NewDriverState, ST_NEW_FS_CONSTANTS);
       COPY_4V(ctx->ATIFragmentShader.GlobalConstants[dstindex], value);
    }
 }

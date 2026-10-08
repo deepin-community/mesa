@@ -99,45 +99,16 @@ static struct pipe_sampler_view *noop_create_sampler_view(struct pipe_context *c
    return sampler_view;
 }
 
-static struct pipe_surface *noop_create_surface(struct pipe_context *ctx,
-                                                struct pipe_resource *texture,
-                                                const struct pipe_surface *surf_tmpl)
-{
-   struct pipe_surface *surface = CALLOC_STRUCT(pipe_surface);
-
-   if (!surface)
-      return NULL;
-   pipe_reference_init(&surface->reference, 1);
-   pipe_resource_reference(&surface->texture, texture);
-   surface->context = ctx;
-   surface->format = surf_tmpl->format;
-   surface->width = texture->width0;
-   surface->height = texture->height0;
-   surface->texture = texture;
-   surface->u.tex.first_layer = surf_tmpl->u.tex.first_layer;
-   surface->u.tex.last_layer = surf_tmpl->u.tex.last_layer;
-   surface->u.tex.level = surf_tmpl->u.tex.level;
-
-   return surface;
-}
-
 static void noop_set_sampler_views(struct pipe_context *ctx,
-                                   enum pipe_shader_type shader,
+                                   mesa_shader_stage shader,
                                    unsigned start, unsigned count,
                                    unsigned unbind_num_trailing_slots,
-                                   bool take_ownership,
                                    struct pipe_sampler_view **views)
 {
-   if (take_ownership && views) {
-      for (unsigned i = 0; i < count; i++) {
-         struct pipe_sampler_view *view = views[i];
-         pipe_sampler_view_reference(&view, NULL);
-      }
-   }
 }
 
 static void noop_bind_sampler_states(struct pipe_context *ctx,
-                                     enum pipe_shader_type shader,
+                                     mesa_shader_stage shader,
                                      unsigned start, unsigned count,
                                      void **states)
 {
@@ -182,18 +153,13 @@ static void noop_set_framebuffer_state(struct pipe_context *ctx,
 }
 
 static void noop_set_constant_buffer(struct pipe_context *ctx,
-                                     enum pipe_shader_type shader, uint index,
-                                     bool take_ownership,
+                                     mesa_shader_stage shader, uint index,
                                      const struct pipe_constant_buffer *cb)
 {
-   if (take_ownership && cb) {
-      struct pipe_resource *buf = cb->buffer;
-      pipe_resource_reference(&buf, NULL);
-   }
 }
 
 static void noop_set_inlinable_constants(struct pipe_context *ctx,
-                                         enum pipe_shader_type shader,
+                                         mesa_shader_stage shader,
                                          uint num_values, uint32_t *values)
 {
 }
@@ -204,14 +170,6 @@ static void noop_sampler_view_destroy(struct pipe_context *ctx,
 {
    pipe_resource_reference(&state->texture, NULL);
    FREE(state);
-}
-
-
-static void noop_surface_destroy(struct pipe_context *ctx,
-                                 struct pipe_surface *surface)
-{
-   pipe_resource_reference(&surface->texture, NULL);
-   FREE(surface);
 }
 
 static void noop_bind_state(struct pipe_context *ctx, void *state)
@@ -227,12 +185,6 @@ static void noop_set_vertex_buffers(struct pipe_context *ctx,
                                     unsigned count,
                                     const struct pipe_vertex_buffer *buffers)
 {
-   for (unsigned i = 0; i < count; i++) {
-      if (!buffers[i].is_user_buffer) {
-         struct pipe_resource *buf = buffers[i].buffer.resource;
-         pipe_resource_reference(&buf, NULL);
-      }
-   }
 }
 
 static void *noop_create_vertex_elements(struct pipe_context *ctx,
@@ -281,7 +233,8 @@ static void noop_stream_output_target_destroy(struct pipe_context *ctx,
 static void noop_set_stream_output_targets(struct pipe_context *ctx,
                                            unsigned num_targets,
                                            struct pipe_stream_output_target **targets,
-                                           const unsigned *offsets)
+                                           const unsigned *offsets,
+                                           enum mesa_prim output_prim)
 {
 }
 
@@ -293,7 +246,7 @@ static void noop_set_window_rectangles(struct pipe_context *ctx,
 }
 
 static void noop_set_shader_buffers(struct pipe_context *ctx,
-                                    enum pipe_shader_type shader,
+                                    mesa_shader_stage shader,
                                     unsigned start_slot, unsigned count,
                                     const struct pipe_shader_buffer *buffers,
                                     unsigned writable_bitmask)
@@ -301,7 +254,7 @@ static void noop_set_shader_buffers(struct pipe_context *ctx,
 }
 
 static void noop_set_shader_images(struct pipe_context *ctx,
-                                   enum pipe_shader_type shader,
+                                   mesa_shader_stage shader,
                                    unsigned start_slot, unsigned count,
                                    unsigned unbind_num_trailing_slots,
                                    const struct pipe_image_view *images)
@@ -359,7 +312,14 @@ static void noop_clear_buffer(struct pipe_context *pipe,
 }
 
 static void noop_fence_server_sync(struct pipe_context *pipe,
-                                   struct pipe_fence_handle *fence)
+                                   struct pipe_fence_handle *fence,
+                                   uint64_t value)
+{
+}
+
+static void noop_fence_server_signal(struct pipe_context *pipe,
+                                     struct pipe_fence_handle *fence,
+                                     uint64_t value)
 {
 }
 
@@ -435,13 +395,14 @@ void noop_init_state_functions(struct pipe_context *ctx)
    ctx->create_rasterizer_state = noop_create_rs_state;
    ctx->create_sampler_state = noop_create_sampler_state;
    ctx->create_sampler_view = noop_create_sampler_view;
-   ctx->create_surface = noop_create_surface;
    ctx->create_vertex_elements_state = noop_create_vertex_elements;
    ctx->create_compute_state = noop_create_compute_state;
    ctx->create_tcs_state = noop_create_shader_state;
    ctx->create_tes_state = noop_create_shader_state;
    ctx->create_gs_state = noop_create_shader_state;
    ctx->create_vs_state = noop_create_shader_state;
+   ctx->create_ts_state = noop_create_shader_state;
+   ctx->create_ms_state = noop_create_shader_state;
    ctx->bind_blend_state = noop_bind_state;
    ctx->bind_depth_stencil_alpha_state = noop_bind_state;
    ctx->bind_sampler_states = noop_bind_sampler_states;
@@ -453,6 +414,8 @@ void noop_init_state_functions(struct pipe_context *ctx)
    ctx->bind_tes_state = noop_bind_state;
    ctx->bind_gs_state = noop_bind_state;
    ctx->bind_vs_state = noop_bind_state;
+   ctx->bind_ts_state = noop_bind_state;
+   ctx->bind_ms_state = noop_bind_state;
    ctx->delete_blend_state = noop_delete_state;
    ctx->delete_depth_stencil_alpha_state = noop_delete_state;
    ctx->delete_fs_state = noop_delete_state;
@@ -464,6 +427,8 @@ void noop_init_state_functions(struct pipe_context *ctx)
    ctx->delete_tes_state = noop_delete_state;
    ctx->delete_gs_state = noop_delete_state;
    ctx->delete_vs_state = noop_delete_state;
+   ctx->delete_ts_state = noop_delete_state;
+   ctx->delete_ms_state = noop_delete_state;
    ctx->set_blend_color = noop_set_blend_color;
    ctx->set_clip_state = noop_set_clip_state;
    ctx->set_constant_buffer = noop_set_constant_buffer;
@@ -480,10 +445,11 @@ void noop_init_state_functions(struct pipe_context *ctx)
    ctx->set_viewport_states = noop_set_viewport_states;
    ctx->set_window_rectangles = noop_set_window_rectangles;
    ctx->sampler_view_destroy = noop_sampler_view_destroy;
-   ctx->surface_destroy = noop_surface_destroy;
+   ctx->sampler_view_release = u_default_sampler_view_release;
    ctx->draw_vbo = noop_draw_vbo;
    ctx->draw_vertex_state = noop_draw_vertex_state;
    ctx->launch_grid = noop_launch_grid;
+   ctx->draw_mesh_tasks = noop_launch_grid;;
    ctx->create_stream_output_target = noop_create_stream_output_target;
    ctx->stream_output_target_destroy = noop_stream_output_target_destroy;
    ctx->set_stream_output_targets = noop_set_stream_output_targets;
@@ -495,6 +461,7 @@ void noop_init_state_functions(struct pipe_context *ctx)
    ctx->clear_texture = noop_clear_texture;
    ctx->clear_buffer = noop_clear_buffer;
    ctx->fence_server_sync = noop_fence_server_sync;
+   ctx->fence_server_signal = noop_fence_server_signal;
    ctx->texture_barrier = noop_texture_barrier;
    ctx->memory_barrier = noop_memory_barrier;
    ctx->resource_commit = noop_resource_commit;

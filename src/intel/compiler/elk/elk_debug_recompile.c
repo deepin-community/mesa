@@ -1,23 +1,6 @@
 /*
  * Copyright © 2019 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 /**
@@ -152,19 +135,17 @@ debug_gs_recompile(const struct elk_compiler *c, void *log,
 
 static void
 debug_fs_recompile(const struct elk_compiler *c, void *log,
-                   const struct elk_wm_prog_key *old_key,
-                   const struct elk_wm_prog_key *key)
+                   const struct elk_fs_prog_key *old_key,
+                   const struct elk_fs_prog_key *key)
 {
    bool found = false;
 
    found |= check("alphatest, computed depth, depth test, or depth write",
                   iz_lookup);
    found |= check("depth statistics", stats_wm);
-   found |= check("flat shading", flat_shade);
    found |= check("number of color buffers", nr_color_regions);
    found |= check("MRT alpha test", alpha_test_replicate_alpha);
    found |= check("alpha to coverage", alpha_to_coverage);
-   found |= check("fragment color clamping", clamp_fragment_color);
    found |= check("per-sample interpolation", persample_interp);
    found |= check("multisampled FBO", multisample_fbo);
    found |= check("line smoothing", line_aa);
@@ -197,7 +178,7 @@ debug_cs_recompile(const struct elk_compiler *c, void *log,
 
 void
 elk_debug_key_recompile(const struct elk_compiler *c, void *log,
-                        gl_shader_stage stage,
+                        mesa_shader_stage stage,
                         const struct elk_base_prog_key *old_key,
                         const struct elk_base_prog_key *key)
 {
@@ -224,8 +205,8 @@ elk_debug_key_recompile(const struct elk_compiler *c, void *log,
                                  (const struct elk_gs_prog_key *)key);
       break;
    case MESA_SHADER_FRAGMENT:
-      debug_fs_recompile(c, log, (const struct elk_wm_prog_key *)old_key,
-                                 (const struct elk_wm_prog_key *)key);
+      debug_fs_recompile(c, log, (const struct elk_fs_prog_key *)old_key,
+                                 (const struct elk_fs_prog_key *)key);
       break;
    case MESA_SHADER_COMPUTE:
       debug_cs_recompile(c, log, (const struct elk_cs_prog_key *)old_key,

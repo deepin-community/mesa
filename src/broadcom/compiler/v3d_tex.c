@@ -194,7 +194,7 @@ handle_tex_src(struct v3d_compile *c,
         }
 
         default:
-                unreachable("unknown texture source");
+                UNREACHABLE("unknown texture source");
         }
 }
 
@@ -238,9 +238,8 @@ v3d_vir_emit_tex(struct v3d_compile *c, nir_tex_instr *instr)
          * itself, we still need to add the sampler configuration
          * parameter if the output is 32 bit
          */
-        assert(sampler_idx < c->key->num_samplers_used);
         bool output_type_32_bit =
-                c->key->sampler[sampler_idx].return_size == 32;
+                (c->key->sampler_is_32b & (1 << sampler_idx));
 
         struct V3D42_TMU_CONFIG_PARAMETER_0 p0_unpacked = {
         };
@@ -253,14 +252,14 @@ v3d_vir_emit_tex(struct v3d_compile *c, nir_tex_instr *instr)
                 (components_read & 0xf): (components_read & 0x3);
         assert(p0_unpacked.return_words_of_texture_data != 0);
 
-        struct V3D42_TMU_CONFIG_PARAMETER_2 p2_unpacked = {
-                .op = V3D_TMU_OP_REGULAR,
-                .gather_mode = instr->op == nir_texop_tg4,
-                .gather_component = instr->component,
-                .coefficient_mode = instr->op == nir_texop_txd,
-                .disable_autolod = instr->op == nir_texop_tg4,
-                .lod_query = instr->op == nir_texop_lod,
-        };
+        struct V3D42_TMU_CONFIG_PARAMETER_2 p2_unpacked;
+        memset(&p2_unpacked, 0, sizeof(p2_unpacked));
+        p2_unpacked.op = V3D_TMU_OP_REGULAR;
+        p2_unpacked.gather_mode = instr->op == nir_texop_tg4;
+        p2_unpacked.gather_component = instr->component;
+        p2_unpacked.coefficient_mode = instr->op == nir_texop_txd;
+        p2_unpacked.disable_autolod = instr->op == nir_texop_tg4;
+        p2_unpacked.lod_query = instr->op == nir_texop_lod;
 
         const unsigned tmu_writes = get_required_tex_tmu_writes(c, instr);
 
@@ -308,12 +307,15 @@ v3d_vir_emit_tex(struct v3d_compile *c, nir_tex_instr *instr)
 
         /* To handle the cases were we can't just use p1_unpacked_default */
         bool non_default_p1_config = nir_tex_instr_need_sampler(instr) ||
-                output_type_32_bit;
+                output_type_32_bit ||
+                (c->s->info.stage == MESA_SHADER_FRAGMENT &&
+                 !instr->skip_helpers);
 
         if (non_default_p1_config) {
                 struct V3D42_TMU_CONFIG_PARAMETER_1 p1_unpacked = {
                         .output_type_32_bit = output_type_32_bit,
-
+                        .per_pixel_mask_enable = (c->s->info.stage != MESA_SHADER_FRAGMENT ||
+                                                  instr->skip_helpers),
                         .unnormalized_coordinates = (instr->sampler_dim ==
                                                      GLSL_SAMPLER_DIM_RECT),
                 };
@@ -398,7 +400,7 @@ v3d_image_atomic_tmu_op(nir_intrinsic_instr *instr)
         case nir_atomic_op_ixor:    return V3D_TMU_OP_WRITE_XOR_READ_NOT;
         case nir_atomic_op_xchg:    return V3D_TMU_OP_WRITE_XCHG_READ_FLUSH;
         case nir_atomic_op_cmpxchg: return V3D_TMU_OP_WRITE_CMPXCHG_READ_FLUSH;
-        default:                    unreachable("unknown atomic op");
+        default:                    UNREACHABLE("unknown atomic op");
         }
 }
 
@@ -415,7 +417,7 @@ v3d_image_load_store_tmu_op(nir_intrinsic_instr *instr)
                 return v3d_image_atomic_tmu_op(instr);
 
         default:
-                unreachable("unknown image intrinsic");
+                UNREACHABLE("unknown image intrinsic");
         };
 }
 
@@ -462,7 +464,7 @@ vir_image_emit_register_writes(struct v3d_compile *c,
                 break;
         }
         default:
-                unreachable("bad image sampler dim");
+                UNREACHABLE("bad image sampler dim");
         }
 
         /* In order to fetch on a cube map, we need to interpret it as
@@ -565,12 +567,17 @@ v3d_vir_emit_image_load_store(struct v3d_compile *c,
         struct V3D42_TMU_CONFIG_PARAMETER_0 p0_unpacked = {
         };
 
-        struct V3D42_TMU_CONFIG_PARAMETER_1 p1_unpacked = {
-                .per_pixel_mask_enable = true,
-                .output_type_32_bit = v3d_gl_format_is_return_32(format),
-        };
+        struct V3D42_TMU_CONFIG_PARAMETER_1 p1_unpacked;
+        memset(&p1_unpacked, 0, sizeof(p1_unpacked));
+        enum gl_access_qualifier access = nir_intrinsic_access(instr);
+        p1_unpacked.per_pixel_mask_enable =
+                (c->s->info.stage != MESA_SHADER_FRAGMENT ||
+                 instr->intrinsic != nir_intrinsic_image_load ||
+                 access & ACCESS_SKIP_HELPERS);
+        p1_unpacked.output_type_32_bit = v3d_gl_format_is_return_32(format);
 
-        struct V3D42_TMU_CONFIG_PARAMETER_2 p2_unpacked = { 0 };
+        struct V3D42_TMU_CONFIG_PARAMETER_2 p2_unpacked;
+        memset(&p2_unpacked, 0, sizeof(p2_unpacked));
 
         /* Limit the number of channels to those that are actually used */
         uint32_t return_channels =

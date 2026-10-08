@@ -7,6 +7,39 @@
 #include "nir.h"
 #include "nir_builder.h"
 #include "nir_intrinsics_indices.h"
+#include "util/format/u_format.h"
+
+/*
+ * The robustImageAccess2 specification says: "Reads, atomic
+ * read-modify-write operations, or fetches from images outside of the
+ * checked dimensions will return zero values, with (0,0,1) values
+ * inserted for missing G, B, or A components based on the format."
+ *
+ * This means, an out-of-bounds access to an R, RG, or RGB format will return
+ * (0, 0, 0, 1). For an RGBA format, such as VK_FORMAT_R8G8B8A8_UNORM,
+ * it will return (0, 0, 0, 0) as no components are missing.
+ */
+static nir_def *
+image_robust2_oob_value(nir_builder *b, nir_intrinsic_instr *instr)
+{
+   unsigned num_components = instr->def.num_components;
+   unsigned bit_size = instr->def.bit_size;
+   nir_alu_type dest_type = nir_intrinsic_dest_type(instr);
+   enum pipe_format format = nir_intrinsic_format(instr);
+   nir_def *zero = nir_imm_zero(b, 1, bit_size);
+   nir_def *one;
+   if (nir_alu_type_get_base_type(dest_type) == nir_type_float)
+      one = nir_imm_floatN_t(b, 1, bit_size);
+   else
+      one = nir_imm_intN_t(b, 1, bit_size);
+
+   const struct util_format_description *desc = util_format_description(format);
+   nir_def *components[NIR_MAX_VEC_COMPONENTS];
+   for (unsigned i = 0; i < num_components; i++)
+      components[i] = desc->swizzle[i] == PIPE_SWIZZLE_1 ? one : zero;
+
+   return nir_vec(b, components, num_components);
+}
 
 static void
 rewrite_offset(nir_builder *b, nir_intrinsic_instr *instr,
@@ -31,14 +64,14 @@ rewrite_offset(nir_builder *b, nir_intrinsic_instr *instr,
  * intrinsic produces a destination, it will be zero in the invalid case.
  */
 static void
-wrap_in_if(nir_builder *b, nir_intrinsic_instr *instr, nir_def *valid)
+wrap_in_if(nir_builder *b, nir_intrinsic_instr *instr, nir_def *valid, bool is_load)
 {
    bool has_dest = nir_intrinsic_infos[instr->intrinsic].has_dest;
    nir_def *res, *zero;
 
    if (has_dest) {
-      zero = nir_imm_zero(b, instr->def.num_components,
-                          instr->def.bit_size);
+         zero = is_load ? image_robust2_oob_value(b, instr) :
+               nir_imm_zero(b, instr->def.num_components, instr->def.bit_size);
    }
 
    nir_push_if(b, valid);
@@ -59,9 +92,7 @@ wrap_in_if(nir_builder *b, nir_intrinsic_instr *instr, nir_def *valid)
 }
 
 static void
-lower_buffer_load(nir_builder *b,
-                  nir_intrinsic_instr *instr,
-                  const nir_lower_robust_access_options *opts)
+lower_buffer_load(nir_builder *b, nir_intrinsic_instr *instr)
 {
    uint32_t type_sz = instr->def.bit_size / 8;
    nir_def *size;
@@ -70,7 +101,7 @@ lower_buffer_load(nir_builder *b,
    if (instr->intrinsic == nir_intrinsic_load_ubo) {
       size = nir_get_ubo_size(b, 32, index);
    } else {
-      size = nir_get_ssbo_size(b, index);
+      size = nir_get_ssbo_size(b, 32, index);
    }
 
    rewrite_offset(b, instr, type_sz, 1, size);
@@ -81,13 +112,13 @@ lower_buffer_store(nir_builder *b, nir_intrinsic_instr *instr)
 {
    uint32_t type_sz = nir_src_bit_size(instr->src[0]) / 8;
    rewrite_offset(b, instr, type_sz, 2,
-                  nir_get_ssbo_size(b, instr->src[1].ssa));
+                  nir_get_ssbo_size(b, 32, instr->src[1].ssa));
 }
 
 static void
 lower_buffer_atomic(nir_builder *b, nir_intrinsic_instr *instr)
 {
-   rewrite_offset(b, instr, 4, 1, nir_get_ssbo_size(b, instr->src[0].ssa));
+   rewrite_offset(b, instr, 4, 1, nir_get_ssbo_size(b, 32, instr->src[0].ssa));
 }
 
 static void
@@ -110,21 +141,44 @@ lower_buffer_shared(nir_builder *b, nir_intrinsic_instr *instr)
                   nir_imm_int(b, b->shader->info.shared_size));
 }
 
-static bool
-lower_image(nir_builder *b,
-            nir_intrinsic_instr *instr,
-            const nir_lower_robust_access_options *opts, bool deref)
+static nir_image_intrinsic_type
+image_intrinsic_type(nir_intrinsic_op intrinsic)
+{
+   switch (intrinsic) {
+   case nir_intrinsic_image_load:
+   case nir_intrinsic_image_store:
+   case nir_intrinsic_image_atomic:
+   case nir_intrinsic_image_atomic_swap:
+      return nir_image_intrinsic_type_default;
+
+   case nir_intrinsic_bindless_image_load:
+   case nir_intrinsic_bindless_image_store:
+   case nir_intrinsic_bindless_image_atomic:
+   case nir_intrinsic_bindless_image_atomic_swap:
+      return nir_image_intrinsic_type_bindless;
+
+   case nir_intrinsic_image_deref_load:
+   case nir_intrinsic_image_deref_store:
+   case nir_intrinsic_image_deref_atomic:
+   case nir_intrinsic_image_deref_atomic_swap:
+      return nir_image_intrinsic_type_deref;
+
+   case nir_intrinsic_image_heap_load:
+   case nir_intrinsic_image_heap_store:
+   case nir_intrinsic_image_heap_atomic:
+   case nir_intrinsic_image_heap_atomic_swap:
+      return nir_image_intrinsic_type_heap;
+
+   default:
+      UNREACHABLE("Invalid NIR image intrinsic");
+   }
+}
+
+static void
+lower_image(nir_builder *b, nir_intrinsic_instr *instr,
+            nir_image_intrinsic_type type, bool is_load)
 {
    enum glsl_sampler_dim dim = nir_intrinsic_image_dim(instr);
-   bool atomic = (instr->intrinsic == nir_intrinsic_image_atomic ||
-                  instr->intrinsic == nir_intrinsic_image_atomic_swap ||
-                  instr->intrinsic == nir_intrinsic_image_deref_atomic ||
-                  instr->intrinsic == nir_intrinsic_image_deref_atomic_swap);
-   if (!opts->lower_image &&
-       !(opts->lower_buffer_image && dim == GLSL_SAMPLER_DIM_BUF) &&
-       !(opts->lower_image_atomic && atomic))
-      return false;
-
    uint32_t num_coords = nir_image_intrinsic_coord_components(instr);
    bool is_array = nir_intrinsic_image_array(instr);
    nir_def *coord = instr->src[1].ssa;
@@ -137,9 +191,19 @@ lower_image(nir_builder *b,
    nir_def *size = nir_image_size(b, size_components, 32,
                                   instr->src[0].ssa, nir_imm_int(b, 0),
                                   .image_array = is_array, .image_dim = dim);
-   if (deref) {
-      nir_instr_as_intrinsic(size->parent_instr)->intrinsic =
-         nir_intrinsic_image_deref_size;
+
+   switch (type) {
+   case nir_image_intrinsic_type_default:
+      nir_def_as_intrinsic(size)->intrinsic = nir_intrinsic_image_size;
+      break;
+   case nir_image_intrinsic_type_deref:
+      nir_def_as_intrinsic(size)->intrinsic = nir_intrinsic_image_deref_size;
+      break;
+   case nir_image_intrinsic_type_heap:
+      nir_def_as_intrinsic(size)->intrinsic = nir_intrinsic_image_heap_size;
+      break;
+   default:
+      UNREACHABLE("Invalid NIR image intrinsic type");
    }
 
    if (dim == GLSL_SAMPLER_DIM_CUBE) {
@@ -155,87 +219,97 @@ lower_image(nir_builder *b,
       nir_def *sample = instr->src[2].ssa;
       nir_def *samples = nir_image_samples(b, 32, instr->src[0].ssa,
                                            .image_array = is_array, .image_dim = dim);
-      if (deref) {
-         nir_instr_as_intrinsic(samples->parent_instr)->intrinsic =
-            nir_intrinsic_image_deref_samples;
+
+      switch (type) {
+      case nir_image_intrinsic_type_default:
+         nir_def_as_intrinsic(samples)->intrinsic = nir_intrinsic_image_samples;
+         break;
+      case nir_image_intrinsic_type_deref:
+         nir_def_as_intrinsic(samples)->intrinsic = nir_intrinsic_image_deref_samples;
+         break;
+      case nir_image_intrinsic_type_heap:
+         nir_def_as_intrinsic(samples)->intrinsic = nir_intrinsic_image_heap_samples;
+         break;
+      default:
+         UNREACHABLE("Invalid NIR image intrinsic type");
       }
 
       in_bounds = nir_iand(b, in_bounds, nir_ult(b, sample, samples));
    }
 
    /* Only execute if coordinates are in-bounds. Otherwise, return zero. */
-   wrap_in_if(b, instr, in_bounds);
-   return true;
+   wrap_in_if(b, instr, in_bounds, is_load);
 }
 
+struct pass_opts {
+   nir_intrin_filter_cb filter;
+   const void *data;
+};
+
 static bool
-lower(nir_builder *b, nir_instr *instr, void *_opts)
+lower(nir_builder *b, nir_intrinsic_instr *intr, void *_opts)
 {
-   const nir_lower_robust_access_options *opts = _opts;
-   if (instr->type != nir_instr_type_intrinsic)
+   const struct pass_opts *opts = _opts;
+   if (!opts->filter(intr, opts->data))
       return false;
 
-   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-   b->cursor = nir_before_instr(instr);
+   b->cursor = nir_before_instr(&intr->instr);
 
    switch (intr->intrinsic) {
    case nir_intrinsic_image_load:
+   case nir_intrinsic_image_deref_load:
+   case nir_intrinsic_image_heap_load:
+      lower_image(b, intr, image_intrinsic_type(intr->intrinsic), true);
+      return true;
    case nir_intrinsic_image_store:
    case nir_intrinsic_image_atomic:
    case nir_intrinsic_image_atomic_swap:
-      return lower_image(b, intr, opts, false);
-
-   case nir_intrinsic_image_deref_load:
    case nir_intrinsic_image_deref_store:
    case nir_intrinsic_image_deref_atomic:
    case nir_intrinsic_image_deref_atomic_swap:
-      return lower_image(b, intr, opts, true);
+   case nir_intrinsic_image_heap_store:
+   case nir_intrinsic_image_heap_atomic:
+   case nir_intrinsic_image_heap_atomic_swap:
+      lower_image(b, intr, image_intrinsic_type(intr->intrinsic), false);
+      return true;
 
    case nir_intrinsic_load_ubo:
-      if (opts->lower_ubo) {
-         lower_buffer_load(b, intr, opts);
-         return true;
-      }
-      return false;
-
    case nir_intrinsic_load_ssbo:
-      if (opts->lower_ssbo) {
-         lower_buffer_load(b, intr, opts);
-         return true;
-      }
-      return false;
+      lower_buffer_load(b, intr);
+      return true;
    case nir_intrinsic_store_ssbo:
-      if (opts->lower_ssbo) {
-         lower_buffer_store(b, intr);
-         return true;
-      }
-      return false;
+      lower_buffer_store(b, intr);
+      return true;
    case nir_intrinsic_ssbo_atomic:
-      if (opts->lower_ssbo) {
-         lower_buffer_atomic(b, intr);
-         return true;
-      }
-      return false;
+   case nir_intrinsic_ssbo_atomic_swap:
+      lower_buffer_atomic(b, intr);
+      return true;
 
    case nir_intrinsic_store_shared:
    case nir_intrinsic_load_shared:
    case nir_intrinsic_shared_atomic:
    case nir_intrinsic_shared_atomic_swap:
-      if (opts->lower_shared) {
-         lower_buffer_shared(b, intr);
-         return true;
-      }
-      return false;
+      /* Vulkan's robustBufferAccess feature is only concerned with buffers that
+       * are bound through descriptor sets, so shared memory is not included,
+       * but this lowering may be useful for debugging.
+       */
+      lower_buffer_shared(b, intr);
+      return true;
 
    default:
-      return false;
+      UNREACHABLE("driver requested lowering for unsupported intrinsic");
    }
 }
 
+/*
+ * Buffer/image robustness lowering with robustBufferAccess/robustImageAccess
+ * semantics. This is sufficient for GL, but not for D3D. However, Vulkan
+ * drivers get buffer robustness lowered via nir_lower_explicit_io.
+ */
 bool
-nir_lower_robust_access(nir_shader *s,
-                        const nir_lower_robust_access_options *opts)
+nir_lower_robust_access(nir_shader *s, nir_intrin_filter_cb filter,
+                        const void *data)
 {
-   return nir_shader_instructions_pass(s, lower, nir_metadata_control_flow,
-                                       (void *)opts);
+   struct pass_opts opt = { .filter = filter, .data = data };
+   return nir_shader_intrinsics_pass(s, lower, nir_metadata_none, &opt);
 }

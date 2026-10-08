@@ -71,11 +71,8 @@ main(void)
 
    struct pan_kmod_dev *dev =
       pan_kmod_dev_create(fd, PAN_KMOD_DEV_FLAG_OWNS_FD, NULL);
-   struct pan_kmod_dev_props props;
-
-   pan_kmod_dev_query_props(dev, &props);
-
-   uint32_t supported = panfrost_query_compressed_formats(&props);
+   struct pan_kmod_dev_props props = dev->props;
+   uint32_t supported = pan_query_compressed_formats(&props);
    bool all_ok = true;
 
    printf("System-on-chip compressed texture support:"

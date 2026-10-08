@@ -24,11 +24,14 @@
 #ifndef VK_DEBUG_UTILS_H
 #define VK_DEBUG_UTILS_H
 
+#include "vk_device.h"
 #include "vk_instance.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+struct vk_queue;
 
 struct vk_debug_utils_messenger {
    struct vk_object_base base;
@@ -66,6 +69,28 @@ vk_address_binding_report(struct vk_instance *instance,
                           uint64_t base_address,
                           uint64_t size,
                           VkDeviceAddressBindingTypeEXT type);
+
+void
+vk_emit_device_memory_report(struct vk_device* device,
+                             VkDeviceMemoryReportEventTypeEXT type,
+                             uint64_t mem_obj_id,
+                             VkDeviceSize size,
+                             VkObjectType obj_type,
+                             uint64_t obj_handle,
+                             uint32_t heap_index);
+
+void
+vk_queue_begin_debug_utils_label(struct vk_queue *queue,
+                                 const VkDebugUtilsLabelEXT *pLabelInfo);
+
+void
+vk_queue_end_debug_utils_label(struct vk_queue *queue);
+
+
+struct u_printf_ctx;
+
+VkResult
+vk_check_printf_status(struct vk_device *dev, struct u_printf_ctx *ctx);
 
 #ifdef __cplusplus
 }

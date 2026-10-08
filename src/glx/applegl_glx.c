@@ -46,6 +46,7 @@ static void
 applegl_destroy_context(struct glx_context *gc)
 {
    apple_glx_destroy_context(&gc->driContext, gc->psc->dpy);
+   free(gc);
 }
 
 static int
@@ -63,7 +64,7 @@ applegl_bind_context(
    if (error)
       return 1; /* GLXBadContext is the same as Success (0) */
 
-   apple_glapi_set_dispatch();
+   apple_mesa_glapi_set_dispatch();
 
    return Success;
 }
@@ -170,7 +171,7 @@ static const struct glx_screen_vtable applegl_screen_vtable = {
    .query_renderer_string  = NULL,
 };
 
-_X_HIDDEN struct glx_screen *
+struct glx_screen *
 applegl_create_screen(int screen, struct glx_display * priv)
 {
    struct glx_screen *psc;
@@ -185,7 +186,7 @@ applegl_create_screen(int screen, struct glx_display * priv)
    return psc;
 }
 
-_X_HIDDEN int
+int
 applegl_create_display(struct glx_display *glx_dpy)
 {
    if(!apple_init_glx(glx_dpy->dpy))

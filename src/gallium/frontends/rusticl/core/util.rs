@@ -1,6 +1,10 @@
+// Copyright 2020 Red Hat.
+// SPDX-License-Identifier: MIT
+
 use crate::api::{icd::CLResult, types::CLVec};
 
 use mesa_rust_gen::*;
+use mesa_rust_util::conversion::*;
 use rusticl_opencl_gen::*;
 
 use super::gl::is_cube_map_face;
@@ -61,11 +65,11 @@ pub fn create_pipe_box(
     };
 
     Ok(pipe_box {
-        x: base[0].try_into().map_err(|_| CL_OUT_OF_HOST_MEMORY)?,
-        y: base[1].try_into().map_err(|_| CL_OUT_OF_HOST_MEMORY)?,
-        z: base[2].try_into().map_err(|_| CL_OUT_OF_HOST_MEMORY)?,
-        width: region[0].try_into().map_err(|_| CL_OUT_OF_HOST_MEMORY)?,
-        height: region[1].try_into().map_err(|_| CL_OUT_OF_HOST_MEMORY)?,
-        depth: region[2].try_into().map_err(|_| CL_OUT_OF_HOST_MEMORY)?,
+        x: base[0].try_into_with_err(CL_OUT_OF_HOST_MEMORY)?,
+        y: base[1].try_into_with_err(CL_OUT_OF_HOST_MEMORY)?,
+        z: base[2].try_into_with_err(CL_OUT_OF_HOST_MEMORY)?,
+        width: region[0].try_into_with_err(CL_OUT_OF_HOST_MEMORY)?,
+        height: region[1].try_into_with_err(CL_OUT_OF_HOST_MEMORY)?,
+        depth: region[2].try_into_with_err(CL_OUT_OF_HOST_MEMORY)?,
     })
 }

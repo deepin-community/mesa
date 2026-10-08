@@ -44,7 +44,7 @@
 #include "pipe/p_defines.h"
 #include "state_tracker/st_context.h"
 #include "util/u_atomic.h"
-#include <mapi/glapi/glapi.h>
+#include "mesa/glapi/glapi/glapi.h"
 
 #include "hgl/hgl_sw_winsys.h"
 #include "hgl_context.h"
@@ -359,8 +359,7 @@ haiku_initialize_impl(_EGLDisplay *disp, void *platformDisplay)
 
    /* Report back to EGL the bitmask of priorities supported */
    disp->Extensions.IMG_context_priority =
-      hgl_dpy->disp->fscreen->screen->get_param(hgl_dpy->disp->fscreen->screen,
-                                                PIPE_CAP_CONTEXT_PRIORITY_MASK);
+      hgl_dpy->disp->fscreen->screen->caps.context_priority_mask;
    disp->Extensions.NV_context_priority_realtime =
       disp->Extensions.IMG_context_priority &
       (1 << __EGL_CONTEXT_PRIORITY_REALTIME_BIT);
@@ -400,7 +399,7 @@ haiku_initialize(_EGLDisplay *disp)
       ret = haiku_initialize_impl(disp, disp->PlatformDisplay);
       break;
    default:
-      unreachable("Callers ensure we cannot get here.");
+      UNREACHABLE("Callers ensure we cannot get here.");
       return EGL_FALSE;
    }
 

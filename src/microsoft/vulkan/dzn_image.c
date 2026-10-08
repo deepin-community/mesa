@@ -486,7 +486,7 @@ dzn_image_get_dsv_desc(const struct dzn_image *image,
       }
       break;
    default:
-      unreachable("Invalid image type");
+      UNREACHABLE("Invalid image type");
    }
 
    switch (dsv_desc.ViewDimension) {
@@ -513,7 +513,7 @@ dzn_image_get_dsv_desc(const struct dzn_image *image,
       dsv_desc.Texture2DMSArray.ArraySize = layer_count;
       break;
    default:
-      unreachable("Invalid view dimension");
+      UNREACHABLE("Invalid view dimension");
    }
 
    return dsv_desc;
@@ -556,7 +556,7 @@ dzn_image_get_rtv_desc(const struct dzn_image *image,
    case VK_IMAGE_TYPE_3D:
       rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE3D;
       break;
-   default: unreachable("Invalid image type\n");
+   default: UNREACHABLE("Invalid image type\n");
    }
 
    switch (rtv_desc.ViewDimension) {
@@ -601,7 +601,7 @@ dzn_image_get_rtv_desc(const struct dzn_image *image,
          range->layerCount == VK_REMAINING_ARRAY_LAYERS ? -1 : layer_count;
       break;
    default:
-      unreachable("Invalid ViewDimension");
+      UNREACHABLE("Invalid ViewDimension");
    }
 
    return rtv_desc;
@@ -663,7 +663,7 @@ dzn_image_layout_to_state(const struct dzn_image *image,
       return D3D12_RESOURCE_STATE_COMMON;
 
    default:
-      unreachable("not implemented");
+      UNREACHABLE("not implemented");
    }
 }
 
@@ -791,24 +791,6 @@ dzn_DestroyImage(VkDevice device, VkImage image,
    dzn_image_destroy(dzn_image_from_handle(image), pAllocator);
 }
 
-static struct dzn_image *
-dzn_swapchain_get_image(struct dzn_device *device,
-                        VkSwapchainKHR swapchain,
-                        uint32_t index)
-{
-   uint32_t n_images = index + 1;
-   STACK_ARRAY(VkImage, images, n_images);
-   struct dzn_image *image = NULL;
-
-   VkResult result = wsi_common_get_images(swapchain, &n_images, images);
-
-   if (result == VK_SUCCESS || result == VK_INCOMPLETE)
-      image = dzn_image_from_handle(images[index]);
-
-   STACK_ARRAY_FINISH(images);
-   return image;
-}
-
 VKAPI_ATTR VkResult VKAPI_CALL
 dzn_BindImageMemory2(VkDevice dev,
                      uint32_t bindInfoCount,
@@ -822,21 +804,17 @@ dzn_BindImageMemory2(VkDevice dev,
       VK_FROM_HANDLE(dzn_image, image, bind_info->image);
 
 #ifdef DZN_USE_WSI_PLATFORM
-      const VkBindImageMemorySwapchainInfoKHR *swapchain_info =
-         vk_find_struct_const(pBindInfos[i].pNext, BIND_IMAGE_MEMORY_SWAPCHAIN_INFO_KHR);
-
-      if (swapchain_info && swapchain_info->swapchain != VK_NULL_HANDLE) {
-         struct dzn_image *swapchain_img =
-            dzn_image_from_handle(wsi_common_get_image(swapchain_info->swapchain, swapchain_info->imageIndex));
-
-         mem = swapchain_img->mem;
+      if (!mem) {
+         const VkBindImageMemorySwapchainInfoKHR *swapchain_info =
+            vk_find_struct_const(pBindInfos[i].pNext, BIND_IMAGE_MEMORY_SWAPCHAIN_INFO_KHR);
+         assert(swapchain_info && swapchain_info->swapchain != VK_NULL_HANDLE);
+         mem = dzn_device_memory_from_handle(
+            wsi_common_get_memory(swapchain_info->swapchain, swapchain_info->imageIndex));
       }
 #endif
 
-      image->mem = mem;
-
       HRESULT hres = S_OK;
-
+      assert(mem);
       if (mem->dedicated_res) {
          assert(pBindInfos[i].memoryOffset == 0);
          image->res = mem->dedicated_res;
@@ -1005,7 +983,7 @@ translate_swizzle(VkComponentSwizzle in, uint32_t comp)
       return D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_2;
    case VK_COMPONENT_SWIZZLE_A:
       return D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_3;
-   default: unreachable("Invalid swizzle");
+   default: UNREACHABLE("Invalid swizzle");
    }
 }
 
@@ -1158,7 +1136,7 @@ dzn_image_view_prepare_srv_desc(struct dzn_image_view *iview)
       iview->srv_desc.Texture3D.ResourceMinLODClamp = 0.0f;
       break;
 
-   default: unreachable("Invalid view type");
+   default: UNREACHABLE("Invalid view type");
    }
 }
 
@@ -1214,7 +1192,7 @@ dzn_image_view_prepare_uav_desc(struct dzn_image_view *iview)
       iview->uav_desc.Texture3D.FirstWSlice = 0;
       iview->uav_desc.Texture3D.WSize = iview->vk.extent.depth;
       break;
-   default: unreachable("Invalid type");
+   default: UNREACHABLE("Invalid type");
    }
 }
 
@@ -1286,7 +1264,7 @@ dzn_image_view_prepare_rtv_desc(struct dzn_image_view *iview)
       iview->rtv_desc.Texture3D.WSize = iview->vk.extent.depth;
       break;
 
-   default: unreachable("Invalid view type");
+   default: UNREACHABLE("Invalid view type");
    }
 }
 
@@ -1340,7 +1318,7 @@ dzn_image_view_prepare_dsv_desc(struct dzn_image_view *iview)
       }
       break;
 
-   default: unreachable("Invalid view type");
+   default: UNREACHABLE("Invalid view type");
    }
 }
 
@@ -1360,7 +1338,7 @@ dzn_image_view_init(struct dzn_device *device,
    const VkImageSubresourceRange *range = &pCreateInfo->subresourceRange;
    ASSERTED uint32_t layer_count = dzn_get_layer_count(image, range);
 
-   vk_image_view_init(&device->vk, &iview->vk, false, pCreateInfo);
+   vk_image_view_init(&device->vk, &iview->vk, pCreateInfo);
 
    assert(layer_count > 0);
    assert(range->baseMipLevel < image->vk.mip_levels);
@@ -1380,7 +1358,7 @@ dzn_image_view_init(struct dzn_device *device,
 
    switch (image->vk.image_type) {
    default:
-      unreachable("bad VkImageType");
+      UNREACHABLE("bad VkImageType");
    case VK_IMAGE_TYPE_1D:
    case VK_IMAGE_TYPE_2D:
       assert(range->baseArrayLayer + dzn_get_layer_count(image, range) - 1 <= image->vk.array_layers);

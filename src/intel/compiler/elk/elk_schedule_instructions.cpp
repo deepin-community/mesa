@@ -1,28 +1,6 @@
 /*
  * Copyright © 2010 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
- *
- * Authors:
- *    Eric Anholt <eric@anholt.net>
- *
+ * SPDX-License-Identifier: MIT
  */
 
 #include "elk_eu.h"
@@ -62,7 +40,7 @@ static bool debug = false;
 class elk_instruction_scheduler;
 struct elk_schedule_node_child;
 
-class elk_schedule_node : public exec_node
+class elk_schedule_node : public brw_exec_node
 {
 public:
    void set_latency_gfx4();
@@ -278,9 +256,7 @@ elk_schedule_node::set_latency_gfx7(const struct elk_isa_info *isa)
    case ELK_SHADER_OPCODE_TEX:
    case ELK_SHADER_OPCODE_TXD:
    case ELK_SHADER_OPCODE_TXF:
-   case ELK_SHADER_OPCODE_TXF_LZ:
    case ELK_SHADER_OPCODE_TXL:
-   case ELK_SHADER_OPCODE_TXL_LZ:
       /* 18 cycles:
        * mov(8)  g115<1>F   0F                         { align1 WE_normal 1Q };
        * mov(8)  g114<1>F   0F                         { align1 WE_normal 1Q };
@@ -459,7 +435,7 @@ elk_schedule_node::set_latency_gfx7(const struct elk_isa_info *isa)
             break;
 
          default:
-            unreachable("Unknown render cache message");
+            UNREACHABLE("Unknown render cache message");
          }
          break;
 
@@ -529,7 +505,7 @@ elk_schedule_node::set_latency_gfx7(const struct elk_isa_info *isa)
             break;
 
          default:
-            unreachable("Unknown data cache message");
+            UNREACHABLE("Unknown data cache message");
          }
          break;
 
@@ -559,7 +535,7 @@ elk_schedule_node::set_latency_gfx7(const struct elk_isa_info *isa)
             break;
 
          default:
-            unreachable("Unknown data cache message");
+            UNREACHABLE("Unknown data cache message");
          }
          break;
 
@@ -572,7 +548,7 @@ elk_schedule_node::set_latency_gfx7(const struct elk_isa_info *isa)
          break;
 
       default:
-         unreachable("Unknown SFID");
+         UNREACHABLE("Unknown SFID");
       }
       break;
 
@@ -668,7 +644,7 @@ public:
 
       unsigned cand_generation;
       int time;
-      exec_list available;
+      brw_exec_list available;
    } current;
 
    bool post_reg_alloc;
@@ -882,7 +858,7 @@ elk_fs_instruction_scheduler::setup_liveness(elk_cfg_t *cfg)
       }
    }
 
-   int payload_last_use_ip[hw_reg_count];
+   int *payload_last_use_ip = ralloc_array(NULL, int, hw_reg_count);
    v->calculate_payload_ranges(hw_reg_count, payload_last_use_ip);
 
    for (unsigned i = 0; i < hw_reg_count; i++) {
@@ -897,6 +873,8 @@ elk_fs_instruction_scheduler::setup_liveness(elk_cfg_t *cfg)
             BITSET_SET(hw_liveout[block], i);
       }
    }
+
+   ralloc_free(payload_last_use_ip);
 }
 
 void
@@ -1203,7 +1181,7 @@ elk_fs_instruction_scheduler::calculate_deps()
     * After register allocation, reg_offsets are gone and we track individual
     * GRF registers.
     */
-   elk_schedule_node *last_mrf_write[ELK_MAX_MRF(v->devinfo->ver)];
+   elk_schedule_node *last_mrf_write[ELK_MAX_MRF_ALL];
    elk_schedule_node *last_conditional_mod[8] = {};
    elk_schedule_node *last_accumulator_write = NULL;
    /* Fixed HW registers are assumed to be separate from the virtual
@@ -1470,7 +1448,7 @@ elk_fs_instruction_scheduler::calculate_deps()
 void
 elk_vec4_instruction_scheduler::calculate_deps()
 {
-   elk_schedule_node *last_mrf_write[ELK_MAX_MRF(v->devinfo->ver)];
+   elk_schedule_node *last_mrf_write[ELK_MAX_MRF_ALL];
    elk_schedule_node *last_conditional_mod = NULL;
    elk_schedule_node *last_accumulator_write = NULL;
    /* Fixed HW registers are assumed to be separate from the virtual
@@ -1652,7 +1630,7 @@ elk_fs_instruction_scheduler::choose_instruction_to_schedule()
        * choose the one most likely to unblock an early program exit, or
        * otherwise the oldest one.
        */
-      foreach_in_list(elk_schedule_node, n, &current.available) {
+      brw_foreach_in_list(elk_schedule_node, n, &current.available) {
          if (!chosen ||
              exit_tmp_unblocked_time(n) < exit_tmp_unblocked_time(chosen) ||
              (exit_tmp_unblocked_time(n) == exit_tmp_unblocked_time(chosen) &&
@@ -1670,7 +1648,7 @@ elk_fs_instruction_scheduler::choose_instruction_to_schedule()
        * shaders which naturally do a better job of hiding instruction
        * latency.
        */
-      foreach_in_list(elk_schedule_node, n, &current.available) {
+      brw_foreach_in_list(elk_schedule_node, n, &current.available) {
          elk_fs_inst *inst = (elk_fs_inst *)n->inst;
 
          if (!chosen) {
@@ -1779,7 +1757,7 @@ elk_vec4_instruction_scheduler::choose_instruction_to_schedule()
    /* Of the instructions ready to execute or the closest to being ready,
     * choose the oldest one.
     */
-   foreach_in_list(elk_schedule_node, n, &current.available) {
+   brw_foreach_in_list(elk_schedule_node, n, &current.available) {
       if (!chosen || n->tmp.unblocked_time < chosen_time) {
          chosen = n;
          chosen_time = n->tmp.unblocked_time;
@@ -1867,7 +1845,7 @@ elk_instruction_scheduler::update_children(elk_schedule_node *chosen)
     * is done.
     */
    if (bs->devinfo->ver < 6 && chosen->inst->is_math()) {
-      foreach_in_list(elk_schedule_node, n, &current.available) {
+      brw_foreach_in_list(elk_schedule_node, n, &current.available) {
          if (n->inst->is_math())
             n->tmp.unblocked_time = MAX2(n->tmp.unblocked_time,
                                          current.time + chosen->latency);

@@ -279,7 +279,8 @@ static void
 combine_stores_block(struct combine_stores_state *state, nir_block *block)
 {
    nir_foreach_instr_safe(instr, block) {
-      if (instr->type == nir_instr_type_call) {
+      if (instr->type == nir_instr_type_call ||
+          instr->type == nir_instr_type_cmat_call) {
          combine_stores_with_modes(state, nir_var_shader_out |
                                              nir_var_shader_temp |
                                              nir_var_function_temp |
@@ -311,7 +312,7 @@ combine_stores_block(struct combine_stores_state *state, nir_block *block)
          break;
 
       case nir_intrinsic_barrier:
-         if (nir_intrinsic_memory_semantics(intrin) & NIR_MEMORY_RELEASE) {
+         if (nir_intrinsic_memory_semantics(intrin) & (NIR_MEMORY_RELEASE | NIR_MEMORY_MAKE_AVAILABLE)) {
             combine_stores_with_modes(state,
                                       nir_intrinsic_memory_modes(intrin));
          }
@@ -401,13 +402,7 @@ combine_stores_impl(struct combine_stores_state *state, nir_function_impl *impl)
    nir_foreach_block(block, impl)
       combine_stores_block(state, block);
 
-   if (state->progress) {
-      nir_metadata_preserve(impl, nir_metadata_control_flow);
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-   }
-
-   return state->progress;
+   return nir_progress(state->progress, impl, nir_metadata_control_flow);
 }
 
 bool

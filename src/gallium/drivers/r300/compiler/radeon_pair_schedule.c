@@ -17,10 +17,10 @@
 
 #define VERBOSE 0
 
-#define DBG(...)                                                                                   \
-   do {                                                                                            \
-      if (VERBOSE)                                                                                 \
-         fprintf(stderr, __VA_ARGS__);                                                             \
+#define DBG(...)                       \
+   do {                                \
+      if (VERBOSE)                     \
+         fprintf(stderr, __VA_ARGS__); \
    } while (0)
 
 struct schedule_instruction {
@@ -135,7 +135,10 @@ struct schedule_state {
    long max_tex_group;
    unsigned PrevBlockHasTex : 1;
    unsigned PrevBlockHasKil : 1;
+   /* Number of TEX in the current block */
    unsigned TEXCount;
+   /* Total number of TEX in the whole program.*/
+   unsigned totalTEXCount;
    unsigned Opt : 1;
 };
 
@@ -147,7 +150,7 @@ get_reg_valuep(struct schedule_state *s, rc_register_file file, unsigned int ind
       return NULL;
 
    if (index >= RC_REGISTER_MAX_INDEX) {
-      rc_error(s->C, "%s: index %i out of bounds\n", __func__, index);
+      rc_error(s->C, "%s: index %i out of bounds", __func__, index);
       return NULL;
    }
 
@@ -644,6 +647,7 @@ destructive_merge_instructions(struct rc_pair_instruction *rgb, struct rc_pair_i
    rgb->Alpha.Opcode = alpha->Alpha.Opcode;
    rgb->Alpha.DestIndex = alpha->Alpha.DestIndex;
    rgb->Alpha.WriteMask = alpha->Alpha.WriteMask;
+   rgb->Alpha.Target = alpha->Alpha.Target;
    rgb->Alpha.OutputWriteMask = alpha->Alpha.OutputWriteMask;
    rgb->Alpha.DepthWriteMask = alpha->Alpha.DepthWriteMask;
    rgb->Alpha.Saturate = alpha->Alpha.Saturate;
@@ -761,7 +765,7 @@ rgb_to_alpha_remap(struct schedule_state *s, struct rc_instruction *inst,
    /* This conversion is not possible, we must have made a mistake in
     * is_rgb_to_alpha_possible. */
    if (new_src_index < 0) {
-      rc_error(s->C, "rgb_to_alpha_remap failed to allocate src.\n");
+      rc_error(s->C, "rgb_to_alpha_remap failed to allocate src");
       return;
    }
 
@@ -1079,7 +1083,12 @@ emit_instruction(struct schedule_state *s, struct rc_instruction *before)
 #endif
 
    for (tex_ptr = s->ReadyTEX; tex_ptr; tex_ptr = tex_ptr->NextReady) {
-      if (tex_ptr->Instruction->U.I.Opcode == RC_OPCODE_KIL) {
+      /* In general we want to emit KIL ASAP, however KIL does count into
+       * the indirection limit, so for R300/R400 we only do this if we
+       * are sure we can fit in there.
+       */
+      if (tex_ptr->Instruction->U.I.Opcode == RC_OPCODE_KIL &&
+          (s->C->is_r500 || s->totalTEXCount <= 3)) {
          emit_all_tex(s, before);
          s->PrevBlockHasKil = 1;
          return;
@@ -1173,7 +1182,7 @@ scan_read(void *data, struct rc_instruction *inst, rc_register_file file, unsign
    (*v)->NumReaders++;
 
    if (s->Current->NumReadValues >= 12) {
-      rc_error(s->C, "%s: NumReadValues overflow\n", __func__);
+      rc_error(s->C, "%s: NumReadValues overflow", __func__);
    } else {
       s->Current->ReadValues[s->Current->NumReadValues++] = *v;
    }
@@ -1208,7 +1217,7 @@ scan_write(void *data, struct rc_instruction *inst, rc_register_file file, unsig
    *pv = newv;
 
    if (s->Current->NumWriteValues >= 4) {
-      rc_error(s->C, "%s: NumWriteValues overflow\n", __func__);
+      rc_error(s->C, "%s: NumWriteValues overflow", __func__);
    } else {
       s->Current->WriteValues[s->Current->NumWriteValues++] = newv;
    }
@@ -1307,7 +1316,23 @@ rc_pair_schedule(struct radeon_compiler *cc, void *user)
    } else {
       s.CalcScore = calc_score_r300;
    }
-   s.max_tex_group = debug_get_num_option("RADEON_TEX_GROUP", 8);
+   /* max_tex_group is mostly R500 optimization, for R300-R400 we want to group as much
+    * as we can, otherwise we risk running out of TEX indirections.
+    */
+   s.max_tex_group = debug_get_num_option("RADEON_TEX_GROUP", cc->is_r500 ? 8 : UINT_MAX);
+
+   /* First go over and count all TEX. */
+   while (inst != &c->Base.Program.Instructions) {
+      if (inst->Type == RC_INSTRUCTION_NORMAL) {
+         const struct rc_opcode_info *info = rc_get_opcode_info(inst->U.I.Opcode);
+         if (info->HasTexture) {
+            s.totalTEXCount++;
+         }
+      }
+      inst = inst->Next;
+   }
+
+   inst = c->Base.Program.Instructions.Next;
    while (inst != &c->Base.Program.Instructions) {
       struct rc_instruction *first;
 

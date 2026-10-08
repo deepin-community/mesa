@@ -32,6 +32,10 @@ static const struct debug_control vn_debug_options[] = {
    { "cache", VN_DEBUG_CACHE },
    { "no_sparse", VN_DEBUG_NO_SPARSE },
    { "no_gpl", VN_DEBUG_NO_GPL },
+   { "no_second_queue", VN_DEBUG_NO_SECOND_QUEUE },
+   { "no_ray_tracing", VN_DEBUG_NO_RAY_TRACING },
+   { "mem_budget", VN_DEBUG_MEM_BUDGET },
+   { "no_desc_heap", VN_DEBUG_NO_DESC_HEAP },
    { NULL, 0 },
    /* clang-format on */
 };
@@ -51,6 +55,7 @@ static const struct debug_control vn_perf_options[] = {
    { "no_multi_ring", VN_PERF_NO_MULTI_RING },
    { "no_async_image_create", VN_PERF_NO_ASYNC_IMAGE_CREATE },
    { "no_async_image_format", VN_PERF_NO_ASYNC_IMAGE_FORMAT },
+   { "no_async_present", VN_PERF_NO_ASYNC_PRESENT },
    { NULL, 0 },
    /* clang-format on */
 };
@@ -81,16 +86,6 @@ vn_env_init(void)
              "\n\tperf = 0x%" PRIx64 "",
              vn_env.debug, vn_env.perf);
    }
-}
-
-void
-vn_trace_init(void)
-{
-#if DETECT_OS_ANDROID
-   atrace_init();
-#else
-   util_cpu_trace_init();
-#endif
 }
 
 void
@@ -144,6 +139,10 @@ vn_watchdog_acquire(struct vn_watchdog *watchdog, bool alive)
        mtx_trylock(&watchdog->mutex) == thrd_success) {
       /* register as the only waiting thread that monitors the ring. */
       watchdog->tid = tid;
+      /* Always set alive to true for new watchdog owner because the
+       * last owner might have just unset the alive bit before release.
+       */
+      alive = true;
    }
 
    if (tid != watchdog->tid)
@@ -226,7 +225,7 @@ vn_relax_get_profile(enum vn_relax_reason reason)
       };
    }
 
-   unreachable("unhandled vn_relax_reason");
+   UNREACHABLE("unhandled vn_relax_reason");
 }
 
 struct vn_relax_state
@@ -260,8 +259,10 @@ vn_relax(struct vn_relax_state *state)
       return;
    }
 
+   state->warn = false;
    if (unlikely(*iter % (1 << warn_order) == 0)) {
       struct vn_instance *instance = state->instance;
+      state->warn = true;
       vn_log(instance, "stuck in %s wait with iter at %d", state->reason_str,
              *iter);
 

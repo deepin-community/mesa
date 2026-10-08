@@ -39,7 +39,7 @@ build_scan_bool(nir_builder *b, nir_intrinsic_op op, nir_op red_op,
          /* The generic path is fine */
          break;
       default:
-         unreachable("Unsupported boolean reduction op");
+         UNREACHABLE("Unsupported boolean reduction op");
       }
    }
 
@@ -54,7 +54,7 @@ build_scan_bool(nir_builder *b, nir_intrinsic_op op, nir_op red_op,
    case nir_intrinsic_reduce:
       break;
    default:
-      unreachable("Unsupported scan/reduce op");
+      UNREACHABLE("Unsupported scan/reduce op");
    }
 
    data = nir_ballot(b, 1, 32, data);
@@ -69,7 +69,7 @@ build_scan_bool(nir_builder *b, nir_intrinsic_op op, nir_op red_op,
       return nir_ine_imm(b, nir_iand_imm(b, count, 1), 0);
    }
    default:
-      unreachable("Unsupported boolean reduction op");
+      UNREACHABLE("Unsupported boolean reduction op");
    }
 }
 
@@ -122,7 +122,7 @@ build_scan_full(nir_builder *b, nir_intrinsic_op op, nir_op red_op,
    }
 
    default:
-      unreachable("Unsupported scan/reduce op");
+      UNREACHABLE("Unsupported scan/reduce op");
    }
 }
 
@@ -186,15 +186,17 @@ build_scan_reduce(nir_builder *b, nir_intrinsic_op op, nir_op red_op,
    }
 
    default:
-      unreachable("Unsupported scan/reduce op");
+      UNREACHABLE("Unsupported scan/reduce op");
    }
 }
 
 static bool
 nak_nir_lower_scan_reduce_intrin(nir_builder *b,
                                  nir_intrinsic_instr *intrin,
-                                 UNUSED void *_data)
+                                 void *_nak)
 {
+   const struct nak_compiler *nak = (const struct nak_compiler *) _nak;
+
    switch (intrin->intrinsic) {
    case nir_intrinsic_exclusive_scan:
    case nir_intrinsic_inclusive_scan:
@@ -221,6 +223,17 @@ nak_nir_lower_scan_reduce_intrin(nir_builder *b,
       /* Simple case where we're not actually doing any reducing at all. */
       assert(intrin->intrinsic == nir_intrinsic_reduce);
       data = intrin->src[0].ssa;
+   } else if (intrin->intrinsic == nir_intrinsic_reduce &&
+              nak->sm >= 80 &&
+              red_op != nir_op_imul &&
+              nir_op_infos[red_op].output_type != nir_type_float &&
+              intrin->src[0].ssa->bit_size == 32 &&
+              cluster_size == 32 &&
+              !nak_block_is_divergent(intrin->instr.block)) {
+      /* TODO: We could probably also use REDUX for the non-uniform case if we
+       *       were allowed to write uregs from non-uniform control flow.
+       */
+      return false;
    } else if (intrin->src[0].ssa->bit_size == 1) {
       data = build_scan_bool(b, intrin->intrinsic, red_op,
                              intrin->src[0].ssa, cluster_size);
@@ -252,8 +265,8 @@ nak_nir_lower_scan_reduce_intrin(nir_builder *b,
 }
 
 bool
-nak_nir_lower_scan_reduce(nir_shader *nir)
+nak_nir_lower_scan_reduce(nir_shader *nir, const struct nak_compiler *nak)
 {
    return nir_shader_intrinsics_pass(nir, nak_nir_lower_scan_reduce_intrin,
-                                     nir_metadata_none, NULL);
+                                     nir_metadata_none, (void*) nak);
 }

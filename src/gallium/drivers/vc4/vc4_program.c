@@ -68,7 +68,7 @@ resize_qreg_array(struct vc4_compile *c,
         *size = MAX2(*size * 2, decl_size);
         *regs = reralloc(c, *regs, struct qreg, *size);
         if (!*regs) {
-                fprintf(stderr, "Malloc failure\n");
+                mesa_loge("Malloc failure");
                 abort();
         }
 
@@ -147,7 +147,7 @@ vc4_nir_get_swizzled_channel(nir_builder *b, nir_def **srcs, int swiz)
         switch (swiz) {
         default:
         case PIPE_SWIZZLE_NONE:
-                fprintf(stderr, "warning: unknown swizzle\n");
+                mesa_logw("unknown swizzle");
                 FALLTHROUGH;
         case PIPE_SWIZZLE_0:
                 return nir_imm_float(b, 0.0);
@@ -399,7 +399,8 @@ ntq_emit_txf(struct vc4_compile *c, nir_tex_instr *instr)
 static void
 ntq_emit_tex(struct vc4_compile *c, nir_tex_instr *instr)
 {
-        struct qreg s, t, r, lod, compare;
+        struct qreg lod, compare;
+        struct qreg r = { 0 }, s= { 0 }, t = { 0 };
         bool is_txb = false, is_txl = false;
         unsigned unit = instr->texture_index;
 
@@ -408,6 +409,7 @@ ntq_emit_tex(struct vc4_compile *c, nir_tex_instr *instr)
                 return;
         }
 
+        assert(instr->num_srcs > 0);
         for (unsigned i = 0; i < instr->num_srcs; i++) {
                 switch (instr->src[i].src_type) {
                 case nir_tex_src_coord:
@@ -431,7 +433,7 @@ ntq_emit_tex(struct vc4_compile *c, nir_tex_instr *instr)
                         compare = ntq_get_src(c, instr->src[i].src, 0);
                         break;
                 default:
-                        unreachable("unknown texture source");
+                        UNREACHABLE("unknown texture source");
                 }
         }
 
@@ -511,7 +513,7 @@ ntq_emit_tex(struct vc4_compile *c, nir_tex_instr *instr)
 
         if (util_format_is_depth_or_stencil(format)) {
                 struct qreg normalized = ntq_scale_depth_texture(c, tex);
-                struct qreg depth_output;
+                struct qreg depth_output = { 0 };
 
                 struct qreg u0 = qir_uniform_f(c, 0.0f);
                 struct qreg u1 = qir_uniform_f(c, 1.0f);
@@ -826,10 +828,10 @@ ntq_emit_pack_unorm_4x8(struct vc4_compile *c, nir_alu_instr *instr)
         /* If packing from a vec4 op (as expected), identify it so that we can
          * peek back at what generated its sources.
          */
-        if (instr->src[0].src.ssa->parent_instr->type == nir_instr_type_alu &&
-            nir_instr_as_alu(instr->src[0].src.ssa->parent_instr)->op ==
+        if (nir_src_is_alu(instr->src[0].src) &&
+            nir_def_as_alu(instr->src[0].src.ssa)->op ==
             nir_op_vec4) {
-                vec4 = nir_instr_as_alu(instr->src[0].src.ssa->parent_instr);
+                vec4 = nir_def_as_alu(instr->src[0].src.ssa);
         }
 
         /* If the pack is replicating the same channel 4 times, use the 8888
@@ -995,10 +997,10 @@ static struct qreg ntq_emit_bcsel(struct vc4_compile *c, nir_alu_instr *instr,
 {
         if (nir_load_reg_for_def(instr->src[0].src.ssa))
                 goto out;
-        if (instr->src[0].src.ssa->parent_instr->type != nir_instr_type_alu)
+        if (!nir_src_is_alu(instr->src[0].src))
                 goto out;
         nir_alu_instr *compare =
-                nir_instr_as_alu(instr->src[0].src.ssa->parent_instr);
+                nir_def_as_alu(instr->src[0].src.ssa);
         if (!compare)
                 goto out;
 
@@ -1191,7 +1193,7 @@ ntq_emit_alu(struct vc4_compile *c, nir_alu_instr *instr)
         case nir_op_ilt32:
         case nir_op_ult32:
                 if (!ntq_emit_comparison(c, &result, instr, instr)) {
-                        fprintf(stderr, "Bad comparison instruction\n");
+                        mesa_loge("Bad comparison instruction");
                 }
                 break;
 
@@ -1287,9 +1289,8 @@ ntq_emit_alu(struct vc4_compile *c, nir_alu_instr *instr)
                 break;
 
         default:
-                fprintf(stderr, "unknown NIR ALU inst: ");
-                nir_print_instr(&instr->instr, stderr);
-                fprintf(stderr, "\n");
+                mesa_loge("unknown NIR ALU inst: %s",
+                          nir_instr_as_str(&instr->instr, NULL));
                 abort();
         }
 
@@ -1484,42 +1485,27 @@ static void
 vc4_optimize_nir(struct nir_shader *s)
 {
         bool progress;
-        unsigned lower_flrp =
-                (s->options->lower_flrp16 ? 16 : 0) |
-                (s->options->lower_flrp32 ? 32 : 0) |
-                (s->options->lower_flrp64 ? 64 : 0);
 
         do {
                 progress = false;
 
-                NIR_PASS_V(s, nir_lower_vars_to_ssa);
+                NIR_PASS(_, s, nir_lower_vars_to_ssa);
                 NIR_PASS(progress, s, nir_lower_alu_to_scalar, NULL, NULL);
-                NIR_PASS(progress, s, nir_lower_phis_to_scalar, false);
-                NIR_PASS(progress, s, nir_copy_prop);
+                NIR_PASS(progress, s, nir_lower_phis_to_scalar, NULL, NULL);
+                NIR_PASS(progress, s, nir_opt_copy_prop);
                 NIR_PASS(progress, s, nir_opt_remove_phis);
                 NIR_PASS(progress, s, nir_opt_dce);
                 NIR_PASS(progress, s, nir_opt_dead_cf);
                 NIR_PASS(progress, s, nir_opt_cse);
-                NIR_PASS(progress, s, nir_opt_peephole_select, 8, true, true);
+
+                nir_opt_peephole_select_options peephole_select_options = {
+                        .limit = 8,
+                        .indirect_load_ok = true,
+                        .expensive_alu_ok = true,
+                };
+                NIR_PASS(progress, s, nir_opt_peephole_select, &peephole_select_options);
                 NIR_PASS(progress, s, nir_opt_algebraic);
                 NIR_PASS(progress, s, nir_opt_constant_folding);
-                if (lower_flrp != 0) {
-                        bool lower_flrp_progress = false;
-
-                        NIR_PASS(lower_flrp_progress, s, nir_lower_flrp,
-                                 lower_flrp,
-                                 false /* always_precise */);
-                        if (lower_flrp_progress) {
-                                NIR_PASS(progress, s, nir_opt_constant_folding);
-                                progress = true;
-                        }
-
-                        /* Nothing should rematerialize any flrps, so we only
-                         * need to do this lowering once.
-                         */
-                        lower_flrp = 0;
-                }
-
                 NIR_PASS(progress, s, nir_opt_undef);
                 NIR_PASS(progress, s, nir_opt_loop_unroll);
         } while (progress);
@@ -1728,15 +1714,6 @@ ntq_emit_intrinsic(struct vc4_compile *c, nir_intrinsic_instr *instr)
                 ntq_store_def(c, &instr->def, 0, vc4_ubo_load(c, instr));
                 break;
 
-        case nir_intrinsic_load_user_clip_plane:
-                for (int i = 0; i < nir_intrinsic_dest_components(instr); i++) {
-                        ntq_store_def(c, &instr->def, i,
-                                      qir_uniform(c, QUNIFORM_USER_CLIP_PLANE,
-                                                  nir_intrinsic_ucp_id(instr) *
-                                                  4 + i));
-                }
-                break;
-
         case nir_intrinsic_load_blend_const_color_r_float:
         case nir_intrinsic_load_blend_const_color_g_float:
         case nir_intrinsic_load_blend_const_color_b_float:
@@ -1864,9 +1841,8 @@ ntq_emit_intrinsic(struct vc4_compile *c, nir_intrinsic_instr *instr)
                 break;
 
         default:
-                fprintf(stderr, "Unknown intrinsic: ");
-                nir_print_instr(&instr->instr, stderr);
-                fprintf(stderr, "\n");
+                mesa_loge("Unknown intrinsic: %s",
+                          nir_instr_as_str(&instr->instr, NULL));
                 break;
         }
 }
@@ -1887,8 +1863,7 @@ static void
 ntq_emit_if(struct vc4_compile *c, nir_if *if_stmt)
 {
         if (!c->vc4->screen->has_control_flow) {
-                fprintf(stderr,
-                        "IF statement support requires updated kernel.\n");
+                mesa_loge("IF statement support requires updated kernel.");
                 return;
         }
 
@@ -1976,7 +1951,7 @@ ntq_emit_jump(struct vc4_compile *c, nir_jump_instr *jump)
                 jump_block = c->loop_cont_block;
                 break;
         default:
-                unreachable("Unsupported jump type\n");
+                UNREACHABLE("Unsupported jump type\n");
         }
 
         qir_SF(c, c->execute);
@@ -2021,9 +1996,8 @@ ntq_emit_instr(struct vc4_compile *c, nir_instr *instr)
                 break;
 
         default:
-                fprintf(stderr, "Unknown NIR instr type: ");
-                nir_print_instr(instr, stderr);
-                fprintf(stderr, "\n");
+                mesa_loge("Unknown NIR instr type: %s",
+                          nir_instr_as_str(instr, NULL));
                 abort();
         }
 }
@@ -2043,8 +2017,7 @@ ntq_emit_loop(struct vc4_compile *c, nir_loop *loop)
 {
         assert(!nir_loop_has_continue_construct(loop));
         if (!c->vc4->screen->has_control_flow) {
-                fprintf(stderr,
-                        "loop support requires updated kernel.\n");
+                mesa_loge("loop support requires updated kernel.");
                 ntq_emit_cf_list(c, &loop->body);
                 return;
         }
@@ -2100,7 +2073,7 @@ ntq_emit_loop(struct vc4_compile *c, nir_loop *loop)
 static void
 ntq_emit_function(struct vc4_compile *c, nir_function_impl *func)
 {
-        fprintf(stderr, "FUNCTIONS not handled.\n");
+        mesa_loge("FUNCTIONS not handled.");
         abort();
 }
 
@@ -2126,7 +2099,7 @@ ntq_emit_cf_list(struct vc4_compile *c, struct exec_list *list)
                         break;
 
                 default:
-                        fprintf(stderr, "Unknown NIR node type\n");
+                        mesa_loge("Unknown NIR node type");
                         abort();
                 }
         }
@@ -2157,7 +2130,6 @@ nir_to_qir(struct vc4_compile *c)
 }
 
 static const nir_shader_compiler_options nir_options = {
-        .lower_all_io_to_temps = true,
         .lower_extract_byte = true,
         .lower_extract_word = true,
         .lower_insert_byte = true,
@@ -2171,7 +2143,6 @@ static const nir_shader_compiler_options nir_options = {
         .lower_fpow = true,
         .lower_fsat = true,
         .lower_fsqrt = true,
-        .lower_ldexp = true,
         .lower_fneg = true,
         .lower_ineg = true,
         .lower_to_scalar = true,
@@ -2183,14 +2154,14 @@ static const nir_shader_compiler_options nir_options = {
         .has_texture_scaling = true,
         .lower_mul_high = true,
         .max_unroll_iterations = 32,
+        .max_samples = 4,
         .force_indirect_unrolling = (nir_var_shader_in | nir_var_shader_out | nir_var_function_temp),
         .scalarize_ddx = true,
 };
 
-const void *
+const struct nir_shader_compiler_options *
 vc4_screen_get_compiler_options(struct pipe_screen *pscreen,
-                                enum pipe_shader_ir ir,
-                                enum pipe_shader_type shader)
+                                mesa_shader_stage shader)
 {
         return &nir_options;
 }
@@ -2246,7 +2217,7 @@ vc4_shader_ntq(struct vc4_context *vc4, enum qstage stage,
         c->s = nir_shader_clone(c, key->shader_state->base.ir.nir);
 
         if (stage == QSTAGE_FRAG) {
-                NIR_PASS_V(c->s, vc4_nir_lower_blend, c);
+                NIR_PASS(_, c->s, vc4_nir_lower_blend, c);
         }
 
         struct nir_lower_tex_options tex_options = {
@@ -2284,35 +2255,23 @@ vc4_shader_ntq(struct vc4_context *vc4, enum qstage stage,
                         tex_options.lower_srgb |= (1 << i);
         }
 
-        NIR_PASS_V(c->s, nir_lower_tex, &tex_options);
+        NIR_PASS(_, c->s, nir_lower_tex, &tex_options);
 
-        if (c->key->ucp_enables) {
-                if (stage == QSTAGE_FRAG) {
-                        NIR_PASS_V(c->s, nir_lower_clip_fs,
-                                   c->key->ucp_enables, false);
-                } else {
-                        NIR_PASS_V(c->s, nir_lower_clip_vs,
-                                   c->key->ucp_enables, false, false, NULL);
-                        NIR_PASS_V(c->s, nir_lower_io_to_scalar,
-                                   nir_var_shader_out, NULL, NULL);
-                }
+        if (c->fs_key && c->fs_key->ucp_enables) {
+                NIR_PASS(_, c->s, nir_lower_clip_fs, c->fs_key->ucp_enables, false, false);
         }
 
-        /* FS input scalarizing must happen after nir_lower_two_sided_color,
-         * which only handles a vec4 at a time.  Similarly, VS output
-         * scalarizing must happen after nir_lower_clip_vs.
-         */
         if (c->stage == QSTAGE_FRAG)
-                NIR_PASS_V(c->s, nir_lower_io_to_scalar, nir_var_shader_in, NULL, NULL);
+                NIR_PASS(_, c->s, nir_lower_io_to_scalar, nir_var_shader_in, NULL, NULL);
         else
-                NIR_PASS_V(c->s, nir_lower_io_to_scalar, nir_var_shader_out, NULL, NULL);
+                NIR_PASS(_, c->s, nir_lower_io_to_scalar, nir_var_shader_out, NULL, NULL);
 
-        NIR_PASS_V(c->s, vc4_nir_lower_io, c);
-        NIR_PASS_V(c->s, vc4_nir_lower_txf_ms, c);
+        NIR_PASS(_, c->s, vc4_nir_lower_io, c);
+        NIR_PASS(_, c->s, vc4_nir_lower_txf_ms, c);
         nir_lower_idiv_options idiv_options = {
                 .allow_fp16 = true,
         };
-        NIR_PASS_V(c->s, nir_lower_idiv, &idiv_options);
+        NIR_PASS(_, c->s, nir_lower_idiv, &idiv_options);
         NIR_PASS(_, c->s, nir_lower_alu);
 
         vc4_optimize_nir(c->s);
@@ -2326,22 +2285,22 @@ vc4_shader_ntq(struct vc4_context *vc4, enum qstage stage,
         while (more_late_algebraic) {
                 more_late_algebraic = false;
                 NIR_PASS(more_late_algebraic, c->s, nir_opt_algebraic_late);
-                NIR_PASS_V(c->s, nir_opt_constant_folding);
-                NIR_PASS_V(c->s, nir_copy_prop);
-                NIR_PASS_V(c->s, nir_opt_dce);
-                NIR_PASS_V(c->s, nir_opt_cse);
+                NIR_PASS(_, c->s, nir_opt_constant_folding);
+                NIR_PASS(_, c->s, nir_opt_copy_prop);
+                NIR_PASS(_, c->s, nir_opt_dce);
+                NIR_PASS(_, c->s, nir_opt_cse);
         }
 
-        NIR_PASS_V(c->s, nir_lower_bool_to_int32);
+        NIR_PASS(_, c->s, nir_lower_bool_to_int32);
 
-        NIR_PASS_V(c->s, nir_convert_from_ssa, true);
-        NIR_PASS_V(c->s, nir_trivialize_registers);
+        NIR_PASS(_, c->s, nir_convert_from_ssa, true, false);
+        NIR_PASS(_, c->s, nir_trivialize_registers);
 
         if (VC4_DBG(NIR)) {
-                fprintf(stderr, "%s prog %d/%d NIR:\n",
-                        qir_get_stage_name(c->stage),
-                        c->program_id, c->variant_id);
-                nir_print_shader(c->s, stderr);
+                mesa_logi("%s prog %d/%d NIR:",
+                          qir_get_stage_name(c->stage),
+                          c->program_id, c->variant_id);
+                nir_log_shaderi(c->s);
         }
 
         nir_to_qir(c);
@@ -2372,11 +2331,10 @@ vc4_shader_ntq(struct vc4_context *vc4, enum qstage stage,
         }
 
         if (VC4_DBG(QIR)) {
-                fprintf(stderr, "%s prog %d/%d pre-opt QIR:\n",
-                        qir_get_stage_name(c->stage),
-                        c->program_id, c->variant_id);
-                qir_dump(c);
-                fprintf(stderr, "\n");
+                mesa_logi("%s prog %d/%d pre-opt QIR:",
+                          qir_get_stage_name(c->stage),
+                          c->program_id, c->variant_id);
+                qir_dumpi(c);
         }
 
         qir_optimize(c);
@@ -2386,11 +2344,10 @@ vc4_shader_ntq(struct vc4_context *vc4, enum qstage stage,
         qir_emit_uniform_stream_resets(c);
 
         if (VC4_DBG(QIR)) {
-                fprintf(stderr, "%s prog %d/%d QIR:\n",
-                        qir_get_stage_name(c->stage),
-                        c->program_id, c->variant_id);
-                qir_dump(c);
-                fprintf(stderr, "\n");
+                mesa_logi("%s prog %d/%d QIR:",
+                          qir_get_stage_name(c->stage),
+                          c->program_id, c->variant_id);
+                qir_dumpi(c);
         }
 
         qir_reorder_uniforms(c);
@@ -2500,6 +2457,17 @@ vc4_shader_precompile(struct vc4_context *vc4,
         }
 }
 
+static bool
+vc4_check_divergent_loops(nir_shader *s)
+{
+        nir_foreach_block(block, nir_shader_get_entrypoint(s)) {
+                nir_loop *loop = nir_block_get_following_loop(block);
+                if (loop && nir_loop_is_divergent(loop))
+                        return true;
+        }
+        return false;
+}
+
 static void *
 vc4_shader_state_create(struct pipe_context *pctx,
                         const struct pipe_shader_state *cso)
@@ -2522,41 +2490,59 @@ vc4_shader_state_create(struct pipe_context *pctx,
                 assert(cso->type == PIPE_SHADER_IR_TGSI);
 
                 if (VC4_DBG(TGSI)) {
-                        fprintf(stderr, "prog %d TGSI:\n",
-                                so->program_id);
+                        mesa_logd("prog %d TGSI:", so->program_id);
                         tgsi_dump(cso->tokens, 0);
-                        fprintf(stderr, "\n");
                 }
                 s = tgsi_to_nir(cso->tokens, pctx->screen, false);
         }
 
         if (s->info.stage == MESA_SHADER_VERTEX)
-                NIR_PASS_V(s, nir_lower_point_size, 1.0f, 0.0f);
+                NIR_PASS(_, s, nir_lower_point_size, 1.0f, 0.0f);
 
-        NIR_PASS_V(s, nir_lower_io,
-                   nir_var_shader_in | nir_var_shader_out | nir_var_uniform,
-                   type_size, (nir_lower_io_options)0);
+        NIR_PASS(_, s, nir_lower_io,
+                 nir_var_shader_in | nir_var_shader_out | nir_var_uniform,
+                 type_size, (nir_lower_io_options)0);
+        s->info.disable_output_offset_src_constant_folding = true;
 
-        NIR_PASS_V(s, nir_normalize_cubemap_coords);
+        NIR_PASS(_, s, nir_normalize_cubemap_coords);
 
-        NIR_PASS_V(s, nir_lower_load_const_to_scalar);
+        NIR_PASS(_, s, nir_lower_load_const_to_scalar);
 
         vc4_optimize_nir(s);
 
-        NIR_PASS_V(s, nir_remove_dead_variables, nir_var_function_temp, NULL);
+        NIR_PASS(_, s, nir_remove_dead_variables, nir_var_function_temp, NULL);
 
         /* Garbage collect dead instructions */
         nir_sweep(s);
+
+        /* VC4 hardware doesn't have a dispatch mask for the VS. This means
+         * that, if we submit a divergent loop to the hardware, some execution
+         * channels can have undefined/garbage contents and cause infinite
+         * loops and GPU hangs.
+         *
+         * Instead of potentially hanging the GPU, refuse shader linking.
+         */
+        if (s->info.stage == MESA_SHADER_VERTEX) {
+                nir_divergence_analysis(s);
+
+                if (vc4_check_divergent_loops(s) && cso->report_compile_error) {
+                        ((struct pipe_shader_state *)cso)->error_message =
+                                strdup("Non-uniform loops are unsupported "
+                                       "in the vertex shader.");
+                        ralloc_free(s);
+                        free(so);
+                        return NULL;
+                }
+        }
 
         so->base.type = PIPE_SHADER_IR_NIR;
         so->base.ir.nir = s;
 
         if (VC4_DBG(NIR)) {
-                fprintf(stderr, "%s prog %d NIR:\n",
-                        gl_shader_stage_name(s->info.stage),
-                        so->program_id);
-                nir_print_shader(s, stderr);
-                fprintf(stderr, "\n");
+                mesa_logi("%s prog %d NIR:",
+                          mesa_shader_stage_name(s->info.stage),
+                          so->program_id);
+                nir_log_shaderi(s);
         }
 
         if (VC4_DBG(SHADERDB)) {
@@ -2706,9 +2692,7 @@ vc4_get_compiled_shader(struct vc4_context *vc4, enum qstage stage,
         }
 
         shader->failed = c->failed;
-        if (c->failed) {
-                shader->failed = true;
-        } else {
+        if (!shader->failed) {
                 copy_uniform_state_to_shader(shader, c);
                 shader->bo = vc4_bo_alloc_shader(vc4->screen, c->qpu_insts,
                                                  c->qpu_inst_count *
@@ -2758,8 +2742,6 @@ vc4_setup_shared_key(struct vc4_context *vc4, struct vc4_key *key,
                                 vc4_sampler->force_first_level;
                 }
         }
-
-        key->ucp_enables = vc4->rasterizer->base.clip_plane_enable;
 }
 
 static void
@@ -2784,6 +2766,7 @@ vc4_update_compiled_fs(struct vc4_context *vc4, uint8_t prim_mode)
         memset(key, 0, sizeof(*key));
         vc4_setup_shared_key(vc4, &key->base, &vc4->fragtex);
         key->base.shader_state = vc4->prog.bind_fs;
+        key->ucp_enables = vc4->rasterizer->base.clip_plane_enable;
         key->is_points = (prim_mode == MESA_PRIM_POINTS);
         key->is_lines = (prim_mode >= MESA_PRIM_LINES &&
                          prim_mode <= MESA_PRIM_LINE_STRIP);
@@ -2800,8 +2783,8 @@ vc4_update_compiled_fs(struct vc4_context *vc4, uint8_t prim_mode)
                 key->sample_alpha_to_one = vc4->blend->alpha_to_one;
         }
 
-        if (vc4->framebuffer.cbufs[0])
-                key->color_format = vc4->framebuffer.cbufs[0]->format;
+        if (vc4->framebuffer.cbufs[0].texture)
+                key->color_format = vc4->framebuffer.cbufs[0].format;
 
         key->stencil_enabled = vc4->zsa->stencil_uniforms[0] != 0;
         key->stencil_twoside = vc4->zsa->stencil_uniforms[1] != 0;
@@ -2817,7 +2800,7 @@ vc4_update_compiled_fs(struct vc4_context *vc4, uint8_t prim_mode)
                          PIPE_SPRITE_COORD_UPPER_LEFT);
         }
 
-        key->ubo_1_size = vc4->constbuf[PIPE_SHADER_FRAGMENT].cb[1].buffer_size;
+        key->ubo_1_size = vc4->constbuf[MESA_SHADER_FRAGMENT].cb[1].buffer_size;
 
         struct vc4_compiled_shader *old_fs = vc4->prog.fs;
         vc4->prog.fs = vc4_get_compiled_shader(vc4, QSTAGE_FRAG, &key->base);

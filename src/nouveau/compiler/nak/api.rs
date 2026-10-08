@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: MIT
 
 use crate::from_nir::*;
-use crate::ir::{ShaderInfo, ShaderIoInfo, ShaderModel, ShaderStageInfo};
-use crate::sm50::ShaderModel50;
-use crate::sm70::ShaderModel70;
+use crate::ir::{
+    ShaderInfo, ShaderIoInfo, ShaderModel, ShaderModelInfo, ShaderStageInfo,
+};
 use crate::sph;
 
 use compiler::bindings::*;
@@ -15,15 +15,18 @@ use std::env;
 use std::ffi::{CStr, CString};
 use std::fmt::Write;
 use std::os::raw::c_void;
+use std::panic;
 use std::sync::OnceLock;
 
 #[repr(u8)]
 enum DebugFlags {
+    Panic,
     Print,
     Serial,
     Spill,
     Annotate,
     NoUgpr,
+    Cycles,
 }
 
 pub struct Debug {
@@ -43,11 +46,13 @@ impl Debug {
         let mut flags = 0;
         for flag in debug_str.split(',') {
             match flag.trim() {
+                "panic" => flags |= 1 << DebugFlags::Panic as u8,
                 "print" => flags |= 1 << DebugFlags::Print as u8,
                 "serial" => flags |= 1 << DebugFlags::Serial as u8,
                 "spill" => flags |= 1 << DebugFlags::Spill as u8,
                 "annotate" => flags |= 1 << DebugFlags::Annotate as u8,
                 "nougpr" => flags |= 1 << DebugFlags::NoUgpr as u8,
+                "cycles" => flags |= 1 << DebugFlags::Cycles as u8,
                 unk => eprintln!("Unknown NAK_DEBUG flag \"{}\"", unk),
             }
         }
@@ -57,6 +62,10 @@ impl Debug {
 
 pub trait GetDebugFlags {
     fn debug_flags(&self) -> u32;
+
+    fn panic(&self) -> bool {
+        self.debug_flags() & (1 << DebugFlags::Panic as u8) != 0
+    }
 
     fn print(&self) -> bool {
         self.debug_flags() & (1 << DebugFlags::Print as u8) != 0
@@ -77,6 +86,10 @@ pub trait GetDebugFlags {
     fn no_ugpr(&self) -> bool {
         self.debug_flags() & (1 << DebugFlags::NoUgpr as u8) != 0
     }
+
+    fn cycles(&self) -> bool {
+        self.debug_flags() & (1 << DebugFlags::Cycles as u8) != 0
+    }
 }
 
 pub static DEBUG: OnceLock<Debug> = OnceLock::new();
@@ -92,80 +105,89 @@ pub extern "C" fn nak_should_print_nir() -> bool {
     DEBUG.print()
 }
 
+#[no_mangle]
+pub extern "C" fn nak_debug_no_ugpr() -> bool {
+    DEBUG.no_ugpr()
+}
+
 fn nir_options(dev: &nv_device_info) -> nir_shader_compiler_options {
-    let mut op: nir_shader_compiler_options = unsafe { std::mem::zeroed() };
+    nir_shader_compiler_options {
+        lower_fdiv: true,
+        fuse_ffma16: true,
+        fuse_ffma32: true,
+        fuse_ffma64: true,
+        lower_flrp16: true,
+        lower_flrp32: true,
+        lower_flrp64: true,
+        lower_fsqrt: dev.sm < 52,
+        lower_bitfield_extract: false,
+        lower_bitfield_extract8: true,
+        lower_bitfield_extract16: true,
+        lower_bitfield_insert: true,
+        lower_pack_half_2x16: true,
+        lower_pack_unorm_2x16: true,
+        lower_pack_snorm_2x16: true,
+        lower_pack_unorm_4x8: true,
+        lower_pack_snorm_4x8: true,
+        lower_unpack_half_2x16: true,
+        lower_unpack_unorm_2x16: true,
+        lower_unpack_snorm_2x16: true,
+        lower_unpack_unorm_4x8: true,
+        lower_unpack_snorm_4x8: true,
+        lower_insert_byte: true,
+        lower_insert_word: true,
+        lower_cs_local_index_to_id: true,
+        lower_device_index_to_zero: true,
+        lower_isign: true,
+        lower_uadd_sat: dev.sm < 70,
+        lower_usub_sat: dev.sm < 70,
+        lower_iadd_sat: true, // TODO
+        lower_doubles_options: nir_lower_drcp
+            | nir_lower_dsqrt
+            | nir_lower_drsq
+            | nir_lower_dtrunc
+            | nir_lower_dfloor
+            | nir_lower_dceil
+            | nir_lower_dfract
+            | nir_lower_dround_even
+            | nir_lower_dsat
+            | if dev.sm >= 70 { nir_lower_dminmax } else { 0 },
+        lower_int64_options: !(nir_lower_icmp64
+            | nir_lower_iadd64
+            | nir_lower_ineg64
+            | nir_lower_shift64
+            | nir_lower_imul_2x32_64
+            | nir_lower_vote_ieq64
+            | nir_lower_conv64)
+            | if dev.sm < 70 { nir_lower_vote_ieq64 } else { 0 }
+            | if dev.sm < 32 { nir_lower_shift64 } else { 0 },
+        lower_fmod: true,
+        lower_ffract: true,
+        lower_fpow: true,
+        lower_scmp: true,
+        lower_uadd_carry: true,
+        lower_usub_borrow: true,
+        has_rotate32: dev.sm >= 32,
+        has_iadd3: dev.sm >= 70,
+        has_imad32: dev.sm >= 70,
+        has_sdot_4x8: dev.sm >= 70,
+        has_udot_4x8: dev.sm >= 70,
+        has_sudot_4x8: dev.sm >= 70,
+        // We set .ftz on f32 by default so we can support fmulz whenever the client
+        // doesn't explicitly request denorms.
+        has_fmulz_no_denorms: true,
+        has_find_msb_rev: true,
+        has_pack_half_2x16_rtz: true,
+        has_bfm: dev.sm >= 70,
+        discard_is_demote: true,
+        has_load_global_bounded: dev.sm >= 73,
+        vectorize_vec2_16bit: true,
 
-    op.lower_fdiv = true;
-    op.fuse_ffma16 = true;
-    op.fuse_ffma32 = true;
-    op.fuse_ffma64 = true;
-    op.lower_flrp16 = true;
-    op.lower_flrp32 = true;
-    op.lower_flrp64 = true;
-    op.lower_fsqrt = dev.sm < 52;
-    op.lower_bitfield_extract = dev.sm >= 70;
-    op.lower_bitfield_insert = true;
-    op.lower_pack_half_2x16 = true;
-    op.lower_pack_unorm_2x16 = true;
-    op.lower_pack_snorm_2x16 = true;
-    op.lower_pack_unorm_4x8 = true;
-    op.lower_pack_snorm_4x8 = true;
-    op.lower_unpack_half_2x16 = true;
-    op.lower_unpack_unorm_2x16 = true;
-    op.lower_unpack_snorm_2x16 = true;
-    op.lower_unpack_unorm_4x8 = true;
-    op.lower_unpack_snorm_4x8 = true;
-    op.lower_insert_byte = true;
-    op.lower_insert_word = true;
-    op.lower_cs_local_index_to_id = true;
-    op.lower_device_index_to_zero = true;
-    op.lower_isign = true;
-    op.lower_uadd_sat = dev.sm < 70;
-    op.lower_usub_sat = dev.sm < 70;
-    op.lower_iadd_sat = true; // TODO
-    op.use_interpolated_input_intrinsics = true;
-    op.lower_doubles_options = nir_lower_drcp
-        | nir_lower_dsqrt
-        | nir_lower_drsq
-        | nir_lower_dtrunc
-        | nir_lower_dfloor
-        | nir_lower_dceil
-        | nir_lower_dfract
-        | nir_lower_dround_even
-        | nir_lower_dsat;
-    if dev.sm >= 70 {
-        op.lower_doubles_options |= nir_lower_dminmax;
+        max_unroll_iterations: 32,
+        max_samples: 8,
+        scalarize_ddx: true,
+        ..Default::default()
     }
-    op.lower_int64_options = !(nir_lower_icmp64
-        | nir_lower_iadd64
-        | nir_lower_ineg64
-        | nir_lower_shift64
-        | nir_lower_imul_2x32_64
-        | nir_lower_conv64);
-    op.lower_ldexp = true;
-    op.lower_fmod = true;
-    op.lower_ffract = true;
-    op.lower_fpow = true;
-    op.lower_scmp = true;
-    op.lower_uadd_carry = true;
-    op.lower_usub_borrow = true;
-    op.has_iadd3 = dev.sm >= 70;
-    op.has_imad32 = dev.sm >= 70;
-    op.has_sdot_4x8 = dev.sm >= 70;
-    op.has_udot_4x8 = dev.sm >= 70;
-    op.has_sudot_4x8 = dev.sm >= 70;
-    // We set .ftz on f32 by default so we can support fmulz whenever the client
-    // doesn't explicitly request denorms.
-    op.has_fmulz_no_denorms = true;
-    op.has_find_msb_rev = true;
-    op.has_pack_half_2x16_rtz = true;
-    op.has_bfm = dev.sm >= 70;
-    op.discard_is_demote = true;
-
-    op.max_unroll_iterations = 32;
-    op.scalarize_ddx = true;
-
-    op
 }
 
 #[no_mangle]
@@ -205,14 +227,14 @@ pub extern "C" fn nak_nir_options(
 
 #[repr(C)]
 pub struct ShaderBin {
-    bin: nak_shader_bin,
+    pub bin: nak_shader_bin,
     code: Vec<u32>,
     asm: CString,
 }
 
 impl ShaderBin {
     pub fn new(
-        sm: &dyn ShaderModel,
+        sm: &ShaderModelInfo,
         info: &ShaderInfo,
         fs_key: Option<&nak_fs_key>,
         code: Vec<u32>,
@@ -224,21 +246,28 @@ impl ShaderBin {
         let c_info = nak_shader_info {
             stage: match info.stage {
                 ShaderStageInfo::Compute(_) => MESA_SHADER_COMPUTE,
-                ShaderStageInfo::Vertex => MESA_SHADER_VERTEX,
+                ShaderStageInfo::Vertex(_) => MESA_SHADER_VERTEX,
                 ShaderStageInfo::Fragment(_) => MESA_SHADER_FRAGMENT,
                 ShaderStageInfo::Geometry(_) => MESA_SHADER_GEOMETRY,
                 ShaderStageInfo::TessellationInit(_) => MESA_SHADER_TESS_CTRL,
                 ShaderStageInfo::Tessellation(_) => MESA_SHADER_TESS_EVAL,
             },
             sm: sm.sm(),
-            num_gprs: if sm.sm() >= 70 {
-                max(4, info.num_gprs + 2)
-            } else {
-                max(4, info.num_gprs)
+            num_gprs: {
+                max(4, info.num_gprs as u32 + sm.hw_reserved_gprs())
+                    .try_into()
+                    .unwrap()
             },
             num_control_barriers: info.num_control_barriers,
             _pad0: Default::default(),
+            _pad1: Default::default(),
+            max_warps_per_sm: info.max_warps_per_sm,
             num_instrs: info.num_instrs,
+            num_static_cycles: info.num_static_cycles,
+            num_spills_to_mem: info.num_spills_to_mem,
+            num_fills_from_mem: info.num_fills_from_mem,
+            num_spills_to_reg: info.num_spills_to_reg,
+            num_fills_from_reg: info.num_fills_from_reg,
             slm_size: info.slm_size,
             crs_size: sm.crs_size(info.max_crs_depth),
             __bindgen_anon_1: match &info.stage {
@@ -271,12 +300,30 @@ impl ShaderBin {
                         },
                     }
                 }
+                ShaderStageInfo::TessellationInit(ts_info) => {
+                    nak_shader_info__bindgen_ty_1 {
+                        ts: nak_shader_info__bindgen_ty_1__bindgen_ty_3 {
+                            domain: 0,
+                            spacing: ts_info
+                                .common
+                                .spacing
+                                .map_or(0, |x| x as u8),
+                            ccw: ts_info.common.ccw,
+                            point_mode: ts_info.common.point_mode,
+                            _pad: Default::default(),
+                        },
+                    }
+                }
                 ShaderStageInfo::Tessellation(ts_info) => {
                     nak_shader_info__bindgen_ty_1 {
                         ts: nak_shader_info__bindgen_ty_1__bindgen_ty_3 {
                             domain: ts_info.domain as u8,
-                            spacing: ts_info.spacing as u8,
-                            prims: ts_info.primitives as u8,
+                            spacing: ts_info
+                                .common
+                                .spacing
+                                .map_or(0, |x| x as u8),
+                            ccw: ts_info.common.ccw,
+                            point_mode: ts_info.common.point_mode,
                             _pad: Default::default(),
                         },
                     }
@@ -291,18 +338,18 @@ impl ShaderBin {
                     writes_point_size: io.attr_written(NAK_ATTR_POINT_SIZE),
                     writes_vprs_table_index: io
                         .attr_written(NAK_ATTR_VPRS_TABLE_INDEX),
-                    clip_enable: io.clip_enable.try_into().unwrap(),
-                    cull_enable: io.cull_enable.try_into().unwrap(),
+                    clip_enable: io.clip_enable,
+                    cull_enable: io.cull_enable,
                     xfb: if let Some(xfb) = &io.xfb {
                         **xfb
                     } else {
-                        unsafe { std::mem::zeroed() }
+                        Default::default()
                     },
                     _pad: Default::default(),
                 },
-                _ => unsafe { std::mem::zeroed() },
+                _ => Default::default(),
             },
-            hdr: sph::encode_header(sm, &info, fs_key),
+            hdr: sph::encode_header(sm, info, fs_key),
         };
 
         if DEBUG.print() {
@@ -313,6 +360,12 @@ impl ShaderBin {
 
             eprintln!("Stage: {}", stage_name);
             eprintln!("Instruction count: {}", c_info.num_instrs);
+            eprintln!("Static cycle count: {}", c_info.num_static_cycles);
+            eprintln!("Max warps/SM: {}", c_info.max_warps_per_sm);
+            eprintln!("Spills to mem: {}", c_info.num_spills_to_mem);
+            eprintln!("Spills to reg: {}", c_info.num_spills_to_reg);
+            eprintln!("Fills from mem: {}", c_info.num_fills_from_mem);
+            eprintln!("Fills from reg: {}", c_info.num_fills_from_reg);
             eprintln!("Num GPRs: {}", c_info.num_gprs);
             eprintln!("SLM size: {}", c_info.slm_size);
 
@@ -360,12 +413,12 @@ fn eprint_hex(label: &str, data: &[u32]) {
     eprint!("{}:", label);
     for i in 0..data.len() {
         if (i % 8) == 0 {
-            eprintln!("");
+            eprintln!();
             eprint!(" ");
         }
         eprint!(" {:08x}", data[i]);
     }
-    eprintln!("");
+    eprintln!();
 }
 
 macro_rules! pass {
@@ -377,8 +430,7 @@ macro_rules! pass {
     };
 }
 
-#[no_mangle]
-pub extern "C" fn nak_compile_shader(
+fn nak_compile_shader_internal(
     nir: *mut nir_shader,
     dump_asm: bool,
     nak: *const nak_compiler,
@@ -394,15 +446,8 @@ pub extern "C" fn nak_compile_shader(
         Some(unsafe { &*fs_key })
     };
 
-    let sm: Box<dyn ShaderModel> = if nak.sm >= 70 {
-        Box::new(ShaderModel70::new(nak.sm))
-    } else if nak.sm >= 50 {
-        Box::new(ShaderModel50::new(nak.sm))
-    } else {
-        panic!("Unsupported shader model");
-    };
-
-    let mut s = nak_shader_from_nir(nak, nir, sm.as_ref());
+    let sm = ShaderModelInfo::new(nak.sm, nak.warps_per_sm);
+    let mut s = nak_shader_from_nir(nak, nir, &sm);
 
     if DEBUG.print() {
         eprintln!("NAK IR:\n{}", &s);
@@ -417,6 +462,8 @@ pub extern "C" fn nak_compile_shader(
     pass!(s, opt_dce);
     pass!(s, opt_out);
     pass!(s, legalize);
+    pass!(s, opt_dce);
+    pass!(s, opt_instr_sched_prepass);
     pass!(s, assign_regs);
     pass!(s, lower_par_copies);
     pass!(s, lower_copy_swap);
@@ -428,6 +475,7 @@ pub extern "C" fn nak_compile_shader(
 
     s.remove_annotations();
 
+    pass!(s, opt_instr_sched_postpass);
     pass!(s, calc_instr_deps);
 
     s.gather_info();
@@ -438,7 +486,24 @@ pub extern "C" fn nak_compile_shader(
     }
 
     let code = sm.encode_shader(&s);
-    let bin =
-        Box::new(ShaderBin::new(sm.as_ref(), &s.info, fs_key, code, &asm));
+    let bin = Box::new(ShaderBin::new(&sm, &s.info, fs_key, code, &asm));
     Box::into_raw(bin) as *mut nak_shader_bin
+}
+
+#[no_mangle]
+pub extern "C" fn nak_compile_shader(
+    nir: *mut nir_shader,
+    dump_asm: bool,
+    nak: *const nak_compiler,
+    robust2_modes: nir_variable_mode,
+    fs_key: *const nak_fs_key,
+) -> *mut nak_shader_bin {
+    let compile = || {
+        nak_compile_shader_internal(nir, dump_asm, nak, robust2_modes, fs_key)
+    };
+    if DEBUG.panic() {
+        compile()
+    } else {
+        panic::catch_unwind(compile).unwrap_or(std::ptr::null_mut())
+    }
 }

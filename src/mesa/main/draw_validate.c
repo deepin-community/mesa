@@ -107,8 +107,21 @@ _mesa_update_valid_to_render_state(struct gl_context *ctx)
                       num_color_buffers - max_dual_source_buffers))
       return;
 
+   /* From the GL_EXT_shader_pixel_local_storage spec:
+    *
+    *    "INVALID_OPERATION is generated if pixel local storage is disabled and
+    *     the application attempts to issue a rendering command while a program
+    *     object that accesses pixel local storage is bound."
+    */
+   const struct gl_program *fp =
+      ctx->_Shader->CurrentProgram[MESA_SHADER_FRAGMENT];
+
+   if (!ctx->PixelLocalStorage && fp &&
+       fp->info.fs.accesses_pixel_local_storage)
+      return;
+
    if (ctx->Color.BlendEnabled &&
-       ctx->Color._AdvancedBlendMode != BLEND_NONE) {
+       ctx->Color._AdvancedBlendMode != PIPE_ADVANCED_BLEND_NONE) {
       /* The KHR_blend_equation_advanced spec says:
        *
        *    "If any non-NONE draw buffer uses a blend equation found in table
@@ -138,16 +151,14 @@ _mesa_update_valid_to_render_state(struct gl_context *ctx)
        *     the blend equation or "blend_support_all_equations", the error
        *     INVALID_OPERATION is generated [...]"
        */
-      const struct gl_program *prog =
-         ctx->_Shader->CurrentProgram[MESA_SHADER_FRAGMENT];
-      const GLbitfield blend_support = !prog ? 0 : prog->info.fs.advanced_blend_modes;
+      const GLbitfield blend_support = !fp ? 0 : fp->info.fs.advanced_blend_modes;
 
       if ((blend_support & BITFIELD_BIT(ctx->Color._AdvancedBlendMode)) == 0)
          return;
    }
 
    if (_mesa_is_desktop_gl_compat(ctx)) {
-      if (!shader->CurrentProgram[MESA_SHADER_FRAGMENT]) {
+      if (!fp) {
          if (ctx->FragmentProgram.Enabled &&
              !_mesa_arb_fragment_program_enabled(ctx))
             return;
@@ -155,8 +166,28 @@ _mesa_update_valid_to_render_state(struct gl_context *ctx)
          /* If drawing to integer-valued color buffers, there must be an
           * active fragment shader (GL_EXT_texture_integer).
           */
-         if (ctx->DrawBuffer->_IntegerBuffers)
+         if (ctx->DrawBuffer->_IntegerDrawBuffers)
             return;
+      }
+   }
+
+   /**
+    * OVR_multiview
+
+      INVALID_OPERATION is generated if a rendering command is issued and the the
+      number of views in the current draw framebuffer is not equal to the number
+      of views declared in the currently bound program.
+    */
+   struct gl_program *vp = ctx->_Shader->CurrentProgram[MESA_SHADER_VERTEX];
+   if (vp) {
+      unsigned num_views = util_bitcount(vp->info.view_mask);
+      for (int i = 0; i < ctx->DrawBuffer->_NumColorDrawBuffers; i++) {
+         gl_buffer_index buf = ctx->DrawBuffer->_ColorDrawBufferIndexes[i];
+         if (buf != BUFFER_NONE) {
+            struct gl_renderbuffer *rb = ctx->DrawBuffer->Attachment[buf].Renderbuffer;
+            if (rb && rb->rtt_numviews != num_views)
+               return;
+         }
       }
    }
 
@@ -214,7 +245,7 @@ _mesa_update_valid_to_render_state(struct gl_context *ctx)
        * However GL_EXT_float_blend removes this text.
        */
       if (!ctx->Extensions.EXT_float_blend &&
-          (ctx->DrawBuffer->_FP32Buffers & ctx->Color.BlendEnabled))
+          (ctx->DrawBuffer->_FP32DrawBuffers & ctx->Color.BlendEnabled))
          return;
       break;
 
@@ -241,7 +272,7 @@ _mesa_update_valid_to_render_state(struct gl_context *ctx)
       break;
 
    default:
-      unreachable("Invalid API value in _mesa_update_valid_to_render_state");
+      UNREACHABLE("Invalid API value in _mesa_update_valid_to_render_state");
    }
 
    /* From the GL_NV_fill_rectangle spec:
@@ -450,7 +481,7 @@ _mesa_update_valid_to_render_state(struct gl_context *ctx)
    if (shader->Flags & GLSL_LOG) {
       struct gl_program **prog = shader->CurrentProgram;
 
-      for (unsigned i = 0; i < MESA_SHADER_STAGES; i++) {
+      for (unsigned i = 0; i < MESA_SHADER_MESH_STAGES; i++) {
 	 if (prog[i] == NULL || prog[i]->_Used)
 	    continue;
 
@@ -466,7 +497,7 @@ _mesa_update_valid_to_render_state(struct gl_context *ctx)
 	 _mesa_append_uniforms_to_file(prog[i]);
       }
 
-      for (unsigned i = 0; i < MESA_SHADER_STAGES; i++) {
+      for (unsigned i = 0; i < MESA_SHADER_MESH_STAGES; i++) {
 	 if (prog[i] != NULL)
 	    prog[i]->_Used = GL_TRUE;
       }

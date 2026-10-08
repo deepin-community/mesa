@@ -270,8 +270,7 @@ _eglParseContextAttribList(_EGLContext *ctx, _EGLDisplay *disp,
           *     contexts."
           */
          if (!(disp->Extensions.KHR_create_context && api == EGL_OPENGL_API) &&
-             !(disp->Version >= 15 &&
-               (api == EGL_OPENGL_API || api == EGL_OPENGL_ES_API))) {
+             disp->Version < 15) {
             err = EGL_BAD_ATTRIBUTE;
             break;
          }
@@ -735,7 +734,7 @@ _eglQueryContextRenderBuffer(_EGLContext *ctx)
 
    switch (surf->Type) {
    default:
-      unreachable("bad EGLSurface type");
+      UNREACHABLE("bad EGLSurface type");
    case EGL_PIXMAP_BIT:
       /* - If the context is bound to a pixmap surface, then EGL_SINGLE_BUFFER
        *   will be returned.
@@ -766,6 +765,7 @@ EGLBoolean
 _eglQueryContext(_EGLContext *c, EGLint attribute, EGLint *value)
 {
    _EGLDisplay *disp = c->Resource.Display;
+   EGLenum api = c->ClientAPI;
 
    if (!value)
       return _eglError(EGL_BAD_PARAMETER, "eglQueryContext");
@@ -799,7 +799,14 @@ _eglQueryContext(_EGLContext *c, EGLint attribute, EGLint *value)
       *value = c->Protected;
       break;
    case EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT:
-      if (!disp->Extensions.EXT_query_reset_notification_strategy)
+      if (!disp->Extensions.EXT_create_context_robustness ||
+          api != EGL_OPENGL_ES_API)
+         return _eglError(EGL_BAD_ATTRIBUTE, "eglQueryContext");
+      *value = c->ResetNotificationStrategy;
+      break;
+   case EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_KHR:
+      if (!(disp->Extensions.KHR_create_context && api == EGL_OPENGL_API) &&
+          disp->Version < 15)
          return _eglError(EGL_BAD_ATTRIBUTE, "eglQueryContext");
       *value = c->ResetNotificationStrategy;
       break;

@@ -1,8 +1,6 @@
 # Copyright © 2017 Intel Corporation
 # SPDX-License-Identifier: MIT
 
-fs = import('fs')
-
 files_libintel_common = files(
   'i915/intel_engine.c',
   'i915/intel_engine.h',
@@ -44,23 +42,10 @@ files_libintel_common = files(
   'intel_uuid.h',
   'intel_measure.c',
   'intel_measure.h',
-  'intel_mem.c',
-  'intel_mem.h',
   'intel_pixel_hash.h'
 )
 
 libintel_common_links = [libisl]
-
-if with_clflushopt
-  libintel_clflushopt = static_library(
-    'intel_clflushopt',
-    ['intel_clflushopt.c'],
-    include_directories : [inc_include, inc_src],
-    c_args : [no_override_init_args] + clflushopt_args,
-    gnu_symbol_visibility : 'hidden',
-  )
-  libintel_common_links += libintel_clflushopt
-endif
 
 libintel_common = static_library(
   'intel_common',
@@ -90,7 +75,7 @@ endif
 if with_tests and not with_platform_android
   foreach g : [['70', 'gfx7'], ['75', 'hsw'], ['80', 'gfx8'],
                ['90', 'gfx9'], ['110', 'gfx11'], ['120', 'gfx12'],
-               ['125', 'gfx125'], ['200', 'gfx20']]
+               ['125', 'gfx125'], ['200', 'gfx20'], ['300', 'gfx30']]
     executable(
       'intel_@0@_mi_builder_test'.format(g[1]),
       files('tests/mi_builder_test.cpp'),

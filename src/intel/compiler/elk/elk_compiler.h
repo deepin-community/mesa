@@ -1,35 +1,16 @@
 /*
- * Copyright © 2010 - 2015 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * Copyright © 2010-2015 Intel Corporation
+ * SPDX-License-Identifier: MIT
  */
 
-#ifndef ELK_COMPILER_H
-#define ELK_COMPILER_H
+#pragma once
 
 #include <stdio.h>
 #include "c11/threads.h"
 #include "dev/intel_device_info.h"
 #include "isl/isl.h"
 #include "util/macros.h"
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 #include "util/enum_operators.h"
 #include "util/ralloc.h"
 #include "util/u_math.h"
@@ -109,13 +90,8 @@ struct elk_compiler {
     */
    bool supports_shader_constants;
 
-   /**
-    * Whether indirect UBO loads should use the sampler or go through the
-    * data/constant cache.  For the sampler, UBO surface states have to be set
-    * up with VK_FORMAT_R32G32B32A32_FLOAT whereas if it's going through the
-    * constant or data cache, UBOs must use VK_FORMAT_RAW.
-    */
-   bool indirect_ubos_use_sampler;
+   /** Whether we have an original 965G/GM clipping bug */
+   bool has_negative_rhw_bug;
 
    /**
     * Calling the ra_allocate function after each register spill can take
@@ -242,11 +218,11 @@ struct elk_base_prog_key {
 /**
  * OpenGL attribute slots fall in [0, VERT_ATTRIB_MAX - 1] with the range
  * [VERT_ATTRIB_GENERIC0, VERT_ATTRIB_MAX - 1] reserved for up to 16 user
- * input vertex attributes. In Vulkan, we expose up to 28 user vertex input
+ * input vertex attributes. In Vulkan, we expose up to 29 user vertex input
  * attributes that are mapped to slots also starting at VERT_ATTRIB_GENERIC0.
  */
 #define MAX_GL_VERT_ATTRIB     VERT_ATTRIB_MAX
-#define MAX_VK_VERT_ATTRIB     (VERT_ATTRIB_GENERIC0 + 28)
+#define MAX_VK_VERT_ATTRIB     (VERT_ATTRIB_GENERIC0 + 29)
 
 /**
  * Max number of binding table entries used for stream output.
@@ -315,7 +291,7 @@ struct elk_vs_prog_key {
     */
    unsigned nr_userclip_plane_consts:4;
 
-   uint32_t padding: 25;
+   uint32_t padding: 17;
 };
 
 /** The program key for Tessellation Control Shaders. */
@@ -478,7 +454,7 @@ elk_sometimes_invert(enum elk_sometimes x)
 }
 
 /** The program key for Fragment/Pixel Shaders. */
-struct elk_wm_prog_key {
+struct elk_fs_prog_key {
    struct elk_base_prog_key base;
 
    uint64_t input_slots_valid;
@@ -488,13 +464,11 @@ struct elk_wm_prog_key {
    /* Some collection of ELK_WM_IZ_* */
    uint8_t iz_lookup;
    bool stats_wm:1;
-   bool flat_shade:1;
    unsigned nr_color_regions:5;
    bool emit_alpha_test:1;
    enum compare_func alpha_test_func:3; /* < For Gfx4/5 MRT alpha test */
    bool alpha_test_replicate_alpha:1;
    enum elk_sometimes alpha_to_coverage:2;
-   bool clamp_fragment_color:1;
 
    bool force_dual_color_blend:1;
 
@@ -516,7 +490,7 @@ struct elk_wm_prog_key {
    bool coherent_fb_fetch:1;
    bool ignore_sample_mask_out:1;
 
-   uint64_t padding:56;
+   uint64_t padding:58;
 };
 
 struct elk_cs_prog_key {
@@ -562,7 +536,7 @@ union elk_any_prog_key {
    struct elk_tcs_prog_key tcs;
    struct elk_tes_prog_key tes;
    struct elk_gs_prog_key gs;
-   struct elk_wm_prog_key wm;
+   struct elk_fs_prog_key fs;
    struct elk_cs_prog_key cs;
 };
 
@@ -656,58 +630,12 @@ enum elk_param_builtin {
 #define ELK_PARAM_BUILTIN_CLIP_PLANE_COMP(param) \
    (((param) - ELK_PARAM_BUILTIN_CLIP_PLANE_0_X) & 0x3)
 
-enum elk_shader_reloc_id {
-   ELK_SHADER_RELOC_CONST_DATA_ADDR_LOW,
-   ELK_SHADER_RELOC_CONST_DATA_ADDR_HIGH,
-   ELK_SHADER_RELOC_SHADER_START_OFFSET,
-   ELK_SHADER_RELOC_DESCRIPTORS_ADDR_HIGH,
-};
-
-enum elk_shader_reloc_type {
-   /** An arbitrary 32-bit value */
-   ELK_SHADER_RELOC_TYPE_U32,
-   /** A MOV instruction with an immediate source */
-   ELK_SHADER_RELOC_TYPE_MOV_IMM,
-};
-
-/** Represents a code relocation
- *
- * Relocatable constants are immediates in the code which we want to be able
- * to replace post-compile with the actual value.
- */
-struct elk_shader_reloc {
-   /** The 32-bit ID of the relocatable constant */
-   uint32_t id;
-
-   /** Type of this relocation */
-   enum elk_shader_reloc_type type;
-
-   /** The offset in the shader to the relocated value
-    *
-    * For MOV_IMM relocs, this is an offset to the MOV instruction.  This
-    * allows us to do some sanity checking while we update the value.
-    */
-   uint32_t offset;
-
-   /** Value to be added to the relocated value before it is written */
-   uint32_t delta;
-};
-
-/** A value to write to a relocation */
-struct elk_shader_reloc_value {
-   /** The 32-bit ID of the relocatable constant */
-   uint32_t id;
-
-   /** The value with which to replace the relocated immediate */
-   uint32_t value;
-};
-
 struct elk_stage_prog_data {
    struct elk_ubo_range ubo_ranges[4];
 
    unsigned nr_params;       /**< number of float params/constants */
 
-   gl_shader_stage stage;
+   mesa_shader_stage stage;
 
    /* zero_push_reg is a bitfield which indicates what push registers (if any)
     * should be zeroed by SW at the start of the shader.  The corresponding
@@ -732,7 +660,7 @@ struct elk_stage_prog_data {
    unsigned const_data_offset;
 
    unsigned num_relocs;
-   const struct elk_shader_reloc *relocs;
+   const struct intel_shader_reloc *relocs;
 
    /** Does this program pull from any UBO or other constant buffers? */
    bool has_ubo_pull;
@@ -796,13 +724,12 @@ enum elk_pixel_shader_computed_depth_mode {
 
 /* Data about a particular attempt to compile a program.  Note that
  * there can be many of these, each in a different GL state
- * corresponding to a different elk_wm_prog_key struct, with different
+ * corresponding to a different elk_fs_prog_key struct, with different
  * compiled programs.
  */
-struct elk_wm_prog_data {
+struct elk_fs_prog_data {
    struct elk_stage_prog_data base;
 
-   unsigned num_per_primitive_inputs;
    unsigned num_varying_inputs;
 
    uint8_t reg_blocks_8;
@@ -863,7 +790,7 @@ struct elk_wm_prog_data {
     */
    enum elk_sometimes alpha_to_coverage;
 
-   unsigned msaa_flags_param;
+   unsigned fs_config_param;
 
    /**
     * Mask of which interpolation modes are required by the fragment shader.
@@ -900,7 +827,6 @@ struct elk_wm_prog_data {
     * For varying slots that are not used by the FS, the value is -1.
     */
    int urb_setup[VARYING_SLOT_MAX];
-   int urb_setup_channel[VARYING_SLOT_MAX];
 
    /**
     * Cache structure into the urb_setup array above that contains the
@@ -938,7 +864,7 @@ elk_fs_simd_width_for_ksp(unsigned ksp_idx, bool simd8_enabled,
    case 2:
       return (simd16_enabled && (simd32_enabled || simd8_enabled)) ? 16 : 0;
    default:
-      unreachable("Invalid KSP index");
+      UNREACHABLE("Invalid KSP index");
    }
 }
 
@@ -953,7 +879,7 @@ elk_fs_simd_width_for_ksp(unsigned ksp_idx, bool simd8_enabled,
    (elk_wm_state_simd_width_for_ksp((wm_state), (ksp_idx)) != 0)
 
 static inline uint32_t
-_elk_wm_prog_data_prog_offset(const struct elk_wm_prog_data *prog_data,
+_elk_fs_prog_data_prog_offset(const struct elk_fs_prog_data *prog_data,
                               unsigned simd_width)
 {
    switch (simd_width) {
@@ -964,12 +890,12 @@ _elk_wm_prog_data_prog_offset(const struct elk_wm_prog_data *prog_data,
    }
 }
 
-#define elk_wm_prog_data_prog_offset(prog_data, wm_state, ksp_idx) \
-   _elk_wm_prog_data_prog_offset(prog_data, \
+#define elk_fs_prog_data_prog_offset(prog_data, wm_state, ksp_idx) \
+   _elk_fs_prog_data_prog_offset(prog_data, \
       elk_wm_state_simd_width_for_ksp(wm_state, ksp_idx))
 
 static inline uint8_t
-_elk_wm_prog_data_dispatch_grf_start_reg(const struct elk_wm_prog_data *prog_data,
+_elk_fs_prog_data_dispatch_grf_start_reg(const struct elk_fs_prog_data *prog_data,
                                          unsigned simd_width)
 {
    switch (simd_width) {
@@ -980,12 +906,12 @@ _elk_wm_prog_data_dispatch_grf_start_reg(const struct elk_wm_prog_data *prog_dat
    }
 }
 
-#define elk_wm_prog_data_dispatch_grf_start_reg(prog_data, wm_state, ksp_idx) \
-   _elk_wm_prog_data_dispatch_grf_start_reg(prog_data, \
+#define elk_fs_prog_data_dispatch_grf_start_reg(prog_data, wm_state, ksp_idx) \
+   _elk_fs_prog_data_dispatch_grf_start_reg(prog_data, \
       elk_wm_state_simd_width_for_ksp(wm_state, ksp_idx))
 
 static inline uint8_t
-_elk_wm_prog_data_reg_blocks(const struct elk_wm_prog_data *prog_data,
+_elk_fs_prog_data_reg_blocks(const struct elk_fs_prog_data *prog_data,
                              unsigned simd_width)
 {
    switch (simd_width) {
@@ -996,27 +922,27 @@ _elk_wm_prog_data_reg_blocks(const struct elk_wm_prog_data *prog_data,
    }
 }
 
-#define elk_wm_prog_data_reg_blocks(prog_data, wm_state, ksp_idx) \
-   _elk_wm_prog_data_reg_blocks(prog_data, \
+#define elk_fs_prog_data_reg_blocks(prog_data, wm_state, ksp_idx) \
+   _elk_fs_prog_data_reg_blocks(prog_data, \
       elk_wm_state_simd_width_for_ksp(wm_state, ksp_idx))
 
 static inline bool
-elk_wm_prog_data_is_persample(const struct elk_wm_prog_data *prog_data,
-                              enum intel_msaa_flags pushed_msaa_flags)
+elk_fs_prog_data_is_persample(const struct elk_fs_prog_data *prog_data,
+                              enum intel_fs_config pushed_fs_config)
 {
-   if (pushed_msaa_flags & INTEL_MSAA_FLAG_ENABLE_DYNAMIC) {
-      if (!(pushed_msaa_flags & INTEL_MSAA_FLAG_MULTISAMPLE_FBO))
+   if (pushed_fs_config & INTEL_FS_CONFIG_ENABLE_DYNAMIC) {
+      if (!(pushed_fs_config & INTEL_FS_CONFIG_MULTISAMPLE_FBO))
          return false;
 
       if (prog_data->sample_shading)
-         assert(pushed_msaa_flags & INTEL_MSAA_FLAG_PERSAMPLE_DISPATCH);
+         assert(pushed_fs_config & INTEL_FS_CONFIG_PERSAMPLE_DISPATCH);
 
-      if (pushed_msaa_flags & INTEL_MSAA_FLAG_PERSAMPLE_DISPATCH)
+      if (pushed_fs_config & INTEL_FS_CONFIG_PERSAMPLE_DISPATCH)
          assert(prog_data->persample_dispatch != ELK_NEVER);
       else
          assert(prog_data->persample_dispatch != ELK_ALWAYS);
 
-      return (pushed_msaa_flags & INTEL_MSAA_FLAG_PERSAMPLE_DISPATCH) != 0;
+      return (pushed_fs_config & INTEL_FS_CONFIG_PERSAMPLE_DISPATCH) != 0;
    }
 
    assert(prog_data->persample_dispatch == ELK_ALWAYS ||
@@ -1026,20 +952,20 @@ elk_wm_prog_data_is_persample(const struct elk_wm_prog_data *prog_data,
 }
 
 static inline uint32_t
-elk_wm_prog_data_barycentric_modes(const struct elk_wm_prog_data *prog_data,
-                               enum intel_msaa_flags pushed_msaa_flags)
+elk_fs_prog_data_barycentric_modes(const struct elk_fs_prog_data *prog_data,
+                               enum intel_fs_config pushed_fs_config)
 {
    uint32_t modes = prog_data->barycentric_interp_modes;
 
    /* In the non dynamic case, we can just return the computed modes from
     * compilation time.
     */
-   if (!(pushed_msaa_flags & INTEL_MSAA_FLAG_ENABLE_DYNAMIC))
+   if (!(pushed_fs_config & INTEL_FS_CONFIG_ENABLE_DYNAMIC))
       return modes;
 
-   if (pushed_msaa_flags & INTEL_MSAA_FLAG_PERSAMPLE_INTERP) {
+   if (pushed_fs_config & INTEL_FS_CONFIG_PERSAMPLE_INTERP) {
       assert(prog_data->persample_dispatch == ELK_ALWAYS ||
-             (pushed_msaa_flags & INTEL_MSAA_FLAG_PERSAMPLE_DISPATCH));
+             (pushed_fs_config & INTEL_FS_CONFIG_PERSAMPLE_DISPATCH));
 
       /* Making dynamic per-sample interpolation work is a bit tricky.  The
        * hardware will hang if SAMPLE is requested but per-sample dispatch is
@@ -1190,7 +1116,7 @@ typedef enum
     ~VARYING_BIT_POS & ~VARYING_BIT_FACE)
 
 void elk_print_vue_map(FILE *fp, const struct intel_vue_map *vue_map,
-                       gl_shader_stage stage);
+                       mesa_shader_stage stage);
 
 /**
  * Convert a VUE slot number into a byte offset within the VUE.
@@ -1213,7 +1139,7 @@ elk_varying_to_offset(const struct intel_vue_map *vue_map, unsigned varying)
 void elk_compute_vue_map(const struct intel_device_info *devinfo,
                          struct intel_vue_map *vue_map,
                          uint64_t slots_valid,
-                         bool separate_shader,
+                         enum intel_vue_layout layout,
                          uint32_t pos_slots);
 
 void elk_compute_tess_vue_map(struct intel_vue_map *const vue_map,
@@ -1223,7 +1149,7 @@ void elk_compute_tess_vue_map(struct intel_vue_map *const vue_map,
 /* elk_interpolation_map.c */
 void elk_setup_vue_interpolation(const struct intel_vue_map *vue_map,
                                  struct nir_shader *nir,
-                                 struct elk_wm_prog_data *prog_data);
+                                 struct elk_fs_prog_data *prog_data);
 
 struct elk_vue_prog_data {
    struct elk_stage_prog_data base;
@@ -1378,7 +1304,7 @@ union elk_any_prog_data {
    struct elk_tcs_prog_data tcs;
    struct elk_tes_prog_data tes;
    struct elk_gs_prog_data gs;
-   struct elk_wm_prog_data wm;
+   struct elk_fs_prog_data fs;
    struct elk_cs_prog_data cs;
 };
 
@@ -1402,8 +1328,8 @@ DEFINE_PROG_DATA_DOWNCAST(vs,  prog_data->stage == MESA_SHADER_VERTEX)
 DEFINE_PROG_DATA_DOWNCAST(tcs, prog_data->stage == MESA_SHADER_TESS_CTRL)
 DEFINE_PROG_DATA_DOWNCAST(tes, prog_data->stage == MESA_SHADER_TESS_EVAL)
 DEFINE_PROG_DATA_DOWNCAST(gs,  prog_data->stage == MESA_SHADER_GEOMETRY)
-DEFINE_PROG_DATA_DOWNCAST(wm,  prog_data->stage == MESA_SHADER_FRAGMENT)
-DEFINE_PROG_DATA_DOWNCAST(cs,  gl_shader_stage_uses_workgroup(prog_data->stage))
+DEFINE_PROG_DATA_DOWNCAST(fs,  prog_data->stage == MESA_SHADER_FRAGMENT)
+DEFINE_PROG_DATA_DOWNCAST(cs,  mesa_shader_stage_uses_workgroup(prog_data->stage))
 
 DEFINE_PROG_DATA_DOWNCAST(vue, prog_data->stage == MESA_SHADER_VERTEX ||
                                prog_data->stage == MESA_SHADER_TESS_CTRL ||
@@ -1447,10 +1373,10 @@ uint64_t
 elk_get_compiler_config_value(const struct elk_compiler *compiler);
 
 unsigned
-elk_prog_data_size(gl_shader_stage stage);
+elk_prog_data_size(mesa_shader_stage stage);
 
 unsigned
-elk_prog_key_size(gl_shader_stage stage);
+elk_prog_key_size(mesa_shader_stage stage);
 
 struct elk_compile_params {
    void *mem_ctx;
@@ -1595,8 +1521,8 @@ elk_compile_clip(const struct elk_compiler *compiler,
 struct elk_compile_fs_params {
    struct elk_compile_params base;
 
-   const struct elk_wm_prog_key *key;
-   struct elk_wm_prog_data *prog_data;
+   const struct elk_fs_prog_key *key;
+   struct elk_fs_prog_data *prog_data;
 
    const struct intel_vue_map *vue_map;
    const struct elk_mue_map *mue_map;
@@ -1650,7 +1576,7 @@ elk_compile_ff_gs_prog(struct elk_compiler *compiler,
 		       unsigned *final_assembly_size);
 
 void elk_debug_key_recompile(const struct elk_compiler *c, void *log,
-                             gl_shader_stage stage,
+                             mesa_shader_stage stage,
                              const struct elk_base_prog_key *old_key,
                              const struct elk_base_prog_key *key);
 
@@ -1662,7 +1588,7 @@ void
 elk_write_shader_relocs(const struct elk_isa_info *isa,
                         void *program,
                         const struct elk_stage_prog_data *prog_data,
-                        struct elk_shader_reloc_value *values,
+                        struct intel_shader_reloc_value *values,
                         unsigned num_values);
 
 /**
@@ -1687,7 +1613,7 @@ elk_cs_get_dispatch_info(const struct intel_device_info *devinfo,
  */
 static inline bool
 elk_stage_has_packed_dispatch(ASSERTED const struct intel_device_info *devinfo,
-                              gl_shader_stage stage,
+                              mesa_shader_stage stage,
                               const struct elk_stage_prog_data *prog_data)
 {
    /* The code below makes assumptions about the hardware's thread dispatch
@@ -1707,10 +1633,10 @@ elk_stage_has_packed_dispatch(ASSERTED const struct intel_device_info *devinfo,
        * the SIMD thread, so dispatch of unlit samples cannot be avoided in
        * general and we should return false.
        */
-      const struct elk_wm_prog_data *wm_prog_data =
-         (const struct elk_wm_prog_data *)prog_data;
-      return !wm_prog_data->persample_dispatch &&
-             wm_prog_data->uses_vmask;
+      const struct elk_fs_prog_data *fs_prog_data =
+         (const struct elk_fs_prog_data *)prog_data;
+      return !fs_prog_data->persample_dispatch &&
+             fs_prog_data->uses_vmask;
    }
    case MESA_SHADER_COMPUTE:
       /* Compute shaders will be spawned with either a fully enabled dispatch
@@ -1762,5 +1688,3 @@ elk_compute_first_urb_slot_required(uint64_t inputs_read,
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
-
-#endif /* ELK_COMPILER_H */

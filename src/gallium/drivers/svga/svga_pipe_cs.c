@@ -41,14 +41,14 @@ svga_create_compute_state(struct pipe_context *pipe,
 
    assert(templ->ir_type == PIPE_SHADER_IR_NIR);
    /* nir_to_tgsi requires lowered images */
-   NIR_PASS_V(nir, gl_nir_lower_images, false);
+   NIR_PASS(_, nir, gl_nir_lower_images, false);
 
    cs->base.tokens = nir_to_tgsi((void *)nir, pipe->screen);
 
    struct svga_shader *shader = &cs->base;
    shader->id = svga->debug.shader_id++;
    shader->type = PIPE_SHADER_IR_TGSI;
-   shader->stage = PIPE_SHADER_COMPUTE;
+   shader->stage = MESA_SHADER_COMPUTE;
 
    /* Collect shader basic info */
    svga_tgsi_scan_shader(&cs->base);
@@ -73,7 +73,7 @@ svga_bind_compute_state(struct pipe_context *pipe, void *shader)
    svga->dirty |= SVGA_NEW_CS;
 
    /* Check if the shader uses samplers */
-   svga_set_curr_shader_use_samplers_flag(svga, PIPE_SHADER_COMPUTE,
+   svga_set_curr_shader_use_samplers_flag(svga, MESA_SHADER_COMPUTE,
                                           svga_shader_use_samplers(&cs->base));
 }
 
@@ -111,21 +111,6 @@ svga_delete_compute_state(struct pipe_context *pipe, void *shader)
       FREE(cs);
       cs = next_cs;
    }
-}
-
-
-/**
- * Bind an array of shader resources that will be used by the
- * compute program.  Any resources that were previously bound to
- * the specified range will be unbound after this call.
- */
-static void
-svga_set_compute_resources(struct pipe_context *pipe,
-                           unsigned start, unsigned count,
-                           struct pipe_surface **resources)
-{
-   //TODO
-   return;
 }
 
 
@@ -221,7 +206,6 @@ svga_init_cs_functions(struct svga_context *svga)
    svga->pipe.create_compute_state = svga_create_compute_state;
    svga->pipe.bind_compute_state = svga_bind_compute_state;
    svga->pipe.delete_compute_state = svga_delete_compute_state;
-   svga->pipe.set_compute_resources = svga_set_compute_resources;
    svga->pipe.set_global_binding = svga_set_global_binding;
    svga->pipe.launch_grid = svga_launch_grid;
 }

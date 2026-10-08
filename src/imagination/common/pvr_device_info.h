@@ -46,6 +46,10 @@
 #define PVR_BVNC_PACK_MASK_N UINT64_C(0x00000000FFFF0000)
 #define PVR_BVNC_PACK_MASK_C UINT64_C(0x000000000000FFFF)
 
+enum pvr_device_arch {
+   PVR_DEVICE_ARCH_ROGUE,
+};
+
 /**
  * Packs B, V, N and C values into a 64-bit unsigned integer.
  *
@@ -87,7 +91,7 @@
  * #pvr_get_packed_bvnc() and #PVR_BVNC_PACK()
  */
 #define PVR_BVNC_UNPACK_B(bvnc) \
-   ((uint16_t)(((bvnc)&PVR_BVNC_PACK_MASK_B) >> PVR_BVNC_PACK_SHIFT_B))
+   ((uint16_t)(((bvnc) & PVR_BVNC_PACK_MASK_B) >> PVR_BVNC_PACK_SHIFT_B))
 
 /**
  * Unpacks V value (version ID) from packed BVNC.
@@ -99,7 +103,7 @@
  * #pvr_get_packed_bvnc() and #PVR_BVNC_PACK()
  */
 #define PVR_BVNC_UNPACK_V(bvnc) \
-   ((uint16_t)(((bvnc)&PVR_BVNC_PACK_MASK_V) >> PVR_BVNC_PACK_SHIFT_V))
+   ((uint16_t)(((bvnc) & PVR_BVNC_PACK_MASK_V) >> PVR_BVNC_PACK_SHIFT_V))
 
 /**
  * Unpacks N value (number of scalable units) from packed BVNC.
@@ -111,7 +115,7 @@
  * #pvr_get_packed_bvnc() and #PVR_BVNC_PACK()
  */
 #define PVR_BVNC_UNPACK_N(bvnc) \
-   ((uint16_t)(((bvnc)&PVR_BVNC_PACK_MASK_N) >> PVR_BVNC_PACK_SHIFT_N))
+   ((uint16_t)(((bvnc) & PVR_BVNC_PACK_MASK_N) >> PVR_BVNC_PACK_SHIFT_N))
 
 /**
  * Unpacks C value (config ID) from packed BVNC.
@@ -123,7 +127,7 @@
  * #pvr_get_packed_bvnc() and #PVR_BVNC_PACK()
  */
 #define PVR_BVNC_UNPACK_C(bvnc) \
-   ((uint16_t)(((bvnc)&PVR_BVNC_PACK_MASK_C) >> PVR_BVNC_PACK_SHIFT_C))
+   ((uint16_t)(((bvnc) & PVR_BVNC_PACK_MASK_C) >> PVR_BVNC_PACK_SHIFT_C))
 
 /**
  * Tests whether a physical device has a given feature.
@@ -222,7 +226,8 @@
  *  * true if the enhancement is present in the hardware.
  *  * false if the enhancement is not present in the hardware.
  */
-#define PVR_HAS_ERN(dev_info, number) ((dev_info)->enhancements.has_ern##number)
+#define PVR_HAS_ENHANCEMENT(dev_info, number) \
+   ((dev_info)->enhancements.has_ern##number)
 
 /**
  * Tests whether a physical device has a given quirk.
@@ -241,6 +246,7 @@
 #define PVR_HAS_QUIRK(dev_info, number) ((dev_info)->quirks.has_brn##number)
 
 struct pvr_device_ident {
+   enum pvr_device_arch arch;
    uint16_t b, v, n, c;
    uint32_t device_id;
    const char *series_name;
@@ -256,7 +262,7 @@ struct pvr_device_features {
    bool has_compute_overlap : 1;
    bool has_eight_output_registers : 1;
    bool has_fb_cdc_v4 : 1;
-   bool has_fbcdc_algorithm;
+   bool has_fbcdc_algorithm : 1;
    bool has_gpu_multicore_support : 1;
    bool has_gs_rta_support : 1;
    bool has_ipf_creq_pf : 1;
@@ -268,10 +274,10 @@ struct pvr_device_features {
    bool has_max_usc_tasks : 1;
    bool has_num_clusters : 1;
    bool has_num_raster_pipes : 1;
-   bool has_num_user_clip_planes : 1;
    bool has_paired_tiles : 1;
    bool has_pbe2_in_xe : 1;
    bool has_pbe_filterable_f16 : 1;
+   bool has_pbe_stride_align_1pixel : 1;
    bool has_pbe_yuv : 1;
    bool has_pds_ddmadt : 1;
    bool has_roguexe : 1;
@@ -292,7 +298,13 @@ struct pvr_device_features {
    bool has_tpu_dm_global_registers : 1;
    bool has_tpu_extended_integer_lookup : 1;
    bool has_tpu_image_state_v2 : 1;
+   bool has_tpu_parallel_instances : 1;
+   bool has_unified_store_depth : 1;
+   bool has_usc_alu_roundingmode_rne : 1;
    bool has_usc_f16sop_u8 : 1;
+   bool has_usc_itrsmp : 1;
+   bool has_usc_itrsmp_enhanced : 1;
+   bool has_usc_itr_parallel_instances : 1;
    bool has_usc_min_output_registers_per_pix : 1;
    bool has_usc_pixel_partition_mask : 1;
    bool has_usc_slots : 1;
@@ -315,11 +327,13 @@ struct pvr_device_features {
    uint32_t max_usc_tasks;
    uint32_t num_clusters;
    uint32_t num_raster_pipes;
-   uint32_t num_user_clip_planes;
    uint32_t simple_parameter_format_version;
    uint32_t slc_cache_line_size_bits;
    uint32_t tile_size_x;
    uint32_t tile_size_y;
+   uint32_t tpu_parallel_instances;
+   uint32_t unified_store_depth;
+   uint32_t usc_itr_parallel_instances;
    uint32_t usc_min_output_registers_per_pix;
    uint32_t usc_slots;
    uint32_t uvs_banks;
@@ -358,6 +372,9 @@ struct pvr_device_quirks {
    bool has_brn62269 : 1;
    bool has_brn66011 : 1;
    bool has_brn70165 : 1;
+   bool has_brn72168 : 1;
+   bool has_brn72463 : 1;
+   bool has_brn74056 : 1;
 };
 
 struct pvr_device_info {
@@ -407,5 +424,8 @@ pvr_get_packed_bvnc(const struct pvr_device_info *dev_info)
 }
 
 int pvr_device_info_init(struct pvr_device_info *info, uint64_t bvnc);
+
+bool pvr_device_info_init_public_name(struct pvr_device_info *info,
+                                      const char *public_name);
 
 #endif /* PVR_DEVICE_INFO_H */

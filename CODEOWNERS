@@ -1,6 +1,6 @@
 # This file contains the GitLab handle of the maintainers/reviewers for
 # a given file:
-# https://docs.gitlab.com/ce/user/project/code_owners.html
+# https://docs.gitlab.com/user/project/codeowners/
 #
 # Consider these as the list of people who want to be involved in MRs
 # touching these files/folders, and whom you can ask your questions and
@@ -21,7 +21,7 @@
 
 # Build system - Meson
 meson.build @dbaker @eric
-/meson_options.txt @dbaker @eric
+/meson.options @dbaker @eric
 /docs/meson.rst @dbaker @eric
 
 # Build system - Android
@@ -127,26 +127,36 @@ gitlab-ci*.yml @eric
 /include/drm-uapi/pvr_drm.h @aashishc @frankbinns @luigi.santivetti
 /src/imagination/ @aashishc @frankbinns @luigi.santivetti
 /src/imagination/rogue/ @simon-perretta-img
+/src/imagination/pco/ @simon-perretta-img
 
 # Intel
-/include/drm-uapi/i915_drm.h @kwg @llandwerlin @gfxstrand @idr
-/include/pci_ids/i*_pci_ids.h @kwg @llandwerlin @gfxstrand @idr
-/src/intel/ @kwg @llandwerlin @gfxstrand @idr
-/src/gallium/winsys/iris/ @kwg @llandwerlin @gfxstrand @idr
-/src/gallium/drivers/iris/ @kwg @llandwerlin @gfxstrand @idr
+/include/drm-uapi/i915_drm.h @kwg @llandwerlin @idr
+/include/pci_ids/i*_pci_ids.h @kwg @llandwerlin @idr
+/src/intel/ @kwg @llandwerlin @idr
+/src/gallium/winsys/iris/ @kwg @llandwerlin @idr
+/src/gallium/drivers/iris/ @kwg @llandwerlin @idr
 /src/gallium/drivers/i915/ @anholt
+
+# KosmicKrisp
+/src/kosmickrisp @aitor
+/src/kosmickrisp/compiler @agoldmints
 
 # Microsoft
 /src/microsoft/ @jenatali
 /src/gallium/drivers/d3d12/ @jenatali
 
 # Panfrost
-/src/panfrost/ @bbrezillon
+/src/panfrost/ @bbrezillon @larsivsi @chrpil
 /src/panfrost/midgard @italove
 /src/gallium/drivers/panfrost/ @bbrezillon
 
 # R300
 /src/gallium/drivers/r300/ @ondracka @gawin
+
+# Venus
+/src/virtio/virtio-gpu/venus_hw.h @zzyiwei @olv
+/src/virtio/venus-protocol/ @zzyiwei @olv
+/src/virtio/vulkan/ @zzyiwei @olv
 
 # VirGL - Video
 /src/gallium/drivers/virgl/virgl_video.* @flynnjiang
@@ -155,3 +165,6 @@ gitlab-ci*.yml @eric
 # VMware
 /src/gallium/drivers/svga/ @brianp @charmainel
 /src/gallium/winsys/svga/ @thomash @drawat
+
+# Rust util: peripherally uploaded to crates.io
+src/util/rust @gurchetansingh @aruby @jmacnak @dextero1

@@ -65,8 +65,8 @@ struct rs_state {
 
 /* treat this as opaque structure */
 struct compiled_rs_state {
-   uint8_t valid : 1;
    uint8_t source_ts_valid : 1;
+   uint8_t single_buffer : 1;
    uint32_t RS_CONFIG;
    uint32_t RS_SOURCE_STRIDE;
    uint32_t RS_DEST_STRIDE;
@@ -86,6 +86,11 @@ struct compiled_rs_state {
 void
 etna_compile_rs_state(struct etna_context *ctx, struct compiled_rs_state *cs,
                       const struct rs_state *rs);
+
+void
+etna_align_box_for_rs(const struct etna_screen *screen,
+                      const struct etna_resource *rsc,
+                      struct pipe_box *box);
 
 /* Context initialization for RS clear_blit functions. */
 void

@@ -110,7 +110,7 @@ intel_gem_read_render_timestamp(int fd,
    case INTEL_KMD_TYPE_XE:
       return xe_gem_read_render_timestamp(fd, value);
    default:
-      unreachable("Missing");
+      UNREACHABLE("Missing");
       return false;
    }
 }
@@ -136,7 +136,7 @@ intel_gem_read_correlate_cpu_gpu_timestamp(int fd,
                                                      gpu_timestamp,
                                                      cpu_delta);
    default:
-      unreachable("Missing");
+      UNREACHABLE("Missing");
       return false;
    }
 }
@@ -155,10 +155,9 @@ intel_gem_supports_protected_context(int fd, enum intel_kmd_type kmd_type)
    case INTEL_KMD_TYPE_I915:
       return i915_gem_supports_protected_context(fd);
    case INTEL_KMD_TYPE_XE:
-      /* TODO: so far Xe don't have support for protected contexts/engines */
-      return false;
+      return xe_gem_supports_protected_exec_queue(fd);
    default:
-      unreachable("Missing");
+      UNREACHABLE("Missing");
       return false;
    }
 }
@@ -198,7 +197,7 @@ intel_gem_can_render_on_fd(int fd, enum intel_kmd_type kmd_type)
    case INTEL_KMD_TYPE_XE:
       return xe_gem_can_render_on_fd(fd);
    default:
-      unreachable("Missing");
+      UNREACHABLE("Missing");
       return false;
    }
 }

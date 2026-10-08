@@ -8,6 +8,8 @@
 
 #include "util/u_debug.h"
 
+#include "amd_family.h"
+
 #if AMD_LLVM_AVAILABLE
 #if defined(_MSC_VER) && defined(restrict)
 #undef restrict
@@ -26,7 +28,12 @@
 namespace aco {
 namespace {
 
-std::vector<bool>
+struct referenced_block {
+   uint32_t index;
+   uint32_t offset;
+};
+
+std::vector<referenced_block>
 get_referenced_blocks(Program* program)
 {
    std::vector<bool> referenced_blocks(program->blocks.size());
@@ -35,16 +42,29 @@ get_referenced_blocks(Program* program)
       for (unsigned succ : block.linear_succs)
          referenced_blocks[succ] = true;
    }
-   return referenced_blocks;
+
+   std::vector<referenced_block> block_offsets;
+   block_offsets.reserve(program->blocks.size());
+   for (unsigned i = 0; i < program->blocks.size(); i++) {
+      if (referenced_blocks[i])
+         block_offsets.emplace_back(referenced_block{i, program->blocks[i].offset});
+   }
+
+   std::sort(block_offsets.begin(), block_offsets.end(),
+             [](referenced_block& a, referenced_block& b) { return a.offset < b.offset; });
+   return block_offsets;
 }
 
 void
-print_block_markers(FILE* output, Program* program, const std::vector<bool>& referenced_blocks,
-                    unsigned* next_block, unsigned pos)
+print_block_markers(FILE* output, Program* program,
+                    const std::vector<referenced_block>& block_offsets, unsigned* next_block,
+                    unsigned pos)
 {
-   while (*next_block < program->blocks.size() && pos == program->blocks[*next_block].offset) {
-      if (referenced_blocks[*next_block])
-         fprintf(output, "BB%u:\n", *next_block);
+   while (*next_block < block_offsets.size() && pos >= block_offsets[*next_block].offset) {
+      uint32_t block_idx = block_offsets[*next_block].index;
+      assert(pos == program->blocks[block_idx].offset ||
+             program->blocks[block_idx].instructions.empty());
+      fprintf(output, "BB%u:\n", block_idx);
       (*next_block)++;
    }
 }
@@ -80,6 +100,7 @@ print_constant_data(FILE* output, Program* program)
    }
 }
 
+#ifndef _WIN32
 /**
  * Determines the GPU type to use for CLRXdisasm
  */
@@ -128,6 +149,7 @@ to_clrx_device_name(amd_gfx_level gfx_level, radeon_family family)
       switch (family) {
       case CHIP_NAVI10: return "gfx1010";
       case CHIP_NAVI12: return "gfx1011";
+      case CHIP_GFX1013: return "gfx1013";
       default: return nullptr;
       }
    default: return nullptr;
@@ -135,7 +157,7 @@ to_clrx_device_name(amd_gfx_level gfx_level, radeon_family family)
 }
 
 bool
-get_branch_target(char** output, Program* program, const std::vector<bool>& referenced_blocks,
+get_branch_target(char** output, const std::vector<referenced_block>& block_offsets,
                   char** line_start)
 {
    unsigned pos;
@@ -144,17 +166,19 @@ get_branch_target(char** output, Program* program, const std::vector<bool>& refe
    pos /= 4;
    *line_start = strchr(*line_start, '_') + 2;
 
-   for (Block& block : program->blocks) {
-      if (referenced_blocks[block.index] && block.offset == pos) {
+   for (referenced_block block : block_offsets) {
+      if (block.offset == pos) {
          *output += sprintf(*output, "BB%u", block.index);
          return true;
       }
    }
    return false;
 }
+#endif
 
 bool
-print_asm_clrx(Program* program, std::vector<uint32_t>& binary, unsigned exec_size, FILE* output)
+print_asm_clrx(Program* program, enum radeon_family family, std::vector<uint32_t>& binary,
+               unsigned exec_size, FILE* output)
 {
 #ifdef _WIN32
    return true;
@@ -165,7 +189,7 @@ print_asm_clrx(Program* program, std::vector<uint32_t>& binary, unsigned exec_si
    FILE* p;
    int fd;
 
-   const char* gpu_type = to_clrx_device_name(program->gfx_level, program->family);
+   const char* gpu_type = to_clrx_device_name(program->gfx_level, family);
 
    /* Dump the binary into a temporary file. */
    fd = mkstemp(path);
@@ -190,7 +214,7 @@ print_asm_clrx(Program* program, std::vector<uint32_t>& binary, unsigned exec_si
          goto fail;
       }
 
-      std::vector<bool> referenced_blocks = get_referenced_blocks(program);
+      std::vector<referenced_block> block_offsets = get_referenced_blocks(program);
       unsigned next_block = 0;
 
       char prev_instr[2048];
@@ -222,13 +246,13 @@ print_asm_clrx(Program* program, std::vector<uint32_t>& binary, unsigned exec_si
             prev_pos = pos;
          }
 
-         print_block_markers(output, program, referenced_blocks, &next_block, pos);
+         print_block_markers(output, program, block_offsets, &next_block, pos);
 
          char* dest = prev_instr;
          *(dest++) = '\t';
          while (*line_start) {
             if (!strncmp(line_start, ".L", 2) &&
-                get_branch_target(&dest, program, referenced_blocks, &line_start))
+                get_branch_target(&dest, block_offsets, &line_start))
                continue;
             *(dest++) = *(line_start++);
          }
@@ -296,16 +320,15 @@ disasm_instr(amd_gfx_level gfx_level, LLVMDisasmContextRef disasm, uint32_t* bin
 }
 
 bool
-print_asm_llvm(Program* program, std::vector<uint32_t>& binary, unsigned exec_size, FILE* output)
+print_asm_llvm(Program* program, enum radeon_family family, std::vector<uint32_t>& binary,
+               unsigned exec_size, FILE* output)
 {
-   std::vector<bool> referenced_blocks = get_referenced_blocks(program);
+   std::vector<referenced_block> block_offsets = get_referenced_blocks(program);
 
    std::vector<llvm::SymbolInfoTy> symbols;
    std::vector<std::array<char, 16>> block_names;
    block_names.reserve(program->blocks.size());
-   for (Block& block : program->blocks) {
-      if (!referenced_blocks[block.index])
-         continue;
+   for (referenced_block block : block_offsets) {
       std::array<char, 16> name;
       sprintf(name.data(), "BB%u", block.index);
       block_names.push_back(name);
@@ -313,14 +336,23 @@ print_asm_llvm(Program* program, std::vector<uint32_t>& binary, unsigned exec_si
                            llvm::StringRef(block_names[block_names.size() - 1].data()), 0);
    }
 
-   const char* features = "";
+   std::string features = "";
    if (program->gfx_level >= GFX10 && program->wave_size == 64) {
-      features = "+wavefrontsize64";
+      features += "+wavefrontsize64";
    }
 
+   /* Older versions have very incomplete true16 support. */
+#if LLVM_VERSION_MAJOR >= 20
+   if (program->gfx_level >= GFX11) {
+      if (!features.empty())
+         features += ",";
+      features += "+real-true16";
+   }
+#endif
+
    LLVMDisasmContextRef disasm =
-      LLVMCreateDisasmCPUFeatures("amdgcn-mesa-mesa3d", ac_get_llvm_processor_name(program->family),
-                                  features, &symbols, 0, NULL, NULL);
+      LLVMCreateDisasmCPUFeatures("amdgcn-mesa-mesa3d", ac_get_llvm_processor_name(family),
+                                  features.c_str(), &symbols, 0, NULL, NULL);
 
    size_t pos = 0;
    bool invalid = false;
@@ -330,8 +362,7 @@ print_asm_llvm(Program* program, std::vector<uint32_t>& binary, unsigned exec_si
    unsigned prev_pos = 0;
    unsigned repeat_count = 0;
    while (pos <= exec_size) {
-      bool new_block =
-         next_block < program->blocks.size() && pos == program->blocks[next_block].offset;
+      bool new_block = next_block < block_offsets.size() && pos == block_offsets[next_block].offset;
       if (pos + prev_size <= exec_size && prev_pos != pos && !new_block &&
           memcmp(&binary[prev_pos], &binary[pos], prev_size * 4) == 0) {
          repeat_count++;
@@ -343,7 +374,7 @@ print_asm_llvm(Program* program, std::vector<uint32_t>& binary, unsigned exec_si
          repeat_count = 0;
       }
 
-      print_block_markers(output, program, referenced_blocks, &next_block, pos);
+      print_block_markers(output, program, block_offsets, &next_block, pos);
 
       /* For empty last block, only print block marker. */
       if (pos == exec_size)
@@ -360,7 +391,7 @@ print_asm_llvm(Program* program, std::vector<uint32_t>& binary, unsigned exec_si
       prev_pos = pos;
       pos += res.second;
    }
-   assert(next_block == program->blocks.size());
+   assert(next_block == block_offsets.size());
 
    LLVMDisasmDispose(disasm);
 
@@ -373,12 +404,12 @@ print_asm_llvm(Program* program, std::vector<uint32_t>& binary, unsigned exec_si
 } /* end namespace */
 
 bool
-check_print_asm_support(Program* program)
+check_print_asm_support(Program* program, enum radeon_family family)
 {
 #if AMD_LLVM_AVAILABLE
    if (program->gfx_level >= GFX8) {
       /* LLVM disassembler only supports GFX8+ */
-      const char* name = ac_get_llvm_processor_name(program->family);
+      const char* name = ac_get_llvm_processor_name(family);
       const char* triple = "amdgcn--";
       LLVMTargetRef target = ac_get_llvm_target(triple);
 
@@ -395,7 +426,7 @@ check_print_asm_support(Program* program)
 
 #ifndef _WIN32
    /* Check if CLRX disassembler binary is available and can disassemble the program */
-   return to_clrx_device_name(program->gfx_level, program->family) &&
+   return to_clrx_device_name(program->gfx_level, family) &&
           system("clrxdisasm --version > /dev/null 2>&1") == 0;
 #else
    return false;
@@ -404,15 +435,16 @@ check_print_asm_support(Program* program)
 
 /* Returns true on failure */
 bool
-print_asm(Program* program, std::vector<uint32_t>& binary, unsigned exec_size, FILE* output)
+print_asm(Program* program, enum radeon_family family, std::vector<uint32_t>& binary,
+          unsigned exec_size, FILE* output)
 {
 #if AMD_LLVM_AVAILABLE
    if (program->gfx_level >= GFX8) {
-      return print_asm_llvm(program, binary, exec_size, output);
+      return print_asm_llvm(program, family, binary, exec_size, output);
    }
 #endif
 
-   return print_asm_clrx(program, binary, exec_size, output);
+   return print_asm_clrx(program, family, binary, exec_size, output);
 }
 
 } // namespace aco

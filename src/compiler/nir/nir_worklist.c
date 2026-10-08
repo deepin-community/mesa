@@ -22,6 +22,7 @@
  */
 
 #include "nir_worklist.h"
+#include "nir.h"
 
 void
 nir_block_worklist_add_all(nir_block_worklist *w, nir_function_impl *impl)
@@ -35,7 +36,7 @@ static bool
 nir_instr_worklist_add_srcs_cb(nir_src *src, void *state)
 {
    nir_instr_worklist *wl = state;
-   nir_instr_worklist_push_tail(wl, src->ssa->parent_instr);
+   nir_instr_worklist_push_tail(wl, nir_def_instr(src->ssa));
    return true;
 }
 

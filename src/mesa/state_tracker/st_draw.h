@@ -75,7 +75,7 @@ pointer_to_offset(const void *ptr)
 }
 
 void
-st_prepare_draw(struct gl_context *ctx, uint64_t state_mask);
+st_prepare_draw(struct gl_context *ctx, const st_state_bitset state_mask);
 
 void
 st_draw_gallium(struct gl_context *ctx,
@@ -100,7 +100,8 @@ st_indirect_draw_vbo(struct gl_context *ctx,
                      GLsizei draw_count, GLsizei stride);
 
 bool
-st_draw_hw_select_prepare_common(struct gl_context *ctx);
+st_draw_hw_select_prepare_common(struct gl_context *ctx,
+                                 struct pipe_resource **releasebuf);
 bool
 st_draw_hw_select_prepare_mode(struct gl_context *ctx, struct pipe_draw_info *info);
 void

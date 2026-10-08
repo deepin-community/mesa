@@ -20,7 +20,7 @@ clamp_vertex_color
 
    D3D11: seems always disabled
 
-   Note the PIPE_CAP_VERTEX_COLOR_CLAMPED query indicates whether or not the
+   Note pipe_caps.vertex_color_clamped indicates whether or not the
    driver supports this control.  If it's not supported, gallium frontends may
    have to insert extra clamping code.
 
@@ -34,7 +34,7 @@ clamp_fragment_color
 
    D3D11: seems always disabled
 
-   Note the PIPE_CAP_FRAGMENT_COLOR_CLAMPED query indicates whether or not the
+   Note pipe_caps.fragment_color_clamped indicates whether or not the
    driver supports this control.  If it's not supported, gallium frontends may
    have to insert extra clamping code.
 
@@ -56,7 +56,7 @@ flatshade
       CONSTANT, LINEAR and PERSPECTIVE. The flatshade state is needed at
       clipping time to determine how to set the color of new vertices.
 
-      :ref:`Draw` can implement flat shading by copying the provoking vertex
+      Draw can implement flat shading by copying the provoking vertex
       color to all the other vertices in the primitive.
 
 flatshade_first
@@ -69,7 +69,7 @@ flatshade_first
      vertex. If the caller wishes to change the provoking vertex, they merely
      need to rotate the vertices themselves.
    * ``PIPE_PRIMITIVE_QUAD``, ``PIPE_PRIMITIVE_QUAD_STRIP``: The option only has
-     an effect if ``PIPE_CAP_QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION`` is true.
+     an effect if ``pipe_caps.quads_follow_provoking_vertex_convention`` is true.
      If it is not, the provoking vertex is always the last vertex.
    * ``PIPE_PRIMITIVE_TRIANGLE_FAN``: When set, the provoking vertex is the
      second vertex, not the first. This permits each segment of the fan to have
@@ -80,7 +80,7 @@ Polygons
 
 light_twoside
    If set, there are per-vertex back-facing colors.  The hardware
-   (perhaps assisted by :ref:`Draw`) should be set up to use this state
+   (perhaps assisted by Draw) should be set up to use this state
    along with the front/back information to set the final vertex colors
    prior to rasterization.
 
@@ -120,12 +120,6 @@ offset_tri
 
 offset_units
     Specifies the polygon offset bias
-offset_units_unscaled
-    Specifies the unit of the polygon offset bias. If false, use the
-    GL/D3D1X behavior. If true, offset_units is a floating point offset
-    which isn't scaled (D3D9). Note that GL/D3D1X behavior has different
-    formula whether the depth buffer is unorm or float, which is not
-    the case for D3D9.
 offset_scale
     Specifies the polygon offset scale
 offset_clamp
@@ -157,16 +151,16 @@ Points
 ------
 
 sprite_coord_enable
-   The effect of this state depends on PIPE_CAP_TGSI_TEXCOORD !
+   The effect of this state depends on pipe_caps.tgsi_texcoord !
 
    Controls automatic texture coordinate generation for rendering sprite points.
 
-   If PIPE_CAP_TGSI_TEXCOORD is false:
+   If pipe_caps.tgsi_texcoord is false:
    When bit k in the sprite_coord_enable bitfield is set, then generic
    input k to the fragment shader will get an automatically computed
    texture coordinate.
 
-   If PIPE_CAP_TGSI_TEXCOORD is true:
+   If pipe_caps.tgsi_texcoord is true:
    The bitfield refers to inputs with TEXCOORD semantic instead of generic inputs.
 
    The texture coordinate will be of the form (s, t, 0, 1) where s varies
@@ -178,7 +172,7 @@ sprite_coord_enable
    always rasterized as quads).  Any mismatch between these states should
    be considered a bug in the gallium frontend.
 
-   This feature is implemented in the :ref:`Draw` module but may also be
+   This feature is implemented in the Draw module but may also be
    implemented natively by GPUs or implemented with a geometry shader.
 
 
@@ -187,7 +181,7 @@ sprite_coord_mode
    point sprites. For PIPE_SPRITE_COORD_LOWER_LEFT, the lower-left vertex will
    have coordinates (0,0,0,1). For PIPE_SPRITE_COORD_UPPER_LEFT, the upper-left
    vertex will have coordinates (0,0,0,1).
-   This state is used by :ref:`Draw` to generate texcoords.
+   This state is used by Draw to generate texcoords.
 
 
 point_quad_rasterization

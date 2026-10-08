@@ -21,6 +21,16 @@ struct nvkmd_dev;
 struct nvkmd_mem;
 struct vk_pipeline_cache;
 
+enum nvk_dispatch_table {
+   NVK_DEVICE_DISPATCH_TABLE,
+   NVK_APP_DISPATCH_TABLE,
+   NVK_DISPATCH_TABLE_COUNT,
+};
+
+struct nvk_layer_dispatch_tables {
+   struct vk_device_dispatch_table app;
+};
+
 struct nvk_slm_area {
    simple_mtx_t mutex;
    struct nvkmd_mem *mem;
@@ -40,20 +50,23 @@ struct nvk_device {
 
    struct nvk_upload_queue upload;
 
+   struct nvk_layer_dispatch_tables layer_dispatch;
    struct nvkmd_mem *zero_page;
    struct nvk_descriptor_table images;
    struct nvk_descriptor_table samplers;
    struct nvk_edb_bview_cache edb_bview_cache;
    struct nvk_heap shader_heap;
    struct nvk_heap event_heap;
+   struct nvk_heap qmd_heap;
    struct nvk_slm_area slm;
    struct nvkmd_mem *vab_memory;
 
-   struct nvk_queue queue;
+   struct u_printf_ctx printf;
 
    struct vk_meta_device meta;
 
    struct nvk_shader *copy_queries;
+   struct nvk_shader *copy_indirect;
 };
 
 VK_DEFINE_HANDLE_CASTS(nvk_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)
@@ -62,8 +75,14 @@ VkResult nvk_device_ensure_slm(struct nvk_device *dev,
                                uint32_t slm_bytes_per_lane,
                                uint32_t crs_bytes_per_warp);
 
+static inline const struct nvk_physical_device *
+nvk_device_physical(const struct nvk_device *dev)
+{
+   return (struct nvk_physical_device *)dev->vk.physical;
+}
+
 static inline struct nvk_physical_device *
-nvk_device_physical(struct nvk_device *dev)
+nvk_device_physical_mut(struct nvk_device *dev)
 {
    return (struct nvk_physical_device *)dev->vk.physical;
 }

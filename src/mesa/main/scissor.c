@@ -51,8 +51,14 @@ set_scissor_no_notify(struct gl_context *ctx, unsigned idx,
        height == ctx->Scissor.ScissorArray[idx].Height)
       return;
 
+   /* Flush bitmap cache if needed */
+   struct st_context *st_ctx = st_context(ctx);
+   if (st_ctx && st_ctx->bitmap.cache.empty == GL_FALSE && idx == 0) {
+      st_flush_bitmap_cache(st_ctx);
+   }
+
    FLUSH_VERTICES(ctx, 0, GL_SCISSOR_BIT);
-   ctx->NewDriverState |= ST_NEW_SCISSOR;
+   ST_SET_STATE(ctx->NewDriverState, ST_NEW_SCISSOR);
 
    ctx->Scissor.ScissorArray[idx].X = x;
    ctx->Scissor.ScissorArray[idx].Y = y;
@@ -298,7 +304,7 @@ _mesa_WindowRectanglesEXT(GLenum mode, GLsizei count, const GLint *box)
    st_flush_bitmap_cache(st_context(ctx));
 
    FLUSH_VERTICES(ctx, 0, GL_SCISSOR_BIT);
-   ctx->NewDriverState |= ST_NEW_WINDOW_RECTANGLES;
+   ST_SET_STATE(ctx->NewDriverState, ST_NEW_WINDOW_RECTANGLES);
 
    memcpy(ctx->Scissor.WindowRects, newval,
           sizeof(struct gl_scissor_rect) * count);

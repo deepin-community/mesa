@@ -41,6 +41,7 @@ const nir_intrinsic_info nir_intrinsic_infos[nir_num_intrinsics] = {
    .dest_bit_sizes = ${hex(reduce(operator.or_, opcode.bit_sizes, 0))},
    .bit_size_src = ${opcode.bit_size_src},
    .num_indices = ${opcode.num_indices},
+   .num_index_slots = ${opcode.num_index_slots},
 % if opcode.indices:
    .indices = {
 % for i in range(len(opcode.indices)):
@@ -49,7 +50,7 @@ const nir_intrinsic_info nir_intrinsic_infos[nir_num_intrinsics] = {
    },
    .index_map = {
 % for i in range(len(opcode.indices)):
-      [NIR_INTRINSIC_${opcode.indices[i].name.upper()}] = ${i + 1},
+      [NIR_INTRINSIC_${opcode.indices[i].name.upper()}] = ${opcode.index_map[i]},
 % endfor
     },
 % endif
@@ -72,13 +73,12 @@ import os
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--outdir', required=True,
-                        help='Directory to put the generated files in')
+    parser.add_argument('--out', required=True,
+                        help='Output C file')
 
     args = parser.parse_args()
 
-    path = os.path.join(args.outdir, 'nir_intrinsics.c')
-    with open(path, 'w', encoding='utf-8') as f:
+    with open(args.out, 'w', encoding='utf-8') as f:
         f.write(Template(template).render(
             INTR_OPCODES=INTR_OPCODES, INTR_INDICES=INTR_INDICES,
             reduce=reduce, operator=operator))

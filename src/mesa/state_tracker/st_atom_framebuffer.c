@@ -61,11 +61,11 @@ static void
 update_framebuffer_size(struct pipe_framebuffer_state *framebuffer,
                         struct pipe_surface *surface)
 {
+   unsigned width, height;
    assert(surface);
-   assert(surface->width  < USHRT_MAX);
-   assert(surface->height < USHRT_MAX);
-   framebuffer->width  = MIN2(framebuffer->width,  surface->width);
-   framebuffer->height = MIN2(framebuffer->height, surface->height);
+   pipe_surface_size(surface, &width, &height);
+   framebuffer->width  = MIN2(framebuffer->width,  width);
+   framebuffer->height = MIN2(framebuffer->height, height);
 }
 
 /**
@@ -146,45 +146,37 @@ st_update_framebuffer_state( struct st_context *st )
     */
    framebuffer.nr_cbufs = fb->_NumColorDrawBuffers;
 
+   framebuffer.pls_enabled = ctx->PixelLocalStorage;
+
    unsigned num_multiview_layer = 0;
-   unsigned first_multiview_layer = 0;
    for (i = 0; i < fb->_NumColorDrawBuffers; i++) {
-      framebuffer.cbufs[i] = NULL;
       rb = fb->_ColorDrawBuffers[i];
 
-      if (rb) {
-         if (rb->is_rtt || (rb->texture &&
-             _mesa_is_format_srgb(rb->Format))) {
+      if (rb && rb->texture) {
+         if (rb->is_rtt || _mesa_is_format_srgb(rb->Format)) {
             /* rendering to a GL texture, may have to update surface */
 
             _mesa_update_renderbuffer_surface(ctx, rb);
 
-            if (rb->rtt_numviews) {
-               first_multiview_layer = rb->rtt_slice;
-               num_multiview_layer = MAX2(num_multiview_layer, rb->rtt_numviews);
-            }
+            num_multiview_layer = MAX2(num_multiview_layer, rb->rtt_numviews);
          }
 
-         if (rb->surface) {
-            if (rb->surface->context != st->pipe) {
-               _mesa_regen_renderbuffer_surface(ctx, rb);
-            }
-            framebuffer.cbufs[i] = rb->surface;
-            update_framebuffer_size(&framebuffer, rb->surface);
-         }
+         framebuffer.cbufs[i] = rb->surface;
+         framebuffer.cbufs[i].format = _mesa_renderbuffer_get_format(ctx, rb);
+         update_framebuffer_size(&framebuffer, &rb->surface);
          rb->defined = GL_TRUE; /* we'll be drawing something */
+      } else {
+         memset(&framebuffer.cbufs[i], 0, sizeof(framebuffer.cbufs[i]));
       }
    }
-   if (num_multiview_layer)
-      framebuffer.viewmask = BITFIELD_RANGE(first_multiview_layer, num_multiview_layer);
 
    for (i = framebuffer.nr_cbufs; i < PIPE_MAX_COLOR_BUFS; i++) {
-      framebuffer.cbufs[i] = NULL;
+      memset(&framebuffer.cbufs[i], 0, sizeof(framebuffer.cbufs[i]));
    }
 
    /* Remove trailing GL_NONE draw buffers. */
    while (framebuffer.nr_cbufs &&
-          !framebuffer.cbufs[framebuffer.nr_cbufs-1]) {
+          !framebuffer.cbufs[framebuffer.nr_cbufs-1].texture) {
       framebuffer.nr_cbufs--;
    }
 
@@ -195,36 +187,31 @@ st_update_framebuffer_state( struct st_context *st )
    if (!rb)
       rb = fb->Attachment[BUFFER_STENCIL].Renderbuffer;
 
-   if (rb) {
+   if (rb && rb->texture) {
       if (rb->is_rtt) {
          /* rendering to a GL texture, may have to update surface */
          _mesa_update_renderbuffer_surface(ctx, rb);
-      }
-      if (rb->surface && rb->surface->context != ctx->pipe) {
-         _mesa_regen_renderbuffer_surface(ctx, rb);
+         num_multiview_layer = MAX2(num_multiview_layer, rb->rtt_numviews);
       }
       framebuffer.zsbuf = rb->surface;
-      if (rb->surface)
-         update_framebuffer_size(&framebuffer, rb->surface);
+      framebuffer.zsbuf.format = rb->texture->format;
+      update_framebuffer_size(&framebuffer, &rb->surface);
+   } else {
+      memset(&framebuffer.zsbuf, 0, sizeof(framebuffer.zsbuf));
    }
-   else
-      framebuffer.zsbuf = NULL;
+
+   framebuffer.viewmask = (uint8_t)BITFIELD_MASK(num_multiview_layer);
 
 #ifndef NDEBUG
    /* Make sure the resource binding flags were set properly */
    for (i = 0; i < framebuffer.nr_cbufs; i++) {
-      assert(!framebuffer.cbufs[i] ||
-             framebuffer.cbufs[i]->texture->bind & PIPE_BIND_RENDER_TARGET);
+      assert(!framebuffer.cbufs[i].texture ||
+             framebuffer.cbufs[i].texture->bind & PIPE_BIND_RENDER_TARGET);
    }
-   if (framebuffer.zsbuf) {
-      assert(framebuffer.zsbuf->texture->bind & PIPE_BIND_DEPTH_STENCIL);
+   if (framebuffer.zsbuf.texture) {
+      assert(framebuffer.zsbuf.texture->bind & PIPE_BIND_DEPTH_STENCIL);
    }
 #endif
-
-   if (framebuffer.width == USHRT_MAX)
-      framebuffer.width = 0;
-   if (framebuffer.height == USHRT_MAX)
-      framebuffer.height = 0;
 
    cso_set_framebuffer(st->cso_context, &framebuffer);
 

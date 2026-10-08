@@ -27,6 +27,7 @@
 
 #include "nir/pipe_nir.h"
 #include "pipe/p_defines.h"
+#include "pipe/p_shader_tokens.h"
 
 #include "util/u_inlines.h"
 #include "util/u_pack_color.h"
@@ -317,7 +318,7 @@ nv50_clear_render_target(struct pipe_context *pipe,
    PUSH_DATAh(push, mt->base.address + sf->offset);
    PUSH_DATA (push, mt->base.address + sf->offset);
    PUSH_DATA (push, nv50_format_table[dst->format].rt);
-   PUSH_DATA (push, mt->level[sf->base.u.tex.level].tile_mode);
+   PUSH_DATA (push, mt->level[sf->base.level].tile_mode);
    PUSH_DATA (push, mt->layer_stride >> 2);
    BEGIN_NV04(push, NV50_3D(RT_HORIZ(0)), 2);
    if (nouveau_bo_memtype(bo))
@@ -414,7 +415,7 @@ nv50_clear_depth_stencil(struct pipe_context *pipe,
    PUSH_DATAh(push, mt->base.address + sf->offset);
    PUSH_DATA (push, mt->base.address + sf->offset);
    PUSH_DATA (push, nv50_format_table[dst->format].rt);
-   PUSH_DATA (push, mt->level[sf->base.u.tex.level].tile_mode);
+   PUSH_DATA (push, mt->level[sf->base.level].tile_mode);
    PUSH_DATA (push, mt->layer_stride >> 2);
    BEGIN_NV04(push, NV50_3D(ZETA_ENABLE), 1);
    PUSH_DATA (push, 1);
@@ -453,7 +454,9 @@ nv50_clear_depth_stencil(struct pipe_context *pipe,
 }
 
 void
-nv50_clear(struct pipe_context *pipe, unsigned buffers, const struct pipe_scissor_state *scissor_state,
+nv50_clear(struct pipe_context *pipe, unsigned buffers,
+           uint32_t color_clear_mask, uint8_t stencil_clear_mask,
+           const struct pipe_scissor_state *scissor_state,
            const union pipe_color_union *color,
            double depth, unsigned stencil)
 {
@@ -513,10 +516,10 @@ nv50_clear(struct pipe_context *pipe, unsigned buffers, const struct pipe_scisso
 
    if (mode) {
       int zs_layers = 0, color0_layers = 0;
-      if (fb->cbufs[0] && (mode & 0x3c))
-         color0_layers = nv50_surface(fb->cbufs[0])->depth;
-      if (fb->zsbuf && (mode & ~0x3c))
-         zs_layers = nv50_surface(fb->zsbuf)->depth;
+      if (nv50->fb_cbufs[0] && (mode & 0x3c))
+         color0_layers = nv50_surface(nv50->fb_cbufs[0])->depth;
+      if (nv50->fb_zsbuf && (mode & ~0x3c))
+         zs_layers = nv50_surface(nv50->fb_zsbuf)->depth;
 
       for (j = 0; j < MIN2(zs_layers, color0_layers); j++) {
          BEGIN_NV04(push, NV50_3D(CLEAR_BUFFERS), 1);
@@ -533,7 +536,7 @@ nv50_clear(struct pipe_context *pipe, unsigned buffers, const struct pipe_scisso
    }
 
    for (i = 1; i < fb->nr_cbufs; i++) {
-      struct pipe_surface *sf = fb->cbufs[i];
+      struct pipe_surface *sf = nv50->fb_cbufs[i];
       if (!sf || !(buffers & (PIPE_CLEAR_COLOR0 << i)))
          continue;
       for (j = 0; j < nv50_surface(sf)->depth; j++) {
@@ -786,6 +789,7 @@ struct nv50_blitctx
    enum pipe_texture_target target;
    struct {
       struct pipe_framebuffer_state fb;
+      struct pipe_surface *cbuf0, *zsbuf;
       struct nv50_window_rect_stateobj window_rect;
       struct nv50_rasterizer_stateobj *rast;
       struct nv50_program *vp;
@@ -813,7 +817,7 @@ nv50_blitter_make_vp(struct nv50_blitter *blit)
       0x10000811, 0x0423c789, /* mov b32 o[0x10] s[0x10] */ /* TEXC.z */
    };
 
-   blit->vp.type = PIPE_SHADER_VERTEX;
+   blit->vp.type = MESA_SHADER_VERTEX;
    blit->vp.translated = true;
    blit->vp.code = (uint32_t *)code; /* const_cast */
    blit->vp.code_size = sizeof(code);
@@ -865,7 +869,7 @@ nv50_blitter_make_fp(struct pipe_context *pipe,
 
    const int chipset = nouveau_screen(pipe->screen)->device->chipset;
    const nir_shader_compiler_options *options =
-      nv50_ir_nir_shader_compiler_options(chipset, PIPE_SHADER_FRAGMENT);
+      nv50_ir_nir_shader_compiler_options(chipset, MESA_SHADER_FRAGMENT);
 
    struct nir_builder b =
       nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, options,
@@ -901,7 +905,7 @@ nv50_blitter_make_fp(struct pipe_context *pipe,
 
       nir_deref_instr *tex_deref = nir_build_deref_var(&b, sampler);
 
-      s = nir_tex_deref(&b, tex_deref, tex_deref, coord);
+      s = nir_tex(&b, coord, .texture_deref = tex_deref, .sampler_deref = tex_deref);
       s = nir_channel(&b, s, 0);
    }
 
@@ -914,7 +918,7 @@ nv50_blitter_make_fp(struct pipe_context *pipe,
 
       nir_deref_instr *tex_deref = nir_build_deref_var(&b, sampler);
 
-      rgba = nir_tex_deref(&b, tex_deref, tex_deref, coord);
+      rgba = nir_tex(&b, coord, .texture_deref = tex_deref, .sampler_deref = tex_deref);
       z = nir_channel(&b, rgba, 0);
    }
 
@@ -991,7 +995,7 @@ nv50_blitter_make_fp(struct pipe_context *pipe,
    nir_store_var(&b, out_var, out_ssa, out_mask);
 
    /* return shader */
-   NIR_PASS_V(b.shader, nir_lower_samplers);
+   NIR_PASS(_, b.shader, nir_lower_samplers);
 
    return pipe_shader_from_nir(pipe, b.shader);
 }
@@ -1092,27 +1096,30 @@ nv50_blit_set_dst(struct nv50_blitctx *ctx,
 {
    struct nv50_context *nv50 = ctx->nv50;
    struct pipe_context *pipe = &nv50->base.pipe;
-   struct pipe_surface templ;
 
    if (util_format_is_depth_or_stencil(format))
-      templ.format = nv50_blit_zeta_to_colour_format(format);
-   else
-      templ.format = format;
+      format = nv50_blit_zeta_to_colour_format(format);
 
-   templ.u.tex.level = level;
-   templ.u.tex.first_layer = templ.u.tex.last_layer = layer;
+   /* this will be overwritten (not released) at the end of the blit */
+   nv50->framebuffer.cbufs[0] = (struct pipe_surface) {
+      .texture = res,
+      .format = format,
+      .level = level,
+      .first_layer = layer,
+      .last_layer = layer,
+   };
 
    if (layer == -1) {
-      templ.u.tex.first_layer = 0;
-      templ.u.tex.last_layer =
+      nv50->framebuffer.cbufs[0].first_layer = 0;
+      nv50->framebuffer.cbufs[0].last_layer =
          (res->target == PIPE_TEXTURE_3D ? res->depth0 : res->array_size) - 1;
    }
 
-   nv50->framebuffer.cbufs[0] = nv50_miptree_surface_new(pipe, res, &templ);
+   nv50->fb_cbufs[0] = nv50_miptree_surface_new(pipe, res, &nv50->framebuffer.cbufs[0]);
    nv50->framebuffer.nr_cbufs = 1;
-   nv50->framebuffer.zsbuf = NULL;
-   nv50->framebuffer.width = nv50->framebuffer.cbufs[0]->width;
-   nv50->framebuffer.height = nv50->framebuffer.cbufs[0]->height;
+   memset(&nv50->framebuffer.zsbuf, 0, sizeof(nv50->framebuffer.zsbuf));
+   nv50->fb_zsbuf = NULL;
+   pipe_surface_size(&nv50->framebuffer.cbufs[0], &nv50->framebuffer.width, &nv50->framebuffer.height);
 }
 
 static void
@@ -1233,6 +1240,8 @@ nv50_blitctx_pre_blit(struct nv50_blitctx *ctx,
    ctx->saved.fb.nr_cbufs = nv50->framebuffer.nr_cbufs;
    ctx->saved.fb.cbufs[0] = nv50->framebuffer.cbufs[0];
    ctx->saved.fb.zsbuf = nv50->framebuffer.zsbuf;
+   ctx->saved.cbuf0 = nv50->fb_cbufs[0];
+   ctx->saved.zsbuf = nv50->fb_zsbuf;
 
    ctx->saved.rast = nv50->rast;
 
@@ -1291,13 +1300,15 @@ nv50_blitctx_post_blit(struct nv50_blitctx *blit)
    struct nv50_context *nv50 = blit->nv50;
    int s;
 
-   pipe_surface_reference(&nv50->framebuffer.cbufs[0], NULL);
+   nv50_surface_destroy(&nv50->base.pipe, nv50->fb_cbufs[0]);
 
    nv50->framebuffer.width = blit->saved.fb.width;
    nv50->framebuffer.height = blit->saved.fb.height;
    nv50->framebuffer.nr_cbufs = blit->saved.fb.nr_cbufs;
    nv50->framebuffer.cbufs[0] = blit->saved.fb.cbufs[0];
    nv50->framebuffer.zsbuf = blit->saved.fb.zsbuf;
+   nv50->fb_cbufs[0] = blit->saved.cbuf0;
+   nv50->fb_zsbuf = blit->saved.zsbuf;
 
    nv50->rast = blit->saved.rast;
 

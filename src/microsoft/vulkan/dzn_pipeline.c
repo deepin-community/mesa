@@ -91,7 +91,7 @@ gfx_pipeline_cmd_signature_key_hash(const void *key)
 
 struct dzn_cached_blob {
    struct vk_pipeline_cache_object base;
-   uint8_t hash[SHA1_DIGEST_LENGTH];
+   uint8_t hash[BLAKE3_KEY_LEN];
    const void *data;
    size_t size;
 };
@@ -129,7 +129,7 @@ dzn_cached_blob_deserialize(struct vk_pipeline_cache *cache,
                             struct blob_reader *blob)
 {
    size_t data_size = blob->end - blob->current;
-   assert(key_size == SHA1_DIGEST_LENGTH);
+   assert(key_size == BLAKE3_KEY_LEN);
 
    return dzn_cached_blob_create(cache->base.device, key_data,
                                  blob_read_bytes(blob, data_size), data_size);
@@ -197,7 +197,7 @@ to_dxil_shader_stage(VkShaderStageFlagBits in)
    case VK_SHADER_STAGE_GEOMETRY_BIT: return DXIL_SPIRV_SHADER_GEOMETRY;
    case VK_SHADER_STAGE_FRAGMENT_BIT: return DXIL_SPIRV_SHADER_FRAGMENT;
    case VK_SHADER_STAGE_COMPUTE_BIT: return DXIL_SPIRV_SHADER_COMPUTE;
-   default: unreachable("Unsupported stage");
+   default: UNREACHABLE("Unsupported stage");
    }
 }
 
@@ -218,13 +218,13 @@ dzn_pipeline_get_nir_shader(struct dzn_device *device,
                             const uint8_t *hash,
                             VkPipelineCreateFlags2KHR pipeline_flags,
                             const VkPipelineShaderStageCreateInfo *stage_info,
-                            gl_shader_stage stage,
+                            mesa_shader_stage stage,
                             const struct dzn_nir_options *options,
                             struct dxil_spirv_metadata *metadata,
                             nir_shader **nir)
 {
    if (cache) {
-      *nir = vk_pipeline_cache_lookup_nir(cache, hash, SHA1_DIGEST_LENGTH,
+      *nir = vk_pipeline_cache_lookup_nir(cache, hash, BLAKE3_KEY_LEN,
                                           options->nir_opts, NULL, NULL);
       if (*nir) {
          /* This bit is explicitly added into the info before caching, since this sysval wouldn't
@@ -281,14 +281,14 @@ dzn_pipeline_get_nir_shader(struct dzn_device *device,
       }
 
       if (needs_conv)
-         NIR_PASS_V(*nir, dxil_nir_lower_vs_vertex_conversion, options->vi_conversions);
+         NIR_PASS(_, *nir, dxil_nir_lower_vs_vertex_conversion, options->vi_conversions);
    }
 
    if (cache) {
       /* Cache this additional metadata */
       if (metadata->needs_draw_sysvals)
          BITSET_SET((*nir)->info.system_values_read, SYSTEM_VALUE_FIRST_VERTEX);
-      vk_pipeline_cache_add_nir(cache, hash, SHA1_DIGEST_LENGTH, *nir);
+      vk_pipeline_cache_add_nir(cache, hash, BLAKE3_KEY_LEN, *nir);
    }
 
    return VK_SUCCESS;
@@ -336,7 +336,7 @@ adjust_to_bindless_cb(struct dxil_spirv_binding_remapping *inout, void *context)
       inout->binding = new_binding;
       break;
    default:
-      unreachable("Invalid binding type");
+      UNREACHABLE("Invalid binding type");
    }
 }
 
@@ -347,10 +347,10 @@ adjust_var_bindings(nir_shader *shader,
                     uint8_t *bindings_hash)
 {
    uint32_t modes = nir_var_image | nir_var_uniform | nir_var_mem_ubo | nir_var_mem_ssbo;
-   struct mesa_sha1 bindings_hash_ctx;
+   blake3_hasher bindings_hash_ctx;
 
    if (bindings_hash)
-      _mesa_sha1_init(&bindings_hash_ctx);
+      _mesa_blake3_init(&bindings_hash_ctx);
 
    nir_foreach_variable_with_modes(var, shader, modes) {
       if (var->data.mode == nir_var_uniform) {
@@ -370,14 +370,14 @@ adjust_var_bindings(nir_shader *shader,
          var->data.binding = layout->binding_translation[s].base_reg[b];
 
       if (bindings_hash) {
-         _mesa_sha1_update(&bindings_hash_ctx, &s, sizeof(s));
-         _mesa_sha1_update(&bindings_hash_ctx, &b, sizeof(b));
-         _mesa_sha1_update(&bindings_hash_ctx, &var->data.binding, sizeof(var->data.binding));
+         _mesa_blake3_update(&bindings_hash_ctx, &s, sizeof(s));
+         _mesa_blake3_update(&bindings_hash_ctx, &b, sizeof(b));
+         _mesa_blake3_update(&bindings_hash_ctx, &var->data.binding, sizeof(var->data.binding));
       }
    }
 
    if (bindings_hash)
-      _mesa_sha1_final(&bindings_hash_ctx, bindings_hash);
+      _mesa_blake3_final(&bindings_hash_ctx, bindings_hash);
 
    if (device->bindless) {
       struct dxil_spirv_nir_lower_bindless_options options = {
@@ -427,6 +427,7 @@ dzn_pipeline_compile_shader(struct dzn_device *device,
           device->vk.enabled_features.shaderInt16),
       .shader_model_max = dzn_get_shader_model(pdev),
       .input_clip_size = input_clip_size,
+      .advanced_texture_ops = pdev->options14.AdvancedTextureOpsSupported,
 #ifdef _WIN32
       .validator_version_max = dxil_get_validator_version(instance->dxil_validator),
 #endif
@@ -489,7 +490,7 @@ dzn_pipeline_compile_shader(struct dzn_device *device,
 
 static D3D12_SHADER_BYTECODE *
 dzn_pipeline_get_gfx_shader_slot(D3D12_PIPELINE_STATE_STREAM_DESC *stream,
-                                 gl_shader_stage in)
+                                 mesa_shader_stage in)
 {
    switch (in) {
    case MESA_SHADER_VERTEX: {
@@ -512,12 +513,12 @@ dzn_pipeline_get_gfx_shader_slot(D3D12_PIPELINE_STATE_STREAM_DESC *stream,
       d3d12_gfx_pipeline_state_stream_new_desc(stream, PS, D3D12_SHADER_BYTECODE, desc);
       return desc;
    }
-   default: unreachable("Unsupported stage");
+   default: UNREACHABLE("Unsupported stage");
    }
 }
 
 struct dzn_cached_dxil_shader_header {
-   gl_shader_stage stage;
+   mesa_shader_stage stage;
    size_t size;
    uint8_t data[0];
 };
@@ -525,7 +526,7 @@ struct dzn_cached_dxil_shader_header {
 static VkResult
 dzn_pipeline_cache_lookup_dxil_shader(struct vk_pipeline_cache *cache,
                                       const uint8_t *dxil_hash,
-                                      gl_shader_stage *stage,
+                                      mesa_shader_stage *stage,
                                       D3D12_SHADER_BYTECODE *bc)
 {
    *stage = MESA_SHADER_NONE;
@@ -536,7 +537,7 @@ dzn_pipeline_cache_lookup_dxil_shader(struct vk_pipeline_cache *cache,
    struct vk_pipeline_cache_object *cache_obj = NULL;
 
    cache_obj =
-      vk_pipeline_cache_lookup_object(cache, dxil_hash, SHA1_DIGEST_LENGTH,
+      vk_pipeline_cache_lookup_object(cache, dxil_hash, BLAKE3_KEY_LEN,
                                       &dzn_cached_blob_ops,
                                       NULL);
    if (!cache_obj)
@@ -575,7 +576,7 @@ out:
 static void
 dzn_pipeline_cache_add_dxil_shader(struct vk_pipeline_cache *cache,
                                    const uint8_t *dxil_hash,
-                                   gl_shader_stage stage,
+                                   mesa_shader_stage stage,
                                    const D3D12_SHADER_BYTECODE *bc)
 {
    size_t size = sizeof(struct dzn_cached_dxil_shader_header) +
@@ -619,7 +620,7 @@ dzn_pipeline_cache_lookup_gfx_pipeline(struct dzn_graphics_pipeline *pipeline,
    struct vk_pipeline_cache_object *cache_obj = NULL;
 
    cache_obj =
-      vk_pipeline_cache_lookup_object(cache, pipeline_hash, SHA1_DIGEST_LENGTH,
+      vk_pipeline_cache_lookup_object(cache, pipeline_hash, BLAKE3_KEY_LEN,
                                       &dzn_cached_blob_ops,
                                       NULL);
    if (!cache_obj)
@@ -650,11 +651,11 @@ dzn_pipeline_cache_lookup_gfx_pipeline(struct dzn_graphics_pipeline *pipeline,
       offset += sizeof(*inputs) * info->input_count;
    }
 
-   assert(cached_blob->size == offset + util_bitcount(info->stages) * SHA1_DIGEST_LENGTH);
+   assert(cached_blob->size == offset + util_bitcount(info->stages) * BLAKE3_KEY_LEN);
 
    u_foreach_bit(s, info->stages) {
       uint8_t *dxil_hash = (uint8_t *)cached_blob->data + offset;
-      gl_shader_stage stage;
+      mesa_shader_stage stage;
 
       D3D12_SHADER_BYTECODE *slot =
          dzn_pipeline_get_gfx_shader_slot(stream_desc, s);
@@ -665,7 +666,7 @@ dzn_pipeline_cache_lookup_gfx_pipeline(struct dzn_graphics_pipeline *pipeline,
          return ret;
 
       assert(stage == s);
-      offset += SHA1_DIGEST_LENGTH;
+      offset += BLAKE3_KEY_LEN;
    }
 
    pipeline->rast_disabled_from_missing_position = info->rast_disabled_from_missing_position;
@@ -692,7 +693,7 @@ dzn_pipeline_cache_add_gfx_pipeline(struct dzn_graphics_pipeline *pipeline,
    for (uint32_t i = 0; i < MESA_VULKAN_SHADER_STAGES; i++) {
       if (pipeline->templates.shaders[i].bc) {
          stages |= BITFIELD_BIT(i);
-         offset += SHA1_DIGEST_LENGTH;
+         offset += BLAKE3_KEY_LEN;
       }
    }
 
@@ -724,8 +725,8 @@ dzn_pipeline_cache_add_gfx_pipeline(struct dzn_graphics_pipeline *pipeline,
    u_foreach_bit(s, stages) {
       uint8_t *dxil_hash = (uint8_t *)cached_blob->data + offset;
 
-      memcpy(dxil_hash, dxil_hashes[s], SHA1_DIGEST_LENGTH);
-      offset += SHA1_DIGEST_LENGTH;
+      memcpy(dxil_hash, dxil_hashes[s], BLAKE3_KEY_LEN);
+      offset += BLAKE3_KEY_LEN;
    }
 
    cache_obj = vk_pipeline_cache_add_object(cache, cache_obj);
@@ -737,12 +738,12 @@ dzn_graphics_pipeline_hash_attribs(D3D12_INPUT_ELEMENT_DESC *attribs,
                                    enum pipe_format *vi_conversions,
                                    uint8_t *result)
 {
-   struct mesa_sha1 ctx;
+   blake3_hasher ctx;
 
-   _mesa_sha1_init(&ctx);
-   _mesa_sha1_update(&ctx, attribs, sizeof(*attribs) * MAX_VERTEX_GENERIC_ATTRIBS);
-   _mesa_sha1_update(&ctx, vi_conversions, sizeof(*vi_conversions) * MAX_VERTEX_GENERIC_ATTRIBS);
-   _mesa_sha1_final(&ctx, result);
+   _mesa_blake3_init(&ctx);
+   _mesa_blake3_update(&ctx, attribs, sizeof(*attribs) * MAX_VERTEX_GENERIC_ATTRIBS);
+   _mesa_blake3_update(&ctx, vi_conversions, sizeof(*vi_conversions) * MAX_VERTEX_GENERIC_ATTRIBS);
+   _mesa_blake3_final(&ctx, result);
 }
 
 static VkResult
@@ -762,24 +763,24 @@ dzn_graphics_pipeline_compile_shaders(struct dzn_device *device,
       NULL : info->pViewportState;
    struct {
       const VkPipelineShaderStageCreateInfo *info;
-      uint8_t spirv_hash[SHA1_DIGEST_LENGTH];
-      uint8_t dxil_hash[SHA1_DIGEST_LENGTH];
-      uint8_t nir_hash[SHA1_DIGEST_LENGTH];
-      uint8_t link_hashes[SHA1_DIGEST_LENGTH][2];
+      uint8_t spirv_hash[BLAKE3_KEY_LEN];
+      uint8_t dxil_hash[BLAKE3_KEY_LEN];
+      uint8_t nir_hash[BLAKE3_KEY_LEN];
+      uint8_t link_hashes[BLAKE3_KEY_LEN][2];
    } stages[MESA_VULKAN_SHADER_STAGES] = { 0 };
    const uint8_t *dxil_hashes[MESA_VULKAN_SHADER_STAGES] = { 0 };
-   uint8_t attribs_hash[SHA1_DIGEST_LENGTH];
-   uint8_t pipeline_hash[SHA1_DIGEST_LENGTH];
-   gl_shader_stage last_raster_stage = MESA_SHADER_NONE;
+   uint8_t attribs_hash[BLAKE3_KEY_LEN];
+   uint8_t pipeline_hash[BLAKE3_KEY_LEN];
+   mesa_shader_stage last_raster_stage = MESA_SHADER_NONE;
    uint32_t active_stage_mask = 0;
    VkResult ret;
 
-   /* First step: collect stage info in a table indexed by gl_shader_stage
+   /* First step: collect stage info in a table indexed by mesa_shader_stage
     * so we can iterate over stages in pipeline order or reverse pipeline
     * order.
     */
    for (uint32_t i = 0; i < info->stageCount; i++) {
-      gl_shader_stage stage =
+      mesa_shader_stage stage =
          vk_to_mesa_shader_stage(info->pStages[i].stage);
 
       assert(stage <= MESA_SHADER_FRAGMENT);
@@ -844,31 +845,30 @@ dzn_graphics_pipeline_compile_shaders(struct dzn_device *device,
    if (cache) {
       dzn_graphics_pipeline_hash_attribs(attribs, vi_conversions, attribs_hash);
 
-      struct mesa_sha1 pipeline_hash_ctx;
+      blake3_hasher pipeline_hash_ctx;
 
-      _mesa_sha1_init(&pipeline_hash_ctx);
-      _mesa_sha1_update(&pipeline_hash_ctx, &device->bindless, sizeof(device->bindless));
-      _mesa_sha1_update(&pipeline_hash_ctx, attribs_hash, sizeof(attribs_hash));
-      _mesa_sha1_update(&pipeline_hash_ctx, &yz_flip_mode, sizeof(yz_flip_mode));
-      _mesa_sha1_update(&pipeline_hash_ctx, &y_flip_mask, sizeof(y_flip_mask));
-      _mesa_sha1_update(&pipeline_hash_ctx, &z_flip_mask, sizeof(z_flip_mask));
-      _mesa_sha1_update(&pipeline_hash_ctx, &force_sample_rate_shading, sizeof(force_sample_rate_shading));
-      _mesa_sha1_update(&pipeline_hash_ctx, &lower_view_index, sizeof(lower_view_index));
-      _mesa_sha1_update(&pipeline_hash_ctx, &pipeline->use_gs_for_polygon_mode_point, sizeof(pipeline->use_gs_for_polygon_mode_point));
+      _mesa_blake3_init(&pipeline_hash_ctx);
+      _mesa_blake3_update(&pipeline_hash_ctx, &device->bindless, sizeof(device->bindless));
+      _mesa_blake3_update(&pipeline_hash_ctx, attribs_hash, sizeof(attribs_hash));
+      _mesa_blake3_update(&pipeline_hash_ctx, &yz_flip_mode, sizeof(yz_flip_mode));
+      _mesa_blake3_update(&pipeline_hash_ctx, &y_flip_mask, sizeof(y_flip_mask));
+      _mesa_blake3_update(&pipeline_hash_ctx, &z_flip_mask, sizeof(z_flip_mask));
+      _mesa_blake3_update(&pipeline_hash_ctx, &force_sample_rate_shading, sizeof(force_sample_rate_shading));
+      _mesa_blake3_update(&pipeline_hash_ctx, &lower_view_index, sizeof(lower_view_index));
+      _mesa_blake3_update(&pipeline_hash_ctx, &pipeline->use_gs_for_polygon_mode_point, sizeof(pipeline->use_gs_for_polygon_mode_point));
 
       u_foreach_bit(stage, active_stage_mask) {
-         const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo *subgroup_size =
+         const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo *subgroup_size_info =
             (const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo *)
             vk_find_struct_const(stages[stage].info->pNext, PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO);
-         enum gl_subgroup_size subgroup_enum = subgroup_size && subgroup_size->requiredSubgroupSize >= 8 ?
-            subgroup_size->requiredSubgroupSize : SUBGROUP_SIZE_FULL_SUBGROUPS;
+         uint8_t subgroup_size = subgroup_size_info ? subgroup_size_info->requiredSubgroupSize : 0;
 
          vk_pipeline_hash_shader_stage(pipeline->base.flags, stages[stage].info, NULL, stages[stage].spirv_hash);
-         _mesa_sha1_update(&pipeline_hash_ctx, &subgroup_enum, sizeof(subgroup_enum));
-         _mesa_sha1_update(&pipeline_hash_ctx, stages[stage].spirv_hash, sizeof(stages[stage].spirv_hash));
-         _mesa_sha1_update(&pipeline_hash_ctx, layout->stages[stage].hash, sizeof(layout->stages[stage].hash));
+         _mesa_blake3_update(&pipeline_hash_ctx, &subgroup_size, sizeof(subgroup_size));
+         _mesa_blake3_update(&pipeline_hash_ctx, stages[stage].spirv_hash, sizeof(stages[stage].spirv_hash));
+         _mesa_blake3_update(&pipeline_hash_ctx, layout->stages[stage].hash, sizeof(layout->stages[stage].hash));
       }
-      _mesa_sha1_final(&pipeline_hash_ctx, pipeline_hash);
+      _mesa_blake3_final(&pipeline_hash_ctx, pipeline_hash);
 
       bool cache_hit;
       ret = dzn_pipeline_cache_lookup_gfx_pipeline(pipeline, cache, pipeline_hash,
@@ -886,25 +886,25 @@ dzn_graphics_pipeline_compile_shaders(struct dzn_device *device,
    dxil_get_nir_compiler_options(&nir_opts, dzn_get_shader_model(pdev), supported_bit_sizes, supported_bit_sizes);
    nir_opts.lower_base_vertex = true;
    u_foreach_bit(stage, active_stage_mask) {
-      struct mesa_sha1 nir_hash_ctx;
+      blake3_hasher nir_hash_ctx;
 
       if (cache) {
-         _mesa_sha1_init(&nir_hash_ctx);
-         _mesa_sha1_update(&nir_hash_ctx, &device->bindless, sizeof(device->bindless));
+         _mesa_blake3_init(&nir_hash_ctx);
+         _mesa_blake3_update(&nir_hash_ctx, &device->bindless, sizeof(device->bindless));
          if (stage != MESA_SHADER_FRAGMENT) {
-            _mesa_sha1_update(&nir_hash_ctx, &lower_view_index, sizeof(lower_view_index));
-            _mesa_sha1_update(&nir_hash_ctx, &force_sample_rate_shading, sizeof(force_sample_rate_shading));
+            _mesa_blake3_update(&nir_hash_ctx, &lower_view_index, sizeof(lower_view_index));
+            _mesa_blake3_update(&nir_hash_ctx, &force_sample_rate_shading, sizeof(force_sample_rate_shading));
          }
          if (stage == MESA_SHADER_VERTEX)
-            _mesa_sha1_update(&nir_hash_ctx, attribs_hash, sizeof(attribs_hash));
+            _mesa_blake3_update(&nir_hash_ctx, attribs_hash, sizeof(attribs_hash));
          if (stage == last_raster_stage) {
-            _mesa_sha1_update(&nir_hash_ctx, &yz_flip_mode, sizeof(yz_flip_mode));
-            _mesa_sha1_update(&nir_hash_ctx, &y_flip_mask, sizeof(y_flip_mask));
-            _mesa_sha1_update(&nir_hash_ctx, &z_flip_mask, sizeof(z_flip_mask));
-            _mesa_sha1_update(&nir_hash_ctx, &lower_view_index, sizeof(lower_view_index));
+            _mesa_blake3_update(&nir_hash_ctx, &yz_flip_mode, sizeof(yz_flip_mode));
+            _mesa_blake3_update(&nir_hash_ctx, &y_flip_mask, sizeof(y_flip_mask));
+            _mesa_blake3_update(&nir_hash_ctx, &z_flip_mask, sizeof(z_flip_mask));
+            _mesa_blake3_update(&nir_hash_ctx, &lower_view_index, sizeof(lower_view_index));
          }
-         _mesa_sha1_update(&nir_hash_ctx, stages[stage].spirv_hash, sizeof(stages[stage].spirv_hash));
-         _mesa_sha1_final(&nir_hash_ctx, stages[stage].nir_hash);
+         _mesa_blake3_update(&nir_hash_ctx, stages[stage].spirv_hash, sizeof(stages[stage].spirv_hash));
+         _mesa_blake3_final(&nir_hash_ctx, stages[stage].nir_hash);
       }
 
       struct dzn_nir_options options = {
@@ -965,15 +965,15 @@ dzn_graphics_pipeline_compile_shaders(struct dzn_device *device,
       };
 
       bool requires_runtime_data;
-      NIR_PASS_V(pipeline->templates.shaders[MESA_SHADER_GEOMETRY].nir, dxil_spirv_nir_lower_yz_flip,
+      NIR_PASS(_, pipeline->templates.shaders[MESA_SHADER_GEOMETRY].nir, dxil_spirv_nir_lower_yz_flip,
                  &conf, &requires_runtime_data);
 
       active_stage_mask |= (1 << MESA_SHADER_GEOMETRY);
-      memcpy(stages[MESA_SHADER_GEOMETRY].spirv_hash, stages[MESA_SHADER_VERTEX].spirv_hash, SHA1_DIGEST_LENGTH);
+      memcpy(stages[MESA_SHADER_GEOMETRY].spirv_hash, stages[MESA_SHADER_VERTEX].spirv_hash, BLAKE3_KEY_LEN);
 
       if ((active_stage_mask & (1 << MESA_SHADER_FRAGMENT)) &&
           BITSET_TEST(pipeline->templates.shaders[MESA_SHADER_FRAGMENT].nir->info.system_values_read, SYSTEM_VALUE_FRONT_FACE))
-         NIR_PASS_V(pipeline->templates.shaders[MESA_SHADER_FRAGMENT].nir, dxil_nir_forward_front_face);
+         NIR_PASS(_, pipeline->templates.shaders[MESA_SHADER_FRAGMENT].nir, dxil_nir_forward_front_face);
    }
 
    /* Third step: link those NIR shaders. We iterate in reverse order
@@ -981,9 +981,9 @@ dzn_graphics_pipeline_compile_shaders(struct dzn_device *device,
     */
    uint32_t link_mask = active_stage_mask;
    while (link_mask != 0) {
-      gl_shader_stage stage = util_last_bit(link_mask) - 1;
+      mesa_shader_stage stage = util_last_bit(link_mask) - 1;
       link_mask &= ~BITFIELD_BIT(stage);
-      gl_shader_stage prev_stage = util_last_bit(link_mask) - 1;
+      mesa_shader_stage prev_stage = util_last_bit(link_mask) - 1;
 
       struct dxil_spirv_runtime_conf conf = {
          .runtime_data_cbv = {
@@ -999,30 +999,30 @@ dzn_graphics_pipeline_compile_shaders(struct dzn_device *device,
                           &conf, &metadata);
 
       if (prev_stage != MESA_SHADER_NONE) {
-         memcpy(stages[stage].link_hashes[0], stages[prev_stage].spirv_hash, SHA1_DIGEST_LENGTH);
-         memcpy(stages[prev_stage].link_hashes[1], stages[stage].spirv_hash, SHA1_DIGEST_LENGTH);
+         memcpy(stages[stage].link_hashes[0], stages[prev_stage].spirv_hash, BLAKE3_KEY_LEN);
+         memcpy(stages[prev_stage].link_hashes[1], stages[stage].spirv_hash, BLAKE3_KEY_LEN);
       }
    }
 
    u_foreach_bit(stage, active_stage_mask) {
-      uint8_t bindings_hash[SHA1_DIGEST_LENGTH];
+      uint8_t bindings_hash[BLAKE3_KEY_LEN];
 
-      NIR_PASS_V(pipeline->templates.shaders[stage].nir, adjust_var_bindings, device, layout,
+      NIR_PASS(_, pipeline->templates.shaders[stage].nir, adjust_var_bindings, device, layout,
                  cache ? bindings_hash : NULL);
 
       if (cache) {
-         struct mesa_sha1 dxil_hash_ctx;
+         blake3_hasher dxil_hash_ctx;
 
-         _mesa_sha1_init(&dxil_hash_ctx);
-         _mesa_sha1_update(&dxil_hash_ctx, stages[stage].nir_hash, sizeof(stages[stage].nir_hash));
-         _mesa_sha1_update(&dxil_hash_ctx, stages[stage].spirv_hash, sizeof(stages[stage].spirv_hash));
-         _mesa_sha1_update(&dxil_hash_ctx, stages[stage].link_hashes[0], sizeof(stages[stage].link_hashes[0]));
-         _mesa_sha1_update(&dxil_hash_ctx, stages[stage].link_hashes[1], sizeof(stages[stage].link_hashes[1]));
-         _mesa_sha1_update(&dxil_hash_ctx, bindings_hash, sizeof(bindings_hash));
-         _mesa_sha1_final(&dxil_hash_ctx, stages[stage].dxil_hash);
+         _mesa_blake3_init(&dxil_hash_ctx);
+         _mesa_blake3_update(&dxil_hash_ctx, stages[stage].nir_hash, sizeof(stages[stage].nir_hash));
+         _mesa_blake3_update(&dxil_hash_ctx, stages[stage].spirv_hash, sizeof(stages[stage].spirv_hash));
+         _mesa_blake3_update(&dxil_hash_ctx, stages[stage].link_hashes[0], sizeof(stages[stage].link_hashes[0]));
+         _mesa_blake3_update(&dxil_hash_ctx, stages[stage].link_hashes[1], sizeof(stages[stage].link_hashes[1]));
+         _mesa_blake3_update(&dxil_hash_ctx, bindings_hash, sizeof(bindings_hash));
+         _mesa_blake3_final(&dxil_hash_ctx, stages[stage].dxil_hash);
          dxil_hashes[stage] = stages[stage].dxil_hash;
 
-         gl_shader_stage cached_stage;
+         mesa_shader_stage cached_stage;
          D3D12_SHADER_BYTECODE bc;
          ret = dzn_pipeline_cache_lookup_dxil_shader(cache, stages[stage].dxil_hash, &cached_stage, &bc);
          if (ret != VK_SUCCESS)
@@ -1063,7 +1063,7 @@ dzn_graphics_pipeline_compile_shaders(struct dzn_device *device,
 
    /* Last step: translate NIR shaders into DXIL modules */
    u_foreach_bit(stage, active_stage_mask) {
-      gl_shader_stage prev_stage =
+      mesa_shader_stage prev_stage =
          util_last_bit(active_stage_mask & BITFIELD_MASK(stage)) - 1;
       uint32_t prev_stage_output_clip_size = 0;
       if (stage == MESA_SHADER_FRAGMENT) {
@@ -1216,7 +1216,7 @@ to_prim_topology_type(VkPrimitiveTopology in)
       return D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
    case VK_PRIMITIVE_TOPOLOGY_PATCH_LIST:
       return D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
-   default: unreachable("Invalid primitive topology");
+   default: UNREACHABLE("Invalid primitive topology");
    }
 }
 
@@ -1239,7 +1239,7 @@ to_prim_topology(VkPrimitiveTopology in, unsigned patch_control_points, bool sup
    case VK_PRIMITIVE_TOPOLOGY_PATCH_LIST:
       assert(patch_control_points);
       return (D3D12_PRIMITIVE_TOPOLOGY)(D3D_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST + patch_control_points - 1);
-   default: unreachable("Invalid primitive topology");
+   default: UNREACHABLE("Invalid primitive topology");
    }
 }
 
@@ -1292,7 +1292,7 @@ translate_polygon_mode(VkPolygonMode in)
    case VK_POLYGON_MODE_POINT:
       /* This is handled elsewhere */
       return D3D12_FILL_MODE_SOLID;
-   default: unreachable("Unsupported polygon mode");
+   default: UNREACHABLE("Unsupported polygon mode");
    }
 }
 
@@ -1305,7 +1305,7 @@ translate_cull_mode(VkCullModeFlags in)
    case VK_CULL_MODE_BACK_BIT: return D3D12_CULL_MODE_BACK;
    /* Front+back face culling is equivalent to 'rasterization disabled' */
    case VK_CULL_MODE_FRONT_AND_BACK: return D3D12_CULL_MODE_NONE;
-   default: unreachable("Unsupported cull mode");
+   default: UNREACHABLE("Unsupported cull mode");
    }
 }
 
@@ -1436,7 +1436,7 @@ translate_stencil_op(VkStencilOp in)
    case VK_STENCIL_OP_INCREMENT_AND_WRAP: return D3D12_STENCIL_OP_INCR;
    case VK_STENCIL_OP_DECREMENT_AND_WRAP: return D3D12_STENCIL_OP_DECR;
    case VK_STENCIL_OP_INVERT: return D3D12_STENCIL_OP_INVERT;
-   default: unreachable("Invalid stencil op");
+   default: UNREACHABLE("Invalid stencil op");
    }
 }
 
@@ -1649,7 +1649,7 @@ translate_blend_factor(VkBlendFactor in, bool is_alpha, bool support_alpha_blend
    case VK_BLEND_FACTOR_SRC1_ALPHA: return D3D12_BLEND_SRC1_ALPHA;
    case VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA: return D3D12_BLEND_INV_SRC1_ALPHA;
    case VK_BLEND_FACTOR_SRC_ALPHA_SATURATE: return D3D12_BLEND_SRC_ALPHA_SAT;
-   default: unreachable("Invalid blend factor");
+   default: UNREACHABLE("Invalid blend factor");
    }
 }
 
@@ -1662,7 +1662,7 @@ translate_blend_op(VkBlendOp in)
    case VK_BLEND_OP_REVERSE_SUBTRACT: return D3D12_BLEND_OP_REV_SUBTRACT;
    case VK_BLEND_OP_MIN: return D3D12_BLEND_OP_MIN;
    case VK_BLEND_OP_MAX: return D3D12_BLEND_OP_MAX;
-   default: unreachable("Invalid blend op");
+   default: UNREACHABLE("Invalid blend op");
    }
 }
 
@@ -1686,7 +1686,7 @@ translate_logic_op(VkLogicOp in)
    case VK_LOGIC_OP_OR_INVERTED: return D3D12_LOGIC_OP_OR_INVERTED;
    case VK_LOGIC_OP_NAND: return D3D12_LOGIC_OP_NAND;
    case VK_LOGIC_OP_SET: return D3D12_LOGIC_OP_SET;
-   default: unreachable("Invalid logic op");
+   default: UNREACHABLE("Invalid logic op");
    }
 }
 
@@ -1945,7 +1945,7 @@ dzn_graphics_pipeline_create(struct dzn_device *device,
          case VK_DYNAMIC_STATE_LINE_WIDTH:
             /* Nothing to do since we just support lineWidth = 1. */
             break;
-         default: unreachable("Unsupported dynamic state");
+         default: UNREACHABLE("Unsupported dynamic state");
          }
       }
    }
@@ -2430,7 +2430,7 @@ dzn_pipeline_cache_lookup_compute_pipeline(struct vk_pipeline_cache *cache,
    struct vk_pipeline_cache_object *cache_obj = NULL;
 
    cache_obj =
-      vk_pipeline_cache_lookup_object(cache, pipeline_hash, SHA1_DIGEST_LENGTH,
+      vk_pipeline_cache_lookup_object(cache, pipeline_hash, BLAKE3_KEY_LEN,
                                       &dzn_cached_blob_ops,
                                       NULL);
    if (!cache_obj)
@@ -2439,10 +2439,10 @@ dzn_pipeline_cache_lookup_compute_pipeline(struct vk_pipeline_cache *cache,
    struct dzn_cached_blob *cached_blob =
       container_of(cache_obj, struct dzn_cached_blob, base);
 
-   assert(cached_blob->size == SHA1_DIGEST_LENGTH);
+   assert(cached_blob->size == BLAKE3_KEY_LEN);
 
    const uint8_t *dxil_hash = cached_blob->data;
-   gl_shader_stage stage;
+   mesa_shader_stage stage;
 
    VkResult ret =
       dzn_pipeline_cache_lookup_dxil_shader(cache, dxil_hash, &stage, dxil);
@@ -2467,14 +2467,14 @@ dzn_pipeline_cache_add_compute_pipeline(struct vk_pipeline_cache *cache,
                                         uint8_t *dxil_hash)
 {
    struct vk_pipeline_cache_object *cache_obj =
-      dzn_cached_blob_create(cache->base.device, pipeline_hash, NULL, SHA1_DIGEST_LENGTH);
+      dzn_cached_blob_create(cache->base.device, pipeline_hash, NULL, BLAKE3_KEY_LEN);
    if (!cache_obj)
       return;
 
    struct dzn_cached_blob *cached_blob =
       container_of(cache_obj, struct dzn_cached_blob, base);
 
-   memcpy((void *)cached_blob->data, dxil_hash, SHA1_DIGEST_LENGTH);
+   memcpy((void *)cached_blob->data, dxil_hash, BLAKE3_KEY_LEN);
 
    cache_obj = vk_pipeline_cache_add_object(cache, cache_obj);
    vk_pipeline_cache_object_unref(cache->base.device, cache_obj);
@@ -2491,20 +2491,20 @@ dzn_compute_pipeline_compile_shader(struct dzn_device *device,
 {
    struct dzn_physical_device *pdev =
       container_of(device->vk.physical, struct dzn_physical_device, vk);
-   uint8_t spirv_hash[SHA1_DIGEST_LENGTH], pipeline_hash[SHA1_DIGEST_LENGTH], nir_hash[SHA1_DIGEST_LENGTH];
+   uint8_t spirv_hash[BLAKE3_KEY_LEN], pipeline_hash[BLAKE3_KEY_LEN], nir_hash[BLAKE3_KEY_LEN];
    VkResult ret = VK_SUCCESS;
    nir_shader *nir = NULL;
 
    if (cache) {
-      struct mesa_sha1 pipeline_hash_ctx;
+      blake3_hasher pipeline_hash_ctx;
 
-      _mesa_sha1_init(&pipeline_hash_ctx);
+      _mesa_blake3_init(&pipeline_hash_ctx);
       vk_pipeline_hash_shader_stage(pipeline->base.flags, &info->stage, NULL, spirv_hash);
-      _mesa_sha1_update(&pipeline_hash_ctx, &device->bindless, sizeof(device->bindless));
-      _mesa_sha1_update(&pipeline_hash_ctx, spirv_hash, sizeof(spirv_hash));
-      _mesa_sha1_update(&pipeline_hash_ctx, layout->stages[MESA_SHADER_COMPUTE].hash,
+      _mesa_blake3_update(&pipeline_hash_ctx, &device->bindless, sizeof(device->bindless));
+      _mesa_blake3_update(&pipeline_hash_ctx, spirv_hash, sizeof(spirv_hash));
+      _mesa_blake3_update(&pipeline_hash_ctx, layout->stages[MESA_SHADER_COMPUTE].hash,
                         sizeof(layout->stages[MESA_SHADER_COMPUTE].hash));
-      _mesa_sha1_final(&pipeline_hash_ctx, pipeline_hash);
+      _mesa_blake3_final(&pipeline_hash_ctx, pipeline_hash);
 
       bool cache_hit = false;
       ret = dzn_pipeline_cache_lookup_compute_pipeline(cache, pipeline_hash,
@@ -2515,11 +2515,11 @@ dzn_compute_pipeline_compile_shader(struct dzn_device *device,
    }
 
    if (cache) {
-      struct mesa_sha1 nir_hash_ctx;
-      _mesa_sha1_init(&nir_hash_ctx);
-      _mesa_sha1_update(&nir_hash_ctx, &device->bindless, sizeof(device->bindless));
-      _mesa_sha1_update(&nir_hash_ctx, spirv_hash, sizeof(spirv_hash));
-      _mesa_sha1_final(&nir_hash_ctx, nir_hash);
+      blake3_hasher nir_hash_ctx;
+      _mesa_blake3_init(&nir_hash_ctx);
+      _mesa_blake3_update(&nir_hash_ctx, &device->bindless, sizeof(device->bindless));
+      _mesa_blake3_update(&nir_hash_ctx, spirv_hash, sizeof(spirv_hash));
+      _mesa_blake3_final(&nir_hash_ctx, nir_hash);
    }
    nir_shader_compiler_options nir_opts;
    const unsigned supported_bit_sizes = 16 | 32 | 64;
@@ -2535,20 +2535,20 @@ dzn_compute_pipeline_compile_shader(struct dzn_device *device,
    if (ret != VK_SUCCESS)
       return ret;
 
-   uint8_t bindings_hash[SHA1_DIGEST_LENGTH], dxil_hash[SHA1_DIGEST_LENGTH];
+   uint8_t bindings_hash[BLAKE3_KEY_LEN], dxil_hash[BLAKE3_KEY_LEN];
 
-   NIR_PASS_V(nir, adjust_var_bindings, device, layout, cache ? bindings_hash : NULL);
+   NIR_PASS(_, nir, adjust_var_bindings, device, layout, cache ? bindings_hash : NULL);
 
    if (cache) {
-      struct mesa_sha1 dxil_hash_ctx;
+      blake3_hasher dxil_hash_ctx;
 
-      _mesa_sha1_init(&dxil_hash_ctx);
-      _mesa_sha1_update(&dxil_hash_ctx, nir_hash, sizeof(nir_hash));
-      _mesa_sha1_update(&dxil_hash_ctx, spirv_hash, sizeof(spirv_hash));
-      _mesa_sha1_update(&dxil_hash_ctx, bindings_hash, sizeof(bindings_hash));
-      _mesa_sha1_final(&dxil_hash_ctx, dxil_hash);
+      _mesa_blake3_init(&dxil_hash_ctx);
+      _mesa_blake3_update(&dxil_hash_ctx, nir_hash, sizeof(nir_hash));
+      _mesa_blake3_update(&dxil_hash_ctx, spirv_hash, sizeof(spirv_hash));
+      _mesa_blake3_update(&dxil_hash_ctx, bindings_hash, sizeof(bindings_hash));
+      _mesa_blake3_final(&dxil_hash_ctx, dxil_hash);
 
-      gl_shader_stage stage;
+      mesa_shader_stage stage;
 
       ret = dzn_pipeline_cache_lookup_dxil_shader(cache, dxil_hash, &stage, shader);
       if (ret != VK_SUCCESS)

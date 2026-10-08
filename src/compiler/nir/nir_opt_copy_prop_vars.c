@@ -57,7 +57,7 @@ struct copies {
    struct list_head node;
 
    /* Hash table of copies referenced by variables */
-   struct hash_table *ht;
+   struct hash_table ht;
 
    /* Array of derefs that can't be chased back to a variable */
    struct util_dynarray arr;
@@ -75,7 +75,7 @@ struct vars_written {
    nir_variable_mode modes;
 
    /* Key is deref and value is the uintptr_t with the write mask. */
-   struct hash_table *derefs;
+   struct hash_table derefs;
 };
 
 struct value {
@@ -115,28 +115,32 @@ struct copy_prop_var_state {
    /* Maps nodes to vars_written.  Used to invalidate copy entries when
     * visiting each node.
     */
-   struct hash_table *vars_written_map;
+   struct hash_table vars_written_map;
 
    /* List of copy structures ready for reuse */
    struct list_head unused_copy_structs_list;
 
+   bool has_non_ssa_src_entries;
+
    bool progress;
 };
 
-static bool
+static nir_component_mask_t
 value_equals_store_src(struct value *value, nir_intrinsic_instr *intrin)
 {
    assert(intrin->intrinsic == nir_intrinsic_store_deref);
    nir_component_mask_t write_mask = nir_intrinsic_write_mask(intrin);
+   nir_component_mask_t equals_mask = 0;
 
    for (unsigned i = 0; i < intrin->num_components; i++) {
+      nir_scalar src = nir_scalar_resolved(intrin->src[1].ssa, i);
       if ((write_mask & (1 << i)) &&
-          (value->ssa.def[i] != intrin->src[1].ssa ||
-           value->ssa.component[i] != i))
-         return false;
+          (value->ssa.def[i] == src.def &&
+           value->ssa.component[i] == src.comp))
+         equals_mask |= 1 << i;
    }
 
-   return true;
+   return equals_mask;
 }
 
 static struct vars_written *
@@ -144,7 +148,7 @@ create_vars_written(struct copy_prop_var_state *state)
 {
    struct vars_written *written =
       linear_zalloc_child(state->lin_ctx, sizeof(struct vars_written));
-   written->derefs = _mesa_pointer_hash_table_create(state->mem_ctx);
+   _mesa_pointer_hash_table_init(&written->derefs, state->mem_ctx);
    return written;
 }
 
@@ -169,7 +173,8 @@ gather_vars_written(struct copy_prop_var_state *state,
 
       nir_block *block = nir_cf_node_as_block(cf_node);
       nir_foreach_instr(instr, block) {
-         if (instr->type == nir_instr_type_call) {
+         if (instr->type == nir_instr_type_call ||
+             instr->type == nir_instr_type_cmat_call) {
             written->modes |= nir_var_shader_out |
                               nir_var_shader_temp |
                               nir_var_function_temp |
@@ -185,7 +190,7 @@ gather_vars_written(struct copy_prop_var_state *state,
          nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
          switch (intrin->intrinsic) {
          case nir_intrinsic_barrier:
-            if (nir_intrinsic_memory_semantics(intrin) & NIR_MEMORY_ACQUIRE)
+            if (nir_intrinsic_memory_semantics(intrin) & (NIR_MEMORY_ACQUIRE | NIR_MEMORY_MAKE_VISIBLE))
                written->modes |= nir_intrinsic_memory_modes(intrin);
             break;
 
@@ -204,11 +209,11 @@ gather_vars_written(struct copy_prop_var_state *state,
             nir_component_mask_t mask = (1 << glsl_get_vector_elements(payload->type)) - 1;
 
             struct hash_entry *ht_entry =
-               _mesa_hash_table_search(written->derefs, payload);
+               _mesa_hash_table_search(&written->derefs, payload);
             if (ht_entry) {
                ht_entry->data = (void *)(mask | (uintptr_t)ht_entry->data);
             } else {
-               _mesa_hash_table_insert(written->derefs, payload,
+               _mesa_hash_table_insert(&written->derefs, payload,
                                        (void *)(uintptr_t)mask);
             }
             break;
@@ -228,6 +233,13 @@ gather_vars_written(struct copy_prop_var_state *state,
                               nir_var_shader_call_data;
             break;
 
+         case nir_intrinsic_cmat_store:
+            /* Be conservative: src[0] only refers to the base element, but
+             * cmat_store may write beyond it.
+             */
+            written->modes |= nir_src_as_deref(intrin->src[0])->modes;
+            break;
+
          case nir_intrinsic_deref_atomic:
          case nir_intrinsic_deref_atomic_swap:
          case nir_intrinsic_store_deref:
@@ -238,11 +250,11 @@ gather_vars_written(struct copy_prop_var_state *state,
 
             uintptr_t mask = intrin->intrinsic == nir_intrinsic_store_deref ? nir_intrinsic_write_mask(intrin) : (1 << glsl_get_vector_elements(dst->type)) - 1;
 
-            struct hash_entry *ht_entry = _mesa_hash_table_search(written->derefs, dst);
+            struct hash_entry *ht_entry = _mesa_hash_table_search(&written->derefs, dst);
             if (ht_entry)
                ht_entry->data = (void *)(mask | (uintptr_t)ht_entry->data);
             else
-               _mesa_hash_table_insert(written->derefs, dst, (void *)mask);
+               _mesa_hash_table_insert(&written->derefs, dst, (void *)mask);
 
             break;
          }
@@ -282,28 +294,28 @@ gather_vars_written(struct copy_prop_var_state *state,
    }
 
    default:
-      unreachable("Invalid CF node type");
+      UNREACHABLE("Invalid CF node type");
    }
 
    if (new_written) {
       /* Merge new information to the parent control flow node. */
       if (written) {
          written->modes |= new_written->modes;
-         hash_table_foreach(new_written->derefs, new_entry) {
+         hash_table_foreach(&new_written->derefs, new_entry) {
             struct hash_entry *old_entry =
-               _mesa_hash_table_search_pre_hashed(written->derefs, new_entry->hash,
+               _mesa_hash_table_search_pre_hashed(&written->derefs, new_entry->hash,
                                                   new_entry->key);
             if (old_entry) {
                nir_component_mask_t merged = (uintptr_t)new_entry->data |
                                              (uintptr_t)old_entry->data;
                old_entry->data = (void *)((uintptr_t)merged);
             } else {
-               _mesa_hash_table_insert_pre_hashed(written->derefs, new_entry->hash,
+               _mesa_hash_table_insert_pre_hashed(&written->derefs, new_entry->hash,
                                                   new_entry->key, new_entry->data);
             }
          }
       }
-      _mesa_hash_table_insert(state->vars_written_map, cf_node, new_written);
+      _mesa_hash_table_insert(&state->vars_written_map, cf_node, new_written);
    }
 }
 
@@ -365,13 +377,13 @@ static struct copies_dynarray *
 copies_array_for_var(struct copy_prop_var_state *state,
                      struct copies *copies, nir_variable *var)
 {
-   struct hash_entry *entry = _mesa_hash_table_search(copies->ht, var);
+   struct hash_entry *entry = _mesa_hash_table_search(&copies->ht, var);
    if (entry != NULL)
       return get_copies_array_from_ht_entry(state, copies, entry);
 
    struct copies_dynarray *copies_array = get_copies_dynarray(state);
    copies_array->owner = copies;
-   _mesa_hash_table_insert(copies->ht, var, copies_array);
+   _mesa_hash_table_insert(&copies->ht, var, copies_array);
 
    return copies_array;
 }
@@ -404,7 +416,7 @@ copy_entry_create(struct copy_prop_var_state *state,
    struct copy_entry new_entry = {
       .dst = *deref,
    };
-   util_dynarray_append(copies_array, struct copy_entry, new_entry);
+   util_dynarray_append(copies_array, new_entry);
    return util_dynarray_top_ptr(copies_array, struct copy_entry);
 }
 
@@ -471,6 +483,22 @@ lookup_entry_for_deref(struct copy_prop_var_state *state,
 }
 
 static void
+kill_source_aliases_copy_array(struct copy_prop_var_state *state,
+                               struct util_dynarray *copies_array,
+                               nir_deref_and_path *deref)
+{
+   util_dynarray_foreach_reverse(copies_array, struct copy_entry, iter) {
+      if (iter->src.is_ssa)
+         continue;
+
+      nir_deref_compare_result src_comp =
+         nir_compare_derefs_and_paths(state->mem_ctx, &iter->src.deref, deref);
+      if (src_comp & nir_derefs_may_alias_bit)
+         copy_entry_remove(copies_array, iter, NULL);
+   }
+}
+
+static void
 lookup_entry_and_kill_aliases_copy_array(struct copy_prop_var_state *state,
                                          struct util_dynarray *copies_array,
                                          nir_deref_and_path *deref,
@@ -494,6 +522,11 @@ lookup_entry_and_kill_aliases_copy_array(struct copy_prop_var_state *state,
          }
       } else if (comp & nir_derefs_may_alias_bit) {
          copy_entry_remove(copies_array, iter, entry);
+      } else if (!iter->src.is_ssa) {
+        nir_deref_compare_result src_comp =
+           nir_compare_derefs_and_paths(state->mem_ctx, &iter->src.deref, deref);
+        if (src_comp & nir_derefs_may_alias_bit)
+           copy_entry_remove(copies_array, iter, entry);
       }
    }
 }
@@ -520,7 +553,7 @@ lookup_entry_and_kill_aliases(struct copy_prop_var_state *state,
        deref->_path->path[0]->var->data.mode == nir_var_mem_ssbo ||
        deref->_path->path[0]->var->data.mode == nir_var_mem_shared) {
 
-      hash_table_foreach(copies->ht, ht_entry) {
+      hash_table_foreach(&copies->ht, ht_entry) {
          nir_variable *var = (nir_variable *)ht_entry->key;
          if (deref->_path->path[0]->deref_type == nir_deref_type_var &&
              var->data.mode != deref->_path->path[0]->var->data.mode)
@@ -535,7 +568,7 @@ lookup_entry_and_kill_aliases(struct copy_prop_var_state *state,
                                                   &entry_removed);
 
          if (copies_array->arr.size == 0) {
-            _mesa_hash_table_remove(copies->ht, ht_entry);
+            _mesa_hash_table_remove(&copies->ht, ht_entry);
          }
       }
 
@@ -543,8 +576,15 @@ lookup_entry_and_kill_aliases(struct copy_prop_var_state *state,
                                                write_mask, remove_entry,
                                                &entry, &entry_removed);
    } else {
+      nir_variable *write_var = deref->_path->path[0]->var;
+
+      /*
+       * Fast path for regular variables: different variables can't alias
+       * each other's destinations, so only the same-variable bucket needs
+       * the full dst+src check.
+       */
       struct copies_dynarray *cpda =
-         copies_array_for_var(state, copies, deref->_path->path[0]->var);
+         copies_array_for_var(state, copies, write_var);
       struct util_dynarray *copies_array = &cpda->arr;
 
       lookup_entry_and_kill_aliases_copy_array(state, copies_array, deref,
@@ -552,8 +592,32 @@ lookup_entry_and_kill_aliases(struct copy_prop_var_state *state,
                                                &entry, &entry_removed);
 
       if (copies_array->size == 0) {
-         _mesa_hash_table_remove_key(copies->ht, deref->_path->path[0]->var);
+         _mesa_hash_table_remove_key(&copies->ht, deref->_path->path[0]->var);
       }
+
+      /*
+       * Other same-mode variable buckets can't have aliasing destinations,
+       * but their sources might alias the write target. Use the cheaper
+       * source-only check rather than the full dst+src check.
+       */
+      if (state->has_non_ssa_src_entries) {
+         hash_table_foreach(&copies->ht, ht_entry) {
+            nir_variable *var = (nir_variable *)ht_entry->key;
+            if (var == write_var || var->data.mode != write_var->data.mode)
+               continue;
+
+            struct copies_dynarray *other_cpda =
+               get_copies_array_from_ht_entry(state, copies, ht_entry);
+
+            kill_source_aliases_copy_array(state, &other_cpda->arr, deref);
+
+            if (other_cpda->arr.size == 0)
+               _mesa_hash_table_remove(&copies->ht, ht_entry);
+         }
+      }
+
+      /* Non-variable entries (copies->arr) may also have stale sources. */
+      kill_source_aliases_copy_array(state, &copies->arr, deref);
    }
 
    return entry;
@@ -601,7 +665,7 @@ static void
 apply_barrier_for_modes(struct copy_prop_var_state *state,
                         struct copies *copies, nir_variable_mode modes)
 {
-   hash_table_foreach(copies->ht, ht_entry) {
+   hash_table_foreach(&copies->ht, ht_entry) {
       struct copies_dynarray *copies_array =
          get_copies_array_from_ht_entry(state, copies, ht_entry);
 
@@ -752,7 +816,7 @@ load_from_ssa_entry_value(struct copy_prop_var_state *state,
          if (load_def == NULL)
             load_def = nir_load_deref(b, entry->dst.instr);
 
-         if (load_def->parent_instr == &intrin->instr)
+         if (nir_def_instr(load_def) == &intrin->instr)
             keep_intrin = true;
 
          comps[i] = nir_get_scalar(load_def, i);
@@ -903,12 +967,12 @@ invalidate_copies_for_cf_node(struct copy_prop_var_state *state,
                               struct copies *copies,
                               nir_cf_node *cf_node)
 {
-   struct hash_entry *ht_entry = _mesa_hash_table_search(state->vars_written_map, cf_node);
+   struct hash_entry *ht_entry = _mesa_hash_table_search(&state->vars_written_map, cf_node);
    assert(ht_entry);
 
    struct vars_written *written = ht_entry->data;
    if (written->modes) {
-      hash_table_foreach(copies->ht, ht_entry) {
+      hash_table_foreach(&copies->ht, ht_entry) {
          struct copies_dynarray *copies_array =
             get_copies_array_from_ht_entry(state, copies, ht_entry);
 
@@ -918,7 +982,7 @@ invalidate_copies_for_cf_node(struct copy_prop_var_state *state,
          }
 
          if (copies_array->arr.size == 0) {
-            _mesa_hash_table_remove(copies->ht, ht_entry);
+            _mesa_hash_table_remove(&copies->ht, ht_entry);
          }
       }
 
@@ -928,7 +992,7 @@ invalidate_copies_for_cf_node(struct copy_prop_var_state *state,
       }
    }
 
-   hash_table_foreach(written->derefs, entry) {
+   hash_table_foreach(&written->derefs, entry) {
       nir_deref_instr *deref_written = (nir_deref_instr *)entry->key;
       nir_deref_and_path deref = { deref_written, NULL };
       kill_aliases(state, copies, &deref, (uintptr_t)entry->data);
@@ -981,7 +1045,7 @@ dump_instr(nir_instr *instr)
 static void
 dump_copy_entries(struct copies *copies)
 {
-   hash_table_foreach(copies->ht, ht_entry) {
+   hash_table_foreach(&copies->ht, ht_entry) {
       struct util_dynarray *copies_array =
          &((struct copies_dynarray *)ht_entry->data)->arr;
 
@@ -1009,7 +1073,8 @@ copy_prop_vars_block(struct copy_prop_var_state *state,
       if (debug && instr->type == nir_instr_type_deref)
          dump_instr(instr);
 
-      if (instr->type == nir_instr_type_call) {
+      if (instr->type == nir_instr_type_call ||
+          instr->type == nir_instr_type_cmat_call) {
          if (debug)
             dump_instr(instr);
          apply_barrier_for_modes(state, copies, nir_var_shader_out | nir_var_shader_temp | nir_var_function_temp | nir_var_mem_ssbo | nir_var_mem_shared | nir_var_mem_global);
@@ -1027,8 +1092,16 @@ copy_prop_vars_block(struct copy_prop_var_state *state,
          if (debug)
             dump_instr(instr);
 
-         if (nir_intrinsic_memory_semantics(intrin) & NIR_MEMORY_ACQUIRE)
+         if (nir_intrinsic_memory_semantics(intrin) & (NIR_MEMORY_ACQUIRE | NIR_MEMORY_MAKE_VISIBLE))
             apply_barrier_for_modes(state, copies, nir_intrinsic_memory_modes(intrin));
+         break;
+
+      case nir_intrinsic_cmat_store:
+         if (debug)
+            dump_instr(instr);
+
+         apply_barrier_for_modes(state, copies,
+                                 nir_src_as_deref(intrin->src[0])->modes);
          break;
 
       case nir_intrinsic_emit_vertex:
@@ -1110,8 +1183,7 @@ copy_prop_vars_block(struct copy_prop_var_state *state,
                    * rewrite the vecN itself.
                    */
                   nir_def_rewrite_uses_after(&intrin->def,
-                                             value.ssa.def[0],
-                                             value.ssa.def[0]->parent_instr);
+                                             value.ssa.def[0]);
                } else {
                   nir_def_rewrite_uses(&intrin->def,
                                        value.ssa.def[0]);
@@ -1196,13 +1268,46 @@ copy_prop_vars_block(struct copy_prop_var_state *state,
 
          struct copy_entry *entry =
             lookup_entry_for_deref(state, copies, &dst, nir_derefs_equal_bit, NULL);
-         if (entry && value_equals_store_src(&entry->src, intrin)) {
+         nir_component_mask_t equals_mask = entry ? value_equals_store_src(&entry->src, intrin) : 0;
+         if (equals_mask == nir_intrinsic_write_mask(intrin)) {
             /* If we are storing the value from a load of the same var the
              * store is redundant so remove it.
              */
             nir_instr_remove(instr);
             state->progress = true;
          } else {
+            if (!(b->shader->info.stage == MESA_SHADER_FRAGMENT &&
+                  (nir_deref_mode_may_be(dst.instr, nir_var_shader_out)))) {
+               /* If any channels we wrote were already the dst's value, mask them
+                * off (which can lead to other dead code elimination).  Apparently
+                * glslang does write masking with load-vec-store.
+                *
+                * Skip this for FS outputs, where multiple drivers don't like color
+                * writes getting channels writemasked out based on copying the
+                * fbfetched data through.
+                */
+               nir_component_mask_t remove_mask = equals_mask & nir_intrinsic_write_mask(intrin);
+               if (remove_mask) {
+                  nir_intrinsic_set_write_mask(intrin, nir_intrinsic_write_mask(intrin) & ~equals_mask);
+
+                  /* For any channels we're trimming off the write mask, replace
+                   * them with undefs.  This lets them be dead-code eliminated,
+                   * which no other pass would do on its own.
+                   */
+                  b->cursor = nir_before_instr(instr);
+                  nir_def *channels[NIR_MAX_VEC_COMPONENTS];
+                  nir_def *undef = nir_undef(b, 1, intrin->src[1].ssa->bit_size);
+                  for (int i = 0; i < intrin->num_components; i++) {
+                     if (remove_mask & (1 << i)) {
+                        channels[i] = undef;
+                     } else {
+                        channels[i] = nir_channel(b, intrin->src[1].ssa, i);
+                     }
+                  }
+                  nir_src_rewrite(&intrin->src[1], nir_vec(b, channels, intrin->num_components));
+                  state->progress = true;
+               }
+            }
             struct value value = { 0 };
             value_set_ssa_components(&value, intrin->src[1].ssa,
                                      intrin->num_components);
@@ -1278,6 +1383,7 @@ copy_prop_vars_block(struct copy_prop_var_state *state,
                .is_ssa = false,
                { .deref = src },
             };
+            state->has_non_ssa_src_entries = true;
          }
 
          nir_variable *src_var = nir_deref_instr_get_variable(src.instr);
@@ -1357,8 +1463,8 @@ clone_copies(struct copy_prop_var_state *state, struct copies *clones,
     * rebuild it and is needed to avoid slow compilation of very large shaders.
     * If needed we will clone the data later if it is ever looked up.
     */
-   assert(clones->ht == NULL);
-   clones->ht = _mesa_hash_table_clone(copies->ht, state->mem_ctx);
+   assert(clones->ht.table == NULL);
+   _mesa_hash_table_copy(&clones->ht, &copies->ht, state->mem_ctx);
 
    util_dynarray_clone(&clones->arr, state->mem_ctx, &copies->arr);
 }
@@ -1373,7 +1479,7 @@ get_copies_structure(struct copy_prop_var_state *state)
    struct copies *copies;
    if (list_is_empty(&state->unused_copy_structs_list)) {
       copies = ralloc(state->mem_ctx, struct copies);
-      copies->ht = NULL;
+      copies->ht.table = NULL;
       util_dynarray_init(&copies->arr, state->mem_ctx);
    } else {
       copies = list_entry(state->unused_copy_structs_list.next,
@@ -1388,8 +1494,7 @@ static void
 clear_copies_structure(struct copy_prop_var_state *state,
                        struct copies *copies)
 {
-   ralloc_free(copies->ht);
-   copies->ht = NULL;
+   _mesa_hash_table_fini(&copies->ht, NULL);
 
    list_add(&copies->node, &state->unused_copy_structs_list);
 }
@@ -1403,9 +1508,8 @@ copy_prop_vars_cf_node(struct copy_prop_var_state *state,
       nir_function_impl *impl = nir_cf_node_as_function(cf_node);
 
       struct copies *impl_copies = get_copies_structure(state);
-      impl_copies->ht = _mesa_hash_table_create(state->mem_ctx,
-                                                _mesa_hash_pointer,
-                                                _mesa_key_pointer_equal);
+      _mesa_hash_table_init(&impl_copies->ht, state->mem_ctx,
+                            _mesa_hash_pointer, _mesa_key_pointer_equal);
 
       foreach_list_typed_safe(nir_cf_node, cf_node, node, &impl->body)
          copy_prop_vars_cf_node(state, impl_copies, cf_node);
@@ -1483,7 +1587,7 @@ copy_prop_vars_cf_node(struct copy_prop_var_state *state,
    }
 
    default:
-      unreachable("Invalid CF node type");
+      UNREACHABLE("Invalid CF node type");
    }
 }
 
@@ -1501,20 +1605,17 @@ nir_copy_prop_vars_impl(nir_function_impl *impl)
       .impl = impl,
       .mem_ctx = mem_ctx,
       .lin_ctx = linear_context(mem_ctx),
-
-      .vars_written_map = _mesa_pointer_hash_table_create(mem_ctx),
+      .has_non_ssa_src_entries = false,
    };
+   _mesa_pointer_hash_table_init(&state.vars_written_map, mem_ctx);
    list_inithead(&state.unused_copy_structs_list);
 
    gather_vars_written(&state, NULL, &impl->cf_node);
 
    copy_prop_vars_cf_node(&state, NULL, &impl->cf_node);
 
-   if (state.progress) {
-      nir_metadata_preserve(impl, nir_metadata_control_flow);
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-   }
+   bool impl_progress = state.progress;
+   nir_progress(impl_progress, impl, nir_metadata_control_flow);
 
    ralloc_free(mem_ctx);
    return state.progress;

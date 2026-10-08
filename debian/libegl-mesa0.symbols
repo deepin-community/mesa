@@ -1,3 +1,5 @@
 libEGL_mesa.so.0 libegl-mesa0 #MINVER#
+ MesaGLInteropEGLExportObject@Base 25.2.0
+ MesaGLInteropEGLFlushObjects@Base 25.2.0
+ MesaGLInteropEGLQueryDeviceInfo@Base 25.2.0
  __egl_Main@Base 17.0.0~
- zx_print_driver_map_list@Base 24.3.0-1deepin1

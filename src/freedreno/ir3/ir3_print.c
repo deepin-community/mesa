@@ -18,6 +18,7 @@
 #define RESET   "\x1b[0m"
 #define RED     "\x1b[0;31m"
 #define GREEN   "\x1b[0;32m"
+#define YELLOW  "\x1b[0;33m"
 #define BLUE    "\x1b[0;34m"
 #define MAGENTA "\x1b[0;35m"
 
@@ -27,6 +28,7 @@
 #define SYN_REG(x)   RED x RESET
 #define SYN_IMMED(x) GREEN x RESET
 #define SYN_CONST(x) GREEN x RESET
+#define SYN_RT(x)    YELLOW x RESET
 #define SYN_SSA(x)   BLUE x RESET
 #define SYN_ARRAY(x) MAGENTA x RESET
 
@@ -80,6 +82,14 @@ print_instr_name(struct log_stream *stream, struct ir3_instruction *instr,
          mesa_log_stream_printf(stream, "(ul)");
       if (instr->flags & IR3_INSTR_SAT)
          mesa_log_stream_printf(stream, "(sat)");
+      if (instr->flags & IR3_INSTR_EQ)
+         mesa_log_stream_printf(stream, "(eq)");
+      if (instr->flags & IR3_INSTR_NEEDS_HELPERS)
+         mesa_log_stream_printf(stream, "(needs_helpers)");
+      if (instr->flags & IR3_INSTR_EOLM)
+         mesa_log_stream_printf(stream, "(eolm)");
+      if (instr->flags & IR3_INSTR_EOGM)
+         mesa_log_stream_printf(stream, "(eogm)");
    } else {
       mesa_log_stream_printf(stream, " ");
    }
@@ -190,6 +200,10 @@ print_instr_name(struct log_stream *stream, struct ir3_instruction *instr,
          mesa_log_stream_printf(stream, ".a1en");
       if (instr->flags & IR3_INSTR_U)
          mesa_log_stream_printf(stream, ".u");
+      if (instr->flags & IR3_INSTR_RCK)
+         mesa_log_stream_printf(stream, ".rck");
+      if (instr->flags & IR3_INSTR_CLP)
+         mesa_log_stream_printf(stream, ".clp");
       if (instr->opc == OPC_LDC)
          mesa_log_stream_printf(stream, ".offset%d", instr->cat6.d);
       if (instr->opc == OPC_LDC_K)
@@ -242,6 +256,40 @@ print_instr_name(struct log_stream *stream, struct ir3_instruction *instr,
          }
 
          mesa_log_stream_printf(stream, ".%s", type_name(instr->cat6.type));
+         break;
+      case OPC_IMG_BINDLESS: {
+         mesa_log_stream_printf(
+            stream, ".%s",
+            instr->cat5.match_mode == IR3_MATCH_MODE_SSD ? "ssd" : "sad");
+         break;
+      }
+      case OPC_ALIAS:
+         switch (instr->cat7.alias_scope) {
+         case ALIAS_TEX:
+            mesa_log_stream_printf(stream, ".tex");
+            break;
+         case ALIAS_RT:
+            mesa_log_stream_printf(stream, ".rt");
+            break;
+         case ALIAS_MEM:
+            mesa_log_stream_printf(stream, ".mem");
+            break;
+         }
+
+         if (instr->cat7.alias_type_float) {
+            mesa_log_stream_printf(stream, ".f");
+         } else {
+            mesa_log_stream_printf(stream, ".b");
+         }
+
+         if (instr->srcs[0]->flags & IR3_REG_HALF) {
+            mesa_log_stream_printf(stream, "16");
+         } else {
+            mesa_log_stream_printf(stream, "32");
+         }
+
+         mesa_log_stream_printf(stream, ".%u",
+                                instr->cat7.alias_table_size_minus_one);
          break;
       default:
          break;
@@ -297,6 +345,8 @@ print_reg_name(struct log_stream *stream, struct ir3_instruction *instr,
 
    if (reg->flags & IR3_REG_FIRST_KILL)
       mesa_log_stream_printf(stream, "(kill)");
+   if (reg->flags & IR3_REG_LAST_USE)
+      mesa_log_stream_printf(stream, "(last)");
    if (reg->flags & IR3_REG_UNUSED)
       mesa_log_stream_printf(stream, "(unused)");
 
@@ -305,6 +355,9 @@ print_reg_name(struct log_stream *stream, struct ir3_instruction *instr,
 
    if (reg->flags & IR3_REG_EARLY_CLOBBER)
       mesa_log_stream_printf(stream, "(early_clobber)");
+
+   if (reg->flags & IR3_REG_DUMMY)
+      mesa_log_stream_printf(stream, "(dummy)");
 
    /* Right now all instructions that use tied registers only have one
     * destination register, so we can just print (tied) as if it's a flag,
@@ -320,6 +373,8 @@ print_reg_name(struct log_stream *stream, struct ir3_instruction *instr,
          mesa_log_stream_printf(stream, "!");
    }
 
+   if (reg->flags & IR3_REG_UNIFORM)
+      mesa_log_stream_printf(stream, "u");
    if (reg->flags & IR3_REG_SHARED)
       mesa_log_stream_printf(stream, "s");
    if (reg->flags & IR3_REG_HALF)
@@ -358,12 +413,15 @@ print_reg_name(struct log_stream *stream, struct ir3_instruction *instr,
       else if (reg->flags & IR3_REG_PREDICATE)
          mesa_log_stream_printf(stream, SYN_REG("p0.%c"),
                                 "xyzw"[reg_comp(reg)]);
+      else if (reg->flags & IR3_REG_RT)
+         mesa_log_stream_printf(stream, SYN_RT("rt%u.%c"), reg_num(reg),
+                                "xyzw"[reg_comp(reg)]);
       else
          mesa_log_stream_printf(stream, SYN_REG("r%u.%c"), reg_num(reg),
                                 "xyzw"[reg_comp(reg)]);
    }
 
-   if (reg->wrmask > 0x1)
+   if (reg->wrmask != 0x1)
       mesa_log_stream_printf(stream, " (wrmask=0x%x)", reg->wrmask);
 }
 
@@ -412,22 +470,39 @@ print_instr(struct log_stream *stream, struct ir3_instruction *instr, int lvl)
       }
    }
 
+   if (instr->flags & IR3_INSTR_SAT)
+      mesa_log_stream_printf(stream, "(sat)");
+
    bool first = true;
    foreach_dst (reg, instr) {
       if (reg->wrmask == 0)
          continue;
       if (!first)
          mesa_log_stream_printf(stream, ", ");
+      if (reg->flags & IR3_REG_ALIAS)
+         mesa_log_stream_printf(stream, "@");
       print_reg_name(stream, instr, reg, true);
       first = false;
    }
    foreach_src_n (reg, n, instr) {
       if (!first)
          mesa_log_stream_printf(stream, ", ");
+      if (reg->flags & IR3_REG_FIRST_ALIAS)
+         mesa_log_stream_printf(stream, "@{");
       print_reg_name(stream, instr, reg, false);
+      if ((reg->flags & IR3_REG_ALIAS) &&
+          (n == instr->srcs_count - 1 ||
+           ir3_src_is_first_in_group(instr->srcs[n + 1]))) {
+         mesa_log_stream_printf(stream, "}");
+      }
       if (instr->opc == OPC_END || instr->opc == OPC_CHMASK)
          mesa_log_stream_printf(stream, " (%u)", instr->end.outidxs[n]);
       first = false;
+   }
+
+   if ((opc_cat(instr->opc) == 1) && (instr->cat1.r[0] || instr->cat1.r[1])) {
+      mesa_log_stream_printf(stream, ", %u, %u",
+                             instr->cat1.r[0], instr->cat1.r[1]);
    }
 
    if (is_tex(instr) && !(instr->flags & IR3_INSTR_S2EN) &&

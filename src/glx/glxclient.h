@@ -40,10 +40,9 @@ enum glx_driver {
    GLX_DRIVER_NONE = 0,
    GLX_DRIVER_ZINK_INFER = (1<<0),
    GLX_DRIVER_SW = (1<<1),
-   GLX_DRIVER_DRI2 = (1<<2),
-   GLX_DRIVER_DRI3 = (1<<3),
-   GLX_DRIVER_WINDOWS = (1<<4),
-   GLX_DRIVER_ZINK_YES = (1<<5),
+   GLX_DRIVER_DRI3 = (1<<2),
+   GLX_DRIVER_WINDOWS = (1<<3),
+   GLX_DRIVER_ZINK_YES = (1<<4),
 };
 
 #if USE_LIBGLVND
@@ -137,16 +136,14 @@ struct __GLXDRIdrawableRec
 ** dependent methods.
 */
 extern __GLXDRIdisplay *driswCreateDisplay(Display * dpy, enum glx_driver glx_driver);
-extern __GLXDRIdisplay *dri2CreateDisplay(Display * dpy);
 extern __GLXDRIdisplay *dri3_create_display(Display * dpy);
 extern __GLXDRIdisplay *driwindowsCreateDisplay(Display * dpy);
 
 
 #if defined(GLX_DIRECT_RENDERING) && (!defined(GLX_USE_APPLEGL) || defined(GLX_USE_APPLE))
-#ifdef HAVE_LIBDRM
 struct glx_screen *dri3_create_screen(int screen, struct glx_display * priv, bool driver_name_is_inferred, bool *return_zink);
 void dri3_destroy_display(__GLXDRIdisplay * dpy);
-#endif
+
 
 bool dri2CheckSupport(Display *dpy);
 struct glx_screen *dri2CreateScreen(int screen, struct glx_display * priv, bool driver_name_is_inferred);
@@ -600,7 +597,6 @@ struct glx_display
 
    __glxHashTable *dri2Hash;
    bool has_multibuffer;
-   bool has_explicit_modifiers;
 #endif
 #ifdef GLX_USE_WINDOWSGL
    __GLXDRIdisplay *windowsdriDisplay;

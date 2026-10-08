@@ -1,28 +1,8 @@
 /*
  * Copyright 2019 Collabora, Ltd.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- *
- * Authors (Collabora):
- *   Alyssa Rosenzweig <alyssa.rosenzweig@collabora.com>
+ * SPDX-License-Identifier: MIT
  */
+
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -31,6 +11,7 @@
 
 #include "pan_bo.h"
 #include "pan_device.h"
+#include "pan_trace.h"
 #include "pan_util.h"
 #include "wrap.h"
 
@@ -111,8 +92,8 @@ panfrost_bo_alloc(struct panfrost_device *dev, size_t size, uint32_t flags,
    bo->ptr.gpu = vm_op.va.start;
    bo->flags = flags;
    bo->dev = dev;
-   bo->label = label;
    return bo;
+
 err_bind:
    pan_kmod_bo_put(kmod_bo);
    /* BO will be freed with the sparse array, but zero to indicate free */
@@ -124,6 +105,8 @@ err_alloc:
 static void
 panfrost_bo_free(struct panfrost_bo *bo)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_BO);
+
    struct pan_kmod_bo *kmod_bo = bo->kmod_bo;
    struct pan_kmod_vm *vm = bo->dev->kmod.vm;
    uint64_t gpu_va = bo->ptr.gpu;
@@ -155,6 +138,8 @@ panfrost_bo_free(struct panfrost_bo *bo)
 bool
 panfrost_bo_wait(struct panfrost_bo *bo, int64_t timeout_ns, bool wait_readers)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_BO);
+
    /* If the BO has been exported or imported we can't rely on the cached
     * state, we need to call the WAIT_BO ioctl.
     */
@@ -238,7 +223,6 @@ panfrost_bo_cache_fetch(struct panfrost_device *dev, size_t size,
       }
       /* Let's go! */
       bo = entry;
-      bo->label = label;
       break;
    }
    pthread_mutex_unlock(&dev->bo_cache.lock);
@@ -304,7 +288,7 @@ panfrost_bo_cache_put(struct panfrost_bo *bo)
    panfrost_bo_cache_evict_stale_bos(dev);
 
    /* Update the label to help debug BO cache memory usage issues */
-   bo->label = "Unused (BO cache)";
+   panfrost_bo_set_label(bo, "Unused (BO cache)");
 
    /* Must be last */
    pthread_mutex_unlock(&dev->bo_cache.lock);
@@ -333,29 +317,34 @@ panfrost_bo_cache_evict_all(struct panfrost_device *dev)
    pthread_mutex_unlock(&dev->bo_cache.lock);
 }
 
-void
+int
 panfrost_bo_mmap(struct panfrost_bo *bo)
 {
-   if (bo->ptr.cpu)
-      return;
+   PAN_TRACE_FUNC(PAN_TRACE_GL_BO);
 
-   bo->ptr.cpu = pan_kmod_bo_mmap(bo->kmod_bo, 0, panfrost_bo_size(bo),
-                                  PROT_READ | PROT_WRITE, MAP_SHARED, NULL);
+   if (bo->ptr.cpu)
+      return 0;
+
+   bo->ptr.cpu =
+      pan_kmod_bo_mmap(bo->kmod_bo, PROT_READ | PROT_WRITE, MAP_SHARED, NULL);
    if (bo->ptr.cpu == MAP_FAILED) {
       bo->ptr.cpu = NULL;
-      fprintf(stderr, "mmap failed: result=%p size=0x%llx\n", bo->ptr.cpu,
-              (long long)panfrost_bo_size(bo));
+      return -1;
    }
+
+   return 0;
 }
 
 static void
 panfrost_bo_munmap(struct panfrost_bo *bo)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_BO);
+
    if (!bo->ptr.cpu)
       return;
 
    if (os_munmap((void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {
-      perror("munmap");
+      mesa_loge("munmap failed: %s", strerror(errno));
       abort();
    }
 
@@ -366,6 +355,10 @@ struct panfrost_bo *
 panfrost_bo_create(struct panfrost_device *dev, size_t size, uint32_t flags,
                    const char *label)
 {
+   assert(label);
+   PAN_TRACE_SCOPE(PAN_TRACE_GL_BO, "%s size=%zu label=\"%s\"", __func__,
+                   size, label);
+
    struct panfrost_bo *bo;
 
    if (dev->debug & PAN_DBG_DUMP) {
@@ -408,8 +401,12 @@ panfrost_bo_create(struct panfrost_device *dev, size_t size, uint32_t flags,
     * never map since we don't care about their contents; they're purely
     * for GPU-internal use. But we do trace them anyway. */
 
-   if (!(flags & (PAN_BO_INVISIBLE | PAN_BO_DELAY_MMAP)))
-      panfrost_bo_mmap(bo);
+   if (!(flags & (PAN_BO_INVISIBLE | PAN_BO_DELAY_MMAP))) {
+      if (panfrost_bo_mmap(bo)) {
+         panfrost_bo_free(bo);
+         return NULL;
+      }
+   }
 
    p_atomic_set(&bo->refcnt, 1);
 
@@ -421,6 +418,8 @@ panfrost_bo_create(struct panfrost_device *dev, size_t size, uint32_t flags,
          pandecode_inject_mmap(dev->decode_ctx, bo->ptr.gpu, bo->ptr.cpu,
                                panfrost_bo_size(bo), NULL);
    }
+
+   panfrost_bo_set_label(bo, label);
 
    return bo;
 }
@@ -472,19 +471,27 @@ panfrost_bo_unreference(struct panfrost_bo *bo)
 struct panfrost_bo *
 panfrost_bo_import(struct panfrost_device *dev, int fd)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_BO);
+
    struct panfrost_bo *bo;
-   ASSERTED int ret;
+   struct pan_kmod_bo *kmod_bo;
    unsigned gem_handle;
 
    pthread_mutex_lock(&dev->bo_map_lock);
-   ret = drmPrimeFDToHandle(dev->kmod.dev->fd, fd, &gem_handle);
-   assert(!ret);
+   /* Import via pan_kmod_bo_import - it handles drmPrimeFDToHandle internally */
+   kmod_bo = pan_kmod_bo_import(dev->kmod.dev, fd);
+   if (!kmod_bo) {
+      pthread_mutex_unlock(&dev->bo_map_lock);
+      return NULL;
+   }
 
+   /* Look up panfrost_bo by the GEM handle from kmod_bo */
+   gem_handle = pan_kmod_bo_handle(kmod_bo);
    bo = pan_lookup_bo(dev, gem_handle);
 
    if (!bo->dev) {
       bo->dev = dev;
-      bo->kmod_bo = pan_kmod_bo_import(dev->kmod.dev, fd, 0);
+      bo->kmod_bo = kmod_bo; /* Take ownership of kmod_bo reference */
 
       struct pan_kmod_vm_op vm_op = {
          .type = PAN_KMOD_VM_OP_TYPE_MAP,
@@ -509,9 +516,15 @@ panfrost_bo_import(struct panfrost_device *dev, int fd)
       p_atomic_set(&bo->refcnt, 1);
 
       /* mmap imported BOs when PAN_MESA_DEBUG=dump */
-      if (dev->debug & PAN_DBG_DUMP)
-         panfrost_bo_mmap(bo);
+      if ((dev->debug & PAN_DBG_DUMP) && panfrost_bo_mmap(bo))
+         mesa_loge("failed to mmap");
    } else {
+      /* pan_kmod_bo_import already incremented kmod_bo->refcnt,
+       * but we already have a reference in bo->kmod_bo,
+       * so release this extra kmod_bo reference.
+       */
+      pan_kmod_bo_put(kmod_bo);
+
       /* bo->refcnt == 0 can happen if the BO
        * was being released but panfrost_bo_import() acquired the
        * lock before panfrost_bo_unreference(). In that case, refcnt
@@ -535,6 +548,8 @@ panfrost_bo_import(struct panfrost_device *dev, int fd)
 int
 panfrost_bo_export(struct panfrost_bo *bo)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_BO);
+
    int ret = pan_kmod_bo_export(bo->kmod_bo);
    if (ret >= 0)
       bo->flags |= PAN_BO_SHARED;
@@ -553,4 +568,18 @@ panfrost_bo_from_kmod_bo(struct panfrost_device *dev,
    assert(bo->kmod_bo == kmod_bo);
 
    return bo;
+}
+
+const char *
+panfrost_bo_replace_label(struct panfrost_bo *bo, const char *label,
+                          bool set_kernel_label)
+{
+   const char *old_label = bo->label;
+
+   bo->label = label;
+
+   if (set_kernel_label)
+      pan_kmod_set_bo_label(bo->dev->kmod.dev, bo->kmod_bo, label);
+
+   return old_label;
 }

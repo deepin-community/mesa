@@ -4,10 +4,11 @@
 extern crate bitview;
 extern crate nvidia_headers;
 
-use crate::ir::{ShaderInfo, ShaderIoInfo, ShaderModel, ShaderStageInfo};
+use crate::ir::{
+    ShaderInfo, ShaderIoInfo, ShaderModel, ShaderModelInfo, ShaderStageInfo,
+};
 use bitview::{
     BitMutView, BitMutViewable, BitView, BitViewable, SetBit, SetField,
-    SetFieldU64,
 };
 use nak_bindings::*;
 use nvidia_headers::classes::cla097::sph::*;
@@ -31,7 +32,7 @@ pub enum ShaderType {
 impl From<&ShaderStageInfo> for ShaderType {
     fn from(value: &ShaderStageInfo) -> Self {
         match value {
-            ShaderStageInfo::Vertex => ShaderType::Vertex,
+            ShaderStageInfo::Vertex(_) => ShaderType::Vertex,
             ShaderStageInfo::Fragment(_) => ShaderType::Fragment,
             ShaderStageInfo::Geometry(_) => ShaderType::Geometry,
             ShaderStageInfo::TessellationInit(_) => {
@@ -91,12 +92,6 @@ impl BitMutViewable for ShaderProgramHeader {
     }
 }
 
-impl SetFieldU64 for ShaderProgramHeader {
-    fn set_field_u64(&mut self, range: Range<usize>, val: u64) {
-        BitMutView::new(&mut self.data).set_field_u64(range, val);
-    }
-}
-
 impl ShaderProgramHeader {
     pub fn new(shader_type: ShaderType, sm: u8) -> Self {
         let mut res = Self {
@@ -110,7 +105,7 @@ impl ShaderProgramHeader {
             SPHV3_T1_SPH_TYPE_TYPE_01_VTG
         };
 
-        let sph_version = if sm >= 75 { 4 } else { 3 };
+        let sph_version = if sm >= 73 { 4 } else { 3 };
         res.set_sph_type(sph_type, sph_version);
         res.set_shader_type(shader_type);
 
@@ -238,6 +233,15 @@ impl ShaderProgramHeader {
     }
 
     #[inline]
+    pub fn set_isbe_space_sharing_enable(
+        &mut self,
+        isbe_space_sharing_enable: bool,
+    ) {
+        assert!(self.shader_type == ShaderType::Vertex);
+        self.set_bit(25, isbe_space_sharing_enable);
+    }
+
+    #[inline]
     pub fn set_does_load_or_store(&mut self, does_load_or_store: bool) {
         self.set_field(SPHV3_T1_DOES_LOAD_OR_STORE, does_load_or_store);
     }
@@ -299,7 +303,6 @@ impl ShaderProgramHeader {
     }
 
     #[inline]
-    #[allow(dead_code)]
     pub fn set_shader_local_memory_crs_size(
         &mut self,
         shader_local_memory_crs_size: u32,
@@ -438,7 +441,6 @@ impl ShaderProgramHeader {
     }
 
     #[inline]
-    #[allow(dead_code)]
     pub fn set_uses_underestimate(&mut self, uses_underestimate: bool) {
         assert!(self.shader_type == ShaderType::Fragment);
         self.set_bit(611, uses_underestimate);
@@ -462,7 +464,7 @@ impl ShaderProgramHeader {
 }
 
 pub fn encode_header(
-    sm: &dyn ShaderModel,
+    sm: &ShaderModelInfo,
     shader_info: &ShaderInfo,
     fs_key: Option<&nak_fs_key>,
 ) -> [u32; CURRENT_MAX_SHADER_HEADER_SIZE] {
@@ -473,12 +475,14 @@ pub fn encode_header(
     let mut sph =
         ShaderProgramHeader::new(ShaderType::from(&shader_info.stage), sm.sm());
 
+    let slm_size = shader_info.slm_size.next_multiple_of(16);
     sph.set_sass_version(1);
-    sph.set_does_load_or_store(shader_info.uses_global_mem);
+    sph.set_does_load_or_store(
+        shader_info.uses_global_mem || (sm.is_kepler() && slm_size > 0),
+    );
     sph.set_does_global_store(shader_info.writes_global_mem);
     sph.set_does_fp64(shader_info.uses_fp64);
 
-    let slm_size = shader_info.slm_size.next_multiple_of(16);
     sph.set_shader_local_memory_size(slm_size.into());
     let crs_size = sm.crs_size(shader_info.max_crs_depth);
     sph.set_shader_local_memory_crs_size(crs_size);
@@ -517,7 +521,7 @@ pub fn encode_header(
             }
 
             let uses_underestimate =
-                fs_key.map_or(false, |key| key.uses_underestimate);
+                fs_key.is_some_and(|key| key.uses_underestimate);
 
             // This isn't so much a "Do we write multiple render targets?" bit
             // as a "Should color0 be broadcast to all render targets?" bit. In
@@ -540,8 +544,11 @@ pub fn encode_header(
     }
 
     match &shader_info.stage {
+        ShaderStageInfo::Vertex(stage) => {
+            sph.set_isbe_space_sharing_enable(stage.isbe_space_sharing_enable);
+        }
         ShaderStageInfo::Fragment(stage) => {
-            let zs_self_dep = fs_key.map_or(false, |key| key.zs_self_dep);
+            let zs_self_dep = fs_key.is_some_and(|key| key.zs_self_dep);
             sph.set_kills_pixels(stage.uses_kill || zs_self_dep);
             sph.set_does_interlock(stage.does_interlock);
         }

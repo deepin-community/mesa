@@ -77,13 +77,13 @@ query_features_from_kernel(struct etna_gpu *gpu)
 	STATIC_ASSERT(ETNA_GPU_FEATURES_12 == 0xf);
 
 	for (unsigned i = ETNA_GPU_FEATURES_0; i <= ETNA_GPU_FEATURES_12; i++) {
-		uint64_t val;
+		uint64_t val = 0;
 
 		etna_gpu_get_param(gpu, i, &val);
 		features[i - ETNA_GPU_FEATURES_0] = val;
 	}
 
-	gpu->info.type = ETNA_CORE_GPU;
+	etna_core_enable_feature(&gpu->info, ETNA_FEATURE_CORE_GPU);
 
 	ETNA_FEATURE(chipFeatures, FAST_CLEAR);
 	ETNA_FEATURE(chipFeatures, PIPE_3D);
@@ -92,6 +92,7 @@ query_features_from_kernel(struct etna_gpu *gpu)
 	ETNA_FEATURE(chipFeatures, DXT_TEXTURE_COMPRESSION);
 	ETNA_FEATURE(chipFeatures, ETC1_TEXTURE_COMPRESSION);
 	ETNA_FEATURE(chipFeatures, NO_EARLY_Z);
+	ETNA_FEATURE(chipFeatures, YUV420_TILER);
 
 	ETNA_FEATURE(chipMinorFeatures0, MC20);
 	ETNA_FEATURE(chipMinorFeatures0, RENDERTARGET_8K);
@@ -140,12 +141,14 @@ query_features_from_kernel(struct etna_gpu *gpu)
 	ETNA_FEATURE(chipMinorFeatures6, NO_ASTC);
 	ETNA_FEATURE(chipMinorFeatures6, V4_COMPRESSION);
 
+	ETNA_FEATURE(chipMinorFeatures7, BLT_64BPP_MASKED_CLEAR_FIX);
 	ETNA_FEATURE(chipMinorFeatures7, RS_NEW_BASEADDR);
 	ETNA_FEATURE(chipMinorFeatures7, PE_NO_ALPHA_TEST);
 
 	ETNA_FEATURE(chipMinorFeatures8, SH_NO_ONECONST_LIMIT);
 
 	ETNA_FEATURE(chipMinorFeatures10, DEC400);
+	ETNA_FEATURE(chipMinorFeatures10, WIDELINE_TRIANGLE_EMU);
 }
 
 static void
@@ -154,7 +157,7 @@ query_limits_from_kernel(struct etna_gpu *gpu)
 	struct etna_core_info *info = &gpu->info;
 	uint64_t val;
 
-	assert(info->type == ETNA_CORE_GPU);
+	assert(etna_core_has_feature(info, ETNA_FEATURE_CORE_GPU));
 
 	etna_gpu_get_param(gpu, ETNA_GPU_INSTRUCTION_COUNT, &val);
 	info->gpu.max_instructions = val;
@@ -259,6 +262,14 @@ struct etna_gpu *etna_gpu_new(struct etna_device *dev, unsigned int core)
 	if (!core_info_okay) {
 		query_features_from_kernel(gpu);
 		query_limits_from_kernel(gpu);
+
+		/* GC3000 with the instruction cache feature has a incorrect instruction
+		 * limit encoded in HW (HWDB has the correct number). Fix this up so
+		 * other parts of the stack don't have to worry about this.
+		 */
+		if (etna_core_has_feature(&gpu->info, ETNA_FEATURE_INSTRUCTION_CACHE) &&
+		    gpu->info.gpu.max_instructions < 512)
+			gpu->info.gpu.max_instructions = 512;
 	}
 
 	determine_halti(gpu);

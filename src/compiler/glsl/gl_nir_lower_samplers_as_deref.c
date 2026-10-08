@@ -112,7 +112,7 @@ remove_struct_derefs_prep(nir_deref_instr **p, char **name,
    }
 
    default:
-      unreachable("Invalid deref type");
+      UNREACHABLE("Invalid deref type");
       break;
    }
 }
@@ -127,18 +127,15 @@ record_images_used(struct shader_info *info,
    const unsigned size =
       glsl_type_is_array(var->type) ? glsl_get_aoa_size(var->type) : 1;
 
-   BITSET_SET_RANGE(info->images_used, var->data.binding,
-                    var->data.binding + (MAX2(size, 1) - 1));
+   BITSET_SET_COUNT(info->images_used, var->data.binding, MAX2(size, 1));
 
    enum glsl_sampler_dim sampler_dim =
       glsl_get_sampler_dim(glsl_without_array(var->type));
    if (sampler_dim == GLSL_SAMPLER_DIM_BUF) {
-      BITSET_SET_RANGE(info->image_buffers, var->data.binding,
-                       var->data.binding + (MAX2(size, 1) - 1));
+      BITSET_SET_COUNT(info->image_buffers, var->data.binding, MAX2(size, 1));
    }
    if (sampler_dim == GLSL_SAMPLER_DIM_MS) {
-      BITSET_SET_RANGE(info->msaa_images, var->data.binding,
-                       var->data.binding + (MAX2(size, 1) - 1));
+      BITSET_SET_COUNT(info->msaa_images, var->data.binding, MAX2(size, 1));
    }
 }
 
@@ -148,7 +145,7 @@ lower_deref(nir_builder *b, struct lower_samplers_as_deref_state *state,
             nir_deref_instr *deref)
 {
    nir_variable *var = nir_deref_instr_get_variable(deref);
-   gl_shader_stage stage = state->shader->info.stage;
+   mesa_shader_stage stage = state->shader->info.stage;
 
    if (!(var->data.mode & (nir_var_uniform | nir_var_image)) ||
        var->data.bindless)
@@ -242,15 +239,22 @@ record_textures_used(struct shader_info *info,
    const unsigned size =
       glsl_type_is_array(var->type) ? glsl_get_aoa_size(var->type) : 1;
 
-   BITSET_SET_RANGE(info->textures_used, var->data.binding,
-                    var->data.binding + (MAX2(size, 1) - 1));
+   BITSET_SET_COUNT(info->textures_used, var->data.binding, MAX2(size, 1));
 
    if (op == nir_texop_txf ||
        op == nir_texop_txf_ms ||
        op == nir_texop_txf_ms_mcs_intel) {
-      BITSET_SET_RANGE(info->textures_used_by_txf, var->data.binding,
+      BITSET_SET_COUNT(info->textures_used_by_txf, var->data.binding,
+                      MAX2(size, 1));
+   }
+
+   enum glsl_sampler_dim sampler_dim =
+      glsl_get_sampler_dim(glsl_without_array(var->type));
+   if (sampler_dim == GLSL_SAMPLER_DIM_BUF) {
+      BITSET_SET_RANGE(info->texture_buffers, var->data.binding,
                        var->data.binding + (MAX2(size, 1) - 1));
    }
+
 }
 
 static void
@@ -264,8 +268,7 @@ record_samplers_used(struct shader_info *info,
    const unsigned size =
       glsl_type_is_array(var->type) ? glsl_get_aoa_size(var->type) : 1;
 
-   BITSET_SET_RANGE(info->samplers_used, var->data.binding,
-                    var->data.binding + (MAX2(size, 1) - 1));
+   BITSET_SET_COUNT(info->samplers_used, var->data.binding, MAX2(size, 1));
 }
 
 static bool
@@ -330,7 +333,7 @@ lower_intrinsic(nir_intrinsic_instr *instr,
    }
    if (instr->intrinsic == nir_intrinsic_image_deref_order ||
        instr->intrinsic == nir_intrinsic_image_deref_format)
-      unreachable("how did you even manage this?");
+      UNREACHABLE("how did you even manage this?");
 
    return false;
 }

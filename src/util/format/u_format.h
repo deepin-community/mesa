@@ -560,6 +560,30 @@ util_format_is_etc(enum pipe_format format)
 }
 
 static inline bool
+util_format_is_astc_hdr(enum pipe_format format)
+{
+   switch (format) {
+   case PIPE_FORMAT_ASTC_4x4_FLOAT:
+   case PIPE_FORMAT_ASTC_5x4_FLOAT:
+   case PIPE_FORMAT_ASTC_5x5_FLOAT:
+   case PIPE_FORMAT_ASTC_6x5_FLOAT:
+   case PIPE_FORMAT_ASTC_6x6_FLOAT:
+   case PIPE_FORMAT_ASTC_8x5_FLOAT:
+   case PIPE_FORMAT_ASTC_8x6_FLOAT:
+   case PIPE_FORMAT_ASTC_8x8_FLOAT:
+   case PIPE_FORMAT_ASTC_10x5_FLOAT:
+   case PIPE_FORMAT_ASTC_10x6_FLOAT:
+   case PIPE_FORMAT_ASTC_10x8_FLOAT:
+   case PIPE_FORMAT_ASTC_10x10_FLOAT:
+   case PIPE_FORMAT_ASTC_12x10_FLOAT:
+   case PIPE_FORMAT_ASTC_12x12_FLOAT:
+      return true;
+   default:
+      return false;;
+   }
+}
+
+static inline bool
 util_format_is_srgb(enum pipe_format format)
 {
    const struct util_format_description *desc = util_format_description(format);
@@ -798,6 +822,10 @@ util_format_is_snorm8(enum pipe_format format) ATTRIBUTE_CONST;
 
 bool
 util_format_is_scaled(enum pipe_format format) ATTRIBUTE_CONST;
+
+bool
+util_format_is_float16(enum pipe_format format) ATTRIBUTE_CONST;
+
 /**
  * Check if the src format can be blitted to the destination format with
  * a simple memcpy.  For example, blitting from RGBA to RGBx is OK, but not
@@ -1058,6 +1086,12 @@ util_format_get_component_shift(enum pipe_format format,
    }
 }
 
+static inline unsigned
+util_format_get_depth_bits(enum pipe_format format)
+{
+   return util_format_get_component_bits(format, UTIL_FORMAT_COLORSPACE_ZS, 0);
+}
+
 /**
  * Given a linear RGB colorspace format, return the corresponding SRGB
  * format, or PIPE_FORMAT_NONE if none.
@@ -1273,86 +1307,6 @@ util_format_get_num_planes(enum pipe_format format)
    }
 }
 
-static inline enum pipe_format
-util_format_get_plane_format(enum pipe_format format, unsigned plane)
-{
-   switch (format) {
-   case PIPE_FORMAT_YV12:
-   case PIPE_FORMAT_YV16:
-   case PIPE_FORMAT_IYUV:
-   case PIPE_FORMAT_Y8_U8_V8_422_UNORM:
-   case PIPE_FORMAT_Y8_U8_V8_444_UNORM:
-   case PIPE_FORMAT_Y8_400_UNORM:
-   case PIPE_FORMAT_R8_G8_B8_UNORM:
-   case PIPE_FORMAT_Y8_U8_V8_440_UNORM:
-      return PIPE_FORMAT_R8_UNORM;
-   case PIPE_FORMAT_NV12:
-   case PIPE_FORMAT_Y8_U8V8_422_UNORM:
-      return !plane ? PIPE_FORMAT_R8_UNORM : PIPE_FORMAT_RG88_UNORM;
-   case PIPE_FORMAT_NV21:
-      return !plane ? PIPE_FORMAT_R8_UNORM : PIPE_FORMAT_GR88_UNORM;
-   case PIPE_FORMAT_Y16_U16_V16_420_UNORM:
-   case PIPE_FORMAT_Y16_U16_V16_422_UNORM:
-   case PIPE_FORMAT_Y16_U16_V16_444_UNORM:
-      return PIPE_FORMAT_R16_UNORM;
-   case PIPE_FORMAT_P010:
-   case PIPE_FORMAT_P012:
-   case PIPE_FORMAT_P016:
-   case PIPE_FORMAT_P030:
-   case PIPE_FORMAT_Y16_U16V16_422_UNORM:
-      return !plane ? PIPE_FORMAT_R16_UNORM : PIPE_FORMAT_R16G16_UNORM;
-   default:
-      return format;
-   }
-}
-
-static inline unsigned
-util_format_get_plane_width(enum pipe_format format, unsigned plane,
-                            unsigned width)
-{
-   switch (format) {
-   case PIPE_FORMAT_YV12:
-   case PIPE_FORMAT_YV16:
-   case PIPE_FORMAT_IYUV:
-   case PIPE_FORMAT_NV12:
-   case PIPE_FORMAT_NV21:
-   case PIPE_FORMAT_P010:
-   case PIPE_FORMAT_P012:
-   case PIPE_FORMAT_P016:
-   case PIPE_FORMAT_P030:
-   case PIPE_FORMAT_Y8_U8_V8_422_UNORM:
-   case PIPE_FORMAT_Y8_U8V8_422_UNORM:
-   case PIPE_FORMAT_Y16_U16_V16_420_UNORM:
-   case PIPE_FORMAT_Y16_U16_V16_422_UNORM:
-   case PIPE_FORMAT_Y16_U16V16_422_UNORM:
-      return !plane ? width : (width + 1) / 2;
-   default:
-      return width;
-   }
-}
-
-static inline unsigned
-util_format_get_plane_height(enum pipe_format format, unsigned plane,
-                             unsigned height)
-{
-   switch (format) {
-   case PIPE_FORMAT_YV12:
-   case PIPE_FORMAT_IYUV:
-   case PIPE_FORMAT_NV12:
-   case PIPE_FORMAT_NV21:
-   case PIPE_FORMAT_P010:
-   case PIPE_FORMAT_P012:
-   case PIPE_FORMAT_P016:
-   case PIPE_FORMAT_P030:
-   case PIPE_FORMAT_Y16_U16_V16_420_UNORM:
-   case PIPE_FORMAT_Y8_U8_V8_440_UNORM:
-      return !plane ? height : (height + 1) / 2;
-   case PIPE_FORMAT_YV16:
-   default:
-      return height;
-   }
-}
-
 /**
  * Return the number of components stored.
  * Formats with block size != 1x1 will always have 1 component (the block).
@@ -1361,6 +1315,8 @@ static inline unsigned
 util_format_get_nr_components(enum pipe_format format)
 {
    const struct util_format_description *desc = util_format_description(format);
+   assert(desc->nr_channels <= 4);
+
    return desc->nr_channels;
 }
 
@@ -1395,6 +1351,24 @@ util_format_is_unorm8(const struct util_format_description *desc)
       return false;
 
    return desc->is_unorm && desc->is_array && desc->channel[c].size == 8;
+}
+
+static inline bool
+util_format_is_unorm16(const struct util_format_description *desc)
+{
+   int c = util_format_get_first_non_void_channel(desc->format);
+
+   if (c == -1)
+      return false;
+
+   return desc->is_unorm && desc->is_array && desc->channel[c].size == 16;
+}
+
+static inline bool
+util_format_is_int64(const struct util_format_description *desc)
+{
+   int c = util_format_get_first_non_void_channel(desc->format);
+   return c >= 0 && desc->channel[c].pure_integer && desc->channel[c].size == 64;
 }
 
 static inline void
@@ -1588,9 +1562,6 @@ void pipe_swizzle_4f(float *dst, const float *src,
 void util_format_unswizzle_4f(float *dst, const float *src,
                               const unsigned char swz[4]);
 
-enum pipe_format
-util_format_snorm_to_sint(enum pipe_format format) ATTRIBUTE_CONST;
-
 extern void
 util_copy_rect(void * dst, enum pipe_format format,
                unsigned dst_stride, unsigned dst_x, unsigned dst_y,
@@ -1603,10 +1574,6 @@ util_copy_rect(void * dst, enum pipe_format format,
  */
 enum pipe_format
 util_format_rgb_to_bgr(enum pipe_format format);
-
-/* Returns the pipe format with SNORM formats cast to UNORM, otherwise the original pipe format. */
-enum pipe_format
-util_format_snorm_to_unorm(enum pipe_format format);
 
 enum pipe_format
 util_format_rgbx_to_rgba(enum pipe_format format);

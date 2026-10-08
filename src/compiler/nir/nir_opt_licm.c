@@ -9,7 +9,7 @@ static bool
 defined_before_loop(nir_src *src, void *state)
 {
    unsigned *loop_preheader_idx = state;
-   return src->ssa->parent_instr->block->index <= *loop_preheader_idx;
+   return nir_def_block(src->ssa)->index <= *loop_preheader_idx;
 }
 
 static bool
@@ -32,6 +32,7 @@ is_instr_loop_invariant(nir_instr *instr, unsigned loop_preheader_idx)
 
    case nir_instr_type_phi:
    case nir_instr_type_call:
+   case nir_instr_type_cmat_call:
    case nir_instr_type_jump:
    default:
       return false;
@@ -57,7 +58,7 @@ static bool
 should_optimize_loop(nir_loop *loop)
 {
    /* Ignore loops without back-edge */
-   if (nir_loop_first_block(loop)->predecessors->entries == 1)
+   if (!nir_loop_has_back_edge(loop))
       return false;
 
    nir_foreach_block_in_cf_node(block, &loop->cf_node) {
@@ -115,7 +116,7 @@ visit_cf_list(struct exec_list *list, nir_block *preheader, nir_block *exit)
          break;
       }
       case nir_cf_node_function:
-         unreachable("NIR LICM: Unsupported cf_node type.");
+         UNREACHABLE("NIR LICM: Unsupported cf_node type.");
       }
    }
 
@@ -131,13 +132,9 @@ nir_opt_licm(nir_shader *shader)
       nir_metadata_require(impl, nir_metadata_block_index |
                                     nir_metadata_dominance);
 
-      if (visit_cf_list(&impl->body, NULL, NULL)) {
-         progress = true;
-         nir_metadata_preserve(impl, nir_metadata_block_index |
-                                        nir_metadata_dominance);
-      } else {
-         nir_metadata_preserve(impl, nir_metadata_all);
-      }
+      bool impl_progress = visit_cf_list(&impl->body, NULL, NULL);
+      progress |= nir_progress(impl_progress, impl,
+                               nir_metadata_block_index | nir_metadata_dominance);
    }
 
    return progress;

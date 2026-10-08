@@ -1,7 +1,7 @@
 /*
 ************************************************************************************************************************
 *
-*  Copyright (C) 2023 Advanced Micro Devices, Inc.  All rights reserved.
+*  Copyright (C) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
 *  SPDX-License-Identifier: MIT
 *
 ***********************************************************************************************************************/
@@ -162,6 +162,16 @@ private:
         const ADDR3_COMPUTE_SURFACE_INFO_PARAMS_INPUT*   pIn,
         const ADDR3_COMPUTE_SURFACE_INFO_OUTPUT*         pOut) const;
 
+    virtual ADDR_E_RETURNCODE HwlCopyMemToSurface(
+        const ADDR3_COPY_MEMSURFACE_INPUT*  pIn,
+        const ADDR3_COPY_MEMSURFACE_REGION* pRegions,
+        UINT_32                             regionCount) const override;
+
+    virtual ADDR_E_RETURNCODE HwlCopySurfaceToMem(
+        const ADDR3_COPY_MEMSURFACE_INPUT*  pIn,
+        const ADDR3_COPY_MEMSURFACE_REGION* pRegions,
+        UINT_32                             regionCount) const override;
+
     UINT_32           m_numSwizzleBits;
 
     // Initialize equation table
@@ -223,13 +233,6 @@ private:
             ShiftCeil(Max(mip0.depth, 1u),  mipId)
         };
     }
-
-    UINT_32 ComputeOffsetFromEquation(
-        const ADDR_EQUATION* pEq,
-        UINT_32              x,
-        UINT_32              y,
-        UINT_32              z,
-        UINT_32              s) const;
 
     const ADDR_SW_PATINFO* GetSwizzlePatternInfo(
         Addr3SwizzleMode swizzleMode,

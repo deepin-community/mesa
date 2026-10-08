@@ -25,15 +25,15 @@
 #include "background.h"
 #include "common.h"
 #include "vpe_priv.h"
-#include "color_bg.h"
 
 void vpe_create_bg_segments(
     struct vpe_priv *vpe_priv, struct vpe_rect *gaps, uint16_t gaps_cnt, enum vpe_cmd_ops ops)
 {
     uint16_t            gap_index;
+    uint16_t            bg_index    = vpe_priv->resource.get_bg_stream_idx(vpe_priv);
     struct vpe_cmd_info cmd_info    = {0};
     struct scaler_data *scaler_data = &(cmd_info.inputs[0].scaler_data);
-    struct stream_ctx  *stream_ctx = &(vpe_priv->stream_ctx[0]);
+    struct stream_ctx  *stream_ctx  = &(vpe_priv->stream_ctx[bg_index]);
     int32_t             vp_x       = stream_ctx->stream.scaling_info.src_rect.x;
     int32_t             vp_y       = stream_ctx->stream.scaling_info.src_rect.y;
     uint16_t            src_h_div  = vpe_is_yuv420(stream_ctx->stream.surface_info.format) ? 2 : 1;
@@ -116,49 +116,59 @@ void vpe_create_bg_segments(
 
         cmd_info.num_inputs = 1;
         cmd_info.ops        = ops;
-        cmd_info.cd         = (uint8_t)(gaps_cnt - gap_index - 1);
-        cmd_info.tm_enabled = false; // currently only support frontend tm
+        cmd_info.cd         = (uint16_t)(gaps_cnt - gap_index - 1);
+        cmd_info.lut3d_type = LUT3D_TYPE_NONE; // currently only support frontend tm
         vpe_vector_push(vpe_priv->vpe_cmd_vector, &cmd_info);
     }
 }
 
-void vpe_full_bg_gaps(struct vpe_rect *gaps, const struct vpe_rect *target_rect, uint16_t max_gaps)
+void vpe_full_bg_gaps(struct vpe_rect *gaps, const struct vpe_rect *target_rect, uint32_t alignment,
+    uint16_t max_gaps)
 {
-    uint16_t gap_index;
-    int32_t  last_covered;
-    uint32_t gap_width, gap_remainder;
-
-    last_covered  = target_rect->x;
-    gap_width     = target_rect->width / max_gaps;
-    gap_remainder = target_rect->width % max_gaps;
-
-    for (gap_index = 0; gap_index < max_gaps; gap_index++) {
-        gaps[gap_index].x     = last_covered;
-        gaps[gap_index].y     = target_rect->y;
-        gaps[gap_index].width = gap_width;
-        if (gap_index >= max_gaps - gap_remainder) {
-            gaps[gap_index].width += 1;
-        }
-        gaps[gap_index].height = target_rect->height;
-        last_covered           = last_covered + (int32_t)gaps[gap_index].width;
+    if (max_gaps == 0) {
+        VPE_ASSERT(0);
+        return;
     }
+
+    uint32_t gap_width_unaligned = (target_rect->width / max_gaps);
+    uint32_t gap_width_aligned   = vpe_align_seg(gap_width_unaligned, alignment);
+    uint32_t start_x             = target_rect->x;
+
+    for (int i = 0; i < max_gaps - 1; i++) {
+        gaps[i].x      = i * gap_width_aligned + start_x;
+        gaps[i].width  = gap_width_aligned;
+        gaps[i].y      = target_rect->y;
+        gaps[i].height = target_rect->height;
+    }
+
+    gaps[max_gaps - 1].x      = (max_gaps - 1) * gap_width_aligned + start_x;
+    gaps[max_gaps - 1].width  = (start_x + target_rect->width) - gaps[max_gaps - 1].x;
+    gaps[max_gaps - 1].y      = target_rect->y;
+    gaps[max_gaps - 1].height = target_rect->height;
 }
 
 /* calculates the gaps in target_rect which are not covered by the first stream
    and returns the number of gaps */
 uint16_t vpe_find_bg_gaps(struct vpe_priv *vpe_priv, const struct vpe_rect *target_rect,
-    struct vpe_rect *gaps, uint16_t max_gaps)
+    struct vpe_rect *gaps, uint32_t alignment, uint16_t max_gaps)
 {
     uint16_t            num_gaps = 0;
+    uint16_t            bg_index = vpe_priv->resource.get_bg_stream_idx(vpe_priv);
     uint16_t            num_segs;
     struct vpe_rect    *dst_viewport_rect;
     bool                full_bg       = false;
     const uint32_t      max_seg_width = vpe_priv->pub.caps->plane_caps.max_viewport_width;
     const uint16_t      num_multiple  = vpe_priv->vpe_num_instance ? vpe_priv->vpe_num_instance : 1;
-    struct stream_ctx*  ctx           = &vpe_priv->stream_ctx[0];
+    struct stream_ctx *ctx = &vpe_priv->stream_ctx[bg_index];
 
     num_segs          = ctx->num_segments;
-    dst_viewport_rect = &(ctx->segment_ctx[0].scaler_data.dst_viewport);
+
+    if (num_segs == 0) { // To hit this condition destination rectangle width or height must be 0
+        goto full_bg;
+
+    } else {
+        dst_viewport_rect = &(ctx->segment_ctx[0].scaler_data.dst_viewport);
+    }
 
     if (ctx->stream_type == VPE_STREAM_TYPE_BG_GEN) {
         goto full_bg;
@@ -208,6 +218,6 @@ uint16_t vpe_find_bg_gaps(struct vpe_priv *vpe_priv, const struct vpe_rect *targ
     return num_gaps;
 
 full_bg:
-    vpe_full_bg_gaps(gaps, target_rect, max_gaps);
+    vpe_full_bg_gaps(gaps, target_rect, alignment, max_gaps);
     return max_gaps;
 }

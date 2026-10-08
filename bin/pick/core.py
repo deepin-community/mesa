@@ -27,8 +27,10 @@ import pathlib
 import re
 import subprocess
 import typing
+from functools import cached_property
 
 import attr
+from packaging.version import Version
 
 if typing.TYPE_CHECKING:
     from .ui import UI
@@ -51,7 +53,7 @@ IS_FIX = re.compile(r'^\s*fixes:\s*([a-f0-9]{6,40})', flags=re.MULTILINE | re.IG
 IS_CC = re.compile(r'^\s*cc:\s*["\']?([0-9]{2}\.[0-9])?["\']?\s*["\']?([0-9]{2}\.[0-9])?["\']?\s*\<?mesa-stable',
                    flags=re.MULTILINE | re.IGNORECASE)
 IS_REVERT = re.compile(r'This reverts commit ([0-9a-f]{40})')
-IS_BACKPORT = re.compile(r'^\s*backport-to:\s*(\d{2}\.\d),?\s*(\d{2}\.\d)?',
+IS_BACKPORT = re.compile(r'^\s*backport-to:\s*(?:(\d{2}\.\d),?\s*(\d{2}\.\d)?|(\*))',
                          flags=re.MULTILINE | re.IGNORECASE)
 
 # XXX: hack
@@ -143,6 +145,7 @@ class Commit:
             c.resolution = Resolution(data['resolution'])
         return c
 
+    @cached_property
     def date(self) -> str:
         # Show commit date, ie. when the commit actually landed
         # (as opposed to when it was first written)
@@ -150,6 +153,26 @@ class Commit:
             ['git', 'show', '--no-patch', '--format=%cs', self.sha],
             stderr=subprocess.DEVNULL
         ).decode("ascii").strip()
+
+    @cached_property
+    def body(self) -> str:
+        return subprocess.check_output(
+            ['git', 'show', '--no-patch', '--format=%b', self.sha],
+            stderr=subprocess.DEVNULL
+        ).decode()
+
+    @cached_property
+    def mr_url(self) -> str | None:
+        for line in self.body.splitlines():
+            if match := re.fullmatch(r'Part-of: <(?P<url>https://.*/merge_requests/\d+)/?>', line):
+                return match.group('url')
+        return None
+
+    @cached_property
+    def mr_number(self) -> str | None:
+        if url := self.mr_url:
+            return url.rsplit('/', maxsplit=1)[1]
+        return None
 
     async def apply(self, ui: 'UI') -> typing.Tuple[bool, str]:
         # FIXME: This isn't really enough if we fail to cherry-pick because the
@@ -276,10 +299,10 @@ async def resolve_nomination(commit: 'Commit', version: str) -> 'Commit':
         )
         _out, _ = await p.communicate()
         assert p.returncode == 0, f'git log for {commit.sha} failed'
-    out = _out.decode()
+        commit_message = _out.decode()
 
     # We give precedence to fixes and cc tags over revert tags.
-    if fix_for_commit := IS_FIX.search(out):
+    if fix_for_commit := IS_FIX.search(commit_message):
         # We set the nomination_type and because_sha here so that we can later
         # check to see if this fixes another staged commit.
         try:
@@ -292,19 +315,21 @@ async def resolve_nomination(commit: 'Commit', version: str) -> 'Commit':
                 commit.nominated = True
                 return commit
 
-    if backport_to := IS_BACKPORT.search(out):
-        if version in backport_to.groups():
-            commit.nominated = True
-            commit.nomination_type = NominationType.BACKPORT
-            return commit
+    if backport_to := IS_BACKPORT.findall(commit_message):
+        for match in backport_to:
+            if any(backport_version == '*' or Version(version) >= Version(backport_version)
+                   for backport_version in match if backport_version != ''):
+                commit.nominated = True
+                commit.nomination_type = NominationType.BACKPORT
+                return commit
 
-    if cc_to := IS_CC.search(out):
+    if cc_to := IS_CC.search(commit_message):
         if cc_to.groups() == (None, None) or version in cc_to.groups():
             commit.nominated = True
             commit.nomination_type = NominationType.CC
             return commit
 
-    if revert_of := IS_REVERT.search(out):
+    if revert_of := IS_REVERT.search(commit_message):
         # See comment for IS_FIX path
         try:
             commit.because_sha = reverted = await full_sha(revert_of.group(1))

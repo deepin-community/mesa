@@ -43,7 +43,7 @@
 #include <windows.h>
 
 bool
-disk_cache_get_function_identifier(void *ptr, struct mesa_sha1 *ctx)
+disk_cache_get_function_identifier(void *ptr, blake3_hasher *ctx)
 {
    HMODULE mod = NULL;
    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -72,7 +72,7 @@ disk_cache_get_function_identifier(void *ptr, struct mesa_sha1 *ctx)
    FILETIME time;
    bool ret = GetFileTime(mod_as_file, NULL, NULL, &time);
    if (ret)
-      _mesa_sha1_update(ctx, &time, sizeof(time));
+      _mesa_blake3_update(ctx, &time, sizeof(time));
    CloseHandle(mod_as_file);
    return ret;
 }
@@ -104,14 +104,15 @@ disk_cache_get_function_identifier(void *ptr, struct mesa_sha1 *ctx)
 #include "util/ralloc.h"
 #include "util/rand_xor.h"
 
-/* Create a directory named 'path' if it does not already exist.
- * This is for use by mkdir_with_parents_if_needed(). Use that instead.
+/* Check if directory exists or if mkdir_if_needed param is set create a
+ * directory named 'path' if it does not already exist.
+ * This is for use by find_or_create_dir(). Use that instead.
  *
  * Returns: 0 if path already exists as a directory or if created.
  *         -1 in all other cases.
  */
 static int
-mkdir_if_needed(const char *path)
+find_or_mkdir_if_needed(const char *path, bool mkdir_if_needed)
 {
    struct stat sb;
 
@@ -128,6 +129,9 @@ mkdir_if_needed(const char *path)
       }
    }
 
+   if (!mkdir_if_needed)
+      return -1;
+
    int ret = mkdir(path, 0700);
    if (ret == 0 || (ret == -1 && errno == EEXIST))
      return 0;
@@ -138,14 +142,15 @@ mkdir_if_needed(const char *path)
    return -1;
 }
 
-/* Create a directory named 'path' if it does not already exist,
- * including parent directories if required.
+/* Check if directory exists or if mkdir param is set create a directory named
+ * 'path' if it does not already exist, including parent directories if
+ * required.
  *
  * Returns: 0 if path already exists as a directory or if created.
  *         -1 in all other cases.
  */
 static int
-mkdir_with_parents_if_needed(const char *path)
+find_or_create_dir(const char *path, bool mkdir_with_parents_if_needed)
 {
    char *p;
    const char *end;
@@ -164,7 +169,7 @@ mkdir_with_parents_if_needed(const char *path)
 
          *q = '\0';
 
-         if (mkdir_if_needed(p) == -1) {
+         if (find_or_mkdir_if_needed(p, mkdir_with_parents_if_needed) == -1) {
             free(p);
             return -1;
          }
@@ -178,22 +183,24 @@ mkdir_with_parents_if_needed(const char *path)
 }
 
 /* Concatenate an existing path and a new name to form a new path.  If the new
- * path does not exist as a directory, create it then return the resulting
- * name of the new path (ralloc'ed off of 'ctx').
+ * path does not exist as a directory, create it if the mkdir param is set
+ * then return the resulting name of the new path (ralloc'ed off of 'ctx').
  *
  * Returns NULL on any error, such as:
  *
  *      <path>/<name> exists but is not a directory
  *      <path>/<name> cannot be created as a directory
+ *      <path>/<name> does not exist and mkdir param is false
  */
 static char *
-concatenate_and_mkdir(void *ctx, const char *path, const char *name)
+concatenate_and_mkdir(void *ctx, const char *path, const char *name,
+                      bool mkdir)
 {
    char *new_path;
 
    new_path = ralloc_asprintf(ctx, "%s/%s", path, name);
 
-   if (mkdir_with_parents_if_needed(new_path) == 0)
+   if (find_or_create_dir(new_path, mkdir) == 0)
       return new_path;
 
    return NULL;
@@ -434,13 +441,13 @@ static void
 make_cache_file_directory(struct disk_cache *cache, const cache_key key)
 {
    char *dir;
-   char buf[41];
+   char buf[BLAKE3_HEX_LEN];
 
-   _mesa_sha1_format(buf, key);
+   _mesa_blake3_format(buf, key);
    if (asprintf(&dir, "%s/%c%c", cache->path, buf[0], buf[1]) == -1)
       return;
 
-   mkdir_with_parents_if_needed(dir);
+   find_or_create_dir(dir, true);
    free(dir);
 }
 
@@ -617,8 +624,7 @@ parse_and_validate_cache_item(struct disk_cache *cache, void *cache_item,
    return uncompressed_data;
 
  fail:
-   if (uncompressed_data)
-      free(uncompressed_data);
+   free(uncompressed_data);
 
    return NULL;
 }
@@ -657,10 +663,8 @@ disk_cache_load_item(struct disk_cache *cache, char *filename, size_t *size)
    return uncompressed_data;
 
  fail:
-   if (data)
-      free(data);
-   if (filename)
-      free(filename);
+   free(data);
+   free(filename);
    if (fd != -1)
       close(fd);
 
@@ -674,13 +678,13 @@ disk_cache_load_item(struct disk_cache *cache, char *filename, size_t *size)
 char *
 disk_cache_get_cache_filename(struct disk_cache *cache, const cache_key key)
 {
-   char buf[41];
+   char buf[BLAKE3_HEX_LEN];
    char *filename;
 
    if (cache->path_init_failed)
       return NULL;
 
-   _mesa_sha1_format(buf, key);
+   _mesa_blake3_format(buf, key);
    if (asprintf(&filename, "%s/%c%c/%s", cache->path, buf[0],
                 buf[1], buf + 2) == -1)
       return NULL;
@@ -873,26 +877,43 @@ disk_cache_write_item_to_disk(struct disk_cache_put_job *dc_job,
 
 /* Determine path for cache based on the first defined name as follows:
  *
- *   $MESA_SHADER_CACHE_DIR
- *   $XDG_CACHE_HOME/mesa_shader_cache
- *   $HOME/.cache/mesa_shader_cache
- *   <pwd.pw_dir>/.cache/mesa_shader_cache
+ *   $MESA_SHADER_CACHE_DIR/mesa_shader_cache*
+ *   $XDG_CACHE_HOME/mesa_shader_cache*
+ *   $HOME/.cache/mesa_shader_cache*
+ *   <pwd.pw_dir>/.cache/mesa_shader_cache*
+ *
+ * The directory 'mesa_shader_cache*' is named depending of cache type:
+ *  - For DISK_CACHE_MULTI_FILE: mesa_shader_cache
+ *  - For DISK_CACHE_SINGLE_FILE: mesa_shader_cache_sf
+ *  - For DISK_CACHE_DATABASE: mesa_shader_cache_db
+ *
+ * If the mkdir param is set we create the directory if it doesn't already
+ * exist, if it does not exist and the param is false NULL will be returned.
  */
-char *
+const char *
 disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
                               const char *driver_id,
-                              enum disk_cache_type cache_type)
+                              const char *cache_dir_name_custom,
+                              enum disk_cache_type cache_type,
+                              bool mkdir)
 {
-   char *cache_dir_name = CACHE_DIR_NAME;
-   if (cache_type == DISK_CACHE_SINGLE_FILE)
-      cache_dir_name = CACHE_DIR_NAME_SF;
-   else if (cache_type == DISK_CACHE_DATABASE)
-      cache_dir_name = CACHE_DIR_NAME_DB;
 
-   char *path = secure_getenv("MESA_SHADER_CACHE_DIR");
+   char *cache_dir_name;
+
+   if (cache_dir_name_custom) {
+      cache_dir_name = (char *)cache_dir_name_custom;
+   } else {
+      cache_dir_name = CACHE_DIR_NAME;
+      if (cache_type == DISK_CACHE_SINGLE_FILE)
+         cache_dir_name = CACHE_DIR_NAME_SF;
+      else if (cache_type == DISK_CACHE_DATABASE)
+         cache_dir_name = CACHE_DIR_NAME_DB;
+   }
+
+   const char *path = os_get_option_secure("MESA_SHADER_CACHE_DIR");
 
    if (!path) {
-      path = secure_getenv("MESA_GLSL_CACHE_DIR");
+      path = os_get_option_secure("MESA_GLSL_CACHE_DIR");
       if (path)
          fprintf(stderr,
                  "*** MESA_GLSL_CACHE_DIR is deprecated; "
@@ -900,30 +921,31 @@ disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
    }
 
    if (path) {
-      path = concatenate_and_mkdir(mem_ctx, path, cache_dir_name);
+      path = concatenate_and_mkdir(mem_ctx, path, cache_dir_name, mkdir);
       if (!path)
          return NULL;
    }
 
    if (path == NULL) {
-      char *xdg_cache_home = secure_getenv("XDG_CACHE_HOME");
+      const char *xdg_cache_home = os_get_option_secure("XDG_CACHE_HOME");
 
       if (xdg_cache_home) {
-         path = concatenate_and_mkdir(mem_ctx, xdg_cache_home, cache_dir_name);
+         path = concatenate_and_mkdir(mem_ctx, xdg_cache_home, cache_dir_name,
+                                      mkdir);
          if (!path)
             return NULL;
       }
    }
 
    if (!path) {
-      char *home = getenv("HOME");
+      const char *home = os_get_option("HOME");
 
       if (home) {
-         path = concatenate_and_mkdir(mem_ctx, home, ".cache");
+         path = concatenate_and_mkdir(mem_ctx, home, ".cache", mkdir);
          if (!path)
             return NULL;
 
-         path = concatenate_and_mkdir(mem_ctx, path, cache_dir_name);
+         path = concatenate_and_mkdir(mem_ctx, path, cache_dir_name, mkdir);
          if (!path)
             return NULL;
       }
@@ -955,21 +977,21 @@ disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
          }
       }
 
-      path = concatenate_and_mkdir(mem_ctx, pwd.pw_dir, ".cache");
+      path = concatenate_and_mkdir(mem_ctx, pwd.pw_dir, ".cache", mkdir);
       if (!path)
          return NULL;
 
-      path = concatenate_and_mkdir(mem_ctx, path, cache_dir_name);
+      path = concatenate_and_mkdir(mem_ctx, path, cache_dir_name, mkdir);
       if (!path)
          return NULL;
    }
 
    if (cache_type == DISK_CACHE_SINGLE_FILE) {
-      path = concatenate_and_mkdir(mem_ctx, path, driver_id);
+      path = concatenate_and_mkdir(mem_ctx, path, driver_id, mkdir);
       if (!path)
          return NULL;
 
-      path = concatenate_and_mkdir(mem_ctx, path, gpu_name);
+      path = concatenate_and_mkdir(mem_ctx, path, gpu_name, mkdir);
       if (!path)
          return NULL;
    }
@@ -980,32 +1002,38 @@ disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
 bool
 disk_cache_enabled()
 {
-   /* Disk cache is not enabled for android, but android's EGL layer
-    * uses EGL_ANDROID_blob_cache to manage the cache itself:
-    */
-   if (DETECT_OS_ANDROID)
-      return false;
-
    /* If running as a users other than the real user disable cache */
    if (!__normal_user())
       return false;
 
-   /* At user request, disable shader cache entirely. */
-#ifdef SHADER_CACHE_DISABLE_BY_DEFAULT
+   /* At user request, disable shader cache entirely.
+    * Disk cache is not enabled by default for android, for most
+    * applications the EGL layer uses EGL_ANDROID_blob_cache to manage
+    * the cache itself, however those that wish to use the cache directly
+    * can set `mesa.shader.cache.disable=false` property.
+    * Don't forget to also set the shader cache path to something readable
+    * and writable by the application via `mesa.shader.cache.dir`.
+    */
+#if defined(SHADER_CACHE_DISABLE_BY_DEFAULT) || DETECT_OS_ANDROID
    bool disable_by_default = true;
 #else
    bool disable_by_default = false;
 #endif
    char *envvar_name = "MESA_SHADER_CACHE_DISABLE";
-   if (!getenv(envvar_name)) {
+#if !DETECT_OS_ANDROID
+   if (!os_get_option(envvar_name)) {
       envvar_name = "MESA_GLSL_CACHE_DISABLE";
-      if (getenv(envvar_name))
+      if (os_get_option(envvar_name))
          fprintf(stderr,
                  "*** MESA_GLSL_CACHE_DISABLE is deprecated; "
                  "use MESA_SHADER_CACHE_DISABLE instead ***\n");
    }
+#endif
 
-   if (debug_get_bool_option(envvar_name, disable_by_default))
+   if (debug_get_bool_option(envvar_name, disable_by_default) ||
+       /* MESA_GLSL_DISABLE_IO_OPT must disable the cache to get expected
+        * results because it only takes effect on a cache miss. */
+       debug_get_bool_option("MESA_GLSL_DISABLE_IO_OPT", false))
       return false;
 
    return true;
@@ -1055,7 +1083,7 @@ void
 disk_cache_touch_cache_user_marker(char *path)
 {
    char *marker_path = NULL;
-   asprintf(&marker_path, "%s/marker", path);
+   UNUSED int _unused = asprintf(&marker_path, "%s/marker", path);
    if (!marker_path)
       return;
 
@@ -1074,13 +1102,12 @@ disk_cache_touch_cache_user_marker(char *path)
 }
 
 bool
-disk_cache_mmap_cache_index(void *mem_ctx, struct disk_cache *cache,
-                            char *path)
+disk_cache_mmap_cache_index(void *mem_ctx, struct disk_cache *cache)
 {
    int fd = -1;
    bool mapped = false;
 
-   path = ralloc_asprintf(mem_ctx, "%s/index", cache->path);
+   char *path = ralloc_asprintf(mem_ctx, "%s/index", cache->path);
    if (path == NULL)
       goto path_fail;
 
@@ -1099,8 +1126,15 @@ disk_cache_mmap_cache_index(void *mem_ctx, struct disk_cache *cache,
       /* posix_fallocate() ensures disk space is allocated otherwise it
        * fails if there is not enough space on the disk.
        */
-      if (posix_fallocate(fd, 0, size) != 0)
-         goto path_fail;
+      int ret = posix_fallocate(fd, 0, size);
+      if (ret != 0) {
+         if (ret == EOPNOTSUPP) {
+            if (ftruncate(fd, size) == -1)
+               goto path_fail;
+         } else {
+            goto path_fail;
+         }
+      }
 #else
       /* ftruncate() allocates disk space lazily. If the disk is full
        * and it is unable to allocate disk space when accessed via
@@ -1203,7 +1237,7 @@ delete_dir(const char* path)
       if (strcmp(p->d_name, ".") == 0 || strcmp(p->d_name, "..") == 0)
          continue;
 
-      asprintf(&entry_path, "%s/%s", path, p->d_name);
+      UNUSED int _unused = asprintf(&entry_path, "%s/%s", path, p->d_name);
       if (!entry_path)
          continue;
 
@@ -1228,7 +1262,8 @@ void
 disk_cache_delete_old_cache(void)
 {
    void *ctx = ralloc_context(NULL);
-   char *dirname = disk_cache_generate_cache_dir(ctx, NULL, NULL, DISK_CACHE_MULTI_FILE);
+   const char *dirname = disk_cache_generate_cache_dir(ctx, NULL, NULL, NULL,
+                                                       DISK_CACHE_MULTI_FILE, false);
    if (!dirname)
       goto finish;
 

@@ -119,7 +119,8 @@ driCreateContextAttribs(struct dri_screen *psp, int api,
                         unsigned num_attribs,
                         const uint32_t *attribs,
                         unsigned *error,
-                        void *data);
+                        void *data,
+                        bool thread_safe);
 
 extern uint32_t
 driImageFormatToSizedInternalGLFormat(uint32_t image_format);
@@ -128,7 +129,6 @@ driGetAPIMask(struct dri_screen *screen);
 PUBLIC struct dri_drawable *
 dri_create_drawable(struct dri_screen *psp, const struct dri_config *config,
                     bool isPixmap, void *loaderPrivate);
-extern const __DRIimageDriverExtension driImageDriverExtension;
 PUBLIC void driDestroyScreen(struct dri_screen *psp);
 PUBLIC int
 driGetConfigAttrib(const struct dri_config *config, unsigned int attrib, unsigned int *value);
@@ -141,7 +141,8 @@ driSwapBuffers(struct dri_drawable *drawable);
 PUBLIC void
 driSwapBuffersWithDamage(struct dri_drawable *drawable, int nrects, const int *rects);
 PUBLIC struct dri_context *
-driCreateNewContext(struct dri_screen *screen, const struct dri_config *config, struct dri_context *shared, void *data);
+driCreateNewContext(struct dri_screen *screen, const struct dri_config *config,
+                    struct dri_context *shared, void *data, bool thread_safe);
 PUBLIC int
 driCopyContext(struct dri_context *dest, struct dri_context *src, unsigned long mask);
 PUBLIC void
@@ -163,9 +164,15 @@ PUBLIC void
 kopperSetSwapInterval(struct dri_drawable *drawable, int interval);
 PUBLIC int
 kopperQueryBufferAge(struct dri_drawable *drawable);
+PUBLIC void
+kopperQuerySurfaceSize(struct dri_drawable *drawable, int *width, int *height);
 
 PUBLIC void
 driswCopySubBuffer(struct dri_drawable *drawable, int x, int y, int w, int h);
+
+PUBLIC int
+kopperGetSyncValues(struct dri_drawable *drawable, int64_t target_msc, int64_t divisor,
+                    int64_t remainder, int64_t *ust, int64_t *msc, int64_t *sbc);
 
 PUBLIC void
 dri_set_tex_buffer2(struct dri_context *ctx, GLint target,
@@ -245,10 +252,6 @@ dri2_dup_image(struct dri_image *image, void *loaderPrivate);
 PUBLIC GLboolean
 dri2_validate_usage(struct dri_image *image, unsigned int use);
 PUBLIC struct dri_image *
-dri2_from_names(struct dri_screen *screen, int width, int height, int fourcc,
-                int *names, int num_names, int *strides, int *offsets,
-                void *loaderPrivate);
-PUBLIC struct dri_image *
 dri2_from_planar(struct dri_image *image, int plane, void *loaderPrivate);
 PUBLIC struct dri_image *
 dri2_from_dma_bufs(struct dri_screen *screen,
@@ -267,8 +270,6 @@ dri2_blit_image(struct dri_context *ctx, struct dri_image *dst, struct dri_image
                 int dstx0, int dsty0, int dstwidth, int dstheight,
                 int srcx0, int srcy0, int srcwidth, int srcheight,
                 int flush_flag);
-PUBLIC int
-dri2_get_capabilities(struct dri_screen *_screen);
 PUBLIC void *
 dri2_map_image(struct dri_context *ctx, struct dri_image *image,
                int x0, int y0, int width, int height,
@@ -337,6 +338,12 @@ dri_set_blob_cache_funcs(struct dri_screen *screen, __DRIblobCacheSet set,
 
 PUBLIC struct pipe_screen *
 dri_get_pipe_screen(struct dri_screen *driScreen);
-PUBLIC int
-dri_get_screen_param(struct dri_screen *driScreen, enum pipe_cap param);
+
+PUBLIC char*
+driGetDriInfoXML(const char* driverName);
+
+PUBLIC bool
+dri_get_drm_device_info(const char *device_name, uint8_t *device_uuid, uint8_t *driver_uuid,
+                        char **vendor_name, char **renderer_name, char **driver_name);
+
 #endif /* _DRI_UTIL_H_ */

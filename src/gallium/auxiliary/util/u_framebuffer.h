@@ -69,6 +69,11 @@ util_sample_locations_flip_y(struct pipe_screen *screen, unsigned fb_height,
                              unsigned samples, uint8_t *locations);
 
 
+/* if you see this in your driver stop using it */
+#define PIPE_FB_SURFACES \
+   struct pipe_surface *fb_cbufs[PIPE_MAX_COLOR_BUFS]; \
+   struct pipe_surface *fb_zsbuf
+
 #ifdef __cplusplus
 }
 #endif

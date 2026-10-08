@@ -1,24 +1,6 @@
 /*
  * Copyright © 2011 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 /**
@@ -465,9 +447,7 @@ vec4_visitor::opt_copy_propagation(bool do_constant_prop)
    const int attributes_per_reg =
       prog_data->dispatch_mode == INTEL_DISPATCH_MODE_4X2_DUAL_OBJECT ? 1 : 2;
    bool progress = false;
-   struct copy_entry entries[alloc.total_size];
-
-   memset(&entries, 0, sizeof(entries));
+   struct copy_entry *entries = rzalloc_array(NULL, copy_entry, alloc.total_size);
 
    foreach_block_and_inst(block, vec4_instruction, inst, cfg) {
       /* This pass only works on basic blocks.  If there's flow
@@ -478,7 +458,7 @@ vec4_visitor::opt_copy_propagation(bool do_constant_prop)
        * src/glsl/opt_copy_propagation.cpp to track available copies.
        */
       if (!is_dominated_by_previous_instruction(inst)) {
-	 memset(&entries, 0, sizeof(entries));
+	 memset(entries, 0, sizeof(copy_entry) * alloc.total_size);
 	 continue;
       }
 
@@ -532,7 +512,7 @@ vec4_visitor::opt_copy_propagation(bool do_constant_prop)
 	  * our destination's updated channels, as the two are no longer equal.
 	  */
 	 if (inst->dst.reladdr)
-	    memset(&entries, 0, sizeof(entries));
+	    memset(entries, 0, sizeof(copy_entry) * alloc.total_size);
 	 else {
 	    for (unsigned i = 0; i < alloc.total_size; i++) {
 	       for (int j = 0; j < 4; j++) {
@@ -545,6 +525,8 @@ vec4_visitor::opt_copy_propagation(bool do_constant_prop)
 	 }
       }
    }
+
+   ralloc_free(entries);
 
    if (progress)
       invalidate_analysis(DEPENDENCY_INSTRUCTION_DATA_FLOW |

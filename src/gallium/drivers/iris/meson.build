@@ -37,6 +37,7 @@ files_libiris = files(
   'iris_measure.c',
   'iris_measure.h',
   'iris_monitor.c',
+  'iris_nir_analyze_ubo_ranges.c',
   'iris_perf.h',
   'iris_perf.c',
   'iris_performance_query.c',
@@ -54,12 +55,17 @@ files_libiris = files(
 )
 
 iris_per_hw_ver_libs = []
-foreach v : ['80', '90', '110', '120', '125', '200', '300']
+foreach v : ['80', '90', '110', '120', '125', '200', '300', '350']
+  if v == '80' and not with_intel_elk
+    continue
+  endif
+
   iris_per_hw_ver_libs += static_library(
     'iris_per_hw_ver@0@'.format(v),
     ['iris_blorp.c', 'iris_query.c', 'iris_state.c', 'iris_indirect_gen.c', gen_xml_pack],
-    include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux, inc_intel],
+    include_directories : [inc_include, inc_src, inc_mesa, inc_gallium, inc_gallium_aux, inc_intel],
     c_args : [
+      intel_common_args,
       no_override_init_args, sse2_args,
       '-DGFX_VERx10=@0@'.format(v),
     ],
@@ -72,22 +78,22 @@ endforeach
 
 libiris = static_library(
   'iris',
-  [files_libiris, gen_xml_pack],
+  [files_libiris, gen_xml_pack, sha1_h],
   include_directories : [
     inc_src, inc_include, inc_gallium, inc_gallium_aux, inc_intel,
     inc_gallium_drivers,
     # these should not be necessary, but main/macros.h...
-    inc_mesa, inc_mapi
+    inc_mesa
   ],
-  c_args : [sse2_args],
-  cpp_args : [sse2_args],
+  c_args : [intel_common_args, sse2_args],
+  cpp_args : [intel_common_args, sse2_args],
   gnu_symbol_visibility : 'hidden',
   dependencies : [dep_libdrm, dep_valgrind, idep_genxml, idep_nir_headers,
                   idep_libintel_common, idep_intel_driver_ds, idep_intel_dev,
                   idep_intel_blorp_elk, idep_intel_decoder_elk,
                   idep_intel_blorp, idep_intel_decoder_brw,
                   idep_intel_compiler_elk, idep_intel_compiler_brw,
-                  idep_mesautil],
+                  idep_intel_compiler_jay, idep_mesautil],
   link_with : [
     iris_per_hw_ver_libs, libisl,
     libintel_perf

@@ -1,5 +1,26 @@
-// Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
-
+/* Copyright 2024 Advanced Micro Devices, Inc.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE COPYRIGHT HOLDER(S) OR AUTHOR(S) BE LIABLE FOR ANY CLAIM, DAMAGES OR
+ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
+ *
+ * Authors: AMD
+ *
+ */
 #include "vpe_priv.h"
 #include "reg_helper.h"
 #include "vpe10/inc/vpe10_cm_common.h"
@@ -111,21 +132,21 @@ static void vpe10_dpp_program_gammcor_lut(
             REG_OFFSET(VPCM_GAMCOR_LUT_DATA), REG_FIELD_SHIFT(VPCM_GAMCOR_LUT_DATA),
             REG_FIELD_MASK(VPCM_GAMCOR_LUT_DATA), CM_PWL_R);
     } else {
-        REG_UPDATE(VPCM_GAMCOR_LUT_CONTROL, VPCM_GAMCOR_LUT_WRITE_COLOR_MASK, 4);
+        REG_SET(VPCM_GAMCOR_LUT_CONTROL, 0, VPCM_GAMCOR_LUT_WRITE_COLOR_MASK, 4);
 
         vpe10_cm_helper_program_pwl(config_writer, rgb, last_base_value_red, num,
             REG_OFFSET(VPCM_GAMCOR_LUT_DATA), REG_FIELD_SHIFT(VPCM_GAMCOR_LUT_DATA),
             REG_FIELD_MASK(VPCM_GAMCOR_LUT_DATA), CM_PWL_R);
 
         REG_SET(VPCM_GAMCOR_LUT_INDEX, 0, VPCM_GAMCOR_LUT_INDEX, 0);
-        REG_UPDATE(VPCM_GAMCOR_LUT_CONTROL, VPCM_GAMCOR_LUT_WRITE_COLOR_MASK, 2);
+        REG_SET(VPCM_GAMCOR_LUT_CONTROL, 0, VPCM_GAMCOR_LUT_WRITE_COLOR_MASK, 2);
 
         vpe10_cm_helper_program_pwl(config_writer, rgb, last_base_value_green, num,
             REG_OFFSET(VPCM_GAMCOR_LUT_DATA), REG_FIELD_SHIFT(VPCM_GAMCOR_LUT_DATA),
             REG_FIELD_MASK(VPCM_GAMCOR_LUT_DATA), CM_PWL_G);
 
         REG_SET(VPCM_GAMCOR_LUT_INDEX, 0, VPCM_GAMCOR_LUT_INDEX, 0);
-        REG_UPDATE(VPCM_GAMCOR_LUT_CONTROL, VPCM_GAMCOR_LUT_WRITE_COLOR_MASK, 1);
+        REG_SET(VPCM_GAMCOR_LUT_CONTROL, 0, VPCM_GAMCOR_LUT_WRITE_COLOR_MASK, 1);
 
         vpe10_cm_helper_program_pwl(config_writer, rgb, last_base_value_blue, num,
             REG_OFFSET(VPCM_GAMCOR_LUT_DATA), REG_FIELD_SHIFT(VPCM_GAMCOR_LUT_DATA),

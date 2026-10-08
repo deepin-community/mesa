@@ -1,5 +1,14 @@
 {
 	global:
+                # shared-glapi exported from libgallium:
+                _mesa_glapi_get_dispatch_table_size;
+                _mesa_glapi_get_proc_address;
+                _mesa_glapi_get_proc_offset;
+                _mesa_glapi_set_context;
+                _mesa_glapi_set_dispatch;
+                _mesa_glapi_tls_Context;
+                _mesa_glapi_tls_Dispatch;
+
 		ddebug_screen_create;
 		noop_screen_create;
 		util_run_tests;
@@ -38,11 +47,9 @@
 		dri2_query_image;
 		dri2_dup_image;
 		dri2_validate_usage;
-		dri2_from_names;
 		dri2_from_planar;
 		dri2_from_dma_bufs;
 		dri2_blit_image;
-		dri2_get_capabilities;
 		dri2_map_image;
 		dri2_unmap_image;
 		dri_query_dma_buf_formats;
@@ -61,7 +68,7 @@
 		dri_server_wait_sync;
 		dri_set_blob_cache_funcs;
 		dri_get_pipe_screen;
-		dri_get_screen_param;
+		dri_get_drm_device_info;
 		dri3*;
 		loader_dri3*;
 		dri_create_drawable;
@@ -71,7 +78,6 @@
 		@fd_drm_screen_create_renderonly@
 		@ac_init_shared_llvm_once@
 		@va_driver_init@
-		@vdp_imp_device_create_x11@
 	local:
 		*;
 };

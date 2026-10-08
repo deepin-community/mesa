@@ -10,7 +10,7 @@
 #define AMDGPU_BO_H
 
 #include "amdgpu_winsys.h"
-#include "pipebuffer/pb_slab.h"
+#include "util/pb_slab.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -87,8 +87,15 @@ struct amdgpu_winsys_bo {
 struct amdgpu_bo_real {
    struct amdgpu_winsys_bo b;
 
-   amdgpu_bo_handle bo_handle;
-   amdgpu_va_handle va_handle;
+   ac_drm_bo bo;
+   union {
+      uint64_t svm; /* used when RADEON_FLAG_NO_VMA is set */
+      amdgpu_va_handle handle;
+   } va;
+
+   /* Timeline point of latest VM ioctl completion. Only used in userqueue. */
+   uint64_t vm_timeline_point;
+
    void *cpu_ptr; /* for user_ptr and permanent maps */
    int map_count;
    uint32_t kms_handle;
@@ -106,6 +113,7 @@ struct amdgpu_bo_real {
 
    /* Whether this is a slab buffer and alt_fence was set on one of the slab entries. */
    bool slab_has_busy_alt_fences;
+   bool vm_always_valid;
 };
 
 /* Same as amdgpu_bo_real except this BO isn't destroyed when its reference count drops to 0.
@@ -122,6 +130,8 @@ struct amdgpu_bo_real_reusable {
 struct amdgpu_bo_sparse {
    struct amdgpu_winsys_bo b;
    amdgpu_va_handle va_handle;
+   /* Only used in case of userqueue. Will hold the latest point including for backing bo. */
+   uint64_t vm_timeline_point;
 
    uint32_t num_va_pages;
    uint32_t num_backing_pages;
@@ -190,10 +200,18 @@ static inline struct amdgpu_bo_real *get_slab_entry_real_bo(struct amdgpu_winsys
    return &get_bo_from_slab(((struct amdgpu_bo_slab_entry*)bo)->entry.slab)->b.b;
 }
 
-static struct amdgpu_bo_real_reusable_slab *get_real_bo_reusable_slab(struct amdgpu_winsys_bo *bo)
+static inline struct amdgpu_bo_real_reusable_slab *get_real_bo_reusable_slab(struct amdgpu_winsys_bo *bo)
 {
    assert(bo->type == AMDGPU_BO_REAL_REUSABLE_SLAB);
    return (struct amdgpu_bo_real_reusable_slab*)bo;
+}
+
+static inline uint64_t amdgpu_bo_real_vm_address(struct amdgpu_bo_real *bo)
+{
+   if (bo->b.base.usage & RADEON_FLAG_NO_VMA)
+      return bo->va.svm;
+   else
+      return amdgpu_va_get_start_addr(bo->va.handle);
 }
 
 /* Given a sequence number "fences->seq_no[queue_index]", return a pointer to a non-NULL fence
@@ -204,7 +222,7 @@ static struct amdgpu_bo_real_reusable_slab *get_real_bo_reusable_slab(struct amd
  */
 static inline struct pipe_fence_handle **
 get_fence_from_ring(struct amdgpu_winsys *aws, struct amdgpu_seq_no_fences *fences,
-                    unsigned queue_index)
+                    enum amdgpu_queue_index queue_index)
 {
    /* The caller should check if the BO has a fence. */
    assert(queue_index < AMDGPU_MAX_QUEUES);
@@ -229,7 +247,8 @@ get_fence_from_ring(struct amdgpu_winsys *aws, struct amdgpu_seq_no_fences *fenc
    return NULL;
 }
 
-static inline uint_seq_no pick_latest_seq_no(struct amdgpu_winsys *aws, unsigned queue_index,
+static inline uint_seq_no pick_latest_seq_no(struct amdgpu_winsys *aws,
+                                             enum amdgpu_queue_index queue_index,
                                              uint_seq_no n1, uint_seq_no n2)
 {
    uint_seq_no latest = aws->queues[queue_index].latest_seq_no;
@@ -245,7 +264,7 @@ static inline uint_seq_no pick_latest_seq_no(struct amdgpu_winsys *aws, unsigned
 }
 
 static inline void add_seq_no_to_list(struct amdgpu_winsys *aws, struct amdgpu_seq_no_fences *fences,
-                                      unsigned queue_index, uint_seq_no seq_no)
+                                      enum amdgpu_queue_index queue_index, uint_seq_no seq_no)
 {
    if (fences->valid_fence_mask & BITFIELD_BIT(queue_index)) {
       fences->seq_no[queue_index] = pick_latest_seq_no(aws, queue_index, seq_no,

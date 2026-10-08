@@ -26,8 +26,9 @@
 
 #include <stdbool.h>
 
-#include "nir.h"
+#include "nir_defines.h"
 #include "util/glheader.h"
+#include "util/set.h"
 #include "main/menums.h"
 
 #ifdef __cplusplus
@@ -45,6 +46,7 @@ struct gl_program;
 struct gl_transform_feedback_info;
 struct xfb_decl;
 struct nir_xfb_info;
+struct pipe_screen;
 
 struct gl_nir_linker_options {
    bool fill_parameters;
@@ -61,7 +63,8 @@ void gl_nir_opts(nir_shader *nir);
 void gl_nir_detect_recursion_linked(struct gl_shader_program *prog,
                                     nir_shader *shader);
 
-bool gl_nir_link_spirv(const struct gl_constants *consts,
+bool gl_nir_link_spirv(const struct pipe_screen *screen,
+                       const struct gl_constants *consts,
                        const struct gl_extensions *exts,
                        struct gl_shader_program *prog,
                        const struct gl_nir_linker_options *options);
@@ -79,7 +82,8 @@ bool gl_nir_link_uniforms(const struct gl_constants *consts,
                           struct gl_shader_program *prog,
                           bool fill_parameters);
 
-bool gl_nir_link_varyings(const struct gl_constants *consts,
+bool gl_nir_link_varyings(const struct pipe_screen *screen,
+                          const struct gl_constants *consts,
                           const struct gl_extensions *exts,
                           gl_api api, struct gl_shader_program *prog);
 
@@ -99,14 +103,6 @@ gl_to_nir_xfb_info(struct gl_transform_feedback_info *info, void *mem_ctx);
 nir_variable * gl_nir_lower_xfb_varying(nir_shader *shader,
                                         const char *old_var_name,
                                         nir_variable *toplevel_var);
-
-void gl_nir_opt_dead_builtin_varyings(const struct gl_constants *consts,
-                                      gl_api api,
-                                      struct gl_shader_program *prog,
-                                      struct gl_linked_shader *producer,
-                                      struct gl_linked_shader *consumer,
-                                      unsigned num_tfeedback_decls,
-                                      struct xfb_decl *tfeedback_decls);
 
 void gl_nir_set_uniform_initializers(const struct gl_constants *consts,
                                      struct gl_shader_program *prog);

@@ -1,23 +1,5 @@
 # Copyright © 2021 Collabora, Ltd.
-# Author: Antonio Caggiano <antonio.caggiano@collabora.com>
-
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-# THE SOFTWARE.
+# SPDX-License-Identifier: MIT
 
 import argparse
 import textwrap
@@ -107,25 +89,7 @@ def main():
        *
        * Copyright © 2021 Arm Limited
        * Copyright © 2021 Collabora Ltd.
-       *
-       * Permission is hereby granted, free of charge, to any person obtaining a
-       * copy of this software and associated documentation files (the "Software"),
-       * to deal in the Software without restriction, including without limitation
-       * the rights to use, copy, modify, merge, publish, distribute, sublicense,
-       * and/or sell copies of the Software, and to permit persons to whom the
-       * Software is furnished to do so, subject to the following conditions:
-       *
-       * The above copyright notice and this permission notice (including the next
-       * paragraph) shall be included in all copies or substantial portions of the
-       * Software.
-       *
-       * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-       * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-       * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
-       * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-       * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-       * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-       * DEALINGS IN THE SOFTWARE.
+       * SPDX-License-Identifier: MIT
        */
 
       """).format(os.path.basename(__file__))
@@ -166,8 +130,8 @@ def main():
       c.write("}\n")
 
 
-      current_struct_name = "panfrost_perf_config_%s" % prod.id
-      c.write("\nconst struct panfrost_perf_config %s = {" % current_struct_name)
+      current_struct_name = "pan_perf_config_%s" % prod.id
+      c.write("\nconst struct pan_perf_config %s = {" % current_struct_name)
       c.indent(tab_size)
 
       c.write(".name = \"%s\"," % prod.name)
@@ -219,12 +183,12 @@ def main():
       c.outdent(tab_size)
       c.write("}; // %s\n" % current_struct_name)
 
-   h.write("extern const struct panfrost_perf_config * panfrost_perf_configs[%u];\n" % len(prods))
+   h.write("extern const struct pan_perf_config * pan_perf_configs[%u];\n" % len(prods))
 
-   c.write("\nconst struct panfrost_perf_config * panfrost_perf_configs[] = {")
+   c.write("\nconst struct pan_perf_config * pan_perf_configs[] = {")
    c.indent(tab_size)
    for prod in prods:
-       c.write("&panfrost_perf_config_%s," % prod.id)
+       c.write("&pan_perf_config_%s," % prod.id)
    c.outdent(tab_size)
    c.write("};")
 

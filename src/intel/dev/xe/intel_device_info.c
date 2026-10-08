@@ -73,6 +73,12 @@ xe_query_config(int fd, struct intel_device_info *devinfo)
 
    if (config->info[DRM_XE_QUERY_CONFIG_FLAGS] & DRM_XE_QUERY_CONFIG_FLAG_HAS_VRAM)
       devinfo->has_local_mem = true;
+   if (config->info[DRM_XE_QUERY_CONFIG_FLAGS] & DRM_XE_QUERY_CONFIG_FLAG_HAS_LOW_LATENCY)
+      devinfo->supports_low_latency_hint = true;
+   if (config->info[DRM_XE_QUERY_CONFIG_FLAGS] & DRM_XE_QUERY_CONFIG_FLAG_HAS_NO_COMPRESSION_HINT)
+      devinfo->xe2_has_no_compression_hint = true;
+   if (config->info[DRM_XE_QUERY_CONFIG_FLAGS] & DRM_XE_QUERY_CONFIG_FLAG_HAS_DISABLE_STATE_CACHE_PERF_FIX)
+      devinfo->xe_has_state_cache_perf_fix = true;
 
    if (!has_gmd_ip_version(devinfo))
       devinfo->revision = (config->info[DRM_XE_QUERY_CONFIG_REV_AND_DEVICE_ID] >> 16) & 0xFFFF;
@@ -186,7 +192,7 @@ static void
 xe_compute_topology(struct intel_device_info * devinfo,
                     const uint8_t *geo_dss_mask,
                     const uint32_t geo_dss_num_bytes,
-                    const uint32_t *eu_per_dss_mask,
+                    const uint64_t eu_per_dss_mask,
                     const unsigned l3_banks)
 {
    intel_device_info_topology_reset_masks(devinfo);
@@ -194,27 +200,31 @@ xe_compute_topology(struct intel_device_info * devinfo,
     * RKL/ADL-S: 1 slice x 2 dual sub slices
     * DG2: 8 slices x 4 dual sub slices
     */
-   if (devinfo->verx10 >= 125) {
+   if (devinfo->verx10 >= 300) {
+      /* was set by hwconfig */
+   } else if (devinfo->verx10 >= 125) {
       devinfo->max_slices = 8;
       devinfo->max_subslices_per_slice = 4;
    } else {
       devinfo->max_slices = 1;
       devinfo->max_subslices_per_slice = 6;
    }
-   devinfo->max_eus_per_subslice = __builtin_popcount(*eu_per_dss_mask);
+   devinfo->max_eus_per_subslice = __builtin_popcount(eu_per_dss_mask);
    devinfo->subslice_slice_stride = DIV_ROUND_UP(devinfo->max_slices, 8);
    devinfo->eu_slice_stride = DIV_ROUND_UP(devinfo->max_eus_per_subslice * devinfo->max_subslices_per_slice, 8);
    devinfo->eu_subslice_stride = DIV_ROUND_UP(devinfo->max_eus_per_subslice, 8);
 
    assert((sizeof(uint32_t) * 8) >= devinfo->max_subslices_per_slice);
    assert((sizeof(uint32_t) * 8) >= devinfo->max_eus_per_subslice);
+   assert(INTEL_DEVICE_MAX_SLICES >= devinfo->max_slices);
+   assert(INTEL_DEVICE_MAX_SUBSLICES >= devinfo->max_subslices_per_slice);
 
    const uint32_t dss_mask_in_slice = (1u << devinfo->max_subslices_per_slice) - 1;
    struct slice {
       uint32_t dss_mask;
       struct {
          bool enabled;
-         uint32_t eu_mask;
+         uint64_t eu_mask;
       } dual_subslice[INTEL_DEVICE_MAX_SUBSLICES];
    } slices[INTEL_DEVICE_MAX_SLICES] = {};
 
@@ -236,7 +246,7 @@ xe_compute_topology(struct intel_device_info * devinfo,
          for (uint32_t dss = 0; dss < devinfo->max_subslices_per_slice; dss++) {
             if ((1u << dss) & slices[s].dss_mask) {
                slices[s].dual_subslice[dss].enabled = true;
-               slices[s].dual_subslice[dss].eu_mask = *eu_per_dss_mask;
+               slices[s].dual_subslice[dss].eu_mask = eu_per_dss_mask;
             }
          }
       }
@@ -257,7 +267,7 @@ xe_compute_topology(struct intel_device_info * devinfo,
                                  ss / 8] |= (1u << (ss % 8));
 
          for (unsigned eu = 0; eu < devinfo->max_eus_per_subslice; eu++) {
-            if (!(slices[s].dual_subslice[ss].eu_mask & (1u << eu)))
+            if (!(slices[s].dual_subslice[ss].eu_mask & (1ULL << eu)))
                continue;
 
             devinfo->eu_masks[s * devinfo->eu_slice_stride +
@@ -285,7 +295,8 @@ xe_query_topology(int fd, struct intel_device_info *devinfo)
    if (!topology)
       return false;
 
-   uint32_t geo_dss_num_bytes = 0, *eu_per_dss_mask = NULL;
+   uint64_t eu_per_dss_mask = 0;
+   uint32_t geo_dss_num_bytes = 0;
    uint8_t *geo_dss_mask = NULL, *tmp;
    unsigned l3_banks = 0;
    const struct drm_xe_query_topology_mask *head = topology;
@@ -306,7 +317,9 @@ xe_query_topology(int fd, struct intel_device_info *devinfo)
             break;
          case DRM_XE_TOPO_EU_PER_DSS:
          case DRM_XE_TOPO_SIMD16_EU_PER_DSS:
-            eu_per_dss_mask = (uint32_t *)topology->mask;
+            assert(topology->num_bytes <= sizeof(eu_per_dss_mask));
+            for (int i = 0; i < topology->num_bytes; i++)
+               eu_per_dss_mask |= ((uint64_t)topology->mask[i]) << (8 * i);
             break;
          }
       }
@@ -340,16 +353,19 @@ intel_device_info_xe_get_info_from_fd(int fd, struct intel_device_info *devinfo)
    if (!xe_query_gts(fd, devinfo))
       return false;
 
+   if (!xe_query_process_hwconfig(fd, devinfo))
+      return false;
+
+   /* xe_compute_topology() depends on information provided by hwconfig */
    if (!xe_query_topology(fd, devinfo))
          return false;
 
-   if (xe_query_process_hwconfig(fd, devinfo))
-      intel_device_info_update_after_hwconfig(devinfo);
-
    devinfo->has_context_isolation = true;
    devinfo->has_mmap_offset = true;
+   devinfo->has_partial_mmap_offset = true;
    devinfo->has_caching_uapi = false;
    devinfo->has_set_pat_uapi = true;
+   devinfo->has_userptr_uapi = true;
 
    return true;
 }

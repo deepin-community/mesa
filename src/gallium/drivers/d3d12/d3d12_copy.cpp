@@ -22,7 +22,6 @@
  */
 
 #include "d3d12_context.h"
-#include "d3d12_compiler.h"
 #include "d3d12_debug.h"
 #include "d3d12_format.h"
 #include "d3d12_query.h"
@@ -31,9 +30,6 @@
 
 #include "util/u_blitter.h"
 #include "util/format/u_format.h"
-
-#include "nir_to_dxil.h"
-#include "nir_builder.h"
 
 static void
 copy_buffer_region_no_barriers(struct d3d12_context *ctx,
@@ -50,6 +46,7 @@ copy_buffer_region_no_barriers(struct d3d12_context *ctx,
    ctx->cmdlist->CopyBufferRegion(dst_buf, dst_offset + dst_off,
                                   src_buf, src_offset + src_off,
                                   size);
+   ctx->has_commands = true;
 }
 
 inline static unsigned
@@ -137,6 +134,7 @@ copy_subregion_no_barriers(struct d3d12_context *ctx,
 
          ctx->cmdlist->CopyTextureRegion(&dst_loc, dstx, dsty, dstz,
                                          &src_loc, NULL);
+         ctx->has_commands = true;
 
       } else {
          D3D12_BOX src_box;
@@ -155,6 +153,7 @@ copy_subregion_no_barriers(struct d3d12_context *ctx,
 
          ctx->cmdlist->CopyTextureRegion(&dst_loc, dstx, dsty, dstz,
                                          &src_loc, &src_box);
+         ctx->has_commands = true;
       }
    }
 }
@@ -270,7 +269,7 @@ create_staging_resource(struct d3d12_context *ctx,
 
    templ.format = src->base.b.format;
    templ.width0 = copy_src.width;
-   templ.height0 = copy_src.height;
+   templ.height0 = static_cast<uint16_t>(copy_src.height);
    templ.depth0 = copy_src.depth;
    templ.array_size = 1;
    templ.nr_samples = src->base.b.nr_samples;
@@ -346,7 +345,7 @@ d3d12_resource_copy_region(struct pipe_context *pctx,
 
    dst_box.x = dstx;
    dst_box.y = dsty;
-   dst_box.z = dstz;
+   dst_box.z = static_cast<int16_t>(dstz);
    dst_box.width = psrc_box->width;
    dst_box.height = psrc_box->height;
 

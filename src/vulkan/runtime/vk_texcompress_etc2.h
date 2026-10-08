@@ -59,11 +59,12 @@ struct vk_texcompress_etc2_state {
    VkDescriptorSetLayout ds_layout;
    VkPipelineLayout pipeline_layout;
    VkPipeline pipeline;
+   VkPipeline indirect_pipeline;
 };
 
 void vk_texcompress_etc2_init(struct vk_device *device, struct vk_texcompress_etc2_state *etc2);
 
-VkResult vk_texcompress_etc2_late_init(struct vk_device *device, struct vk_texcompress_etc2_state *etc2);
+VkResult vk_texcompress_etc2_late_init(struct vk_device *device, bool indirect, struct vk_texcompress_etc2_state *etc2);
 
 void vk_texcompress_etc2_finish(struct vk_device *device, struct vk_texcompress_etc2_state *etc2);
 
@@ -76,7 +77,7 @@ vk_texcompress_etc2_image_view_type(VkImageType image_type)
    case VK_IMAGE_TYPE_3D:
       return VK_IMAGE_VIEW_TYPE_3D;
    default:
-      unreachable("bad image type");
+      UNREACHABLE("bad image type");
    }
 }
 

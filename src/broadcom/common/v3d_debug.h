@@ -69,6 +69,8 @@ extern uint32_t v3d_mesa_debug;
 #define V3D_DEBUG_NO_MERGE_JOBS     (1 << 24)
 #define V3D_DEBUG_OPT_COMPILE_TIME  (1 << 25)
 #define V3D_DEBUG_DISABLE_TFU       (1 << 26)
+#define V3D_DEBUG_SYNC              (1 << 27)
+#define V3D_DEBUG_SOFT_BLEND        (1 << 28)
 
 #define V3D_DEBUG_SHADERS           (V3D_DEBUG_TGSI | V3D_DEBUG_NIR | \
                                      V3D_DEBUG_VIR | V3D_DEBUG_QPU | \
@@ -86,12 +88,9 @@ extern uint32_t v3d_mesa_debug;
 #ifndef ALOGW
 #define ALOGW LOGW
 #endif
-#define dbg_printf(...)	ALOGW(__VA_ARGS__)
-#else
-#define dbg_printf(...)	fprintf(stderr, __VA_ARGS__)
 #endif /* HAVE_ANDROID_PLATFORM */
 
-extern bool v3d_debug_flag_for_shader_stage(gl_shader_stage stage);
+extern bool v3d_debug_flag_for_shader_stage(mesa_shader_stage stage);
 
 extern void v3d_process_debug_variable(void);
 

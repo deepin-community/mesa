@@ -10,7 +10,7 @@ tu_entrypoints = custom_target(
     '--out-h', '@OUTPUT0@', '--out-c', '@OUTPUT1@', '--prefix', 'tu',
     '--include', 'adreno_common.xml.h',
     '--tmpl-prefix', 'tu', '--tmpl-param', 'chip CHIP',
-    '--tmpl-variants', '<A6XX>', '<A7XX>',
+    '--tmpl-variants', '<A6XX>', '<A7XX>', '<A8XX>',
     '--beta', with_vulkan_beta.to_string(),
     '--device-prefix', 'tu_rmv',
   ],
@@ -19,7 +19,10 @@ tu_entrypoints = custom_target(
 
 
 libtu_files = files(
+  'bvh/tu_bvh.h',
+  'bvh/tu_build_interface.h',
   'layers/tu_rmv_layer.cc',
+  'tu_acceleration_structure.cc',
   'tu_autotune.cc',
   'tu_buffer.cc',
   'tu_buffer_view.cc',
@@ -35,16 +38,49 @@ libtu_files = files(
   'tu_image.cc',
   'tu_knl.cc',
   'tu_lrz.cc',
+  'tu_nir_lower_demote_samples.cc',
   'tu_nir_lower_multiview.cc',
+  'tu_nir_lower_ray_query.cc',
   'tu_pass.cc',
   'tu_pipeline.cc',
   'tu_sampler.cc',
   'tu_query_pool.cc',
+  'tu_queue.cc',
   'tu_rmv.cc',
   'tu_shader.cc',
   'tu_suballoc.cc',
+  'tu_subsampled_image.cc',
+  'tu_tile_config.cc',
   'tu_util.cc',
 )
+
+libtu_files += custom_target(
+  'float32_spv.h',
+  input : float32_glsl_file,
+  output : 'float32_spv.h',
+  command : [
+    prog_glslang, '--no-link', '-V', '-S', 'comp', '-x', '-o', '@OUTPUT@', '@INPUT@',
+    glslang_quiet, glslang_depfile,
+  ],
+  depfile : 'float32_spv.h.d',
+)
+
+libtu_files += custom_target(
+  'float64_spv.h',
+  input : [glsl2spirv, float64_glsl_file],
+  output : 'float64_spv.h',
+  command : [
+    prog_python, '@INPUT@', '@OUTPUT@',
+    prog_glslang,
+    '--vn', 'float64_spv_source',
+    '--glsl-version', '450',
+    '-Olib',
+    glslang_depfile,
+  ],
+  depfile : 'float64_spv.h.d',
+)
+
+subdir('bvh')
 
 libtu_includes = [
     inc_include,
@@ -54,7 +90,7 @@ libtu_includes = [
 
 tu_link_with = []
 tu_deps = []
-tu_flags = []
+tu_flags = [sse2_args]
 
 tu_wsi = false
 
@@ -74,11 +110,6 @@ endif
 
 if tu_wsi
   libtu_files += 'tu_wsi.cc'
-endif
-
-if with_platform_android
-  libtu_files += files('tu_android.cc')
-  tu_deps += [dep_android]
 endif
 
 if with_xlib_lease
@@ -132,6 +163,7 @@ tu_cpp_args += cpp.get_supported_arguments([
   '-fno-rtti',
   '-Wno-address-of-temporary',
   '-Wno-array-bounds',
+  '-Wno-c++11-narrowing',
   '-Wno-c99-designator',
   '-Wno-class-memaccess',
   '-Wno-missing-braces',
@@ -141,25 +173,14 @@ tu_cpp_args += cpp.get_supported_arguments([
   '-Wno-sign-compare',
   '-Wno-switch',
   '-Wno-unused-function',
+  '-Wno-vla-cxx-extension',
   '-Wno-writable-strings',
   '-Wno-write-strings',
-  '-Wno-vla-cxx-extension',
 ])
-
-# HACK compiler.get_supported_arguments()/has_argument() do not seem
-# to be reliable for cross builds (!?!) so just jam in some args we
-# need and hope for the best
-if meson.is_cross_build()
-  tu_cpp_args += '-Wno-array-bounds'
-  tu_cpp_args += '-Wno-c++11-narrowing'
-  tu_cpp_args += '-Wno-missing-braces'
-  tu_cpp_args += '-Wno-unused-function'
-  tu_cpp_args += '-Wno-writable-strings'
-endif
 
 libvulkan_freedreno = shared_library(
   'vulkan_freedreno',
-  [libtu_files, tu_entrypoints, tu_tracepoints, freedreno_xml_header_files, sha1_h, u_format_pack_h],
+  [libtu_files, tu_entrypoints, tu_tracepoints, freedreno_xml_header_files, sha1_h, u_format_pack_h, bvh_spv],
   include_directories : libtu_includes,
   link_with : [
     libfreedreno_ir3,
@@ -202,15 +223,18 @@ if with_symbols_check
   )
 endif
 
+icd_file_name = libname_prefix + 'vulkan_freedreno.' + libname_suffix
+
 freedreno_icd = custom_target(
   'freedreno_icd',
   input : [vk_icd_gen, vk_api_xml],
-  output : 'freedreno_icd.@0@.json'.format(host_machine.cpu()),
+  output : 'freedreno_icd.' + vulkan_manifest_suffix,
   command : [
     prog_python, '@INPUT0@',
-    '--api-version', '1.1', '--xml', '@INPUT1@',
-    '--lib-path', join_paths(get_option('prefix'), get_option('libdir'),
-                             'libvulkan_freedreno.so'),
+    '--api-version', '1.4', '--xml', '@INPUT1@',
+    '--sizeof-pointer', sizeof_pointer,
+    '--icd-lib-path', vulkan_icd_lib_path,
+    '--icd-filename', icd_file_name,
     '--out', '@OUTPUT@',
   ],
   build_by_default : true,
@@ -226,13 +250,13 @@ _dev_icd = custom_target(
   output : _dev_icdname,
   command : [
     prog_python, '@INPUT0@',
-    '--api-version', '1.1', '--xml', '@INPUT1@',
-    '--lib-path', meson.current_build_dir() / 'libvulkan_freedreno.so',
+    '--api-version', '1.4', '--xml', '@INPUT1@',
+    '--sizeof-pointer', sizeof_pointer,
+    '--icd-lib-path', meson.current_build_dir(),
+    '--icd-filename', icd_file_name,
     '--out', '@OUTPUT@',
   ],
   build_by_default : true,
 )
 
 devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
-# Deprecated: replaced by VK_DRIVER_FILES above
-devenv.append('VK_ICD_FILENAMES', _dev_icd.full_path())

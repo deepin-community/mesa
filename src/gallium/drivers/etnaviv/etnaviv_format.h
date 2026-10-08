@@ -35,8 +35,10 @@
 #define EXT_FORMAT (1 << 31)
 #define ASTC_FORMAT (1 << 30)
 
+struct etna_screen;
+
 uint32_t
-translate_texture_format(enum pipe_format fmt);
+translate_texture_format(enum pipe_format fmt, const struct etna_screen *screen);
 
 bool
 texture_use_int_filter(const struct pipe_sampler_view *sv,
@@ -57,6 +59,40 @@ int
 translate_pe_format_rb_swap(enum pipe_format fmt);
 
 uint32_t
+remap_texture_format_rb_swap(uint32_t format);
+
+enum pipe_format
+translate_pe_internal_format(enum pipe_format fmt);
+
+uint32_t
 translate_vertex_format_type(enum pipe_format fmt);
+
+static inline enum pipe_format
+translate_format_128bit_to_64bit(enum pipe_format fmt)
+{
+    switch (fmt) {
+    case PIPE_FORMAT_R32G32B32A32_FLOAT:
+        return PIPE_FORMAT_R32G32_FLOAT;
+    case PIPE_FORMAT_R32G32B32A32_SINT:
+        return PIPE_FORMAT_R32G32_SINT;
+    case PIPE_FORMAT_R32G32B32A32_UINT:
+        return PIPE_FORMAT_R32G32_UINT;
+    default:
+        return fmt;
+    }
+}
+
+static inline bool
+format_is_128bit(enum pipe_format fmt)
+{
+    switch (fmt) {
+    case PIPE_FORMAT_R32G32B32A32_FLOAT:
+    case PIPE_FORMAT_R32G32B32A32_SINT:
+    case PIPE_FORMAT_R32G32B32A32_UINT:
+        return true;
+    default:
+        return false;
+    }
+}
 
 #endif /* ETNAVIV_FORMAT_H_ */

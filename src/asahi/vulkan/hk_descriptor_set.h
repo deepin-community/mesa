@@ -16,38 +16,41 @@
 #include "util/list.h"
 #include "util/vma.h"
 
-/* Stride of the image heap, equal to the size of a texture/PBE descriptor */
-#define HK_IMAGE_STRIDE (24)
-
 struct hk_descriptor_set_layout;
 
 struct hk_sampled_image_descriptor {
-   uint32_t image_offset;
+   struct agx_texture_packed tex;
+   struct agx_sampler_packed sampler;
    uint16_t sampler_index;
+
+   /* Negative if there is no border colour, else the clamp=0 sampler index used
+    * for custom border colour emulation.
+    */
+   int16_t clamp_0_sampler_index_or_negative;
+
+   /* We want LOD bias and min LOD together as fp16 in this order and 32-bit
+    * aligned. This lets us keep everything vectorized on the shader side, since
+    * this matches the AGX2 lod_bias + min_lod descriptor.
+    */
    uint16_t lod_bias_fp16;
+   uint16_t min_lod_fp16;
+
+   /* This is only used for txf, it can be separate from the other stuff */
+   uint16_t min_lod_uint16;
+   uint16_t pad;
    /* TODO: This should probably be a heap! */
    uint32_t border[4];
-   /* XXX: Single bit! Tuck it in somewhere else */
-   uint32_t has_border;
-   uint16_t clamp_0_sampler_index;
-   uint16_t pad_0;
+   uint8_t pad2[4];
 };
-static_assert(sizeof(struct hk_sampled_image_descriptor) == 32,
+static_assert(sizeof(struct hk_sampled_image_descriptor) == 64,
               "hk_sampled_image_descriptor has no holes");
 
 struct hk_storage_image_descriptor {
-   uint32_t tex_offset;
-   uint32_t pbe_offset;
+   struct agx_texture_packed tex;
+   struct agx_pbe_packed pbe;
 };
-static_assert(sizeof(struct hk_storage_image_descriptor) == 8,
+static_assert(sizeof(struct hk_storage_image_descriptor) == 48,
               "hk_storage_image_descriptor has no holes");
-
-struct hk_buffer_view_descriptor {
-   uint32_t tex_offset;
-   uint32_t pbe_offset;
-};
-static_assert(sizeof(struct hk_buffer_view_descriptor) == 8,
-              "hk_buffer_view_descriptor has no holes");
 
 /* This has to match nir_address_format_64bit_bounded_global */
 struct hk_buffer_address {

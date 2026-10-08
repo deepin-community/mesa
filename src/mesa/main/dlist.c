@@ -45,7 +45,7 @@
 #include "varray.h"
 #include "glthread_marshal.h"
 
-#include "main/dispatch.h"
+#include "dispatch.h"
 
 #include "vbo/vbo_save.h"
 #include "util/u_inlines.h"
@@ -1354,6 +1354,8 @@ save_Bitmap(GLsizei width, GLsizei height,
          _mesa_error(ctx, GL_OUT_OF_MEMORY, "glNewList -> glBitmap");
          return;
       }
+
+      ctx->ListState.Current.NeedsFlush = true;
    }
 
    n = alloc_instruction(ctx, OPCODE_BITMAP, 6 + POINTER_DWORDS);
@@ -13200,11 +13202,12 @@ _mesa_NewList(GLuint name, GLenum mode)
    ctx->ListState.CurrentPos = 0;
    ctx->ListState.LastInstSize = 0;
    ctx->ListState.Current.UseLoopback = false;
+   ctx->ListState.Current.NeedsFlush = false;
 
    vbo_save_NewList(ctx, name, mode);
 
    ctx->Dispatch.Current = ctx->Dispatch.Save;
-   _glapi_set_dispatch(ctx->Dispatch.Current);
+   _mesa_glapi_set_dispatch(ctx->Dispatch.Current);
    if (!ctx->GLThread.enabled) {
       ctx->GLApi = ctx->Dispatch.Current;
    }
@@ -13347,6 +13350,16 @@ _mesa_EndList(void)
 
    (void) alloc_instruction(ctx, OPCODE_END_OF_LIST, 0);
 
+   /* Ending a display list that's part of a share group should make that new display list
+    * immediately visible to other contexts, per Q 16.110 from
+    * https://www.opengl.org/archives/resources/faq/technical/displaylist.htm
+    * If this displaylist includes enqueued uploads to a VRAM vertex buffer or a bitmap,
+    * flush those now to ensure that other contexts can see them.
+    */
+   if (ctx->ListState.Current.NeedsFlush &&
+       ctx->Shared->RefCount > 1)
+      _mesa_flush(ctx);
+
    _mesa_HashLockMutex(&ctx->Shared->DisplayList);
 
    if (ctx->ListState.Current.UseLoopback)
@@ -13416,7 +13429,7 @@ _mesa_EndList(void)
    ctx->CompileFlag = GL_FALSE;
 
    ctx->Dispatch.Current = ctx->Dispatch.Exec;
-   _glapi_set_dispatch(ctx->Dispatch.Current);
+   _mesa_glapi_set_dispatch(ctx->Dispatch.Current);
    if (!ctx->GLThread.enabled) {
       ctx->GLApi = ctx->Dispatch.Current;
    }
@@ -13608,7 +13621,7 @@ void
 _mesa_init_dispatch_save(const struct gl_context *ctx)
 {
    struct _glapi_table *table = ctx->Dispatch.Save;
-   int numEntries = MAX2(_gloffset_COUNT, _glapi_get_dispatch_table_size());
+   int numEntries = MAX2(_gloffset_COUNT, _mesa_glapi_get_dispatch_table_size());
 
    /* Initially populate the dispatch table with the contents of the
     * normal-execution dispatch table.  This lets us skip populating functions

@@ -1,33 +1,14 @@
 /* -*- c++ -*- */
 /*
  * Copyright © 2010-2016 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
-#ifndef ELK_IR_H
-#define ELK_IR_H
+#pragma once
 
 #include <assert.h>
 #include "elk_reg.h"
-#include "compiler/glsl/list.h"
+#include "compiler/brw_list.h"
 
 #define MAX_SAMPLER_MESSAGE_SIZE 11
 
@@ -94,7 +75,7 @@ struct elk_backend_reg : private elk_reg
 
 struct elk_bblock_t;
 
-struct elk_backend_instruction : public exec_node {
+struct elk_backend_instruction : public brw_exec_node {
    bool elk_is_3src(const struct elk_compiler *compiler) const;
    bool is_math() const;
    bool is_control_flow_begin() const;
@@ -131,7 +112,7 @@ struct elk_backend_instruction : public exec_node {
    bool is_volatile() const;
 #else
 struct elk_backend_instruction {
-   struct exec_node link;
+   struct brw_exec_node link;
 #endif
    /** @{
     * Annotation for the generated IR.  One of the two can be set.
@@ -193,5 +174,3 @@ struct elk_backend_instruction {
    /** The number of hardware registers used for a message header. */
    uint8_t header_size;
 };
-
-#endif

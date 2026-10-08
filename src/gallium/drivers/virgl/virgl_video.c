@@ -67,7 +67,6 @@
 
 #include <string.h>
 
-#include "vl/vl_decoder.h"
 #include "vl/vl_video_buffer.h"
 #include "util/u_video.h"
 #include "util/u_memory.h"
@@ -377,7 +376,6 @@ static int fill_h265_picture_desc(const struct pipe_picture_desc *desc,
     ITEM_SET(&vh265->pps, h265->pps, lists_modification_present_flag);
     ITEM_SET(&vh265->pps, h265->pps, log2_parallel_merge_level_minus2);
     ITEM_SET(&vh265->pps, h265->pps, slice_segment_header_extension_present_flag);
-    ITEM_SET(&vh265->pps, h265->pps, st_rps_bits);
 
     ITEM_SET(vh265, h265, IDRPicFlag);
     ITEM_SET(vh265, h265, RAPPicFlag);
@@ -401,8 +399,6 @@ static int fill_h265_picture_desc(const struct pipe_picture_desc *desc,
     ITEM_CPY(vh265, h265, RefPicSetStCurrAfter);
     ITEM_CPY(vh265, h265, RefPicSetLtCurr);
     ITEM_CPY(vh265, h265, RefPicList);
-    ITEM_SET(vh265, h265, UseRefPicList);
-    ITEM_SET(vh265, h265, UseStRpsBits);
 
     return 0;
 }
@@ -514,42 +510,6 @@ static int fill_h265_enc_picture_desc(const struct pipe_picture_desc *desc,
         ITEM_SET(vh265, h265, slices_descriptors[i].slice_segment_address);
         ITEM_SET(vh265, h265, slices_descriptors[i].num_ctu_in_slice);
         ITEM_SET(vh265, h265, slices_descriptors[i].slice_type);
-    }
-
-    return 0;
-}
-
-static int fill_mpeg4_picture_desc(const struct pipe_picture_desc *desc,
-                                   union virgl_picture_desc *vdsc)
-{
-    unsigned i;
-    struct virgl_video_buffer *vbuf;
-    struct virgl_mpeg4_picture_desc *vmpeg4 = &vdsc->mpeg4;
-    struct pipe_mpeg4_picture_desc *mpeg4 = (struct pipe_mpeg4_picture_desc *)desc;
-
-    fill_base_picture_desc(desc, &vmpeg4->base);
-
-    ITEM_CPY(vmpeg4, mpeg4, trd);
-    ITEM_CPY(vmpeg4, mpeg4, trb);
-    ITEM_SET(vmpeg4, mpeg4, vop_time_increment_resolution);
-    ITEM_SET(vmpeg4, mpeg4, vop_coding_type);
-    ITEM_SET(vmpeg4, mpeg4, vop_fcode_forward);
-    ITEM_SET(vmpeg4, mpeg4, vop_fcode_backward);
-    ITEM_SET(vmpeg4, mpeg4, resync_marker_disable);
-    ITEM_SET(vmpeg4, mpeg4, interlaced);
-    ITEM_SET(vmpeg4, mpeg4, quant_type);
-    ITEM_SET(vmpeg4, mpeg4, quarter_sample);
-    ITEM_SET(vmpeg4, mpeg4, short_video_header);
-    ITEM_SET(vmpeg4, mpeg4, rounding_control);
-    ITEM_SET(vmpeg4, mpeg4, alternate_vertical_scan_flag);
-    ITEM_SET(vmpeg4, mpeg4, top_field_first);
-
-    memcpy(vmpeg4->intra_matrix, mpeg4->intra_matrix, 64);
-    memcpy(vmpeg4->non_intra_matrix, mpeg4->non_intra_matrix, 64);
-
-    for (i = 0; i < ARRAY_SIZE(mpeg4->ref); i++) {
-        vbuf = virgl_video_buffer(mpeg4->ref[i]);
-        vmpeg4->ref[i] = vbuf ? vbuf->handle : 0;
     }
 
     return 0;
@@ -940,8 +900,6 @@ static int fill_picture_desc(const struct pipe_picture_desc *desc,
                              union virgl_picture_desc *vdsc)
 {
     switch (u_reduce_video_profile(desc->profile)) {
-    case PIPE_VIDEO_FORMAT_MPEG4:
-        return fill_mpeg4_picture_desc(desc, vdsc);
     case PIPE_VIDEO_FORMAT_MPEG4_AVC:
         return fill_h264_picture_desc(desc, vdsc);
     case PIPE_VIDEO_FORMAT_HEVC:
@@ -1205,7 +1163,6 @@ virgl_video_create_codec(struct pipe_context *ctx,
                      templ->max_references, templ->expect_chunked_decode);
 
     switch (u_reduce_video_profile(templ->profile)) {
-    case PIPE_VIDEO_FORMAT_MPEG4: /* fall through */
     case PIPE_VIDEO_FORMAT_MPEG4_AVC:
         width = align(width, VL_MACROBLOCK_WIDTH);
         height = align(height, VL_MACROBLOCK_HEIGHT);

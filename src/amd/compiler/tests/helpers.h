@@ -63,7 +63,7 @@ bool setup_cs(const char* input_spec, enum amd_gfx_level gfx_level,
               enum radeon_family family = CHIP_UNKNOWN, const char* subvariant = "",
               unsigned wave_size = 64);
 bool
-setup_nir_cs(enum amd_gfx_level gfx_level, gl_shader_stage stage = MESA_SHADER_COMPUTE,
+setup_nir_cs(enum amd_gfx_level gfx_level, mesa_shader_stage stage = MESA_SHADER_COMPUTE,
              enum radeon_family family = CHIP_UNKNOWN, const char* subvariant = "");
 
 void finish_program(aco::Program* program, bool endpgm = true, bool dominance = false);
@@ -74,6 +74,7 @@ void finish_lower_subdword_test();
 void finish_ra_test(aco::ra_test_policy);
 void finish_optimizer_postRA_test();
 void finish_to_hw_instr_test();
+void finish_lower_branches_test();
 void finish_schedule_vopd_test();
 void finish_waitcnt_test();
 void finish_insert_nops_test(bool endpgm = true);

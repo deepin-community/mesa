@@ -28,11 +28,12 @@
 #include <poll.h>
 #include <vulkan/vulkan.h>
 
-#include "pvr_private.h"
+#include "pvr_device.h"
 #include "pvr_srv.h"
 #include "pvr_srv_sync.h"
 #include "util/libsync.h"
 #include "util/macros.h"
+#include "util/os_file.h"
 #include "util/timespec.h"
 #include "vk_alloc.h"
 #include "vk_log.h"
@@ -98,26 +99,6 @@ static VkResult pvr_srv_sync_reset(struct vk_device *device,
    pvr_set_sync_state(srv_sync, false);
 
    return VK_SUCCESS;
-}
-
-/* Careful, timeout might overflow. */
-static inline void pvr_start_timeout(struct timespec *timeout,
-                                     uint64_t timeout_ns)
-{
-   clock_gettime(CLOCK_MONOTONIC, timeout);
-   timespec_add_nsec(timeout, timeout, timeout_ns);
-}
-
-/* Careful, a negative value might be returned. */
-static inline struct timespec
-pvr_get_remaining_time(const struct timespec *timeout)
-{
-   struct timespec time;
-
-   clock_gettime(CLOCK_MONOTONIC, &time);
-   timespec_sub(&time, timeout, &time);
-
-   return time;
 }
 
 static inline int pvr_get_relative_time_ms(uint64_t abs_timeout_ns)
@@ -223,7 +204,7 @@ static VkResult pvr_srv_sync_move(struct vk_device *device,
       return VK_SUCCESS;
    }
 
-   unreachable("srv_sync doesn't support move for shared sync objects.");
+   UNREACHABLE("srv_sync doesn't support move for shared sync objects.");
    return VK_ERROR_UNKNOWN;
 }
 
@@ -235,7 +216,7 @@ static VkResult pvr_srv_sync_import_sync_file(struct vk_device *device,
    int fd = -1;
 
    if (sync_file >= 0) {
-      fd = dup(sync_file);
+      fd = os_dupfd_cloexec(sync_file);
       if (fd < 0)
          return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
    }
@@ -264,7 +245,7 @@ static VkResult pvr_srv_sync_export_sync_file(struct vk_device *device,
 
    assert(srv_sync->fd >= 0);
 
-   fd = dup(srv_sync->fd);
+   fd = os_dupfd_cloexec(srv_sync->fd);
    if (fd < 0)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 

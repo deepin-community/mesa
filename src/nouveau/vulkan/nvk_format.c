@@ -18,25 +18,48 @@
 #include "cl90c0.h"
 
 bool
-nvk_format_supports_atomics(const struct nv_device_info *dev,
+nvk_format_supports_atomics(const struct nvk_physical_device *pdev,
                             enum pipe_format p_format)
 {
    switch (p_format) {
    case PIPE_FORMAT_R32_UINT:
    case PIPE_FORMAT_R32_SINT:
+      return true;
    case PIPE_FORMAT_R64_UINT:
    case PIPE_FORMAT_R64_SINT:
-      return true;
+      return pdev->vk.supported_features.shaderImageInt64Atomics;
    default:
       return false;
    }
 }
 
-#define VA_FMT(vk_fmt, widths, swap_rb, type) \
+bool
+nvk_format_supports_storage(const struct nvk_physical_device *pdev,
+                            enum pipe_format p_format)
+{
+   /* Unfortunately, the SPIR-V cap associated with 64-bit storage images (and
+    * formatted buffers) is gated by the atomics feature so if we have to
+    * disable the formats when the Vulkan feature isn't exposed.
+    */
+   if (!pdev->vk.supported_features.shaderImageInt64Atomics &&
+       util_format_get_max_channel_size(p_format) == 64)
+      return false;
+
+   return nil_format_supports_storage(&pdev->info, p_format);
+}
+
+#define NV9097_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_NONE \
+   NVK_VA_BIT_WIDTH_NONE
+
+#define VA_FMT64(vk_fmt, widths, widths_high, swap_rb, type) \
    [VK_FORMAT_##vk_fmt] = \
    { NV9097_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_##widths, \
+     NV9097_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_##widths_high, \
      NV9097_SET_VERTEX_ATTRIBUTE_A_SWAP_R_AND_B_##swap_rb, \
      NV9097_SET_VERTEX_ATTRIBUTE_A_NUMERICAL_TYPE_NUM_##type }
+
+#define VA_FMT(vk_fmt, widths, swap_rb, type) \
+   VA_FMT64(vk_fmt, widths, NONE, swap_rb, type)
 
 static const struct nvk_va_format nvk_vf_formats[] = {
    VA_FMT(R8_UNORM,                    R8,               FALSE,   UNORM),
@@ -151,6 +174,22 @@ static const struct nvk_va_format nvk_vf_formats[] = {
    VA_FMT(R32G32B32A32_UINT,           R32_G32_B32_A32,  FALSE,   UINT),
    VA_FMT(R32G32B32A32_SINT,           R32_G32_B32_A32,  FALSE,   SINT),
    VA_FMT(R32G32B32A32_SFLOAT,         R32_G32_B32_A32,  FALSE,   FLOAT),
+
+   VA_FMT64(R64_UINT,                  R32_G32,          NONE,             FALSE,   UINT),
+   VA_FMT64(R64_SINT,                  R32_G32,          NONE,             FALSE,   UINT),
+   VA_FMT64(R64_SFLOAT,                R32_G32,          NONE,             FALSE,   UINT),
+
+   VA_FMT64(R64G64_UINT,               R32_G32_B32_A32,  NONE,             FALSE,   UINT),
+   VA_FMT64(R64G64_SINT,               R32_G32_B32_A32,  NONE,             FALSE,   UINT),
+   VA_FMT64(R64G64_SFLOAT,             R32_G32_B32_A32,  NONE,             FALSE,   UINT),
+
+   VA_FMT64(R64G64B64_UINT,            R32_G32_B32_A32,  R32_G32,          FALSE,   UINT),
+   VA_FMT64(R64G64B64_SINT,            R32_G32_B32_A32,  R32_G32,          FALSE,   UINT),
+   VA_FMT64(R64G64B64_SFLOAT,          R32_G32_B32_A32,  R32_G32,          FALSE,   UINT),
+
+   VA_FMT64(R64G64B64A64_UINT,         R32_G32_B32_A32,  R32_G32_B32_A32,  FALSE,   UINT),
+   VA_FMT64(R64G64B64A64_SINT,         R32_G32_B32_A32,  R32_G32_B32_A32,  FALSE,   UINT),
+   VA_FMT64(R64G64B64A64_SFLOAT,       R32_G32_B32_A32,  R32_G32_B32_A32,  FALSE,   UINT),
 };
 
 #undef VA_FMT

@@ -27,7 +27,6 @@
 
 #include "util/u_debug.h"
 #include "util/u_cpu_detect.h"
-#include "lp_bld.h"
 #include "lp_bld_debug.h"
 #include "lp_bld_init.h"
 #include "lp_bld_type.h"
@@ -42,6 +41,7 @@ static const struct debug_named_value lp_bld_perf_flags[] = {
    { "rho_approx", GALLIVM_PERF_RHO_APPROX, "enable rho_approx optimization" },
    { "no_quad_lod", GALLIVM_PERF_NO_QUAD_LOD, "disable quad_lod optimization" },
    { "no_aos_sampling", GALLIVM_PERF_NO_AOS_SAMPLING, "disable aos sampling optimization" },
+   { "no_lod_ellipse", GALLIVM_PERF_NO_LOD_ELLIPSE, "disable LOD elliptical derivative transform" },
    { "nopt",   GALLIVM_PERF_NO_OPT, "disable optimization passes to speed up shader compilation" },
    DEBUG_NAMED_VALUE_END
 };
@@ -58,6 +58,7 @@ static const struct debug_named_value lp_bld_debug_flags[] = {
 #if MESA_DEBUG
    { "dumpbc", GALLIVM_DEBUG_DUMP_BC, NULL },
 #endif
+   { "symbols", GALLIVM_DEBUG_SYMBOLS, NULL },
    DEBUG_NAMED_VALUE_END
 };
 
@@ -82,6 +83,9 @@ void
 lp_init_env_options(void)
 {
    gallivm_debug = debug_get_option_gallivm_debug();
+
+   if (!__normal_user())
+      gallivm_debug &= ~GALLIVM_DEBUG_SYMBOLS;
 
    gallivm_perf = debug_get_flags_option("GALLIVM_PERF", lp_bld_perf_flags, 0 );
 }

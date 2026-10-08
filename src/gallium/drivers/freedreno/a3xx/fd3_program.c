@@ -74,7 +74,7 @@ emit_shader(struct fd_ringbuffer *ring, const struct ir3_shader_variant *so)
 
 void
 fd3_program_emit(struct fd_ringbuffer *ring, struct fd3_emit *emit, int nr,
-                 struct pipe_surface **bufs)
+                 struct pipe_surface *bufs)
 {
    const struct ir3_shader_variant *vp, *fp;
    const struct ir3_info *vsi, *fsi;
@@ -167,7 +167,7 @@ fd3_program_emit(struct fd_ringbuffer *ring, struct fd3_emit *emit, int nr,
     * format, so it's just treated like red
     */
    for (i = 0; i < nr; i++)
-      if (util_format_is_alpha(pipe_surface_format(bufs[i])))
+      if (util_format_is_alpha(pipe_surface_format(&bufs[i])))
          color_regid[i] += 3;
 
    /* we could probably divide this up into things that need to be
@@ -224,7 +224,7 @@ fd3_program_emit(struct fd_ringbuffer *ring, struct fd3_emit *emit, int nr,
    OUT_RING(ring,
             A3XX_SP_VS_CTRL_REG1_CONSTLENGTH(vp->constlen) |
                A3XX_SP_VS_CTRL_REG1_INITIALOUTSTANDING(vp->total_in) |
-               A3XX_SP_VS_CTRL_REG1_CONSTFOOTPRINT(MAX2(vp->constlen - 1, 0)));
+               A3XX_SP_VS_CTRL_REG1_CONSTMAXID(COND(vp->constlen != 0, vp->constlen - 1)));
    OUT_RING(ring, A3XX_SP_VS_PARAM_REG_POSREGID(pos_regid) |
                      A3XX_SP_VS_PARAM_REG_PSIZEREGID(psize_regid) |
                      A3XX_SP_VS_PARAM_REG_TOTALVSOUTVAR(fp->varying_in));
@@ -296,8 +296,7 @@ fd3_program_emit(struct fd_ringbuffer *ring, struct fd3_emit *emit, int nr,
                   A3XX_SP_FS_CTRL_REG0_LENGTH(fpbuffersz));
       OUT_RING(ring, A3XX_SP_FS_CTRL_REG1_CONSTLENGTH(fp->constlen) |
                         A3XX_SP_FS_CTRL_REG1_INITIALOUTSTANDING(fp->sysval_in) |
-                        A3XX_SP_FS_CTRL_REG1_CONSTFOOTPRINT(
-                           MAX2(fp->constlen - 1, 0)) |
+                        A3XX_SP_FS_CTRL_REG1_CONSTMAXID(COND(fp->constlen != 0, fp->constlen - 1)) |
                         A3XX_SP_FS_CTRL_REG1_HALFPRECVAROFFSET(63));
 
       OUT_PKT0(ring, REG_A3XX_SP_FS_OBJ_OFFSET_REG, 2);
@@ -319,7 +318,7 @@ fd3_program_emit(struct fd_ringbuffer *ring, struct fd3_emit *emit, int nr,
          COND(color_regid[i] & HALF_REG_ID, A3XX_SP_FS_MRT_REG_HALF_PRECISION);
 
       if (i < nr) {
-         enum pipe_format fmt = pipe_surface_format(bufs[i]);
+         enum pipe_format fmt = pipe_surface_format(&bufs[i]);
          mrt_reg |=
             COND(util_format_is_pure_uint(fmt), A3XX_SP_FS_MRT_REG_UINT) |
             COND(util_format_is_pure_sint(fmt), A3XX_SP_FS_MRT_REG_SINT);

@@ -1,4 +1,5 @@
-/* Copyright © 2023 Intel Corporation
+/*
+ * Copyright © 2023 Intel Corporation
  * SPDX-License-Identifier: MIT
  */
 
@@ -34,7 +35,7 @@
 #include "iris_genx_macros.h"
 
 #if GFX_VER >= 9
-#include "intel/compiler/brw_compiler.h"
+#include "intel/compiler/brw/brw_compiler.h"
 #include "intel/common/intel_genX_state_brw.h"
 #else
 #include "intel/compiler/elk/elk_compiler.h"
@@ -44,27 +45,36 @@
 #include "libintel_shaders.h"
 
 #if GFX_VERx10 == 80
-# include "intel_gfx8_shaders_code.h"
+# include "intel_gfx80_shaders_binding.h"
 #elif GFX_VERx10 == 90
-# include "intel_gfx9_shaders_code.h"
+# include "intel_gfx90_shaders_binding.h"
 #elif GFX_VERx10 == 110
-# include "intel_gfx11_shaders_code.h"
+# include "intel_gfx110_shaders_binding.h"
 #elif GFX_VERx10 == 120
-# include "intel_gfx12_shaders_code.h"
+# include "intel_gfx120_shaders_binding.h"
 #elif GFX_VERx10 == 125
-# include "intel_gfx125_shaders_code.h"
+# include "intel_gfx125_shaders_binding.h"
 #elif GFX_VERx10 == 200
-# include "intel_gfx20_shaders_code.h"
+# include "intel_gfx200_shaders_binding.h"
 #elif GFX_VERx10 == 300
-# include "intel_gfx30_shaders_code.h"
+# include "intel_gfx300_shaders_binding.h"
+#elif GFX_VERx10 == 350
+# include "intel_gfx350_shaders_binding.h"
 #else
 # error "Unsupported generation"
 #endif
 
+#if GFX_VER < 9
 #define load_param(b, bit_size, struct_name, field_name)          \
    nir_load_uniform(b, 1, bit_size, nir_imm_int(b, 0),            \
-                    .base = offsetof(struct_name, field_name),   \
+                    .base = offsetof(struct_name, field_name),    \
                     .range = bit_size / 8)
+#else
+#define load_param(b, bit_size, struct_name, field_name)                \
+   nir_load_push_data_intel(b, 1, bit_size, nir_imm_int(b, 0),          \
+                            .base = offsetof(struct_name, field_name),  \
+                            .range = bit_size / 8)
+#endif
 
 static nir_def *
 load_fragment_index(nir_builder *b)
@@ -73,22 +83,6 @@ load_fragment_index(nir_builder *b)
    return nir_iadd(b,
                    nir_imul_imm(b, nir_channel(b, pos_in, 1), 8192),
                    nir_channel(b, pos_in, 0));
-}
-
-static nir_shader *
-load_shader_lib(struct iris_screen *screen, void *mem_ctx)
-{
-   const nir_shader_compiler_options *nir_options =
-#if GFX_VER >= 9
-      screen->brw->nir_options[MESA_SHADER_KERNEL];
-#else
-      screen->elk->nir_options[MESA_SHADER_KERNEL];
-#endif
-
-   struct blob_reader blob;
-   blob_reader_init(&blob, (void *)genX(intel_shaders_nir),
-                    sizeof(genX(intel_shaders_nir)));
-   return nir_deserialize(mem_ctx, nir_options, &blob);
 }
 
 static unsigned
@@ -114,7 +108,6 @@ iris_call_generation_shader(struct iris_screen *screen, nir_builder *b)
 void
 genX(init_screen_gen_state)(struct iris_screen *screen)
 {
-   screen->vtbl.load_shader_lib = load_shader_lib;
    screen->vtbl.call_generation_shader = iris_call_generation_shader;
 }
 
@@ -133,7 +126,7 @@ upload_state(struct iris_batch *batch,
              unsigned alignment)
 {
    void *p = NULL;
-   u_upload_alloc(uploader, 0, size, alignment, &ref->offset, &ref->res, &p);
+   u_upload_alloc_ref(uploader, 0, size, alignment, &ref->offset, &ref->res, &p);
    iris_use_pinned_bo(batch, iris_resource_bo(ref->res), false, IRIS_DOMAIN_NONE);
    return p;
 }
@@ -148,7 +141,7 @@ stream_state(struct iris_batch *batch,
 {
    void *ptr = NULL;
 
-   u_upload_alloc(uploader, 0, size, alignment, out_offset, out_res, &ptr);
+   u_upload_alloc_ref(uploader, 0, size, alignment, out_offset, out_res, &ptr);
 
    struct iris_bo *bo = iris_resource_bo(*out_res);
    iris_use_pinned_bo(batch, bo, false, IRIS_DOMAIN_NONE);
@@ -265,7 +258,7 @@ emit_indirect_generate_draw(struct iris_batch *batch,
 
    iris_emit_cmd(batch, GENX(3DSTATE_SF), sf) {
 #if GFX_VER >= 12
-      sf.DerefBlockSize = ice->state.urb_deref_block_size;
+      sf.DerefBlockSize = ice->shaders.urb.cfg.deref_block_size;
 #endif
    }
 
@@ -296,54 +289,58 @@ emit_indirect_generate_draw(struct iris_batch *batch,
 
    iris_emit_cmd(batch, GENX(3DSTATE_PS), ps) {
 #if GFX_VER >= 9
-      struct brw_wm_prog_data *wm_prog_data = brw_wm_prog_data(shader->brw_prog_data);
+      struct brw_fs_prog_data *fs_prog_data = brw_fs_prog_data(shader->brw_prog_data);
 #else
-      struct elk_wm_prog_data *wm_prog_data = elk_wm_prog_data(shader->elk_prog_data);
+      struct elk_fs_prog_data *fs_prog_data = elk_fs_prog_data(shader->elk_prog_data);
 #endif
-      intel_set_ps_dispatch_state(&ps, devinfo, wm_prog_data,
+      intel_set_ps_dispatch_state(&ps, devinfo, fs_prog_data,
                                   1 /* rasterization_samples */,
-                                  0 /* msaa_flags */);
+                                  0 /* fs_config */);
 
       ps.VectorMaskEnable       = fs_data->uses_vmask;
 
       ps.BindingTableEntryCount = GFX_VER == 9 ? 1 : 0;
 #if GFX_VER < 20
-      ps.PushConstantEnable     = shader->nr_params > 0 ||
-                                  shader->ubo_ranges[0].length;
+      ps.PushConstantEnable     = shader->push_sizes[0] > 0;
 #endif
 
 #if GFX_VER >= 9
       ps.DispatchGRFStartRegisterForConstantSetupData0 =
-         brw_wm_prog_data_dispatch_grf_start_reg(wm_prog_data, ps, 0);
+         brw_fs_prog_data_dispatch_grf_start_reg(fs_prog_data, ps, 0);
       ps.DispatchGRFStartRegisterForConstantSetupData1 =
-         brw_wm_prog_data_dispatch_grf_start_reg(wm_prog_data, ps, 1);
+         brw_fs_prog_data_dispatch_grf_start_reg(fs_prog_data, ps, 1);
 #if GFX_VER < 20
       ps.DispatchGRFStartRegisterForConstantSetupData2 =
-         brw_wm_prog_data_dispatch_grf_start_reg(wm_prog_data, ps, 2);
+         brw_fs_prog_data_dispatch_grf_start_reg(fs_prog_data, ps, 2);
 #endif
 
       ps.KernelStartPointer0 = KSP(ice->draw.generation.shader) +
-         brw_wm_prog_data_prog_offset(wm_prog_data, ps, 0);
+         brw_fs_prog_data_prog_offset(fs_prog_data, ps, 0);
       ps.KernelStartPointer1 = KSP(ice->draw.generation.shader) +
-         brw_wm_prog_data_prog_offset(wm_prog_data, ps, 1);
+         brw_fs_prog_data_prog_offset(fs_prog_data, ps, 1);
 #if GFX_VER < 20
       ps.KernelStartPointer2 = KSP(ice->draw.generation.shader) +
-         brw_wm_prog_data_prog_offset(wm_prog_data, ps, 2);
+         brw_fs_prog_data_prog_offset(fs_prog_data, ps, 2);
 #endif
+
+#if GFX_VER >= 30
+      ps.RegistersPerThread = ptl_register_blocks(fs_prog_data->base.grf_used);
+#endif
+
 #else
       ps.DispatchGRFStartRegisterForConstantSetupData0 =
-         elk_wm_prog_data_dispatch_grf_start_reg(wm_prog_data, ps, 0);
+         elk_fs_prog_data_dispatch_grf_start_reg(fs_prog_data, ps, 0);
       ps.DispatchGRFStartRegisterForConstantSetupData1 =
-         elk_wm_prog_data_dispatch_grf_start_reg(wm_prog_data, ps, 1);
+         elk_fs_prog_data_dispatch_grf_start_reg(fs_prog_data, ps, 1);
       ps.DispatchGRFStartRegisterForConstantSetupData2 =
-         elk_wm_prog_data_dispatch_grf_start_reg(wm_prog_data, ps, 2);
+         elk_fs_prog_data_dispatch_grf_start_reg(fs_prog_data, ps, 2);
 
       ps.KernelStartPointer0 = KSP(ice->draw.generation.shader) +
-         elk_wm_prog_data_prog_offset(wm_prog_data, ps, 0);
+         elk_fs_prog_data_prog_offset(fs_prog_data, ps, 0);
       ps.KernelStartPointer1 = KSP(ice->draw.generation.shader) +
-         elk_wm_prog_data_prog_offset(wm_prog_data, ps, 1);
+         elk_fs_prog_data_prog_offset(fs_prog_data, ps, 1);
       ps.KernelStartPointer2 = KSP(ice->draw.generation.shader) +
-         elk_wm_prog_data_prog_offset(wm_prog_data, ps, 2);
+         elk_fs_prog_data_prog_offset(fs_prog_data, ps, 2);
 #endif
 
       ps.MaximumNumberofThreadsPerPSD = devinfo->max_threads_per_psd - 1;
@@ -410,7 +407,7 @@ emit_indirect_generate_draw(struct iris_batch *batch,
    float *vertices =
       upload_state(batch, ice->state.dynamic_uploader,
                    &ice->draw.generation.vertices,
-                   ALIGN(9 * sizeof(float), 8), 8);
+                   align(9 * sizeof(float), 8), 8);
 
    vertices[0] = x1; vertices[1] = y1; vertices[2] = z; /* v0 */
    vertices[3] = x0; vertices[4] = y1; vertices[5] = z; /* v1 */
@@ -511,14 +508,8 @@ emit_indirect_generate_draw(struct iris_batch *batch,
                          IRIS_DIRTY_LINE_STIPPLE |
                          IRIS_ALL_DIRTY_FOR_COMPUTE |
                          IRIS_DIRTY_SCISSOR_RECT |
-                         IRIS_DIRTY_VF);
-   /* Wa_14016820455
-    * On Gfx 12.5 platforms, the SF_CL_VIEWPORT pointer can be invalidated
-    * likely by a read cache invalidation when clipping is disabled, so we
-    * don't skip its dirty bit here, in order to reprogram it.
-    */
-   if (GFX_VERx10 != 125)
-      skip_bits |= IRIS_DIRTY_SF_CL_VIEWPORT;
+                         IRIS_DIRTY_VF |
+                         IRIS_DIRTY_SF_CL_VIEWPORT);
 
    uint64_t skip_stage_bits = (IRIS_ALL_STAGE_DIRTY_FOR_COMPUTE |
                                IRIS_STAGE_DIRTY_UNCOMPILED_VS |

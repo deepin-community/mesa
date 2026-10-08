@@ -259,7 +259,7 @@ struct fixed31_32 vpe_fixpt_cos(struct fixed31_32 arg)
 
     do {
         res = vpe_fixpt_sub(
-            vpe_fixpt_one, vpe_fixpt_div_int(vpe_fixpt_mul(square, res), n * (n - 1)));
+            vpe_fixpt_one, vpe_fixpt_div_int(vpe_fixpt_mul(square, res), (long long)n * (n - 1)));
 
         n -= 2;
     } while (n != 0);
@@ -420,4 +420,25 @@ unsigned int vpe_to_fixed_point(
     d_i = (int)((value * d_pix) + 0.5);
     d_i = d_i & mask;
     return d_i;
+}
+
+/* This function is a generic way to convert a double into fixpt format AdBu, where
+ * A is the decimal bits and B is the fractional bits. If clamp is set, it will
+ * clamp the max value, otherwise there is risk of overflow.
+ */
+unsigned long long vpe_double_to_fixed_point(
+    double x, unsigned long long decimal_bits, unsigned long long fractional_bits, bool clamp)
+{
+    unsigned long long shift   = 1;
+    double             norm    = (double)(shift << fractional_bits);
+    unsigned long long x_fixpt = (long long)(x * norm);
+    unsigned long long mask    = ((shift << (decimal_bits + fractional_bits)) - 1);
+
+    if ((clamp == true) && (x_fixpt > mask)) {
+        x_fixpt = mask;
+    } else {
+        x_fixpt = x_fixpt & mask;
+    }
+
+    return x_fixpt;
 }

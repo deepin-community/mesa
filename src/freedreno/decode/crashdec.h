@@ -42,6 +42,12 @@ have_rem_info(void)
 }
 
 static inline bool
+has_a7xx_gen3_control_regs(void)
+{
+   return options.info->props.new_control_regs;
+}
+
+static inline bool
 is_a7xx(void)
 {
    return options.info->chip == 7;
@@ -79,8 +85,8 @@ is_gmu_legacy(void)
 }
 
 void dump_register(struct regacc *r);
-void dump_cp_mem_pool(uint32_t *mempool);
-void handle_prefetch(uint32_t *dwords, uint32_t sizedwords);
+void dump_cp_mem_pool(uint32_t *mempool, bool is_bv);
+void handle_prefetch(const uint32_t *dwords, uint32_t sizedwords);
 
 struct a6xx_hfi_state {
    uint64_t iova;

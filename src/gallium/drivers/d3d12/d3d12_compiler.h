@@ -32,7 +32,6 @@
 #include "pipe/p_state.h"
 
 #include "compiler/shader_info.h"
-#include "program/prog_statevars.h"
 
 #include "nir.h"
 
@@ -64,11 +63,6 @@ enum d3d12_state_var {
 
 #define D3D12_MAX_POINT_SIZE 255.0f
 
-const void *
-d3d12_get_compiler_options(struct pipe_screen *screen,
-                           enum pipe_shader_ir ir,
-                           enum pipe_shader_type shader);
-
 
 void
 d3d12_varying_cache_init(struct d3d12_screen *ctx);
@@ -98,13 +92,13 @@ struct d3d12_image_format_conversion_info {
    enum pipe_format view_format, emulated_format;
 };
 struct d3d12_image_format_conversion_info_arr {
-   int n_images;
+   unsigned n_images;
    struct d3d12_image_format_conversion_info* image_format_conversion;
 };
 
 struct d3d12_shader_key {
    uint32_t hash;
-   enum pipe_shader_type stage;
+   mesa_shader_stage stage;
 
    uint64_t next_varying_inputs;
    uint64_t prev_varying_outputs;
@@ -190,7 +184,7 @@ struct d3d12_shader_key {
    dxil_texture_swizzle_state swizzle_state[PIPE_MAX_SHADER_SAMPLER_VIEWS];
    enum compare_func sampler_compare_funcs[PIPE_MAX_SHADER_SAMPLER_VIEWS];
 
-   int n_images;
+   unsigned n_images;
    struct d3d12_image_format_conversion_info image_format_conversion[PIPE_MAX_SHADER_IMAGES];
 };
 
@@ -257,7 +251,7 @@ struct d3d12_tcs_variant_key
 };
 
 struct d3d12_shader_selector {
-   enum pipe_shader_type stage;
+   mesa_shader_stage stage;
    const nir_shader *initial;
    struct d3d12_varying_info *initial_output_vars;
    struct d3d12_varying_info *initial_input_vars;
@@ -285,7 +279,7 @@ struct d3d12_shader_selector {
 
 struct d3d12_shader_selector *
 d3d12_create_shader(struct d3d12_context *ctx,
-                    enum pipe_shader_type stage,
+                    mesa_shader_stage stage,
                     const struct pipe_shader_state *shader);
 
 struct d3d12_shader_selector *

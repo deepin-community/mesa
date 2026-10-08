@@ -114,6 +114,9 @@ nouveau_ws_bo_new_tiled_locked(struct nouveau_ws_device *dev,
    if (flags & NOUVEAU_WS_BO_NO_SHARE)
       req.info.domain |= NOUVEAU_GEM_DOMAIN_NO_SHARE;
 
+   if (flags & NOUVEAU_WS_BO_COHERENT)
+      req.info.domain |= NOUVEAU_GEM_DOMAIN_COHERENT;
+
    req.info.tile_flags = (uint32_t)pte_kind << 8;
    req.info.tile_mode = tile_mode;
 
@@ -131,6 +134,7 @@ nouveau_ws_bo_new_tiled_locked(struct nouveau_ws_device *dev,
    bo->dev = dev;
    bo->flags = flags;
    bo->refcnt = 1;
+   bo->pte_kind = pte_kind;
 
    _mesa_hash_table_insert(dev->bos, (void *)(uintptr_t)bo->handle, bo);
 
@@ -195,6 +199,8 @@ nouveau_ws_bo_from_dma_buf_locked(struct nouveau_ws_device *dev, int fd)
       flags |= NOUVEAU_WS_BO_VRAM;
    if (info.domain & NOUVEAU_GEM_DOMAIN_GART)
       flags |= NOUVEAU_WS_BO_GART;
+   if (info.domain & NOUVEAU_GEM_DOMAIN_COHERENT)
+      flags |= NOUVEAU_WS_BO_COHERENT;
    if (info.map_handle)
       flags |= NOUVEAU_WS_BO_MAP;
 
@@ -205,12 +211,7 @@ nouveau_ws_bo_from_dma_buf_locked(struct nouveau_ws_device *dev, int fd)
    bo->dev = dev;
    bo->flags = flags;
    bo->refcnt = 1;
-
-   uint64_t align = (1ULL << 12);
-   if (info.domain & NOUVEAU_GEM_DOMAIN_VRAM)
-      align = (1ULL << 16);
-
-   assert(bo->size == align64(bo->size, align));
+   bo->pte_kind = (info.tile_flags & 0x0000ff00) >> 8;
 
    _mesa_hash_table_insert(dev->bos, (void *)(uintptr_t)handle, bo);
 
@@ -309,5 +310,5 @@ nouveau_ws_bo_wait(struct nouveau_ws_bo *bo, enum nouveau_ws_bo_map_flags flags)
 int
 nouveau_ws_bo_dma_buf(struct nouveau_ws_bo *bo, int *fd)
 {
-   return drmPrimeHandleToFD(bo->dev->fd, bo->handle, DRM_CLOEXEC, fd);
+   return drmPrimeHandleToFD(bo->dev->fd, bo->handle, DRM_CLOEXEC | O_RDWR, fd);
 }

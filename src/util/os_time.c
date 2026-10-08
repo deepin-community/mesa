@@ -38,6 +38,7 @@
 #include "c11/time.h"
 
 #include "util/u_atomic.h"
+#include "util/u_overflow.h"
 
 #if DETECT_OS_POSIX_LITE
 #  include <unistd.h> /* usleep */
@@ -60,7 +61,21 @@ os_time_get_nano(void)
    return ts.tv_nsec + ts.tv_sec*INT64_C(1000000000);
 }
 
-
+void
+os_time_nanosleep_until(int64_t deadline)
+{
+#if DETECT_OS_LINUX || DETECT_OS_MANAGARM
+   struct timespec time;
+   time.tv_sec = deadline / INT64_C(1000000000);
+   time.tv_nsec = deadline % INT64_C(1000000000);
+   while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &time, &time) == EINTR);
+#else
+   int64_t duration = deadline - os_time_get_nano();
+   if (duration > 0) {
+      os_time_sleep(duration / 1000);
+   }
+#endif
+}
 
 void
 os_time_sleep(int64_t usecs)
@@ -98,11 +113,7 @@ os_time_get_absolute_timeout(uint64_t timeout)
 
    time = os_time_get_nano();
 
-   /* Do the addition in unsigned, because signed overflow is UB, then convert to signed again. */
-   abs_timeout = (uint64_t)time + (uint64_t)timeout;
-
-   /* Check for overflow. */
-   if (abs_timeout < time)
+   if (util_add_overflow(int64_t, time, timeout, &abs_timeout))
       return OS_TIMEOUT_INFINITE;
 
    return abs_timeout;

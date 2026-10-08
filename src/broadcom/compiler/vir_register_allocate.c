@@ -240,7 +240,7 @@ reconstruct_temp(struct v3d_compile *c, enum v3d_qpu_add_op op)
                 dest = vir_SAMPID(c);
                 break;
         default:
-            unreachable("Unexpected opcode for reconstruction");
+            UNREACHABLE("Unexpected opcode for reconstruction");
         }
 
         return dest;
@@ -267,6 +267,8 @@ get_spill_type_for_temp(struct v3d_compile *c, int temp)
 static int
 v3d_choose_spill_node(struct v3d_compile *c)
 {
+        assert(c->num_temps > 1);
+
         const float tmu_scale = 10;
         float block_scale = 1.0;
         float spill_costs[c->num_temps];
@@ -1032,7 +1034,7 @@ v3d_ra_select_callback(unsigned int n, BITSET_WORD *regs, void *data)
         if (v3d_ra_select_accum(v3d_ra, regs, &reg))
                 return reg;
 
-        unreachable("RA must pass us at least one possible reg.");
+        UNREACHABLE("RA must pass us at least one possible reg.");
 }
 
 bool
@@ -1217,10 +1219,11 @@ update_graph_and_reg_classes_for_inst(struct v3d_compile *c,
                 switch (inst->src[0].index) {
                 case 0:
                         /* V3D 7.x doesn't use rf0 for thread payload */
-                        if (c->devinfo->ver >= 71)
+                        if (c->devinfo->ver >= 71) {
                                 break;
-                        else
+                        } else {
                                 FALLTHROUGH;
+                        }
                 case 1:
                 case 2:
                 case 3: {

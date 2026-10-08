@@ -29,7 +29,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "compiler/glsl/list.h"
+#include "../compiler/brw_list.h"
 #include "common/intel_bind_timeline.h"
 #include "dev/intel_device_info.h"
 #include "util/bitscan.h"
@@ -173,6 +173,115 @@ struct intel_perf_query_result {
     * Whether the query was interrupted by another workload (aka preemption).
     */
    bool query_disjoint;
+};
+
+struct intel_perf_query_eustall_event {
+   /**
+    * Offset of instruction within shader cache, bit shifted by 3.
+    * Should be unique identifier for event.
+    */
+   uint64_t ip_addr;
+
+   /**
+    * Number of EU stalls with at least one thread waiting on Pixel
+    * Shader dependency
+    */
+   uint64_t tdr_count;
+
+   /**
+    * Number of samples with at least one thread waiting on any
+    * other dependency (Flag/EoT etc). Multiple stall reasons can
+    * qualify during the same cycle
+    */
+   uint64_t other_count;
+
+   /**
+    * Number of samples with at least one thread waiting for JEU to
+    * complete branch instruction. Multiple stall reasons can qualify
+    * during the same cycle
+    */
+   uint64_t control_count;
+
+   /**
+    * Number of samples with at least one thread ready to be
+    * scheduled (Grf conf/send holds etc). Multiple stall reasons can
+    * qualify during the same cycle
+    */
+   uint64_t pipestall_count;
+
+   /**
+    * Number of samples with at least one thread waiting for SEND
+    * message to be dispatched from EU. Multiple stall reasons can
+    * qualify during the same cycle
+    */
+   uint64_t send_count;
+
+   /**
+    * Number of samples with at least one thread waiting for ALU to
+    * write GRF/ACC register. Multiple stall reasons can qualify
+    * during the same cycle
+    */
+   uint64_t dist_acc_count;
+
+   /**
+    * Number of samples with at least one thread waiting for
+    * Scoreboard token to be available. Multiple stall reasons can
+    * qualify during the same cycle
+    */
+   uint64_t sbid_count;
+
+   /**
+    * Number of samples with at least one thread waiting for
+    * Gateway to write Notify register. Multiple stall reasons can
+    * qualify during the same cycle
+    */
+   uint64_t sync_count;
+
+   /**
+    * Number of samples with at least one thread waiting for
+    * Instruction Fetch.  Multiple stall reasons can qualify during
+    * the same cycle
+    */
+   uint64_t inst_fetch_count;
+
+   /**
+    * Number of samples where no threads are waiting
+    */
+   uint64_t active_count;
+};
+
+struct intel_perf_query_eustall_result {
+   /**
+    * Storage for accumulated samples. Hash table containing
+    * intel_perf_query_eustall_event values with ip_addr as key.
+    */
+   struct hash_table *accumulator;
+
+   /**
+    * Hw ID used by the context on which the query was running.
+    */
+   uint32_t hw_id;
+
+   /**
+    * Number of records accumulated to produce the results.
+    */
+   uint32_t records_accumulated;
+
+   /**
+    * Overflow event occurred during sampling.
+    */
+   bool overflow;
+
+   /**
+    * Size of eu sample records in bytes. Obtained from
+    * kmd headers.
+    */
+   size_t record_size;
+
+   /**
+    * Number of bytes to next record to parse.
+    */
+   int bytes_to_next_record;
 };
 
 typedef uint64_t (*intel_counter_read_uint64_t)(struct intel_perf_config *perf,
@@ -320,9 +429,12 @@ struct intel_perf_query_counter_info {
 enum intel_perf_features {
    INTEL_PERF_FEATURE_HOLD_PREEMPTION = (1 << 0),
    INTEL_PERF_FEATURE_GLOBAL_SSEU = (1 << 1),
-   /* Whether i915 has DRM_I915_QUERY_PERF_CONFIG support. */
-   INTEL_PERF_FEATURE_QUERY_PERF = (1 << 2),
-   INTEL_PERF_FEATURE_METRIC_SYNC = (1 << 3),
+   INTEL_PERF_FEATURE_METRIC_SYNC = (1 << 2),
+   /* OA metrics are supported by the kernel but access is blocked by system
+    * policy (observation_paranoid on xe, perf_stream_paranoid on i915).
+    * Set when the sysctl exists but the process lacks the required privilege.
+    */
+   INTEL_PERF_FEATURE_OA_BLOCKED_BY_POLICY = (1 << 3),
 };
 
 struct intel_perf_config {
@@ -367,6 +479,12 @@ struct intel_perf_config {
       uint64_t n_eu_slices;         /** $EuSlicesTotalCount */
       uint64_t n_eu_sub_slices;     /** $EuSubslicesTotalCount */
       uint64_t n_eu_slice0123;      /** $EuDualSubslicesSlice0123Count */
+      uint64_t n_l3_banks;          /** $L3BankTotalCount */
+      uint64_t n_l3_nodes;          /** $L3NodeTotalCount */
+      uint64_t n_sq_idis;           /** $SqidiTotalCount */
+      uint64_t n_depth_pipes;       /** $DepthPipeTotalCount */
+      uint64_t n_geom_pipes;        /** $GeometryPipeTotalCount */
+      uint64_t n_color_pipes;       /** $ColorPipeTotalCount */
       uint64_t slice_mask;          /** $SliceMask */
       uint64_t subslice_mask;       /** $SubsliceMask */
       uint64_t gt_min_freq;         /** $GpuMinFrequency */
@@ -452,10 +570,10 @@ bool intel_perf_load_metric_id(struct intel_perf_config *perf_cfg,
                                const char *guid,
                                uint64_t *metric_id);
 
-/** Load a configuation's content from i915 using a guid.
+/** Load a configuration's id from KMD using a guid.
  */
-struct intel_perf_registers *intel_perf_load_configuration(struct intel_perf_config *perf_cfg,
-                                                           int fd, const char *guid);
+uint64_t
+intel_perf_get_configuration_id(struct intel_perf_config *perf_cfg, const char *guid);
 
 /** Store a configuration into i915 using guid and return a new metric id.
  *
@@ -518,7 +636,17 @@ void intel_perf_query_result_accumulate_fields(struct intel_perf_query_result *r
                                                const void *end,
                                                bool no_oa_accumulate);
 
+/** Accumulate EU stall sampling data, ensuring data from previously seen offsets
+ * get aggregated.
+ */
+void intel_perf_eustall_accumulate_results(struct intel_perf_query_eustall_result *result,
+                                           const void *start,
+                                           const void *end,
+                                           size_t record_size,
+                                           int ver);
+
 void intel_perf_query_result_clear(struct intel_perf_query_result *result);
+void intel_perf_query_eustall_result_clear(struct intel_perf_query_eustall_result *result);
 
 /** Debug helper printing out query data.
  */
@@ -540,7 +668,7 @@ intel_perf_query_counter_get_size(const struct intel_perf_query_counter *counter
    case INTEL_PERF_COUNTER_DATA_TYPE_DOUBLE:
       return sizeof(double);
    default:
-      unreachable("invalid counter data type");
+      UNREACHABLE("invalid counter data type");
    }
 }
 
@@ -605,6 +733,17 @@ int intel_perf_stream_set_metrics_id(struct intel_perf_config *perf_config,
                                      uint64_t metrics_set_id,
                                      struct intel_bind_timeline *timeline);
 
+int intel_perf_eustall_stream_open(struct intel_device_info *devinfo, int drm_fd,
+                                   uint32_t sample_rate, uint32_t min_event_count);
+int intel_perf_eustall_stream_set_state(struct intel_device_info *devinfo,
+                                        int perf_stream_fd, bool enable);
+int intel_perf_eustall_stream_record_size(struct intel_device_info *devinfo,
+                                          int drm_fd);
+int intel_perf_eustall_stream_sample_rate(struct intel_device_info *devinfo,
+                                          int drm_fd);
+int intel_perf_eustall_stream_read_samples(struct intel_device_info *devinfo,
+                                           int perf_stream_fd, uint8_t *buffer,
+                                           size_t buffer_len, bool *overflow);
 #ifdef __cplusplus
 } // extern "C"
 #endif

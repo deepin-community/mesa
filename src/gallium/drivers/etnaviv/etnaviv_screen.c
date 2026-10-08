@@ -34,9 +34,11 @@
 #include "etnaviv_debug.h"
 #include "etnaviv_fence.h"
 #include "etnaviv_format.h"
+#include "etnaviv_ml.h"
 #include "etnaviv_query.h"
 #include "etnaviv_resource.h"
 #include "etnaviv_translate.h"
+#include "etnaviv_yuv.h"
 
 #include "util/hash_table.h"
 #include "util/os_time.h"
@@ -79,6 +81,7 @@ static const struct debug_named_value etna_debug_options[] = {
    {"perf",           ETNA_DBG_PERF, "Enable performance warnings"},
    {"npu_parallel",   ETNA_DBG_NPU_PARALLEL, "Enable parallelism inside NPU batches (unsafe)"},
    {"npu_no_batching",ETNA_DBG_NPU_NO_BATCHING, "Disable batching NPU jobs"},
+   {"no_texdesc"     ,ETNA_DBG_NO_TEXDESC, "Disable texture descriptor"},
    DEBUG_NAMED_VALUE_END
 };
 
@@ -90,11 +93,11 @@ etna_screen_destroy(struct pipe_screen *pscreen)
 {
    struct etna_screen *screen = etna_screen(pscreen);
 
+   if (screen->dummy_bo)
+      etna_bo_del(screen->dummy_bo);
+
    if (screen->dummy_desc_reloc.bo)
       etna_bo_del(screen->dummy_desc_reloc.bo);
-
-   if (screen->dummy_rt_reloc.bo)
-      etna_bo_del(screen->dummy_rt_reloc.bo);
 
    if (screen->perfmon)
       etna_perfmon_del(screen->perfmon);
@@ -148,319 +151,222 @@ etna_screen_get_device_vendor(struct pipe_screen *pscreen)
    return "Vivante";
 }
 
-static int
-etna_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
+static void
+etna_init_single_shader_caps(struct etna_screen *screen, mesa_shader_stage shader)
 {
-   struct etna_screen *screen = etna_screen(pscreen);
+   struct pipe_shader_caps *caps =
+      (struct pipe_shader_caps *)&screen->base.shader_caps[shader];
 
-   switch (param) {
-   /* Supported features (boolean caps). */
-   case PIPE_CAP_BLEND_EQUATION_SEPARATE:
-   case PIPE_CAP_FS_COORD_ORIGIN_UPPER_LEFT:
-   case PIPE_CAP_FS_COORD_PIXEL_CENTER_HALF_INTEGER:
-   case PIPE_CAP_FRAGMENT_SHADER_TEXTURE_LOD:
-   case PIPE_CAP_FRAGMENT_SHADER_DERIVATIVES:
-   case PIPE_CAP_TEXTURE_BARRIER:
-   case PIPE_CAP_QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION:
-   case PIPE_CAP_TGSI_TEXCOORD:
-   case PIPE_CAP_VERTEX_COLOR_UNCLAMPED:
-   case PIPE_CAP_MIXED_COLOR_DEPTH_BITS:
-   case PIPE_CAP_MIXED_FRAMEBUFFER_SIZES:
-   case PIPE_CAP_STRING_MARKER:
-   case PIPE_CAP_FRONTEND_NOOP:
-   case PIPE_CAP_FRAMEBUFFER_NO_ATTACHMENT:
-      return 1;
-   case PIPE_CAP_VERTEX_INPUT_ALIGNMENT:
-      return PIPE_VERTEX_INPUT_ALIGNMENT_4BYTE;
-   case PIPE_CAP_NATIVE_FENCE_FD:
-      return screen->drm_version >= ETNA_DRM_VERSION_FENCE_FD;
-   case PIPE_CAP_FS_POSITION_IS_SYSVAL:
-   case PIPE_CAP_FS_FACE_IS_INTEGER_SYSVAL: /* note: not integer */
-      return 1;
-   case PIPE_CAP_FS_POINT_IS_SYSVAL:
-      return 0;
-
-   /* Memory */
-   case PIPE_CAP_CONSTANT_BUFFER_OFFSET_ALIGNMENT:
-      return 256;
-   case PIPE_CAP_MIN_MAP_BUFFER_ALIGNMENT:
-      return 4096;
-
-   case PIPE_CAP_NPOT_TEXTURES:
-      return true; /* VIV_FEATURE(priv->dev, chipMinorFeatures1,
-                      NON_POWER_OF_TWO); */
-
-   case PIPE_CAP_ANISOTROPIC_FILTER:
-   case PIPE_CAP_TEXTURE_SWIZZLE:
-   case PIPE_CAP_PRIMITIVE_RESTART:
-   case PIPE_CAP_PRIMITIVE_RESTART_FIXED_INDEX:
-      return VIV_FEATURE(screen, ETNA_FEATURE_HALTI0);
-
-   case PIPE_CAP_ALPHA_TEST:
-      return !VIV_FEATURE(screen, ETNA_FEATURE_PE_NO_ALPHA_TEST);
-
-   case PIPE_CAP_DRAW_INDIRECT:
-      return VIV_FEATURE(screen, ETNA_FEATURE_HALTI5);
-
-   /* Unsupported features. */
-   case PIPE_CAP_TEXTURE_BUFFER_OFFSET_ALIGNMENT:
-   case PIPE_CAP_TEXRECT:
-      return 0;
-
-   /* Stream output. */
-   case PIPE_CAP_MAX_STREAM_OUTPUT_BUFFERS:
-      return DBG_ENABLED(ETNA_DBG_DEQP) ? 4 : 0;
-   case PIPE_CAP_MAX_STREAM_OUTPUT_SEPARATE_COMPONENTS:
-   case PIPE_CAP_MAX_STREAM_OUTPUT_INTERLEAVED_COMPONENTS:
-      return 0;
-
-   case PIPE_CAP_MAX_VERTEX_ATTRIB_STRIDE:
-      return 128;
-   case PIPE_CAP_MAX_VERTEX_ELEMENT_SRC_OFFSET:
-      return 255;
-   case PIPE_CAP_MAX_VERTEX_BUFFERS:
-      return screen->info->gpu.stream_count;
-   case PIPE_CAP_VS_INSTANCEID:
-   case PIPE_CAP_VERTEX_ELEMENT_INSTANCE_DIVISOR:
-      return VIV_FEATURE(screen, ETNA_FEATURE_HALTI2);
-
-
-   /* Texturing. */
-   case PIPE_CAP_TEXTURE_HALF_FLOAT_LINEAR:
-      return VIV_FEATURE(screen, ETNA_FEATURE_HALF_FLOAT);
-   case PIPE_CAP_TEXTURE_SHADOW_MAP:
-      return 1;
-   case PIPE_CAP_MAX_TEXTURE_2D_SIZE:
-      return screen->specs.max_texture_size;
-   case PIPE_CAP_MAX_TEXTURE_ARRAY_LAYERS: /* TODO: verify */
-      return screen->info->halti >= 0 ? screen->specs.max_texture_size : 0;
-   case PIPE_CAP_MAX_TEXTURE_3D_LEVELS:
-      if (screen->info->halti < 0)
-         return 0;
-      FALLTHROUGH;
-   case PIPE_CAP_MAX_TEXTURE_CUBE_LEVELS:
-   {
-      int log2_max_tex_size = util_last_bit(screen->specs.max_texture_size);
-      assert(log2_max_tex_size > 0);
-      return log2_max_tex_size;
-   }
-
-   case PIPE_CAP_MIN_TEXTURE_GATHER_OFFSET:
-   case PIPE_CAP_MIN_TEXEL_OFFSET:
-      return -8;
-   case PIPE_CAP_MAX_TEXTURE_GATHER_OFFSET:
-   case PIPE_CAP_MAX_TEXEL_OFFSET:
-      return 7;
-   case PIPE_CAP_SEAMLESS_CUBE_MAP_PER_TEXTURE:
-      return screen->specs.seamless_cube_map;
-
-   /* Render targets. */
-   case PIPE_CAP_MAX_RENDER_TARGETS: {
-      /* If the GPU supports float formats we need to reserve half of
-       * the available render targets for emulation proposes.
-       */
-      if (VIV_FEATURE(screen, ETNA_FEATURE_HALTI2))
-         return screen->specs.num_rts / 2;
-
-      return screen->specs.num_rts;
-   }
-   case PIPE_CAP_INDEP_BLEND_ENABLE:
-   case PIPE_CAP_INDEP_BLEND_FUNC:
-      return screen->info->halti >= 5;
-
-   /* Queries. */
-   case PIPE_CAP_OCCLUSION_QUERY:
-   case PIPE_CAP_CONDITIONAL_RENDER:
-   case PIPE_CAP_CONDITIONAL_RENDER_INVERTED:
-      return VIV_FEATURE(screen, ETNA_FEATURE_HALTI0);
-
-   /* Preferences */
-   case PIPE_CAP_TEXTURE_TRANSFER_MODES:
-      return 0;
-   case PIPE_CAP_MAX_TEXTURE_UPLOAD_MEMORY_BUDGET: {
-      /* etnaviv is being run on systems as small as 256MB total RAM so
-       * we need to provide a sane value for such a device. Limit the
-       * memory budget to min(~3% of pyhiscal memory, 64MB).
-       *
-       * a simple divison by 32 provides the numbers we want.
-       *    256MB / 32 =  8MB
-       *   2048MB / 32 = 64MB
-       */
-      uint64_t system_memory;
-
-      if (!os_get_total_physical_memory(&system_memory))
-         system_memory = (uint64_t)4096 << 20;
-
-      return MIN2(system_memory / 32, 64 * 1024 * 1024);
-   }
-
-   case PIPE_CAP_MAX_VARYINGS:
-      return screen->specs.max_varyings;
-
-   case PIPE_CAP_SUPPORTED_PRIM_MODES:
-   case PIPE_CAP_SUPPORTED_PRIM_MODES_WITH_RESTART: {
-      /* Generate the bitmask of supported draw primitives. */
-      uint32_t modes = 1 << MESA_PRIM_POINTS |
-                       1 << MESA_PRIM_LINES |
-                       1 << MESA_PRIM_LINE_STRIP |
-                       1 << MESA_PRIM_TRIANGLES |
-                       1 << MESA_PRIM_TRIANGLE_FAN;
-
-      /* TODO: The bug relates only to indexed draws, but here we signal
-       * that there is no support for triangle strips at all. This should
-       * be refined.
-       */
-      if (VIV_FEATURE(screen, ETNA_FEATURE_BUG_FIXES8))
-         modes |= 1 << MESA_PRIM_TRIANGLE_STRIP;
-
-      if (VIV_FEATURE(screen, ETNA_FEATURE_LINE_LOOP))
-         modes |= 1 << MESA_PRIM_LINE_LOOP;
-
-      return modes;
-   }
-
-   case PIPE_CAP_PCI_GROUP:
-   case PIPE_CAP_PCI_BUS:
-   case PIPE_CAP_PCI_DEVICE:
-   case PIPE_CAP_PCI_FUNCTION:
-      return 0;
-   case PIPE_CAP_ACCELERATED:
-      return 1;
-   case PIPE_CAP_VIDEO_MEMORY:
-      return 0;
-   case PIPE_CAP_UMA:
-      return 1;
-   case PIPE_CAP_GRAPHICS:
-      return !VIV_FEATURE(screen, ETNA_FEATURE_COMPUTE_ONLY);
-   default:
-      return u_pipe_screen_get_param_defaults(pscreen, param);
-   }
-}
-
-static float
-etna_screen_get_paramf(struct pipe_screen *pscreen, enum pipe_capf param)
-{
-   struct etna_screen *screen = etna_screen(pscreen);
-
-   switch (param) {
-   case PIPE_CAPF_MIN_LINE_WIDTH:
-   case PIPE_CAPF_MIN_LINE_WIDTH_AA:
-   case PIPE_CAPF_MIN_POINT_SIZE:
-   case PIPE_CAPF_MIN_POINT_SIZE_AA:
-      return 1;
-   case PIPE_CAPF_POINT_SIZE_GRANULARITY:
-   case PIPE_CAPF_LINE_WIDTH_GRANULARITY:
-      return 0.1;
-   case PIPE_CAPF_MAX_LINE_WIDTH:
-   case PIPE_CAPF_MAX_LINE_WIDTH_AA:
-   case PIPE_CAPF_MAX_POINT_SIZE:
-   case PIPE_CAPF_MAX_POINT_SIZE_AA:
-      return 8192.0f;
-   case PIPE_CAPF_MAX_TEXTURE_ANISOTROPY:
-      return 16.0f;
-   case PIPE_CAPF_MAX_TEXTURE_LOD_BIAS:
-      return util_last_bit(screen->specs.max_texture_size);
-   case PIPE_CAPF_MIN_CONSERVATIVE_RASTER_DILATE:
-   case PIPE_CAPF_MAX_CONSERVATIVE_RASTER_DILATE:
-   case PIPE_CAPF_CONSERVATIVE_RASTER_DILATE_GRANULARITY:
-      return 0.0f;
-   }
-
-   debug_printf("unknown paramf %d", param);
-   return 0;
-}
-
-static int
-etna_screen_get_shader_param(struct pipe_screen *pscreen,
-                             enum pipe_shader_type shader,
-                             enum pipe_shader_cap param)
-{
-   struct etna_screen *screen = etna_screen(pscreen);
    bool ubo_enable = screen->info->halti >= 2;
-
    if (DBG_ENABLED(ETNA_DBG_DEQP))
       ubo_enable = true;
 
-   switch (shader) {
-   case PIPE_SHADER_FRAGMENT:
-   case PIPE_SHADER_VERTEX:
-      break;
-   case PIPE_SHADER_COMPUTE:
-   case PIPE_SHADER_GEOMETRY:
-   case PIPE_SHADER_TESS_CTRL:
-   case PIPE_SHADER_TESS_EVAL:
-      return 0;
-   default:
-      DBG("unknown shader type %d", shader);
-      return 0;
-   }
+   caps->max_instructions =
+   caps->max_alu_instructions =
+   caps->max_tex_instructions =
+   caps->max_tex_indirections = ETNA_MAX_TOKENS;
 
-   switch (param) {
-   case PIPE_SHADER_CAP_MAX_INSTRUCTIONS:
-   case PIPE_SHADER_CAP_MAX_ALU_INSTRUCTIONS:
-   case PIPE_SHADER_CAP_MAX_TEX_INSTRUCTIONS:
-   case PIPE_SHADER_CAP_MAX_TEX_INDIRECTIONS:
-      return ETNA_MAX_TOKENS;
-   case PIPE_SHADER_CAP_MAX_CONTROL_FLOW_DEPTH:
-      return ETNA_MAX_DEPTH; /* XXX */
-   case PIPE_SHADER_CAP_MAX_INPUTS:
-      /* Maximum number of inputs for the vertex shader is the number
-       * of vertex elements - each element defines one vertex shader
-       * input register.  For the fragment shader, this is the number
-       * of varyings. */
-      return shader == PIPE_SHADER_FRAGMENT ? screen->specs.max_varyings
-                                            : screen->specs.vertex_max_elements;
-   case PIPE_SHADER_CAP_MAX_OUTPUTS:
-      return screen->specs.max_vs_outputs;
-   case PIPE_SHADER_CAP_MAX_TEMPS:
-      return 64; /* Max native temporaries. */
-   case PIPE_SHADER_CAP_MAX_CONST_BUFFERS:
-      return ubo_enable ? ETNA_MAX_CONST_BUF : 1;
-   case PIPE_SHADER_CAP_CONT_SUPPORTED:
-      return 1;
-   case PIPE_SHADER_CAP_INDIRECT_INPUT_ADDR:
-   case PIPE_SHADER_CAP_INDIRECT_OUTPUT_ADDR:
-   case PIPE_SHADER_CAP_INDIRECT_TEMP_ADDR:
-   case PIPE_SHADER_CAP_INDIRECT_CONST_ADDR:
-      return 1;
-   case PIPE_SHADER_CAP_SUBROUTINES:
-      return 0;
-   case PIPE_SHADER_CAP_TGSI_SQRT_SUPPORTED:
-      return VIV_FEATURE(screen, ETNA_FEATURE_HAS_SQRT_TRIG);
-   case PIPE_SHADER_CAP_INT64_ATOMICS:
-   case PIPE_SHADER_CAP_FP16:
-   case PIPE_SHADER_CAP_FP16_DERIVATIVES:
-   case PIPE_SHADER_CAP_FP16_CONST_BUFFERS:
-   case PIPE_SHADER_CAP_INT16:
-   case PIPE_SHADER_CAP_GLSL_16BIT_CONSTS:
-      return 0;
-   case PIPE_SHADER_CAP_INTEGERS:
-      return screen->info->halti >= 2;
-   case PIPE_SHADER_CAP_MAX_TEXTURE_SAMPLERS:
-   case PIPE_SHADER_CAP_MAX_SAMPLER_VIEWS:
-      return shader == PIPE_SHADER_FRAGMENT
-                ? screen->specs.fragment_sampler_count
-                : screen->specs.vertex_sampler_count;
-   case PIPE_SHADER_CAP_MAX_CONST_BUFFER0_SIZE:
-      if (ubo_enable)
-         return 16384; /* 16384 so state tracker enables UBOs */
-      return shader == PIPE_SHADER_FRAGMENT
-                ? screen->specs.max_ps_uniforms * sizeof(float[4])
-                : screen->specs.max_vs_uniforms * sizeof(float[4]);
-   case PIPE_SHADER_CAP_TGSI_ANY_INOUT_DECL_RANGE:
-      return false;
-   case PIPE_SHADER_CAP_SUPPORTED_IRS:
-      return (1 << PIPE_SHADER_IR_TGSI) |
-             (1 << PIPE_SHADER_IR_NIR);
-   case PIPE_SHADER_CAP_MAX_SHADER_BUFFERS:
-   case PIPE_SHADER_CAP_MAX_SHADER_IMAGES:
-   case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTERS:
-   case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTER_BUFFERS:
-      return 0;
-   }
+   caps->max_control_flow_depth = ETNA_MAX_DEPTH; /* XXX */
 
-   debug_printf("unknown shader param %d", param);
-   return 0;
+   /* Maximum number of inputs for the vertex shader is the number
+    * of vertex elements - each element defines one vertex shader
+    * input register.  For the fragment shader, this is the number
+    * of varyings. */
+   caps->max_inputs = shader == MESA_SHADER_FRAGMENT ?
+      screen->specs.max_varyings : screen->specs.vertex_max_elements;
+   caps->max_outputs = screen->specs.max_vs_outputs;
+   caps->max_temps = 64; /* Max native temporaries. */
+   caps->max_const_buffers = ubo_enable ? ETNA_MAX_CONST_BUF : 1;
+   caps->cont_supported = true;
+   caps->indirect_temp_addr = true;
+   caps->indirect_const_addr = true;
+   caps->tgsi_sqrt_supported = VIV_FEATURE(screen, ETNA_FEATURE_HAS_SQRT_TRIG);
+   caps->integers = screen->info->halti >= 2;
+
+   caps->max_texture_samplers =
+   caps->max_sampler_views = shader == MESA_SHADER_FRAGMENT
+      ? screen->specs.fragment_sampler_count
+      : screen->specs.vertex_sampler_count;
+
+   caps->max_const_buffer0_size =
+      ubo_enable ? 16384 /* 16384 so state tracker enables UBOs */ :
+      (shader == MESA_SHADER_FRAGMENT
+       ? screen->specs.max_ps_uniforms * sizeof(float[4])
+       : screen->specs.max_vs_uniforms * sizeof(float[4]));
+
+   caps->supported_irs =
+      (1 << PIPE_SHADER_IR_TGSI) |
+      (1 << PIPE_SHADER_IR_NIR);
+}
+
+static void
+etna_init_shader_caps(struct etna_screen *screen)
+{
+   etna_init_single_shader_caps(screen, MESA_SHADER_VERTEX);
+   etna_init_single_shader_caps(screen, MESA_SHADER_FRAGMENT);
+}
+
+static void
+etna_init_screen_caps(struct etna_screen *screen)
+{
+   struct pipe_caps *caps = (struct pipe_caps *)&screen->base.caps;
+
+   u_init_pipe_screen_caps(&screen->base, 1);
+
+   /* Supported features (boolean caps). */
+   caps->blend_equation_separate = true;
+   caps->fs_coord_origin_upper_left = true;
+   caps->fs_coord_pixel_center_half_integer = true;
+   caps->fragment_shader_texture_lod = true;
+   caps->fragment_shader_derivatives = true;
+   caps->texture_barrier = true;
+   caps->quads_follow_provoking_vertex_convention = true;
+   caps->tgsi_texcoord = true;
+   caps->vertex_color_unclamped = true;
+   caps->mixed_color_depth_bits = true;
+   caps->mixed_framebuffer_sizes = true;
+   caps->string_marker = true;
+   caps->frontend_noop = true;
+   caps->framebuffer_no_attachment = true;
+   caps->vertex_input_alignment = PIPE_VERTEX_INPUT_ALIGNMENT_4BYTE;
+   caps->native_fence_fd = screen->drm_version >= ETNA_DRM_VERSION_FENCE_FD;
+   caps->fs_position_is_sysval = true;
+   caps->fs_face_is_integer_sysval = true; /* note: not integer */
+   caps->fs_point_is_sysval = false;
+   caps->generate_mipmap =
+   caps->clear_scissored = screen->specs.use_blt;
+   caps->clear_masked = screen->specs.use_blt &&
+                        VIV_FEATURE(screen, ETNA_FEATURE_BLT_64BPP_MASKED_CLEAR_FIX);
+
+   /* Memory */
+   caps->constant_buffer_offset_alignment = 256;
+   caps->min_map_buffer_alignment = 4096;
+
+   caps->npot_textures = true; /* VIV_FEATURE(priv->dev, chipMinorFeatures1, NON_POWER_OF_TWO); */
+
+   caps->anisotropic_filter =
+   caps->texture_swizzle =
+   caps->primitive_restart =
+   caps->primitive_restart_fixed_index = VIV_FEATURE(screen, ETNA_FEATURE_HALTI0);
+
+   caps->anisotropic_filter &= !VIV_FEATURE(screen, ETNA_FEATURE_NO_ANISO);
+
+   caps->alpha_test = !VIV_FEATURE(screen, ETNA_FEATURE_PE_NO_ALPHA_TEST);
+
+   caps->draw_indirect = VIV_FEATURE(screen, ETNA_FEATURE_HALTI5);
+
+   /* Unsupported features. */
+   caps->texture_buffer_offset_alignment = false;
+   caps->texrect = false;
+
+   /* Stream output. */
+   caps->max_stream_output_buffers = VIV_FEATURE(screen, ETNA_FEATURE_HWTFB) || DBG_ENABLED(ETNA_DBG_DEQP) ? 4 : 0;
+   caps->max_stream_output_separate_components = 64;
+   caps->max_stream_output_interleaved_components = 64;
+
+   caps->max_vertex_attrib_stride = 128;
+   caps->max_vertex_element_src_offset = 255;
+   caps->max_vertex_buffers = screen->info->gpu.stream_count;
+   caps->vs_instanceid =
+   caps->vertex_element_instance_divisor = VIV_FEATURE(screen, ETNA_FEATURE_HALTI2);
+
+
+   /* Texturing. */
+   caps->texture_half_float_linear = VIV_FEATURE(screen, ETNA_FEATURE_HALF_FLOAT);
+   caps->texture_shadow_map = true;
+   caps->max_texture_2d_size = screen->specs.max_texture_size;
+   caps->max_texture_array_layers =
+      screen->info->halti >= 0 ? screen->specs.max_texture_size : 0; /* TODO: verify */
+   unsigned log2_max_tex_size = util_last_bit(screen->specs.max_texture_size);
+   assert(log2_max_tex_size > 0);
+   caps->max_texture_3d_levels = screen->info->halti < 0 ? 0 : log2_max_tex_size;
+   caps->max_texture_cube_levels = log2_max_tex_size;
+
+   caps->min_texel_offset = -8;
+   caps->max_texel_offset = 7;
+   caps->max_texture_gather_components =
+      (VIV_FEATURE(screen, ETNA_FEATURE_HALTI5) && DBG_ENABLED(ETNA_DBG_DEQP)) ? 4 : 0;
+   caps->seamless_cube_map_per_texture =
+   caps->seamless_cube_map = VIV_FEATURE(screen, ETNA_FEATURE_SEAMLESS_CUBE_MAP);
+   caps->texture_multisample = DBG_ENABLED(ETNA_DBG_DEQP);
+
+   /* Render targets. */
+   caps->max_render_targets = VIV_FEATURE(screen, ETNA_FEATURE_HALTI2) ?
+      /* If the GPU supports float formats we need to reserve half of
+       * the available render targets for emulation proposes.
+       */
+      screen->specs.num_rts / 2 :
+      screen->specs.num_rts;
+   caps->indep_blend_enable =
+   caps->indep_blend_func = screen->info->halti >= 5;
+
+   /* Queries. */
+   caps->occlusion_query =
+   caps->conditional_render =
+   caps->conditional_render_inverted = VIV_FEATURE(screen, ETNA_FEATURE_HALTI0);
+
+   /* Preferences */
+   caps->texture_transfer_modes = 0;
+   /* etnaviv is being run on systems as small as 256MB total RAM so
+    * we need to provide a sane value for such a device. Limit the
+    * memory budget to min(~3% of pyhiscal memory, 64MB).
+    *
+    * a simple divison by 32 provides the numbers we want.
+    *    256MB / 32 =  8MB
+    *   2048MB / 32 = 64MB
+    */
+   uint64_t system_memory;
+   if (!os_get_total_physical_memory(&system_memory))
+      system_memory = (uint64_t)4096 << 20;
+   caps->max_texture_upload_memory_budget = MIN2(system_memory / 32, 64 * 1024 * 1024);
+
+   caps->max_varyings = screen->specs.max_varyings;
+
+   /* Generate the bitmask of supported draw primitives. */
+   uint32_t modes = 1 << MESA_PRIM_POINTS |
+      1 << MESA_PRIM_LINES |
+      1 << MESA_PRIM_LINE_STRIP |
+      1 << MESA_PRIM_TRIANGLES |
+      1 << MESA_PRIM_TRIANGLE_FAN;
+
+   /* TODO: The bug relates only to indexed draws, but here we signal
+    * that there is no support for triangle strips at all. This should
+    * be refined.
+    */
+   if (VIV_FEATURE(screen, ETNA_FEATURE_BUG_FIXES8))
+      modes |= 1 << MESA_PRIM_TRIANGLE_STRIP;
+
+   if (VIV_FEATURE(screen, ETNA_FEATURE_LINE_LOOP))
+      modes |= 1 << MESA_PRIM_LINE_LOOP;
+
+   caps->supported_prim_modes =
+   caps->supported_prim_modes_with_restart = modes;
+
+   caps->pci_group =
+   caps->pci_bus =
+   caps->pci_device =
+   caps->pci_function = 0;
+   caps->video_memory = 0;
+   caps->uma = true;
+   caps->graphics = !VIV_FEATURE(screen, ETNA_FEATURE_COMPUTE_ONLY);
+
+   caps->min_line_width =
+   caps->min_line_width_aa =
+   caps->min_point_size =
+   caps->min_point_size_aa = 1;
+
+   caps->point_size_granularity =
+   caps->line_width_granularity = 0.1;
+
+   caps->max_line_width =
+   caps->max_line_width_aa =
+      VIV_FEATURE(screen, ETNA_FEATURE_WIDELINE_TRIANGLE_EMU) ? 1.0f : 8192.0f;
+
+   caps->max_point_size =
+   caps->max_point_size_aa = 8192.0f;
+
+   caps->max_texture_anisotropy = 16.0f;
+   caps->max_texture_lod_bias = util_last_bit(screen->specs.max_texture_size);
 }
 
 static bool
@@ -487,7 +393,8 @@ gpu_supports_texture_format(struct etna_screen *screen, uint32_t fmt,
    bool supported = true;
 
    /* Requires split sampler support, which the driver doesn't support, yet. */
-   if (!util_format_is_compressed(format) &&
+   if (!DBG_ENABLED(ETNA_DBG_DEQP) &&
+       !util_format_is_compressed(format) &&
        util_format_get_blocksizebits(format) > 64)
       return false;
 
@@ -514,12 +421,40 @@ gpu_supports_texture_format(struct etna_screen *screen, uint32_t fmt,
        (util_format_is_pure_integer(format) || util_format_is_float(format)))
       supported = VIV_FEATURE(screen, ETNA_FEATURE_HALTI2);
 
+   if (format == PIPE_FORMAT_S8_UINT)
+      supported = VIV_FEATURE(screen, ETNA_FEATURE_S8);
+
+   if (format == PIPE_FORMAT_S8X24_UINT)
+      supported = VIV_FEATURE(screen, ETNA_FEATURE_HALTI5) &&
+                  !DBG_ENABLED(ETNA_DBG_NO_TEXDESC);
+
+   if (etna_format_needs_yuv_tiler(format))
+      supported = VIV_FEATURE(screen, ETNA_FEATURE_YUV420_TILER);
 
    if (!supported)
       return false;
 
    if (texture_format_needs_swiz(format))
       return VIV_FEATURE(screen, ETNA_FEATURE_HALTI0);
+
+   return true;
+}
+
+static bool
+gpu_supports_msaa(struct etna_screen *screen, unsigned sample_count)
+{
+   if (DBG_ENABLED(ETNA_DBG_NO_MSAA))
+      return false;
+
+   if (!VIV_FEATURE(screen, ETNA_FEATURE_MSAA))
+      return false;
+
+   if (!translate_samples_to_xyscale(sample_count, NULL, NULL))
+      return false;
+
+   /* On SMALL_MSAA hardware 2x MSAA does not work. */
+   if (sample_count == 2 && VIV_FEATURE(screen, ETNA_FEATURE_SMALL_MSAA))
+      return false;
 
    return true;
 }
@@ -534,26 +469,11 @@ gpu_supports_render_format(struct etna_screen *screen, enum pipe_format format,
       return false;
 
    /* Requires split target support, which the driver doesn't support, yet. */
-   if (util_format_get_blocksizebits(format) > 64)
+   if (!DBG_ENABLED(ETNA_DBG_DEQP) &&
+       util_format_get_blocksizebits(format) > 64)
       return false;
 
    if (sample_count > 1) {
-      /* Explicitly disabled. */
-      if (DBG_ENABLED(ETNA_DBG_NO_MSAA))
-         return false;
-
-      /* The hardware supports it. */
-      if (!VIV_FEATURE(screen, ETNA_FEATURE_MSAA))
-         return false;
-
-      /* Number of samples must be allowed. */
-      if (!translate_samples_to_xyscale(sample_count, NULL, NULL))
-         return false;
-
-      /* On SMALL_MSAA hardware 2x MSAA does not work. */
-      if (sample_count == 2 && VIV_FEATURE(screen, ETNA_FEATURE_SMALL_MSAA))
-         return false;
-
       /* BLT/RS supports the format. */
       if (screen->specs.use_blt) {
          if (translate_blt_format(format) == ETNA_NO_MATCH)
@@ -596,6 +516,26 @@ gpu_supports_vertex_format(struct etna_screen *screen, enum pipe_format format)
    if (util_format_is_pure_integer(format))
       return VIV_FEATURE(screen, ETNA_FEATURE_HALTI2);
 
+   /* ARB_vertex_type_2_10_10_10_rev */
+   if (format == PIPE_FORMAT_R10G10B10A2_UNORM ||
+       format == PIPE_FORMAT_B10G10R10A2_UNORM ||
+       format == PIPE_FORMAT_R10G10B10A2_SNORM ||
+       format == PIPE_FORMAT_B10G10R10A2_SNORM ||
+       format == PIPE_FORMAT_R10G10B10A2_USCALED ||
+       format == PIPE_FORMAT_B10G10R10A2_USCALED ||
+       format == PIPE_FORMAT_R10G10B10A2_SSCALED ||
+       format == PIPE_FORMAT_B10G10R10A2_SSCALED)
+      return VIV_FEATURE(screen, ETNA_FEATURE_HALTI2);
+
+   return true;
+}
+
+static bool
+gpu_supports_depth_stencil_format(struct etna_screen *screen, enum pipe_format format)
+{
+   if (format == PIPE_FORMAT_S8_UINT)
+      return VIV_FEATURE(screen, ETNA_FEATURE_S8);
+
    return true;
 }
 
@@ -616,6 +556,9 @@ etna_screen_is_format_supported(struct pipe_screen *pscreen,
    if (MAX2(1, sample_count) != MAX2(1, storage_sample_count))
       return false;
 
+   if (sample_count > 1 && !gpu_supports_msaa(screen, sample_count))
+      return false;
+
    /* For ARB_framebuffer_no_attachments - Short-circuit the rest of the logic. */
    if (format == PIPE_FORMAT_NONE && usage & PIPE_BIND_RENDER_TARGET)
       return true;
@@ -626,12 +569,17 @@ etna_screen_is_format_supported(struct pipe_screen *pscreen,
    }
 
    if (usage & PIPE_BIND_DEPTH_STENCIL) {
-      if (translate_depth_format(format) != ETNA_NO_MATCH)
+      uint32_t fmt = translate_depth_format(format);
+
+      if (!gpu_supports_depth_stencil_format(screen, format))
+         fmt = ETNA_NO_MATCH;
+
+      if (fmt != ETNA_NO_MATCH)
          allowed |= PIPE_BIND_DEPTH_STENCIL;
    }
 
    if (usage & PIPE_BIND_SAMPLER_VIEW) {
-      uint32_t fmt = translate_texture_format(format);
+      uint32_t fmt = translate_texture_format(format, screen);
 
       if (!gpu_supports_texture_format(screen, fmt, format))
          fmt = ETNA_NO_MATCH;
@@ -680,7 +628,7 @@ static int etna_get_num_modifiers(struct etna_screen *screen)
    int num = ARRAY_SIZE(supported_modifiers);
 
    /* don't advertise split tiled formats on single pipe/buffer GPUs */
-   if (screen->specs.pixel_pipes == 1 || screen->specs.single_buffer)
+   if (!screen->specs.pe_multitiled)
       num = 3;
 
    return num;
@@ -833,8 +781,13 @@ etna_determine_uniform_limits(struct etna_screen *screen)
     * gcmCONFIGUREUNIFORMS in the Vivante kernel driver file
     * drivers/mxc/gpu-viv/hal/kernel/inc/gc_hal_base.h.
     */
-   if (screen->info->model == chipModel_GC2000 &&
-       (screen->info->revision == 0x5118 || screen->info->revision == 0x5140)) {
+   if (screen->info->halti >= 1) {
+      /* with halti1 we use unified constant mode */
+      screen->specs.max_vs_uniforms = screen->specs.max_ps_uniforms =
+            MIN2(512, screen->info->gpu.num_constants - 64);
+   } else if (screen->info->model == chipModel_GC2000 &&
+              (screen->info->revision == 0x5118 ||
+               screen->info->revision == 0x5140)) {
       screen->specs.max_vs_uniforms = 256;
       screen->specs.max_ps_uniforms = 64;
    } else if (screen->info->gpu.num_constants == 320) {
@@ -882,7 +835,7 @@ etna_get_specs(struct etna_screen *screen)
    uint32_t instruction_count = 0;
 
    /* Copy all relevant limits from etna_core_info. */
-   if (info->type == ETNA_CORE_GPU) {
+   if (etna_core_has_feature(info, ETNA_FEATURE_CORE_GPU)) {
       instruction_count = info->gpu.max_instructions;
       screen->specs.pixel_pipes = info->gpu.pixel_pipes;
 
@@ -890,7 +843,7 @@ etna_get_specs(struct etna_screen *screen)
          info = etna_gpu_get_core_info(screen->npu);
    }
 
-   if (info->type == ETNA_CORE_NPU) {
+   if (etna_core_has_feature(info, ETNA_FEATURE_CORE_NPU)) {
       if (etna_core_has_feature(info, ETNA_FEATURE_NN_XYDP0))
          screen->specs.nn_core_version = 8;
       else if (etna_core_has_feature(info, ETNA_FEATURE_VIP_V7))
@@ -917,17 +870,16 @@ etna_get_specs(struct etna_screen *screen)
 
    screen->specs.vs_need_z_div =
       screen->info->model < 0x1000 && screen->info->model != 0x880;
-   screen->specs.has_shader_range_registers =
-      screen->info->model >= 0x1000 || screen->info->model == 0x880;
+   screen->specs.has_unified_instmem = instruction_count > 256;
    screen->specs.has_new_transcendentals =
       VIV_FEATURE(screen, ETNA_FEATURE_HAS_FAST_TRANSCENDENTALS);
    screen->specs.has_no_oneconst_limit =
       VIV_FEATURE(screen, ETNA_FEATURE_SH_NO_ONECONST_LIMIT);
    screen->specs.v4_compression =
       VIV_FEATURE(screen, ETNA_FEATURE_V4_COMPRESSION);
-   screen->specs.seamless_cube_map =
-      (screen->info->model != 0x880) && /* Seamless cubemap is broken on GC880? */
-      VIV_FEATURE(screen, ETNA_FEATURE_SEAMLESS_CUBE_MAP);
+
+   /* XXX: The feature bit gating the bugfix is an educated guess */
+   screen->specs.correct_stencil_valuemask = VIV_FEATURE(screen, ETNA_FEATURE_PE_DITHER_FIX);
 
    if (screen->info->halti >= 5) {
       /* GC7000 - this core must load shaders from memory. */
@@ -936,30 +888,29 @@ etna_get_specs(struct etna_screen *screen)
       screen->specs.max_instructions = 0; /* Do not program shaders manually */
       screen->specs.has_icache = true;
    } else if (VIV_FEATURE(screen, ETNA_FEATURE_INSTRUCTION_CACHE)) {
-      /* GC3000 - this core is capable of loading shaders from
-       * memory. It can also run shaders from registers, as a fallback, but
-       * "max_instructions" does not have the correct value. It has place for
-       * 2*256 instructions just like GC2000, but the offsets are slightly
-       * different.
+      /* GC3000 - this core is capable of loading shaders from memory. It can
+       * also run shaders from unified instruction states as a fallback, but the
+       * offsets are slightly different.
        */
       screen->specs.vs_offset = 0xC000;
       /* State 08000-0C000 mirrors 0C000-0E000, and the Vivante driver uses
        * this mirror for writing PS instructions, probably safest to do the
        * same.
        */
-      screen->specs.ps_offset = 0x8000 + 0x1000;
-      screen->specs.max_instructions = 256; /* maximum number instructions for non-icache use */
+      screen->specs.ps_offset = 0x8000;
+      /* maximum number instructions for non-icache use */
+      screen->specs.max_instructions = instruction_count;
       screen->specs.has_icache = true;
    } else {
-      if (instruction_count > 256) { /* unified instruction memory? */
+      if (instruction_count > 256) {
+         /* unified instruction states */
          screen->specs.vs_offset = 0xC000;
-         screen->specs.ps_offset = 0xD000; /* like vivante driver */
-         screen->specs.max_instructions = 256;
+         screen->specs.ps_offset = 0xC000;
       } else {
          screen->specs.vs_offset = 0x4000;
          screen->specs.ps_offset = 0x6000;
-         screen->specs.max_instructions = instruction_count;
       }
+      screen->specs.max_instructions = instruction_count;
       screen->specs.has_icache = false;
    }
 
@@ -979,17 +930,13 @@ etna_get_specs(struct etna_screen *screen)
    if (screen->info->halti >= 5) {
       screen->specs.has_unified_uniforms = true;
       screen->specs.vs_uniforms_offset = VIVS_SH_HALTI5_UNIFORMS_MIRROR(0);
-      screen->specs.ps_uniforms_offset = VIVS_SH_HALTI5_UNIFORMS(screen->specs.max_vs_uniforms*4);
+      screen->specs.ps_uniforms_offset = VIVS_SH_HALTI5_UNIFORMS(0);
    } else if (screen->info->halti >= 1) {
       /* unified uniform memory on GC3000 - HALTI1 feature bit is just a guess
       */
       screen->specs.has_unified_uniforms = true;
       screen->specs.vs_uniforms_offset = VIVS_SH_UNIFORMS(0);
-      /* hardcode PS uniforms to start after end of VS uniforms -
-       * for more flexibility this offset could be variable based on the
-       * shader.
-       */
-      screen->specs.ps_uniforms_offset = VIVS_SH_UNIFORMS(screen->specs.max_vs_uniforms*4);
+      screen->specs.ps_uniforms_offset = VIVS_SH_UNIFORMS(0);
    } else {
       screen->specs.has_unified_uniforms = false;
       screen->specs.vs_uniforms_offset = VIVS_VS_UNIFORMS(0);
@@ -1011,6 +958,8 @@ etna_get_specs(struct etna_screen *screen)
    screen->specs.single_buffer = VIV_FEATURE(screen, ETNA_FEATURE_SINGLE_BUFFER);
    if (screen->specs.single_buffer)
       DBG("etnaviv: Single buffer mode enabled with %d pixel pipes", screen->specs.pixel_pipes);
+   screen->specs.pe_multitiled = screen->specs.pixel_pipes > 1 &&
+                                 !screen->specs.single_buffer;
 
    screen->specs.tex_astc = VIV_FEATURE(screen, ETNA_FEATURE_TEXTURE_ASTC) &&
                             !VIV_FEATURE(screen, ETNA_FEATURE_NO_ASTC);
@@ -1050,13 +999,6 @@ etna_screen_bo_from_handle(struct pipe_screen *pscreen,
    return bo;
 }
 
-static const void *
-etna_get_compiler_options(struct pipe_screen *pscreen,
-                          enum pipe_shader_ir ir, enum pipe_shader_type shader)
-{
-   return etna_compiler_get_options(etna_screen(pscreen)->compiler);
-}
-
 static struct disk_cache *
 etna_get_disk_shader_cache(struct pipe_screen *pscreen)
 {
@@ -1071,6 +1013,14 @@ etna_screen_get_fd(struct pipe_screen *pscreen)
 {
    struct etna_screen *screen = etna_screen(pscreen);
    return etna_device_fd(screen->dev);
+}
+
+static struct pipe_ml_device *
+etna_get_ml_device(struct pipe_screen *pscreen)
+{
+   struct etna_screen *screen = etna_screen(pscreen);
+
+   return &screen->ml_device.base;
 }
 
 struct pipe_screen *
@@ -1115,7 +1065,7 @@ etna_screen_create(struct etna_device *dev, struct etna_gpu *gpu,
 
    /* apply debug options that disable individual features */
    if (DBG_ENABLED(ETNA_DBG_NO_EARLY_Z))
-      etna_core_disable_feature(screen->info, ETNA_FEATURE_NO_EARLY_Z);
+      etna_core_enable_feature(screen->info, ETNA_FEATURE_NO_EARLY_Z);
    if (DBG_ENABLED(ETNA_DBG_NO_TS))
       etna_core_disable_feature(screen->info, ETNA_FEATURE_FAST_CLEAR);
    if (DBG_ENABLED(ETNA_DBG_NO_AUTODISABLE))
@@ -1136,10 +1086,6 @@ etna_screen_create(struct etna_device *dev, struct etna_gpu *gpu,
 
    pscreen->destroy = etna_screen_destroy;
    pscreen->get_screen_fd = etna_screen_get_fd;
-   pscreen->get_param = etna_screen_get_param;
-   pscreen->get_paramf = etna_screen_get_paramf;
-   pscreen->get_shader_param = etna_screen_get_shader_param;
-   pscreen->get_compiler_options = etna_get_compiler_options;
    pscreen->get_disk_shader_cache = etna_get_disk_shader_cache;
 
    pscreen->get_name = etna_screen_get_name;
@@ -1152,6 +1098,13 @@ etna_screen_create(struct etna_device *dev, struct etna_gpu *gpu,
    pscreen->is_dmabuf_modifier_supported = etna_screen_is_dmabuf_modifier_supported;
    pscreen->get_dmabuf_modifier_planes = etna_screen_get_dmabuf_modifier_planes;
 
+   if (npu) {
+      screen->ml_device.base.ml_operation_supported = etna_ml_operation_supported;
+      screen->ml_device.base.ml_subgraph_create = etna_ml_subgraph_create;
+      screen->ml_device.base.ml_subgraph_destroy = etna_ml_subgraph_destroy;
+      pscreen->get_ml_device = etna_get_ml_device;
+   }
+
    if (!etna_shader_screen_init(pscreen))
       goto fail;
 
@@ -1159,7 +1112,12 @@ etna_screen_create(struct etna_device *dev, struct etna_gpu *gpu,
    etna_query_screen_init(pscreen);
    etna_resource_screen_init(pscreen);
 
-   util_dynarray_init(&screen->supported_pm_queries, NULL);
+   etna_init_shader_caps(screen);
+   etna_init_screen_caps(screen);
+
+   screen->compiler->max_render_targets = screen->base.caps.max_render_targets;
+
+   screen->supported_pm_queries = UTIL_DYNARRAY_INIT;
    slab_create_parent(&screen->transfer_pool, sizeof(struct etna_transfer), 16);
 
    if (screen->drm_version >= ETNA_DRM_VERSION_PERFMON)
@@ -1167,11 +1125,11 @@ etna_screen_create(struct etna_device *dev, struct etna_gpu *gpu,
 
 
    /* create dummy RT buffer, used when rendering with no color buffer */
-   screen->dummy_rt_reloc.bo = etna_bo_new(screen->dev, 64 * 64 * 4,
-                                           DRM_ETNA_GEM_CACHE_WC);
-   if (!screen->dummy_rt_reloc.bo)
+   screen->dummy_bo = etna_bo_new(screen->dev, 64 * 64 * 4, DRM_ETNA_GEM_CACHE_WC);
+   if (!screen->dummy_bo)
       goto fail;
 
+   screen->dummy_rt_reloc.bo = screen->dummy_bo;
    screen->dummy_rt_reloc.offset = 0;
    screen->dummy_rt_reloc.flags = ETNA_RELOC_READ | ETNA_RELOC_WRITE;
 

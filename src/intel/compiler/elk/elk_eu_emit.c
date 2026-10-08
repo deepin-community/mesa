@@ -1,34 +1,10 @@
 /*
- Copyright (C) Intel Corp.  2006.  All Rights Reserved.
- Intel funded Tungsten Graphics to
- develop this 3D driver.
-
- Permission is hereby granted, free of charge, to any person obtaining
- a copy of this software and associated documentation files (the
- "Software"), to deal in the Software without restriction, including
- without limitation the rights to use, copy, modify, merge, publish,
- distribute, sublicense, and/or sell copies of the Software, and to
- permit persons to whom the Software is furnished to do so, subject to
- the following conditions:
-
- The above copyright notice and this permission notice (including the
- next paragraph) shall be included in all copies or substantial
- portions of the Software.
-
- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
- IN NO EVENT SHALL THE COPYRIGHT OWNER(S) AND/OR ITS SUPPLIERS BE
- LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
- WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
- **********************************************************************/
- /*
-  * Authors:
-  *   Keith Whitwell <keithw@vmware.com>
-  */
-
+ * Copyright © 2006 Intel Corporation
+ * SPDX-License-Identifier: MIT
+ *
+ * Intel funded Tungsten Graphics to develop this 3D driver.
+ * File originally authored by: Keith Whitwell <keithw@vmware.com>
+ */
 
 #include "elk_eu_defines.h"
 #include "elk_eu.h"
@@ -570,7 +546,7 @@ elk_append_insns(struct elk_codegen *p, unsigned nr_insn, unsigned alignment)
    assert(util_is_power_of_two_or_zero(sizeof(elk_inst)));
    assert(util_is_power_of_two_or_zero(alignment));
    const unsigned align_insn = MAX2(alignment / sizeof(elk_inst), 1);
-   const unsigned start_insn = ALIGN(p->nr_insn, align_insn);
+   const unsigned start_insn = align(p->nr_insn, align_insn);
    const unsigned new_nr_insn = start_insn + nr_insn;
 
    if (p->store_size < new_nr_insn) {
@@ -631,16 +607,16 @@ elk_next_insn(struct elk_codegen *p, unsigned opcode)
 
 void
 elk_add_reloc(struct elk_codegen *p, uint32_t id,
-              enum elk_shader_reloc_type type,
+              enum intel_shader_reloc_type type,
               uint32_t offset, uint32_t delta)
 {
    if (p->num_relocs + 1 > p->reloc_array_size) {
       p->reloc_array_size = MAX2(16, p->reloc_array_size * 2);
       p->relocs = reralloc(p->mem_ctx, p->relocs,
-                           struct elk_shader_reloc, p->reloc_array_size);
+                           struct intel_shader_reloc, p->reloc_array_size);
    }
 
-   p->relocs[p->num_relocs++] = (struct elk_shader_reloc) {
+   p->relocs[p->num_relocs++] = (struct intel_shader_reloc) {
       .id = id,
       .type = type,
       .offset = offset,
@@ -698,7 +674,7 @@ to_3src_align1_vstride(const struct intel_device_info *devinfo,
    case ELK_VERTICAL_STRIDE_16:
       return ELK_ALIGN1_3SRC_VERTICAL_STRIDE_8;
    default:
-      unreachable("invalid vstride");
+      UNREACHABLE("invalid vstride");
    }
 }
 
@@ -716,7 +692,7 @@ to_3src_align1_hstride(enum elk_horizontal_stride hstride)
    case ELK_HORIZONTAL_STRIDE_4:
       return ELK_ALIGN1_3SRC_SRC_HORIZONTAL_STRIDE_4;
    default:
-      unreachable("invalid hstride");
+      UNREACHABLE("invalid hstride");
    }
 }
 
@@ -975,7 +951,7 @@ elk_AVG(struct elk_codegen *p, struct elk_reg dest,
    case ELK_REGISTER_TYPE_UD:
       break;
    default:
-      unreachable("Bad type for elk_AVG");
+      UNREACHABLE("Bad type for elk_AVG");
    }
 
    return elk_alu2(p, ELK_OPCODE_AVG, dest, src0, src1);
@@ -2518,9 +2494,9 @@ elk_find_next_block_end(struct elk_codegen *p, int start_offset)
 
    int depth = 0;
 
-   for (offset = next_offset(devinfo, store, start_offset);
+   for (offset = next_offset(p, store, start_offset);
         offset < p->next_insn_offset;
-        offset = next_offset(devinfo, store, offset)) {
+        offset = next_offset(p, store, offset)) {
       elk_inst *insn = store + offset;
 
       switch (elk_inst_opcode(p->isa, insn)) {
@@ -2568,9 +2544,9 @@ elk_find_loop_end(struct elk_codegen *p, int start_offset)
    /* Always start after the instruction (such as a WHILE) we're trying to fix
     * up.
     */
-   for (offset = next_offset(devinfo, store, start_offset);
+   for (offset = next_offset(p, store, start_offset);
         offset < p->next_insn_offset;
-        offset = next_offset(devinfo, store, offset)) {
+        offset = next_offset(p, store, offset)) {
       elk_inst *insn = store + offset;
 
       if (elk_inst_opcode(p->isa, insn) == ELK_OPCODE_WHILE) {
@@ -2578,8 +2554,7 @@ elk_find_loop_end(struct elk_codegen *p, int start_offset)
 	    return offset;
       }
    }
-   assert(!"not reached");
-   return start_offset;
+   UNREACHABLE("not reached");
 }
 
 /* After program generation, go back and update the UIP and JIP of
@@ -2852,7 +2827,7 @@ elk_set_memory_fence_message(struct elk_codegen *p,
       elk_inst_set_dp_msg_type(devinfo, insn, GFX7_DATAPORT_DC_MEMORY_FENCE);
       break;
    default:
-      unreachable("Not reached");
+      UNREACHABLE("Not reached");
    }
 
    if (commit_enable)
@@ -3217,7 +3192,7 @@ elk_MOV_reloc_imm(struct elk_codegen *p,
    assert(type_sz(src_type) == 4);
    assert(type_sz(dst.type) == 4);
 
-   elk_add_reloc(p, id, ELK_SHADER_RELOC_TYPE_MOV_IMM,
+   elk_add_reloc(p, id, INTEL_SHADER_RELOC_TYPE_MOV_IMM,
                  p->next_insn_offset, 0);
 
    elk_MOV(p, dst, retype(elk_imm_ud(DEFAULT_PATCH_IMM), src_type));

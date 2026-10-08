@@ -1,25 +1,6 @@
 /*
  * Copyright © 2018 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- *
+ * SPDX-License-Identifier: MIT
  */
 
 #include <stdio.h>
@@ -56,7 +37,7 @@ print_help(const char *progname, FILE *file)
            "    -g, --gen=platform     assemble instructions for given \n"
            "                           platform (3 letter platform name)\n"
            "Example:\n"
-           "    i965_asm -g kbl input.asm -t hex -o output\n",
+           "    elk_asm -g kbl input.asm -t hex -o output\n",
            progname);
 }
 
@@ -208,7 +189,7 @@ i965_postprocess_labels()
 int main(int argc, char **argv)
 {
    char *output_file = NULL;
-   char c;
+   int c;
    FILE *output = stdout;
    bool help = false, compact = false;
    void *store;
@@ -221,7 +202,7 @@ int main(int argc, char **argv)
    list_inithead(&instr_labels);
    list_inithead(&target_labels);
 
-   const struct option i965_asm_opts[] = {
+   const struct option elk_asm_opts[] = {
       { "help",          no_argument,       (int *) &help,      true },
       { "type",          required_argument, NULL,               't' },
       { "gen",           required_argument, NULL,               'g' },
@@ -230,7 +211,7 @@ int main(int argc, char **argv)
       { NULL,            0,                 NULL,               0 }
    };
 
-   while ((c = getopt_long(argc, argv, ":t:g:o:h", i965_asm_opts, NULL)) != -1) {
+   while ((c = getopt_long(argc, argv, ":t:g:o:h", elk_asm_opts, NULL)) != -1) {
       switch (c) {
       case 'g': {
          const int id = intel_device_name_to_pci_device_id(optarg);
@@ -282,7 +263,7 @@ int main(int argc, char **argv)
       goto end;
    }
 
-   if (!argv[optind]) {
+   if (optind == argc) {
       fprintf(stderr, "Please specify input file\n");
       goto end;
    }
@@ -375,11 +356,9 @@ end:
    if (output)
       fclose(output);
 
-   if (p)
-      ralloc_free(p);
+   ralloc_free(p);
 
-   if (devinfo)
-      free(devinfo);
+   free(devinfo);
 
    exit(result);
 }

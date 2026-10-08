@@ -89,7 +89,7 @@ vertices_for_prim(enum mesa_prim prim)
       return 4;
    case MESA_PRIM_PATCHES:
    default:
-      unreachable("unsupported primitive for gs input");
+      UNREACHABLE("unsupported primitive for gs input");
    }
 }
 
@@ -123,7 +123,8 @@ nir_create_passthrough_gs(const nir_shader_compiler_options *options,
                           enum mesa_prim primitive_type,
                           enum mesa_prim output_primitive_type,
                           bool emulate_edgeflags,
-                          bool force_line_strip_out)
+                          bool force_line_strip_out,
+                          bool passthrough_prim_id)
 {
    unsigned int vertices_out = vertices_for_prim(primitive_type);
    emulate_edgeflags = emulate_edgeflags && (prev_stage->info.outputs_written & VARYING_BIT_EDGE);
@@ -158,6 +159,8 @@ nir_create_passthrough_gs(const nir_shader_compiler_options *options,
    /* Create input/output variables. */
    nir_foreach_shader_out_variable(var, prev_stage) {
       assert(!var->data.patch);
+      assert(var->data.location != VARYING_SLOT_PRIMITIVE_ID &&
+             "not a VS output");
 
       /* input vars can't be created for those */
       if (var->data.location == VARYING_SLOT_LAYER ||
@@ -171,8 +174,7 @@ nir_create_passthrough_gs(const nir_shader_compiler_options *options,
          snprintf(name, sizeof(name), "in_%d", var->data.driver_location);
 
       nir_variable *in = nir_variable_clone(var, nir);
-      ralloc_free(in->name);
-      in->name = ralloc_strdup(in, name);
+      nir_variable_set_name(nir, in, name);
       in->type = glsl_array_type(var->type, 6, false);
       in->data.mode = nir_var_shader_in;
       nir_shader_add_variable(nir, in);
@@ -192,12 +194,29 @@ nir_create_passthrough_gs(const nir_shader_compiler_options *options,
          snprintf(name, sizeof(name), "out_%d", var->data.driver_location);
 
       nir_variable *out = nir_variable_clone(var, nir);
-      ralloc_free(out->name);
-      out->name = ralloc_strdup(out, name);
+      nir_variable_set_name(nir, out, name);
       out->data.mode = nir_var_shader_out;
       nir_shader_add_variable(nir, out);
 
       out_vars[num_outputs++] = out;
+   }
+
+   if (passthrough_prim_id) {
+      /* When a geometry shader is not used, a fragment shader may read primitive
+       * ID and get an implicit value without the vertex shader writing an ID. This
+       * case needs to work even when we inject a GS internally.
+       *
+       * However, if a geometry shader precedes a fragment shader that reads
+       * primitive ID, Vulkan requires that the geometry shader write primitive ID.
+       * To handle this case correctly, we must write primitive ID, copying the
+       * fixed-function gl_PrimitiveIDIn input which matches what the fragment
+       * shader will expect.
+       */
+      in_vars[num_inputs++] = nir_create_variable_with_location(
+         nir, nir_var_shader_in, VARYING_SLOT_PRIMITIVE_ID, glsl_int_type());
+
+      out_vars[num_outputs++] = nir_create_variable_with_location(
+         nir, nir_var_shader_out, VARYING_SLOT_PRIMITIVE_ID, glsl_int_type());
    }
 
    unsigned int start_vert = 0;
@@ -240,7 +259,12 @@ nir_create_passthrough_gs(const nir_shader_compiler_options *options,
             uint64_t mask = BITFIELD64_BIT(in_vars[j]->data.location);
             index = nir_bcsel(&b, nir_ieq_imm(&b, nir_iand_imm(&b, flat_interp_mask_def, mask), 0), nir_imm_int(&b, idx), pv_vert_index);
          }
-         nir_deref_instr *value = nir_build_deref_array(&b, nir_build_deref_var(&b, in_vars[j]), index);
+
+         /* gl_PrimitiveIDIn is not arrayed, all other inputs are */
+         nir_deref_instr *value = nir_build_deref_var(&b, in_vars[j]);
+         if (in_vars[j]->data.location != VARYING_SLOT_PRIMITIVE_ID)
+            value = nir_build_deref_array(&b, value, index);
+
          copy_vars(&b, nir_build_deref_var(&b, out_vars[oj]), value);
          ++oj;
       }
@@ -257,7 +281,6 @@ nir_create_passthrough_gs(const nir_shader_compiler_options *options,
             nir_def *edge_value = nir_channel(&b, nir_load_array_var_imm(&b, edge_var, idx), 0);
             nir_push_if(&b, nir_fneu_imm(&b, edge_value, 1.0));
             nir_end_primitive(&b, 0);
-            
          }
          nir_pop_if(&b, NULL);
       }

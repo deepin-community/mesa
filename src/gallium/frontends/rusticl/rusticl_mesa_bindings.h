@@ -1,3 +1,9 @@
+/*
+ * Copyright 2020 Red Hat.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "rusticl_system_bindings.h"
 
 #include "compiler/clc/nir_clc_helpers.h"
@@ -15,17 +21,20 @@
 #include "pipe/p_state.h"
 #include "pipe-loader/pipe_loader.h"
 
+#include "util/blake3/blake3.h"
 #include "util/blob.h"
 #include "util/disk_cache.h"
 #include "util/hex.h"
 #include "util/os_time.h"
-#include "util/sha1/sha1.h"
+#include "util/u_cpu_detect.h"
 #include "util/u_inlines.h"
 #include "util/u_upload_mgr.h"
 #include "util/u_printf.h"
+#include "util/u_queue.h"
 #include "util/u_sampler.h"
 #include "util/u_screen.h"
 #include "util/u_surface.h"
 #include "util/u_transfer.h"
+#include "util/vma.h"
 
 #include "rusticl_nir.h"

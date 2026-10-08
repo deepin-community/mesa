@@ -80,6 +80,7 @@ static struct vc4_simulator_state {
         int refcount;
 } sim_state = {
         .mutex = SIMPLE_MTX_INITIALIZER,
+        .mem = NULL,
 };
 
 enum gem_type {
@@ -103,6 +104,9 @@ struct vc4_simulator_file {
 
         /** for specific gpus, use their create ioctl. Otherwise use dumb bo. */
         enum gem_type gem_type;
+
+        /** The stride alignment required for raster textures. */
+        uint32_t raster_stride_align;
 };
 
 /** Wrapper for drm_vc4_bo tracking the simulator-specific state. */
@@ -203,6 +207,9 @@ vc4_gem_create(int fd, uint64_t size, uint32_t *handle)
         {
                 union drm_amdgpu_gem_create create = { 0 };
                 create.in.bo_size = size;
+                create.in.domains = AMDGPU_GEM_DOMAIN_GTT;
+                create.in.domain_flags =
+                        AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED;
                 ret = drmIoctl(fd, DRM_IOCTL_AMDGPU_GEM_CREATE, &create);
                 *handle = create.out.handle;
                 break;
@@ -266,16 +273,15 @@ vc4_create_simulator_bo(int fd, int handle, unsigned size)
                 int ret = vc4_gem_mmap(fd, handle, &mmap_offset);
 
                 if (ret) {
-                        fprintf(stderr, "Failed to get MMAP offset: %d\n",
-                                errno);
+                        mesa_loge("Failed to get MMAP offset: %d", errno);
                         abort();
                 }
                 sim_bo->gem_vaddr = mmap(NULL, obj->base.size,
                                          PROT_READ | PROT_WRITE, MAP_SHARED,
                                          fd, mmap_offset);
                 if (sim_bo->gem_vaddr == MAP_FAILED) {
-                        fprintf(stderr, "mmap of bo %d (offset 0x%016llx, size %d) failed\n",
-                                handle, (long long)mmap_offset, (int)obj->base.size);
+                        mesa_loge("mmap of bo %d (offset 0x%016llx, size %d) failed",
+                                  handle, (long long)mmap_offset, (int)obj->base.size);
                         abort();
                 }
         }
@@ -397,8 +403,7 @@ vc4_dump_to_file(struct vc4_exec_info *exec)
         asprintf(&filename, "vc4-dri-%d.dump", dumpno++);
         FILE *f = fopen(filename, "w+");
         if (!f) {
-                fprintf(stderr, "Couldn't open %s: %s", filename,
-                        strerror(errno));
+                mesa_loge("Couldn't open %s: %s", filename, strerror(errno));
                 return;
         }
 
@@ -479,9 +484,9 @@ vc4_simulator_submit_cl_ioctl(int fd, struct drm_vc4_submit_cl *args)
                 return ret;
 
         if (VC4_DBG(CL)) {
-                fprintf(stderr, "RCL:\n");
-                vc4_dump_cl(sim_state.mem + exec.ct1ca,
-                            exec.ct1ea - exec.ct1ca, true);
+                mesa_logi("RCL:");
+                vc4_dump_cli(sim_state.mem + exec.ct1ca,
+                             exec.ct1ea - exec.ct1ca, true);
         }
 
         vc4_dump_to_file(&exec);
@@ -489,21 +494,19 @@ vc4_simulator_submit_cl_ioctl(int fd, struct drm_vc4_submit_cl *args)
         if (exec.ct0ca != exec.ct0ea) {
                 int bfc = simpenrose_do_binning(exec.ct0ca, exec.ct0ea);
                 if (bfc != 1) {
-                        fprintf(stderr, "Binning returned %d flushes, should be 1.\n",
-                                bfc);
-                        fprintf(stderr, "Relocated binning command list:\n");
-                        vc4_dump_cl(sim_state.mem + exec.ct0ca,
-                                    exec.ct0ea - exec.ct0ca, false);
+                        mesa_loge("Binning returned %d flushes, should be 1.", bfc);
+                        mesa_loge("Relocated binning command list:");
+                        vc4_dump_cle(sim_state.mem + exec.ct0ca,
+                                     exec.ct0ea - exec.ct0ca, false);
                         abort();
                 }
         }
         int rfc = simpenrose_do_rendering(exec.ct1ca, exec.ct1ea);
         if (rfc != 1) {
-                fprintf(stderr, "Rendering returned %d frames, should be 1.\n",
-                        rfc);
-                fprintf(stderr, "Relocated render command list:\n");
-                vc4_dump_cl(sim_state.mem + exec.ct1ca,
-                            exec.ct1ea - exec.ct1ca, true);
+                mesa_loge("Rendering returned %d frames, should be 1.", rfc);
+                mesa_loge("Relocated render command list:");
+                vc4_dump_cle(sim_state.mem + exec.ct1ca,
+                             exec.ct1ea - exec.ct1ca, true);
                 abort();
         }
 
@@ -534,6 +537,17 @@ vc4_simulator_submit_cl_ioctl(int fd, struct drm_vc4_submit_cl *args)
 void vc4_simulator_open_from_handle(int fd, int handle, uint32_t size)
 {
         vc4_create_simulator_bo(fd, handle, size);
+}
+
+/**
+ * Returns the required stride alignment the GPU needs in order to display the
+ * content generated by the simulator.
+ */
+uint32_t
+vc4_simulator_get_raster_stride_align(int fd)
+{
+        struct vc4_simulator_file *file = vc4_get_simulator_file_for_fd(fd);
+        return file->raster_stride_align;
 }
 
 /**
@@ -640,8 +654,8 @@ vc4_simulator_get_param_ioctl(int fd, struct drm_vc4_get_param *args)
                 return 0;
 
         default:
-                fprintf(stderr, "Unknown DRM_IOCTL_VC4_GET_PARAM(%lld)\n",
-                        (long long)args->param);
+                mesa_loge("Unknown DRM_IOCTL_VC4_GET_PARAM(%lld)",
+                          (long long)args->param);
                 abort();
         };
 }
@@ -690,7 +704,7 @@ vc4_simulator_ioctl(int fd, unsigned long request, void *args)
         case DRM_IOCTL_GEM_FLINK:
                 return drmIoctl(fd, request, args);
         default:
-                fprintf(stderr, "Unknown ioctl 0x%08x\n", (int)request);
+                mesa_loge("Unknown ioctl 0x%08x", (int)request);
                 abort();
         }
 }
@@ -704,16 +718,23 @@ vc4_simulator_init_global(void)
                 return;
         }
 
-        sim_state.mem_size = 256 * 1024 * 1024;
-        sim_state.mem = calloc(sim_state.mem_size, 1);
-        if (!sim_state.mem)
-                abort();
-        sim_state.heap = u_mmInit(0, sim_state.mem_size);
-
-        /* We supply our own memory so that we can have more aperture
-         * available (256MB instead of simpenrose's default 64MB).
+        /* We only allocate once the memory supplied to the simulator, and we
+         * will never free it unless execution ends. So if the simulator is
+         * initialized after being destroyed, it doesn't assert because of
+         * memory being re-initialized.
          */
-        simpenrose_init_hardware_supply_mem(sim_state.mem, sim_state.mem_size);
+        if (!sim_state.mem) {
+                sim_state.mem_size = 256 * 1024 * 1024;
+                sim_state.mem = calloc(sim_state.mem_size, 1);
+                if (!sim_state.mem)
+                        abort();
+                /* We supply our own memory so that we can have more aperture
+                 * available (256MB instead of simpenrose's default 64MB).
+                 */
+                simpenrose_init_hardware_supply_mem(sim_state.mem, sim_state.mem_size);
+        }
+
+        sim_state.heap = u_mmInit(0, sim_state.mem_size);
 
         /* Carve out low memory for tile allocation overflow.  The kernel
          * should be automatically handling overflow memory setup on real
@@ -735,44 +756,56 @@ vc4_simulator_init_global(void)
                                         _mesa_key_pointer_equal);
 }
 
-void
+struct vc4_simulator_file *
 vc4_simulator_init(struct vc4_screen *screen)
 {
         vc4_simulator_init_global();
 
-        screen->sim_file = rzalloc(screen, struct vc4_simulator_file);
+        struct vc4_simulator_file *sim_file =
+                rzalloc(NULL, struct vc4_simulator_file);
 
-        screen->sim_file->bo_map =
-                _mesa_hash_table_create(screen->sim_file,
+        sim_file->bo_map =
+                _mesa_hash_table_create(sim_file,
                                         _mesa_hash_pointer,
                                         _mesa_key_pointer_equal);
 
         drmVersionPtr version = drmGetVersion(screen->fd);
         if (version && strncmp(version->name, "i915", version->name_len) == 0)
-                screen->sim_file->gem_type = GEM_I915;
+                sim_file->gem_type = GEM_I915;
         else if (version && strncmp(version->name, "amdgpu", version->name_len) == 0)
-                screen->sim_file->gem_type = GEM_AMDGPU;
+                sim_file->gem_type = GEM_AMDGPU;
         else
-                screen->sim_file->gem_type = GEM_DUMB;
+                sim_file->gem_type = GEM_DUMB;
+
+        if (sim_file->gem_type == GEM_AMDGPU) {
+                sim_file->raster_stride_align = 256;
+                simpenrose_set_raster_stride_align(sim_file->raster_stride_align);
+        } else {
+                sim_file->raster_stride_align = 1;
+        }
+
         drmFreeVersion(version);
         simple_mtx_lock(&sim_state.mutex);
         _mesa_hash_table_insert(sim_state.fd_map, int_to_key(screen->fd + 1),
-                                screen->sim_file);
+                                sim_file);
         simple_mtx_unlock(&sim_state.mutex);
 
-        screen->sim_file->dev.screen = screen;
+        sim_file->dev.screen = screen;
+
+        return sim_file;
 }
 
 void
-vc4_simulator_destroy(struct vc4_screen *screen)
+vc4_simulator_destroy(struct vc4_simulator_file *sim_file)
 {
         simple_mtx_lock(&sim_state.mutex);
         if (!--sim_state.refcount) {
                 _mesa_hash_table_destroy(sim_state.fd_map, NULL);
                 u_mmDestroy(sim_state.heap);
-                free(sim_state.mem);
+                /* We don't free the simulator allocated memory */
                 /* No memsetting it, because it contains the mutex. */
         }
+        ralloc_free(sim_file);
         simple_mtx_unlock(&sim_state.mutex);
 }
 

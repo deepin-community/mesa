@@ -29,7 +29,7 @@
 #include "broadcom/common/v3d_util.h"
 #include "broadcom/compiler/v3d_compiler.h"
 
-static uint8_t
+static enum V3DX(Blend_Factor)
 v3d_factor(enum pipe_blendfactor factor, bool dst_alpha_one)
 {
         /* We may get a bad blendfactor when blending is disabled. */
@@ -74,7 +74,7 @@ v3d_factor(enum pipe_blendfactor factor, bool dst_alpha_one)
                         V3D_BLEND_FACTOR_ZERO :
                         V3D_BLEND_FACTOR_SRC_ALPHA_SATURATE);
         default:
-                unreachable("Bad blend factor");
+                UNREACHABLE("Bad blend factor");
         }
 }
 
@@ -181,10 +181,9 @@ emit_varying_flags(struct v3d_job *job, uint32_t *flags,
                                               enum V3DX(Varying_Flags_Action) lower,
                                               enum V3DX(Varying_Flags_Action) higher))
 {
-        struct v3d_context *v3d = job->v3d;
         bool emitted_any = false;
 
-        for (int i = 0; i < ARRAY_SIZE(v3d->prog.fs->prog_data.fs->flat_shade_flags); i++) {
+        for (int i = 0; i < ARRAY_SIZE(job->v3d->prog.fs->prog_data.fs->flat_shade_flags); i++) {
                 if (!flags[i])
                         continue;
 
@@ -223,8 +222,11 @@ v3dX(emit_state)(struct pipe_context *pctx)
         struct v3d_job *job = v3d->job;
         bool rasterizer_discard = v3d->rasterizer->base.rasterizer_discard;
 
+        /* Scissor state is part of rasterizer state, but we mark
+         * rasterizer_scissor dirty if needed at v3d_rasterizer_state_bind()
+         */
         if (v3d->dirty & (V3D_DIRTY_SCISSOR | V3D_DIRTY_VIEWPORT |
-                          V3D_DIRTY_RASTERIZER)) {
+                          V3D_DIRTY_RASTERIZER_SCISSOR)) {
                 float *vpscale = v3d->viewport.scale;
                 float *vptranslate = v3d->viewport.translate;
                 float vp_minx = -fabsf(vpscale[0]) + vptranslate[0];
@@ -271,7 +273,7 @@ v3dX(emit_state)(struct pipe_context *pctx)
                     job->scissor.disabled = true;
                 } else if (!job->scissor.disabled &&
                            (v3d->dirty & V3D_DIRTY_SCISSOR)) {
-                        if (job->scissor.count < MAX_JOB_SCISSORS) {
+                        if (job->scissor.count < V3D_JOB_MAX_SCISSORS) {
                                 job->scissor.rects[job->scissor.count].min_x =
                                         v3d->scissor.minx;
                                 job->scissor.rects[job->scissor.count].min_y =
@@ -290,13 +292,21 @@ v3dX(emit_state)(struct pipe_context *pctx)
 
         if (v3d->dirty & (V3D_DIRTY_RASTERIZER |
                           V3D_DIRTY_ZSA |
-                          V3D_DIRTY_BLEND |
-                          V3D_DIRTY_COMPILED_FS)) {
+                          V3D_DIRTY_PRIM_MODE |
+                          V3D_DIRTY_BLEND)) {
+                const enum mesa_prim reduced_prim =
+                        u_reduced_prim(v3d->prim_mode);
                 cl_emit(&job->bcl, CFG_BITS, config) {
+                        /* When drawing points and lines, they will be
+                         * discarded if forward facing primitive is not
+                         * enabled.
+                         */
                         config.enable_forward_facing_primitive =
                                 !rasterizer_discard &&
-                                !(v3d->rasterizer->base.cull_face &
-                                  PIPE_FACE_FRONT);
+                                (reduced_prim == MESA_PRIM_LINES ||
+                                 reduced_prim == MESA_PRIM_POINTS ||
+                                 !(v3d->rasterizer->base.cull_face &
+                                   PIPE_FACE_FRONT));
                         config.enable_reverse_facing_primitive =
                                 !rasterizer_discard &&
                                 !(v3d->rasterizer->base.cull_face &
@@ -325,7 +335,9 @@ v3dX(emit_state)(struct pipe_context *pctx)
                         config.direct3d_provoking_vertex =
                                 v3d->rasterizer->base.flatshade_first;
 
-                        config.blend_enable = v3d->blend->blend_enables;
+                        config.blend_enable = v3d->blend->blend_enables &&
+                                !v3d->framebuffer_soft_blend &&
+                                        !v3d->blend->use_software;
 
                         /* Note: EZ state may update based on the compiled FS,
                          * along with ZSA
@@ -392,8 +404,8 @@ v3dX(emit_state)(struct pipe_context *pctx)
         if (v3d->dirty & V3D_DIRTY_RASTERIZER &&
             v3d->rasterizer->base.offset_tri) {
                 if (v3d->screen->devinfo.ver == 42 &&
-                    job->zsbuf &&
-                    job->zsbuf->format == PIPE_FORMAT_Z16_UNORM) {
+                    job->zsbuf.texture &&
+                    job->zsbuf.format == PIPE_FORMAT_Z16_UNORM) {
                         cl_emit_prepacked_sized(&job->bcl,
                                                 v3d->rasterizer->depth_offset_z16,
                                                 cl_packet_length(DEPTH_OFFSET));
@@ -404,11 +416,24 @@ v3dX(emit_state)(struct pipe_context *pctx)
                 }
         }
 
-        if (v3d->dirty & V3D_DIRTY_RASTERIZER) {
+        /* There is a bug in V3D 4.2 hardware where a FIFO in the binner may
+         * overflow in some scenarios where geometry is dropped in the
+         * pipeline (for example, if using primitive discards). The work
+         * around requires the driver to emit any CLE command, which will
+         * trigger the binner to flush the FIFO. The recommendation is to emit
+         * a very small packet that is fast to process by the CLE hardware
+         * such as PointSize in between all draw calls to ensure this flush
+         * always happens and there is never a chance of overflowing the
+         * binner.
+         */
+        if (v3d->dirty & V3D_DIRTY_RASTERIZER ||
+            v3d->screen->devinfo.ver == 42) {
                 cl_emit(&job->bcl, POINT_SIZE, point_size) {
                         point_size.point_size = v3d->rasterizer->point_size;
                 }
+        }
 
+        if (v3d->dirty & V3D_DIRTY_RASTERIZER) {
                 cl_emit(&job->bcl, LINE_WIDTH, line_width) {
                         line_width.line_width = v3d_get_real_line_width(v3d);
                 }
@@ -481,7 +506,7 @@ v3dX(emit_state)(struct pipe_context *pctx)
         if (v3d->dirty & V3D_DIRTY_BLEND) {
                 struct v3d_blend_state *blend = v3d->blend;
 
-                if (blend->blend_enables) {
+                if (blend->blend_enables && !blend->use_software && !v3d->framebuffer_soft_blend) {
                         cl_emit(&job->bcl, BLEND_ENABLES, enables) {
                                 enables.mask = blend->blend_enables;
                         }
@@ -517,6 +542,10 @@ v3dX(emit_state)(struct pipe_context *pctx)
                                               (1 << max_rts) - 1,
                                               v3d->blend_dst_alpha_one);
                         }
+                } else {
+                        cl_emit(&job->bcl, BLEND_ENABLES, enables) {
+                                enables.mask = 0;
+                        }
                 }
         }
 
@@ -536,9 +565,6 @@ v3dX(emit_state)(struct pipe_context *pctx)
                 }
         }
 
-        /* GFXH-1431: On V3D 3.x, writing BLEND_CONFIG resets the constant
-         * color.
-         */
         if (v3d->dirty & V3D_DIRTY_BLEND_COLOR) {
                 cl_emit(&job->bcl, BLEND_CONSTANT_COLOR, color) {
                         color.red_f16 = (v3d->swap_color_rb ?
@@ -647,6 +673,13 @@ v3dX(emit_state)(struct pipe_context *pctx)
 
                         if (!target)
                                 continue;
+
+                        /* Transform feedback can overflow the bound buffer across
+                         * re-emits, pushing offset past buffer_size and making the
+                         * unsigned (buffer_size - offset) below underflow into a
+                         * bogus huge size.  Clamp so we never record past the end.
+                         */
+                        offset = MIN2(offset, target->buffer_size);
 
                         cl_emit(&job->bcl, TRANSFORM_FEEDBACK_BUFFER, output) {
                                 output.buffer_address =

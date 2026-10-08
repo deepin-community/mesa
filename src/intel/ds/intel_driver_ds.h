@@ -36,6 +36,9 @@
 extern "C" {
 #endif
 
+struct vk_object_base;
+struct VkDebugUtilsObjectNameInfoEXT;
+
 enum intel_ds_api {
    INTEL_DS_API_OPENGL,
    INTEL_DS_API_VULKAN,
@@ -62,6 +65,22 @@ enum intel_ds_stall_flag {
    INTEL_DS_L3_FABRIC_FLUSH_BIT              = BITFIELD_BIT(17),
 };
 
+enum intel_ds_barrier_type {
+   INTEL_DS_BARRIER_TYPE_IMMEDIATE,
+   INTEL_DS_BARRIER_TYPE_SIGNAL,
+   INTEL_DS_BARRIER_TYPE_WAIT,
+};
+
+enum intel_ds_stages {
+   INTEL_DS_STAGES_TOP_BIT    = BITFIELD_BIT(0),
+   INTEL_DS_STAGES_GEOM_BIT   = BITFIELD_BIT(1),
+   INTEL_DS_STAGES_RASTER_BIT = BITFIELD_BIT(2),
+   INTEL_DS_STAGES_DEPTH_BIT  = BITFIELD_BIT(3),
+   INTEL_DS_STAGES_PIXEL_BIT  = BITFIELD_BIT(4),
+   INTEL_DS_STAGES_COLOR_BIT  = BITFIELD_BIT(5),
+   INTEL_DS_STAGES_GPGPU_BIT  = BITFIELD_BIT(6),
+};
+
 enum intel_ds_tracepoint_flags {
    /**
     * Whether the tracepoint's timestamp must be recorded with as an
@@ -71,12 +90,19 @@ enum intel_ds_tracepoint_flags {
    /**
     * Whether this tracepoint's timestamp is recorded on the compute pipeline.
     */
-   INTEL_DS_TRACEPOINT_FLAG_END_OF_PIPE_CS = BITFIELD_BIT(1),
-
+   INTEL_DS_TRACEPOINT_FLAG_END_CS         = BITFIELD_BIT(1),
+   /**
+    * Whether this tracepoint doesn't generate a timestamp but instead repeats
+    * the last one.
+    */
+   INTEL_DS_TRACEPOINT_FLAG_REPEAST_LAST   = BITFIELD_BIT(2),
 };
 
 /* Convert internal driver PIPE_CONTROL stall bits to intel_ds_stall_flag. */
 typedef enum intel_ds_stall_flag (*intel_ds_stall_cb_t)(uint32_t flags);
+
+/* Convert internal driver RESOUCE_BARRIER stages bits to intel_ds_stage. */
+typedef enum intel_ds_stages (*intel_ds_stages_cb_t)(uint8_t stages);
 
 enum intel_ds_queue_stage {
    INTEL_DS_QUEUE_STAGE_QUEUE,
@@ -108,14 +134,6 @@ struct intel_ds_device {
 
    /* Clock identifier for this device. */
    uint32_t gpu_clock_id;
-
-   /* The timestamp at the point where we first emitted the clock_sync..
-    * this  will be a *later* timestamp that the first GPU traces (since
-    * we capture the first clock_sync from the CPU *after* the first GPU
-    * tracepoints happen).  To avoid confusing perfetto we need to drop
-    * the GPU traces with timestamps before this.
-    */
-   uint64_t sync_gpu_ts;
 
    /* Next timestamp after which we should resend a clock correlation. */
    uint64_t next_clock_sync_ns;
@@ -219,6 +237,12 @@ uint64_t intel_ds_begin_submit(struct intel_ds_queue *queue);
 void intel_ds_end_submit(struct intel_ds_queue *queue,
                          uint64_t start_ts);
 
+void intel_ds_perfetto_set_debug_utils_object_name(struct intel_ds_device *device,
+   const struct VkDebugUtilsObjectNameInfoEXT *pNameInfo);
+
+void intel_ds_perfetto_refresh_debug_utils_object_name(struct intel_ds_device *device,
+   const struct vk_object_base *object);
+
 #else
 
 static inline uint64_t intel_ds_begin_submit(struct intel_ds_queue *queue)
@@ -228,6 +252,16 @@ static inline uint64_t intel_ds_begin_submit(struct intel_ds_queue *queue)
 
 static inline void intel_ds_end_submit(struct intel_ds_queue *queue,
                                        uint64_t start_ts)
+{
+}
+
+static inline void intel_ds_perfetto_set_debug_utils_object_name(struct intel_ds_device *device,
+   const struct VkDebugUtilsObjectNameInfoEXT *pNameInfo)
+{
+}
+
+static inline void intel_ds_perfetto_refresh_debug_utils_object_name(struct intel_ds_device *device,
+   const struct vk_object_base *object)
 {
 }
 

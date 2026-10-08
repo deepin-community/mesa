@@ -2,7 +2,20 @@
 # SPDX-License-Identifier: MIT
 
 inc_intel = include_directories('.')
+inc_intel_compiler = include_directories('compiler')
 
+with_intel_elk = get_option('intel-elk')
+
+intel_common_args = []
+if with_intel_elk
+  intel_common_args += ['-DINTEL_USE_ELK']
+else
+  if with_gallium_crocus or with_intel_hasvk
+    error('Cannot build Crocus or Hasvk with meson option -Dintel-elk=false set.')
+  endif
+endif
+
+subdir('mda')
 subdir('genxml')
 subdir('dev')
 if with_intel_hasvk or with_intel_vk or with_gallium_crocus or with_gallium_iris

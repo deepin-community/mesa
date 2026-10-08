@@ -12,15 +12,76 @@
 #include "VirtGpu.h"
 #include "VirtioGpuAddressSpaceStream.h"
 #include "VirtioGpuPipeStream.h"
+#include "c11/threads.h"
 #include "util/log.h"
 
 #define STREAM_BUFFER_SIZE (4 * 1024 * 1024)
 
-struct ThreadInfo {
-    std::unique_ptr<GfxStreamConnectionManager> mgr;
-};
+static tss_t gfxstream_connection_manager_tls_key;
+static bool gfxstream_connection_manager_tls_key_valid;
 
-static thread_local ThreadInfo sThreadInfo;
+static void gfxstream_connection_manager_tls_free(void* tls) {
+    if (tls) {
+        delete ((GfxStreamConnectionManager*)tls);
+    }
+}
+
+static void gfxstream_connection_manager_tls_key_create_once(void) {
+    gfxstream_connection_manager_tls_key_valid =
+        tss_create(&gfxstream_connection_manager_tls_key, gfxstream_connection_manager_tls_free) ==
+        thrd_success;
+    if (!gfxstream_connection_manager_tls_key_valid) {
+        mesa_logd("WARNING: failed to create gfxstream_connection_manager_tls_key");
+    }
+}
+
+GfxStreamConnectionManager* GfxStreamConnectionManager::getThreadLocalInstance(
+    GfxStreamTransportType type, VirtGpuCapset capset) {
+    static once_flag once = ONCE_FLAG_INIT;
+    call_once(&once, gfxstream_connection_manager_tls_key_create_once);
+    if (unlikely(!gfxstream_connection_manager_tls_key_valid)) {
+        return nullptr;
+    }
+
+    GfxStreamConnectionManager* tls =
+        (GfxStreamConnectionManager*)tss_get(gfxstream_connection_manager_tls_key);
+    if (likely(tls)) {
+        return tls;
+    }
+
+    tls = new GfxStreamConnectionManager(type, capset);
+    if (!tls) {
+        return nullptr;
+    }
+
+    if (!tls->initialize()) {
+        delete tls;
+        return nullptr;
+    }
+
+    if (tss_set(gfxstream_connection_manager_tls_key, tls) != thrd_success) {
+        delete tls;
+        return nullptr;
+    }
+
+    return tls;
+}
+
+void GfxStreamConnectionManager::resetThreadLocalInstance() {
+    if (unlikely(!gfxstream_connection_manager_tls_key_valid)) {
+        return;
+    }
+
+    GfxStreamConnectionManager* tls =
+        (GfxStreamConnectionManager*)tss_get(gfxstream_connection_manager_tls_key);
+    if (unlikely(!tls)) {
+        return;
+    }
+
+    delete tls;
+    void* null_ptr = nullptr;
+    tss_set(gfxstream_connection_manager_tls_key, null_ptr);
+}
 
 GfxStreamConnectionManager::GfxStreamConnectionManager(GfxStreamTransportType type,
                                                        VirtGpuCapset capset)
@@ -30,6 +91,7 @@ GfxStreamConnectionManager::~GfxStreamConnectionManager() {}
 
 bool GfxStreamConnectionManager::initialize() {
     switch (mTransportType) {
+#ifdef GFXSTREAM_ENABLE_GUEST_GOLDFISH
         case GFXSTREAM_TRANSPORT_ADDRESS_SPACE: {
             mStream = createGoldfishAddressSpaceStream(STREAM_BUFFER_SIZE);
             if (!mStream) {
@@ -38,6 +100,7 @@ bool GfxStreamConnectionManager::initialize() {
             }
             break;
         }
+#endif
         case GFXSTREAM_TRANSPORT_QEMU_PIPE: {
             mStream = new QemuPipeStream(STREAM_BUFFER_SIZE);
             if (mStream->connect() < 0) {
@@ -68,6 +131,11 @@ bool GfxStreamConnectionManager::initialize() {
             // Use kCapsetGfxStreamVulkan for now, Ranchu HWC needs to be modified to pass in
             // right capset.
             auto device = VirtGpuDevice::getInstance(kCapsetGfxStreamVulkan);
+            if (!device) {
+                mesa_logd("Failed to get VirtGpuDevice\n");
+                return false;
+            }
+
             mDescriptor = device->getDeviceHandle();
             mStream = createVirtioGpuAddressSpaceStream(kCapsetGfxStreamVulkan);
             if (!mStream) {
@@ -87,27 +155,6 @@ bool GfxStreamConnectionManager::initialize() {
     mStream->commitBuffer(sizeof(unsigned int));
 
     return true;
-}
-
-GfxStreamConnectionManager* GfxStreamConnectionManager::getThreadLocalInstance(
-    GfxStreamTransportType type, VirtGpuCapset capset) {
-    if (sThreadInfo.mgr == nullptr) {
-        sThreadInfo.mgr = std::make_unique<GfxStreamConnectionManager>(type, capset);
-        if (!sThreadInfo.mgr->initialize()) {
-            sThreadInfo.mgr = nullptr;
-            return nullptr;
-        }
-    }
-
-    return sThreadInfo.mgr.get();
-}
-
-void GfxStreamConnectionManager::threadLocalExit() {
-    if (sThreadInfo.mgr == nullptr) {
-        return;
-    }
-
-    sThreadInfo.mgr.reset();
 }
 
 int32_t GfxStreamConnectionManager::addConnection(GfxStreamConnectionType type,

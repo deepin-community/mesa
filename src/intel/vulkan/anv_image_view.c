@@ -16,7 +16,7 @@ remap_swizzle(VkComponentSwizzle swizzle,
    case VK_COMPONENT_SWIZZLE_B:     return format_swizzle.b;
    case VK_COMPONENT_SWIZZLE_A:     return format_swizzle.a;
    default:
-      unreachable("Invalid swizzle");
+      UNREACHABLE("Invalid swizzle");
    }
 }
 
@@ -58,17 +58,16 @@ anv_image_fill_surface_state(struct anv_device *device,
    struct isl_view view = *view_in;
    view.usage |= view_usage;
 
-   /* Propagate the protection flag of the image to the view. */
-   view_usage |= surface->isl.usage & ISL_SURF_USAGE_PROTECTED_BIT;
-
    if (view_usage == ISL_SURF_USAGE_RENDER_TARGET_BIT)
       view.swizzle = anv_swizzle_for_render(view.swizzle);
 
-   /* If this is a HiZ buffer we can sample from with a programmable clear
-    * value (SKL+), define the clear value to the optimal constant.
-    */
+   /* Propagate the protection flag of the image to the view. */
+   view_usage |= surface->isl.usage & ISL_SURF_USAGE_PROTECTED_BIT;
+
    union isl_color_value default_clear_color = { .u32 = { 0, } };
-   if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT)
+   if (aspect & VK_IMAGE_ASPECT_ANY_COLOR_BIT_ANV)
+      default_clear_color = anv_image_color_clear_value(device->info, image);
+   else if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT)
       default_clear_color = anv_image_hiz_clear_value(image);
 
    if (!clear_color)
@@ -108,11 +107,9 @@ anv_image_fill_surface_state(struct anv_device *device,
    state_inout->aux_address = aux_address;
 
    const struct anv_address clear_address =
-      anv_image_get_clear_color_addr(device, image, view.format, aspect);
+      anv_image_get_clear_color_addr(device, image, view.format, aspect,
+                                     view_usage & ISL_SURF_USAGE_TEXTURE_BIT);
    state_inout->clear_address = clear_address;
-
-   if (image->vk.create_flags & VK_IMAGE_CREATE_PROTECTED_BIT)
-      view_usage |= ISL_SURF_USAGE_PROTECTED_BIT;
 
    isl_surf_fill_state(&device->isl_dev, surface_state_map,
                        .surf = isl_surf,
@@ -121,6 +118,7 @@ anv_image_fill_surface_state(struct anv_device *device,
                        .clear_color = *clear_color,
                        .aux_surf = &aux_surface->isl,
                        .aux_usage = aux_usage,
+                       .aux_format = isl_surf->format,
                        .aux_address = anv_address_physical(aux_address),
                        .clear_address = anv_address_physical(clear_address),
                        .use_clear_address =
@@ -152,7 +150,7 @@ anv_image_fill_surface_state(struct anv_device *device,
    if (device->info->ver >= 10 && clear_address.bo) {
       uint32_t *clear_addr_dw = surface_state_map +
          device->isl_dev.ss.clear_color_state_offset;
-      assert((clear_address.offset & 0x3f) == 0);
+      assert(util_is_aligned(clear_address.offset, 64));
       state_inout->clear_address.offset |= *clear_addr_dw & 0x3f;
    }
 
@@ -167,82 +165,6 @@ anv_image_aspect_get_planes(VkImageAspectFlags aspect_mask)
    return util_bitcount(aspect_mask);
 }
 
-bool
-anv_can_hiz_clear_ds_view(struct anv_device *device,
-                          const struct anv_image_view *iview,
-                          VkImageLayout layout,
-                          VkImageAspectFlags clear_aspects,
-                          float depth_clear_value,
-                          VkRect2D render_area,
-                          const VkQueueFlagBits queue_flags)
-{
-   if (INTEL_DEBUG(DEBUG_NO_FAST_CLEAR))
-      return false;
-
-   /* If we're just clearing stencil, we can always HiZ clear */
-   if (!(clear_aspects & VK_IMAGE_ASPECT_DEPTH_BIT))
-      return true;
-
-   /* We must have depth in order to have HiZ */
-   if (!(iview->image->vk.aspects & VK_IMAGE_ASPECT_DEPTH_BIT))
-      return false;
-
-   const enum isl_aux_usage clear_aux_usage =
-      anv_layout_to_aux_usage(device->info, iview->image,
-                              VK_IMAGE_ASPECT_DEPTH_BIT,
-                              VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-                              layout, queue_flags);
-
-   if (!isl_aux_usage_has_fast_clears(clear_aux_usage))
-      return false;
-
-   if (isl_aux_usage_has_ccs(clear_aux_usage)) {
-      /* From the TGL PRM, Vol 9, "Compressed Depth Buffers" (under the
-       * "Texture performant" and "ZCS" columns):
-       *
-       *    Update with clear at either 16x8 or 8x4 granularity, based on
-       *    fs_clr or otherwise.
-       *
-       * Although alignment requirements are only listed for the texture
-       * performant mode, test results indicate that requirements exist for
-       * the non-texture performant mode as well. Disable partial clears.
-       */
-      if (render_area.offset.x > 0 ||
-          render_area.offset.y > 0 ||
-          render_area.extent.width !=
-          u_minify(iview->vk.extent.width, iview->vk.base_mip_level) ||
-          render_area.extent.height !=
-          u_minify(iview->vk.extent.height, iview->vk.base_mip_level)) {
-         return false;
-      }
-
-      /* When fast-clearing, hardware behaves in unexpected ways if the clear
-       * rectangle, aligned to 16x8, could cover neighboring LODs.
-       * Fortunately, ISL guarantees that LOD0 will be 8-row aligned and
-       * LOD0's height seems to not matter. Also, few applications ever clear
-       * LOD1+. Only allow fast-clearing upper LODs if no overlap can occur.
-       */
-      const struct isl_surf *surf =
-         &iview->image->planes[0].primary_surface.isl;
-      assert(isl_surf_usage_is_depth(surf->usage));
-      assert(surf->dim_layout == ISL_DIM_LAYOUT_GFX4_2D);
-      assert(surf->array_pitch_el_rows % 8 == 0);
-      if (clear_aux_usage == ISL_AUX_USAGE_HIZ_CCS_WT &&
-          iview->vk.base_mip_level >= 1 &&
-          (iview->vk.extent.width % 32 != 0 ||
-           surf->image_alignment_el.h % 8 != 0)) {
-         return false;
-      }
-   }
-
-   if (device->info->ver <= 12 &&
-       depth_clear_value != anv_image_hiz_clear_value(iview->image).f32[0])
-      return false;
-
-   /* If we got here, then we can fast clear */
-   return true;
-}
-
 void
 anv_image_view_init(struct anv_device *device,
                     struct anv_image_view *iview,
@@ -251,7 +173,7 @@ anv_image_view_init(struct anv_device *device,
 {
    ANV_FROM_HANDLE(anv_image, image, pCreateInfo->image);
 
-   vk_image_view_init(&device->vk, &iview->vk, false, pCreateInfo);
+   vk_image_view_init(&device->vk, &iview->vk, pCreateInfo);
    iview->image = image;
    iview->n_planes = anv_image_aspect_get_planes(iview->vk.aspects);
    iview->use_surface_state_stream = surface_state_stream != NULL;
@@ -264,13 +186,13 @@ anv_image_view_init(struct anv_device *device,
          anv_aspect_to_plane(iview->vk.aspects, 1UL << iaspect_bit);
 
       VkFormat view_format = iview->vk.view_format;
-      if (anv_is_format_emulated(device->physical, view_format)) {
+      if (anv_is_compressed_format_emulated(device->physical, view_format)) {
          assert(image->emu_plane_format != VK_FORMAT_UNDEFINED);
          view_format =
-            anv_get_emulation_format(device->physical, view_format);
+            anv_get_compressed_format_emulation(device->physical, view_format);
       }
       const struct anv_format_plane format = anv_get_format_plane(
-            device->info, view_format, vplane, image->vk.tiling);
+            device->physical, view_format, vplane, image->vk.tiling);
 
       iview->planes[vplane].isl = (struct isl_view) {
          .format = format.isl_format,

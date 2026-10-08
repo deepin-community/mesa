@@ -7,6 +7,8 @@
 #ifndef BVH_BUILD_INTERFACE_H
 #define BVH_BUILD_INTERFACE_H
 
+#include "vk_build_interface.h"
+
 #ifdef VULKAN
 #include "build_helpers.h"
 #else
@@ -16,48 +18,15 @@
 #define VOID_REF  uint64_t
 #endif
 
-struct leaf_args {
-   VOID_REF ir;
-   VOID_REF bvh;
-   REF(radv_ir_header) header;
-   REF(key_id_pair) ids;
-
-   radv_bvh_geometry_data geom_data;
-};
-
-struct morton_args {
-   VOID_REF bvh;
-   REF(radv_ir_header) header;
-   REF(key_id_pair) ids;
-};
-
-#define LBVH_RIGHT_CHILD_BIT_SHIFT 29
-#define LBVH_RIGHT_CHILD_BIT       (1 << LBVH_RIGHT_CHILD_BIT_SHIFT)
-
-struct lbvh_node_info {
-   /* Number of children that have been processed (or are invalid/leaves) in
-    * the lbvh_generate_ir pass.
-    */
-   uint32_t path_count;
-
-   uint32_t children[2];
-   uint32_t parent;
-};
-
-struct lbvh_main_args {
-   VOID_REF bvh;
-   REF(key_id_pair) src_ids;
-   VOID_REF node_info;
-   uint32_t id_count;
-   uint32_t internal_node_base;
-};
-
-struct lbvh_generate_ir_args {
-   VOID_REF bvh;
-   VOID_REF node_info;
-   VOID_REF header;
-   uint32_t internal_node_base;
-};
+#define RADV_BUILD_FLAG_BVH8                           (1u << (VK_BUILD_FLAG_COUNT + 0))
+#define RADV_BUILD_FLAG_UPDATE_IN_PLACE                (1u << (VK_BUILD_FLAG_COUNT + 1))
+#define RADV_BUILD_FLAG_NO_INFS                        (1u << (VK_BUILD_FLAG_COUNT + 2))
+#define RADV_BUILD_FLAG_WRITE_LEAF_NODE_OFFSETS        (1u << (VK_BUILD_FLAG_COUNT + 3))
+#define RADV_BUILD_FLAG_UPDATE_SINGLE_GEOMETRY         (1u << (VK_BUILD_FLAG_COUNT + 4))
+#define RADV_BUILD_FLAG_PAIR_COMPRESS_TRIANGLES        (1u << (VK_BUILD_FLAG_COUNT + 5))
+#define RADV_BUILD_FLAG_BATCH_COMPRESS_TRIANGLES       (1u << (VK_BUILD_FLAG_COUNT + 6))
+#define RADV_BUILD_FLAG_BATCH_COMPRESS_TRIANGLES_RETRY (1u << (VK_BUILD_FLAG_COUNT + 7))
+#define RADV_BUILD_FLAG_USE_BOX16                      (1u << (VK_BUILD_FLAG_COUNT + 8))
 
 #define RADV_COPY_MODE_COPY        0
 #define RADV_COPY_MODE_SERIALIZE   1
@@ -72,43 +41,64 @@ struct copy_args {
 struct encode_args {
    VOID_REF intermediate_bvh;
    VOID_REF output_bvh;
-   REF(radv_ir_header) header;
+   REF(vk_ir_header) header;
    uint32_t output_bvh_offset;
    uint32_t leaf_node_count;
    uint32_t geometry_type;
 };
 
-struct ploc_prefix_scan_partition {
-   uint32_t aggregate;
-   uint32_t inclusive_sum;
+struct encode_gfx12_args {
+   VOID_REF intermediate_bvh;
+   VOID_REF output_base;
+   REF(vk_ir_header) header;
+   uint32_t output_bvh_offset;
+   uint32_t leaf_node_offsets_offset;
+   uint32_t leaf_node_count;
+   uint32_t geometry_type;
 };
 
-#define PLOC_WORKGROUP_SIZE 1024
-
-struct ploc_args {
-   VOID_REF bvh;
-   VOID_REF prefix_scan_partitions;
-   REF(radv_ir_header) header;
-   VOID_REF ids_0;
-   VOID_REF ids_1;
-   uint32_t internal_node_offset;
+struct encode_triangles_gfx12_args {
+   VOID_REF intermediate_bvh;
+   VOID_REF output_base;
+   REF(vk_ir_header) header;
+   uint32_t output_bvh_offset;
+   uint32_t leaf_node_offsets_offset;
+   uint32_t batches_size;
 };
 
 struct header_args {
-   REF(radv_ir_header) src;
+   REF(vk_ir_header) src;
    REF(radv_accel_struct_header) dst;
    uint32_t bvh_offset;
+   uint32_t internal_nodes_offset;
    uint32_t instance_count;
 };
 
 struct update_args {
    REF(radv_accel_struct_header) src;
    REF(radv_accel_struct_header) dst;
-   REF(radv_aabb) leaf_bounds;
    REF(uint32_t) internal_ready_count;
    uint32_t leaf_node_count;
 
-   radv_bvh_geometry_data geom_data;
+   vk_bvh_geometry_data geom_data;
 };
+
+struct update_gfx12_args {
+   REF(radv_accel_struct_header) src;
+   REF(radv_accel_struct_header) dst;
+   REF(vk_bvh_geometry_data) geom_data;
+   REF(vk_aabb) bounds;
+   REF(uint32_t) internal_ready_count;
+   uint32_t leaf_node_count;
+
+   vk_bvh_geometry_data geom_data0;
+};
+
+#define RADV_IR_HEADER_ENCODE_TRIANGLES_INVOCATIONS_X       0
+#define RADV_IR_HEADER_ENCODE_TRIANGLES_INVOCATIONS_Y       1
+#define RADV_IR_HEADER_ENCODE_TRIANGLES_INVOCATIONS_Z       2
+#define RADV_IR_HEADER_ENCODE_TRIANGLES_RETRY_INVOCATIONS_X 3
+#define RADV_IR_HEADER_ENCODE_TRIANGLES_RETRY_INVOCATIONS_Y 4
+#define RADV_IR_HEADER_ENCODE_TRIANGLES_RETRY_INVOCATIONS_Z 5
 
 #endif /* BUILD_INTERFACE_H */

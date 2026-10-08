@@ -65,7 +65,7 @@ cs_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring, struct ir3_s
    OUT_RING(ring, constlen); /* HLSQ_CS_CONSTLEN */
    OUT_RING(ring, instrlen); /* HLSQ_CS_INSTRLEN */
 
-   fd5_emit_shader_obj(ctx, ring, v, REG_A5XX_SP_CS_OBJ_START_LO);
+   fd5_emit_shader_obj(ctx, ring, v, REG_A5XX_SP_CS_OBJ_START);
 
    OUT_PKT4(ring, REG_A5XX_HLSQ_UPDATE_CNTL, 1);
    OUT_RING(ring, 0x1f00000);
@@ -100,13 +100,13 @@ fd5_launch_grid(struct fd_context *ctx,
    if (!v)
       return;
 
-   if (ctx->dirty_shader[PIPE_SHADER_COMPUTE] & FD_DIRTY_SHADER_PROG)
+   if (ctx->dirty_shader[MESA_SHADER_COMPUTE] & FD_DIRTY_SHADER_PROG)
       cs_program_emit(ctx, ring, v);
 
    fd5_emit_cs_state(ctx, ring, v);
    fd5_emit_cs_consts(v, ring, ctx, info);
 
-   u_foreach_bit (i, ctx->global_bindings.enabled_mask)
+   util_dynarray_foreach (&ctx->global_bindings, struct pipe_resource *, res)
       nglobal++;
 
    if (nglobal > 0) {
@@ -117,10 +117,8 @@ fd5_launch_grid(struct fd_context *ctx,
        * payload:
        */
       OUT_PKT7(ring, CP_NOP, 2 * nglobal);
-      u_foreach_bit (i, ctx->global_bindings.enabled_mask) {
-         struct pipe_resource *prsc = ctx->global_bindings.buf[i];
-         OUT_RELOC(ring, fd_resource(prsc)->bo, 0, 0, 0);
-      }
+      util_dynarray_foreach (&ctx->global_bindings, struct pipe_resource *, res)
+         OUT_RELOC(ring, fd_resource(*res)->bo, 0, 0, 0);
    }
 
    const unsigned *local_size =

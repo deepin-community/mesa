@@ -117,6 +117,59 @@ vn_encode_VkBufferOpaqueCaptureAddressCreateInfo(struct vn_cs_encoder *enc, cons
     vn_encode_VkBufferOpaqueCaptureAddressCreateInfo_self(enc, val);
 }
 
+/* struct VkBufferDeviceAddressCreateInfoEXT chain */
+
+static inline size_t
+vn_sizeof_VkBufferDeviceAddressCreateInfoEXT_pnext(const void *val)
+{
+    /* no known/supported struct */
+    return vn_sizeof_simple_pointer(NULL);
+}
+
+static inline size_t
+vn_sizeof_VkBufferDeviceAddressCreateInfoEXT_self(const VkBufferDeviceAddressCreateInfoEXT *val)
+{
+    size_t size = 0;
+    /* skip val->{sType,pNext} */
+    size += vn_sizeof_VkDeviceAddress(&val->deviceAddress);
+    return size;
+}
+
+static inline size_t
+vn_sizeof_VkBufferDeviceAddressCreateInfoEXT(const VkBufferDeviceAddressCreateInfoEXT *val)
+{
+    size_t size = 0;
+
+    size += vn_sizeof_VkStructureType(&val->sType);
+    size += vn_sizeof_VkBufferDeviceAddressCreateInfoEXT_pnext(val->pNext);
+    size += vn_sizeof_VkBufferDeviceAddressCreateInfoEXT_self(val);
+
+    return size;
+}
+
+static inline void
+vn_encode_VkBufferDeviceAddressCreateInfoEXT_pnext(struct vn_cs_encoder *enc, const void *val)
+{
+    /* no known/supported struct */
+    vn_encode_simple_pointer(enc, NULL);
+}
+
+static inline void
+vn_encode_VkBufferDeviceAddressCreateInfoEXT_self(struct vn_cs_encoder *enc, const VkBufferDeviceAddressCreateInfoEXT *val)
+{
+    /* skip val->{sType,pNext} */
+    vn_encode_VkDeviceAddress(enc, &val->deviceAddress);
+}
+
+static inline void
+vn_encode_VkBufferDeviceAddressCreateInfoEXT(struct vn_cs_encoder *enc, const VkBufferDeviceAddressCreateInfoEXT *val)
+{
+    assert(val->sType == VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_CREATE_INFO_EXT);
+    vn_encode_VkStructureType(enc, &(VkStructureType){ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_CREATE_INFO_EXT });
+    vn_encode_VkBufferDeviceAddressCreateInfoEXT_pnext(enc, val->pNext);
+    vn_encode_VkBufferDeviceAddressCreateInfoEXT_self(enc, val);
+}
+
 /* struct VkBufferCreateInfo chain */
 
 static inline size_t
@@ -127,25 +180,33 @@ vn_sizeof_VkBufferCreateInfo_pnext(const void *val)
 
     while (pnext) {
         switch ((int32_t)pnext->sType) {
-        case VK_STRUCTURE_TYPE_BUFFER_USAGE_FLAGS_2_CREATE_INFO_KHR:
+        case VK_STRUCTURE_TYPE_BUFFER_USAGE_FLAGS_2_CREATE_INFO:
             if (!vn_cs_renderer_protocol_has_extension(471 /* VK_KHR_maintenance5 */))
                 break;
             size += vn_sizeof_simple_pointer(pnext);
             size += vn_sizeof_VkStructureType(&pnext->sType);
-            size += vn_sizeof_VkBufferCreateInfo_pnext(pnext->pNext);
-            size += vn_sizeof_VkBufferUsageFlags2CreateInfoKHR_self((const VkBufferUsageFlags2CreateInfoKHR *)pnext);
+            size += vn_sizeof_VkBufferCreateInfo_pnext(((const VkBufferUsageFlags2CreateInfo *)pnext)->pNext);
+            size += vn_sizeof_VkBufferUsageFlags2CreateInfo_self((const VkBufferUsageFlags2CreateInfo *)pnext);
             return size;
         case VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO:
             size += vn_sizeof_simple_pointer(pnext);
             size += vn_sizeof_VkStructureType(&pnext->sType);
-            size += vn_sizeof_VkBufferCreateInfo_pnext(pnext->pNext);
+            size += vn_sizeof_VkBufferCreateInfo_pnext(((const VkExternalMemoryBufferCreateInfo *)pnext)->pNext);
             size += vn_sizeof_VkExternalMemoryBufferCreateInfo_self((const VkExternalMemoryBufferCreateInfo *)pnext);
             return size;
         case VK_STRUCTURE_TYPE_BUFFER_OPAQUE_CAPTURE_ADDRESS_CREATE_INFO:
             size += vn_sizeof_simple_pointer(pnext);
             size += vn_sizeof_VkStructureType(&pnext->sType);
-            size += vn_sizeof_VkBufferCreateInfo_pnext(pnext->pNext);
+            size += vn_sizeof_VkBufferCreateInfo_pnext(((const VkBufferOpaqueCaptureAddressCreateInfo *)pnext)->pNext);
             size += vn_sizeof_VkBufferOpaqueCaptureAddressCreateInfo_self((const VkBufferOpaqueCaptureAddressCreateInfo *)pnext);
+            return size;
+        case VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_CREATE_INFO_EXT:
+            if (!vn_cs_renderer_protocol_has_extension(245 /* VK_EXT_buffer_device_address */))
+                break;
+            size += vn_sizeof_simple_pointer(pnext);
+            size += vn_sizeof_VkStructureType(&pnext->sType);
+            size += vn_sizeof_VkBufferCreateInfo_pnext(((const VkBufferDeviceAddressCreateInfoEXT *)pnext)->pNext);
+            size += vn_sizeof_VkBufferDeviceAddressCreateInfoEXT_self((const VkBufferDeviceAddressCreateInfoEXT *)pnext);
             return size;
         default:
             /* ignore unknown/unsupported struct */
@@ -195,25 +256,33 @@ vn_encode_VkBufferCreateInfo_pnext(struct vn_cs_encoder *enc, const void *val)
 
     while (pnext) {
         switch ((int32_t)pnext->sType) {
-        case VK_STRUCTURE_TYPE_BUFFER_USAGE_FLAGS_2_CREATE_INFO_KHR:
+        case VK_STRUCTURE_TYPE_BUFFER_USAGE_FLAGS_2_CREATE_INFO:
             if (!vn_cs_renderer_protocol_has_extension(471 /* VK_KHR_maintenance5 */))
                 break;
             vn_encode_simple_pointer(enc, pnext);
             vn_encode_VkStructureType(enc, &pnext->sType);
-            vn_encode_VkBufferCreateInfo_pnext(enc, pnext->pNext);
-            vn_encode_VkBufferUsageFlags2CreateInfoKHR_self(enc, (const VkBufferUsageFlags2CreateInfoKHR *)pnext);
+            vn_encode_VkBufferCreateInfo_pnext(enc, ((const VkBufferUsageFlags2CreateInfo *)pnext)->pNext);
+            vn_encode_VkBufferUsageFlags2CreateInfo_self(enc, (const VkBufferUsageFlags2CreateInfo *)pnext);
             return;
         case VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO:
             vn_encode_simple_pointer(enc, pnext);
             vn_encode_VkStructureType(enc, &pnext->sType);
-            vn_encode_VkBufferCreateInfo_pnext(enc, pnext->pNext);
+            vn_encode_VkBufferCreateInfo_pnext(enc, ((const VkExternalMemoryBufferCreateInfo *)pnext)->pNext);
             vn_encode_VkExternalMemoryBufferCreateInfo_self(enc, (const VkExternalMemoryBufferCreateInfo *)pnext);
             return;
         case VK_STRUCTURE_TYPE_BUFFER_OPAQUE_CAPTURE_ADDRESS_CREATE_INFO:
             vn_encode_simple_pointer(enc, pnext);
             vn_encode_VkStructureType(enc, &pnext->sType);
-            vn_encode_VkBufferCreateInfo_pnext(enc, pnext->pNext);
+            vn_encode_VkBufferCreateInfo_pnext(enc, ((const VkBufferOpaqueCaptureAddressCreateInfo *)pnext)->pNext);
             vn_encode_VkBufferOpaqueCaptureAddressCreateInfo_self(enc, (const VkBufferOpaqueCaptureAddressCreateInfo *)pnext);
+            return;
+        case VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_CREATE_INFO_EXT:
+            if (!vn_cs_renderer_protocol_has_extension(245 /* VK_EXT_buffer_device_address */))
+                break;
+            vn_encode_simple_pointer(enc, pnext);
+            vn_encode_VkStructureType(enc, &pnext->sType);
+            vn_encode_VkBufferCreateInfo_pnext(enc, ((const VkBufferDeviceAddressCreateInfoEXT *)pnext)->pNext);
+            vn_encode_VkBufferDeviceAddressCreateInfoEXT_self(enc, (const VkBufferDeviceAddressCreateInfoEXT *)pnext);
             return;
         default:
             /* ignore unknown/unsupported struct */
@@ -329,8 +398,16 @@ vn_sizeof_VkBindBufferMemoryInfo_pnext(const void *val)
         case VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_DEVICE_GROUP_INFO:
             size += vn_sizeof_simple_pointer(pnext);
             size += vn_sizeof_VkStructureType(&pnext->sType);
-            size += vn_sizeof_VkBindBufferMemoryInfo_pnext(pnext->pNext);
+            size += vn_sizeof_VkBindBufferMemoryInfo_pnext(((const VkBindBufferMemoryDeviceGroupInfo *)pnext)->pNext);
             size += vn_sizeof_VkBindBufferMemoryDeviceGroupInfo_self((const VkBindBufferMemoryDeviceGroupInfo *)pnext);
+            return size;
+        case VK_STRUCTURE_TYPE_BIND_MEMORY_STATUS:
+            if (!vn_cs_renderer_protocol_has_extension(546 /* VK_KHR_maintenance6 */))
+                break;
+            size += vn_sizeof_simple_pointer(pnext);
+            size += vn_sizeof_VkStructureType(&pnext->sType);
+            size += vn_sizeof_VkBindBufferMemoryInfo_pnext(((const VkBindMemoryStatus *)pnext)->pNext);
+            size += vn_sizeof_VkBindMemoryStatus_self((const VkBindMemoryStatus *)pnext);
             return size;
         default:
             /* ignore unknown/unsupported struct */
@@ -375,8 +452,16 @@ vn_encode_VkBindBufferMemoryInfo_pnext(struct vn_cs_encoder *enc, const void *va
         case VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_DEVICE_GROUP_INFO:
             vn_encode_simple_pointer(enc, pnext);
             vn_encode_VkStructureType(enc, &pnext->sType);
-            vn_encode_VkBindBufferMemoryInfo_pnext(enc, pnext->pNext);
+            vn_encode_VkBindBufferMemoryInfo_pnext(enc, ((const VkBindBufferMemoryDeviceGroupInfo *)pnext)->pNext);
             vn_encode_VkBindBufferMemoryDeviceGroupInfo_self(enc, (const VkBindBufferMemoryDeviceGroupInfo *)pnext);
+            return;
+        case VK_STRUCTURE_TYPE_BIND_MEMORY_STATUS:
+            if (!vn_cs_renderer_protocol_has_extension(546 /* VK_KHR_maintenance6 */))
+                break;
+            vn_encode_simple_pointer(enc, pnext);
+            vn_encode_VkStructureType(enc, &pnext->sType);
+            vn_encode_VkBindBufferMemoryInfo_pnext(enc, ((const VkBindMemoryStatus *)pnext)->pNext);
+            vn_encode_VkBindMemoryStatus_self(enc, (const VkBindMemoryStatus *)pnext);
             return;
         default:
             /* ignore unknown/unsupported struct */
@@ -1349,19 +1434,6 @@ static inline void vn_async_vkCreateBuffer(struct vn_ring *vn_ring, VkDevice dev
 {
     struct vn_ring_submit_command submit;
     vn_submit_vkCreateBuffer(vn_ring, 0, device, pCreateInfo, pAllocator, pBuffer, &submit);
-}
-
-static inline void vn_call_vkDestroyBuffer(struct vn_ring *vn_ring, VkDevice device, VkBuffer buffer, const VkAllocationCallbacks* pAllocator)
-{
-    VN_TRACE_FUNC();
-
-    struct vn_ring_submit_command submit;
-    vn_submit_vkDestroyBuffer(vn_ring, VK_COMMAND_GENERATE_REPLY_BIT_EXT, device, buffer, pAllocator, &submit);
-    struct vn_cs_decoder *dec = vn_ring_get_command_reply(vn_ring, &submit);
-    if (dec) {
-        vn_decode_vkDestroyBuffer_reply(dec, device, buffer, pAllocator);
-        vn_ring_free_command_reply(vn_ring, &submit);
-    }
 }
 
 static inline void vn_async_vkDestroyBuffer(struct vn_ring *vn_ring, VkDevice device, VkBuffer buffer, const VkAllocationCallbacks* pAllocator)

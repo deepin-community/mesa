@@ -89,13 +89,13 @@ nvk_edb_bview_cache_add_bview(struct nvk_device *dev,
       size_el = size_B / el_size_B;
    }
 
-   uint32_t desc[8];
-   nil_buffer_fill_tic(&nvk_device_physical(dev)->info, base_addr,
-                       nil_format(key.format), size_el, &desc);
+   const struct nil_descriptor desc =
+      nil_buffer_descriptor(&nvk_device_physical(dev)->info, base_addr,
+                            nil_format(key.format), size_el);
 
    uint32_t index;
    VkResult result = nvk_descriptor_table_add(dev, &dev->images,
-                                              desc, sizeof(desc), &index);
+                                              &desc, sizeof(desc), &index);
    if (result != VK_SUCCESS)
       return result;
 
@@ -125,7 +125,7 @@ VkResult
 nvk_edb_bview_cache_init(struct nvk_device *dev,
                          struct nvk_edb_bview_cache *cache)
 {
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    VkResult result;
 
    cache->cache = _mesa_hash_table_create(NULL, _mesa_hash_pointer,

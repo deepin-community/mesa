@@ -21,49 +21,49 @@ const struct si_reg *ac_find_register(enum amd_gfx_level gfx_level, enum radeon_
    switch (gfx_level) {
    case GFX12:
       table = gfx12_reg_table;
-      table_size = ARRAY_SIZE(gfx12_reg_table);
+      table_size = gfx12_reg_table_size;
       break;
    case GFX11_5:
       table = gfx115_reg_table;
-      table_size = ARRAY_SIZE(gfx115_reg_table);
+      table_size = gfx115_reg_table_size;
       break;
    case GFX11:
       table = gfx11_reg_table;
-      table_size = ARRAY_SIZE(gfx11_reg_table);
+      table_size = gfx11_reg_table_size;
       break;
    case GFX10_3:
       table = gfx103_reg_table;
-      table_size = ARRAY_SIZE(gfx103_reg_table);
+      table_size = gfx103_reg_table_size;
       break;
    case GFX10:
       table = gfx10_reg_table;
-      table_size = ARRAY_SIZE(gfx10_reg_table);
+      table_size = gfx10_reg_table_size;
       break;
    case GFX9:
       if (family == CHIP_GFX940) {
          table = gfx940_reg_table;
-         table_size = ARRAY_SIZE(gfx940_reg_table);
+         table_size = gfx940_reg_table_size;
          break;
       }
       table = gfx9_reg_table;
-      table_size = ARRAY_SIZE(gfx9_reg_table);
+      table_size = gfx9_reg_table_size;
       break;
    case GFX8:
       if (family == CHIP_STONEY) {
          table = gfx81_reg_table;
-         table_size = ARRAY_SIZE(gfx81_reg_table);
+         table_size = gfx81_reg_table_size;
          break;
       }
       table = gfx8_reg_table;
-      table_size = ARRAY_SIZE(gfx8_reg_table);
+      table_size = gfx8_reg_table_size;
       break;
    case GFX7:
       table = gfx7_reg_table;
-      table_size = ARRAY_SIZE(gfx7_reg_table);
+      table_size = gfx7_reg_table_size;
       break;
    case GFX6:
       table = gfx6_reg_table;
-      table_size = ARRAY_SIZE(gfx6_reg_table);
+      table_size = gfx6_reg_table_size;
       break;
    default:
       return NULL;
@@ -275,17 +275,21 @@ static int compare_wave(const void *p1, const void *p2)
 #define AC_UMR_REGISTERS_LINE "Main Registers"
 
 static bool
-ac_read_umr_register(const char **_scan, const char *name, uint32_t *value)
+ac_read_umr_register(const char **_scan, size_t *remaining_scan, const char *name, uint32_t *value)
 {
    const char *scan = *_scan;
-   if (strncmp(scan, name, MIN2(strlen(scan), strlen(name))))
+   if (strncmp(scan, name, MIN2(*remaining_scan, strlen(name))))
       return false;
 
+   *remaining_scan -= strlen(name);
+   *remaining_scan -= strlen(": ");
    scan += strlen(name);
    scan += strlen(": ");
 
    *value = strtoul(scan, NULL, 16);
    *_scan = scan + 8;
+   *remaining_scan -= 8;
+
    return true;
 }
 
@@ -328,26 +332,33 @@ unsigned ac_get_wave_info(enum amd_gfx_level gfx_level, const struct radeon_info
             break;
 
          const char *scan = wave_dump;
+
+         /* Tracks how many characters are left inside 'scan', used to avoid costly strlen calls */
+         size_t remaining_scan = strlen(scan);
+
          while (scan < end2) {
-            if (strncmp(scan, "ix", MIN2(strlen(scan), strlen("ix")))) {
+            assert(strlen(scan) == remaining_scan);
+            if (strncmp(scan, "ix", MIN2(remaining_scan, strlen("ix")))) {
                scan++;
+               remaining_scan--;
                continue;
             }
 
             scan += strlen("ix");
+            remaining_scan -= strlen("ix");
 
             bool progress = false;
 
-            progress |= ac_read_umr_register(&scan, "SQ_WAVE_STATUS", &w->status);
-            progress |= ac_read_umr_register(&scan, "SQ_WAVE_PC_LO", &w->pc_lo);
-            progress |= ac_read_umr_register(&scan, "SQ_WAVE_PC_HI", &w->pc_hi);
-            progress |= ac_read_umr_register(&scan, "SQ_WAVE_EXEC_LO", &w->exec_lo);
-            progress |= ac_read_umr_register(&scan, "SQ_WAVE_EXEC_HI", &w->exec_hi);
-            progress |= ac_read_umr_register(&scan, "SQ_WAVE_INST_DW0", &w->inst_dw0);
-            progress |= ac_read_umr_register(&scan, "SQ_WAVE_INST_DW1", &w->inst_dw1);
+            progress |= ac_read_umr_register(&scan, &remaining_scan, "SQ_WAVE_STATUS", &w->status);
+            progress |= ac_read_umr_register(&scan, &remaining_scan, "SQ_WAVE_PC_LO", &w->pc_lo);
+            progress |= ac_read_umr_register(&scan, &remaining_scan, "SQ_WAVE_PC_HI", &w->pc_hi);
+            progress |= ac_read_umr_register(&scan, &remaining_scan, "SQ_WAVE_EXEC_LO", &w->exec_lo);
+            progress |= ac_read_umr_register(&scan, &remaining_scan, "SQ_WAVE_EXEC_HI", &w->exec_hi);
+            progress |= ac_read_umr_register(&scan, &remaining_scan, "SQ_WAVE_INST_DW0", &w->inst_dw0);
+            progress |= ac_read_umr_register(&scan, &remaining_scan, "SQ_WAVE_INST_DW1", &w->inst_dw1);
 
             uint32_t wave;
-            if (ac_read_umr_register(&scan, "SQ_WAVE_HW_ID", &wave)) {
+            if (ac_read_umr_register(&scan, &remaining_scan, "SQ_WAVE_HW_ID", &wave)) {
                w->se = G_000050_SE_ID(wave);
                w->sh = G_000050_SH_ID(wave);
                w->cu = G_000050_CU_ID(wave);
@@ -357,7 +368,7 @@ unsigned ac_get_wave_info(enum amd_gfx_level gfx_level, const struct radeon_info
                progress = true;
             }
 
-            if (ac_read_umr_register(&scan, "SQ_WAVE_HW_ID1", &wave)) {
+            if (ac_read_umr_register(&scan, &remaining_scan, "SQ_WAVE_HW_ID1", &wave)) {
                w->se = G_00045C_SE_ID(wave);
                w->sh = G_00045C_SA_ID(wave);
                w->cu = G_00045C_WGP_ID(wave);
@@ -375,6 +386,7 @@ unsigned ac_get_wave_info(enum amd_gfx_level gfx_level, const struct radeon_info
                      break;
                   }
                   scan++;
+                  remaining_scan--;
                }
             }
 
@@ -440,4 +452,14 @@ void ac_print_gpuvm_fault_status(FILE *output, enum amd_gfx_level gfx_level,
    } else {
       fprintf(output, "VM_CONTEXT1_PROTECTION_FAULT_STATUS: 0x%x\n", status);
    }
+}
+
+void
+ac_dump_texture_descriptor(FILE *output, enum amd_gfx_level gfx_level,
+                           enum radeon_family family, uint32_t desc[8])
+{
+   const uint32_t base_reg = gfx_level >= GFX10 ? R_00A000_SQ_IMG_RSRC_WORD0 : R_008F10_SQ_IMG_RSRC_WORD0;
+
+   for (uint32_t i = 0; i < 8; i++)
+      ac_dump_reg(output, gfx_level, family, base_reg + i * 4,  desc[i], ~0);
 }

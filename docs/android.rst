@@ -15,6 +15,29 @@ When building llvmpipe or lavapipe for Android the ndk-build workflow
 is also used, but there are additional steps required to add the driver
 to the Android OS image.
 
+Preparing offline compilers
+---------------------------
+
+For cross-compiling the nvk driver, mesa_clc compiler binary needs to be
+prepared first:
+
+.. code-block:: sh
+
+    meson setup build-compiler \
+        -Dprefix=/tmp/mesa-compiler \
+        -Dbuildtype=release \
+        -Dstrip=true \
+        -Dplatforms= \
+        -Dgallium-drivers= \
+        -Dvulkan-drivers= \
+        -Dmesa-clc=enabled \
+        -Dinstall-mesa-clc=true
+    meson install -C build-compiler
+    export PATH=/tmp/mesa-compiler/bin:$PATH
+
+For panvk, ``-Dtools=panfrost -Dinstall-precomp-compiler=true`` is
+additionally needed.
+
 Building using the Android NDK
 ------------------------------
 
@@ -24,23 +47,36 @@ Then, create your Meson cross file to use it, something like this
 
 .. code-block:: ini
 
+    [constants]
+    ndk_path = <absolute path to NDK>
+
     [binaries]
-    ar = 'NDKDIR/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-ar'
-    c = ['ccache', 'NDKDIR/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang']
-    cpp = ['ccache', 'NDKDIR/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang++', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-static-libstdc++']
+    ar = ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-ar'
+    c = ['ccache', ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang']
+    cpp = ['ccache', ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang++', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '--start-no-unused-arguments', '-static-libstdc++', '--end-no-unused-arguments']
     c_ld = 'lld'
     cpp_ld = 'lld'
-    strip = 'NDKDIR/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-strip'
-    # Android doesn't come with a pkg-config, but we need one for Meson to be happy not
-    # finding all the optional deps it looks for.  Use system pkg-config pointing at a
-    # directory we get to populate with any .pc files we want to add for Android
-    pkg-config = ['env', 'PKG_CONFIG_LIBDIR=NDKDIR/pkgconfig', '/usr/bin/pkg-config']
+    strip = ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-strip'
 
     [host_machine]
     system = 'android'
     cpu_family = 'aarch64'
     cpu = 'armv8'
     endian = 'little'
+
+For nvk, below rust toolchain preparation and cross file additions are needed:
+
+.. code-block:: sh
+
+    rustup target add aarch64-linux-android
+
+.. code-block:: ini
+
+    [properties]
+    bindgen_clang_arguments = ['-target', 'aarch64-linux-android', '--sysroot', ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/sysroot']
+
+    [binaries]
+    rust = ['rustc', '--target', 'aarch64-linux-android']
 
 Now, use that cross file for your Android build directory (as in this
 one cross-compiling the turnip driver for a stock Pixel phone)
@@ -49,13 +85,19 @@ one cross-compiling the turnip driver for a stock Pixel phone)
 
     meson setup build-android-aarch64 \
         --cross-file android-aarch64 \
-	-Dplatforms=android \
-	-Dplatform-sdk-version=26 \
-	-Dandroid-stub=true \
-	-Dgallium-drivers= \
-	-Dvulkan-drivers=freedreno \
-	-Dfreedreno-kmds=kgsl
+        -Dplatforms=android \
+        -Dplatform-sdk-version=34 \
+        -Dandroid-stub=true \
+        -Dandroid-libbacktrace=disabled \
+        -Degl=disabled \
+        -Dgallium-drivers= \
+        -Dvulkan-drivers=freedreno \
+        -Dfreedreno-kmds=kgsl
     meson compile -C build-android-aarch64
+
+For drm drivers, ``-Dallow-fallback-for=libdrm`` is needed. Besides,
+``-Dallow-fallback-for=libdrm -Dmesa-clc=system`` is needed by nvk, and
+``-Dprecomp-compiler=system`` is additionally needed by panvk.
 
 Replacing Android drivers on stock Android
 ------------------------------------------
@@ -180,8 +222,8 @@ container and let it restart:
 
     kill $(cat /run/containers/android-run_oci/container.pid )
 
-Adding drivers to Android OS image
-----------------------------------
+Adding out-of-tree drivers to Android OS image
+----------------------------------------------
 
 When building your own Android OS images it's possible to add
 drivers built out of tree directly into the OS image. For
@@ -213,8 +255,6 @@ the ``aosp_cf_x86_64_phone-trunk_staging-userdebug`` build target
 for Android. Please note that the x86_64 cuttlefish target will require
 you to build mesa for 32bit and 64bit. Next we need to copy the build
 driver libraries into the source tree of Android and patch the binary names.
-Note that as of ``9b7bb6cc9fa``, libgallium will include the build tag in the
-name, so the name of that library will need to match the tag used in the build.
 
 .. code-block:: sh
 
@@ -222,14 +262,12 @@ name, so the name of that library will need to match the tag used in the build.
    mkdir prebuilts/mesa/x86_64
    mkdir prebuilts/mesa/x86
    cp ${INSTALL_PREFIX_64}/lib/libEGL.so prebuilts/mesa/x86_64/
-   cp ${INSTALL_PREFIX_64}/lib/libglapi.so prebuilts/mesa/x86_64/
-   cp ${INSTALL_PREFIX_64}/lib/libgallium-24.3.0-devel.so prebuilts/mesa/x86_64/
+   cp ${INSTALL_PREFIX_64}/lib/libgallium_dri.so prebuilts/mesa/x86_64/
    cp ${INSTALL_PREFIX_64}/lib/libGLESv1_CM.so  prebuilts/mesa/x86_64/
    cp ${INSTALL_PREFIX_64}/lib/libGLESv2.so  prebuilts/mesa/x86_64/
    cp ${INSTALL_PREFIX_64}/lib/libvulkan_lvp.so prebuilts/mesa/x86_64/
    cp ${INSTALL_PREFIX_32}/lib/libEGL.so prebuilts/mesa/x86
-   cp ${INSTALL_PREFIX_32}/lib/libglapi.so prebuilts/mesa/x86
-   cp ${INSTALL_PREFIX_32}/lib/libgallium-24.3.0-devel.so prebuilts/mesa/x86/
+   cp ${INSTALL_PREFIX_32}/lib/libgallium_dri.so prebuilts/mesa/x86/
    cp ${INSTALL_PREFIX_32}/lib/libGLESv1_CM.so  prebuilts/mesa/x86
    cp ${INSTALL_PREFIX_32}/lib/libGLESv2.so  prebuilts/mesa/x86
    cp ${INSTALL_PREFIX_32}/lib/libvulkan_lvp.so prebuilts/mesa/x86
@@ -249,31 +287,13 @@ the libraries in the build.
 .. code-block::
 
    cc_prebuilt_library_shared {
-       name: "libglapi",
+       name: "libgallium_dri",
        arch: {
            x86_64: {
-               srcs: ["x86_64/libglapi.so"],
+               srcs: ["x86_64/libgallium_dri.so"],
            },
            x86: {
-               srcs: ["x86/libglapi.so"],
-           },
-       },
-       strip: {
-           none: true,
-       },
-       relative_install_path: "egl",
-       shared_libs: ["libc", "libdl", "liblog", "libm"],
-       vendor: true
-   }
-
-   cc_prebuilt_library_shared {
-       name: "libgallium-24.3.0-devel",
-       arch: {
-           x86_64: {
-               srcs: ["x86_64/libgallium-24.3.0-devel.so"],
-           },
-           x86: {
-               srcs: ["x86/libgallium-24.3.0-devel.so"],
+               srcs: ["x86/libgallium_dri.so"],
            },
        },
        strip: {
@@ -374,7 +394,7 @@ create the file
                        libGLESv1_CM_lp \
                        libGLESv2_lp \
                        libEGL_lp \
-                       libgallium-24.3.0-devel.so \
+                       libgallium_dri.so \
                        vulkan.lvp
    PRODUCT_VENDOR_PROPERTIES += \
            ro.hardware.egl=lp \
@@ -400,8 +420,8 @@ Next the file ``device/google/cuttlefish/shared/mesa/sepolicy/file_contexts``
    /vendor/lib(64)?/egl/libEGL_lp\.so u:object_r:same_process_hal_file:s0
    /vendor/lib(64)?/egl/libGLESv1_CM_lp\.so u:object_r:same_process_hal_file:s0
    /vendor/lib(64)?/egl/libGLESv2_lp\.so u:object_r:same_process_hal_file:s0
-   /vendor/lib(64)?/egl/libglapi\.so u:object_r:same_process_hal_file:s0
-   /vendor/lib(64)?/egl/libgallium\-24.3.0\-devel\.so u:object_r:same_process_hal_file:s0
+   /vendor/lib(64)?/libglapi\.so u:object_r:same_process_hal_file:s0
+   /vendor/lib(64)?/libgallium_dri\.so u:object_r:same_process_hal_file:s0
    /vendor/lib(64)?/hw/vulkan\.lvp\.so u:object_r:same_process_hal_file:s0
 
 After creating these files we need to modify the existing config files
@@ -424,3 +444,101 @@ the following line where the other BoardConfig files are included
 
 Then we are set to continue following the official instructions to
 build the cuttlefish target and run it in the cuttlefish emulator.
+
+.. _android-android-system-properties:
+
+Android System Properties
+-------------------------
+
+Android (generally) uses system properties rather than
+:doc:`environment variables <envvars>`  to control Mesa/Gallium behavior,
+although there are some exceptions to this for
+:ref:`Android app developers <envvars-android-app-developers>`.
+
+With the ``os_get_option()`` helper, the environment variable names are
+automatically translated to the corresponding system property name by:
+
+- converting UPPER case to lower case
+- replacing ``_`` with ``.``
+- adding the ``mesa.`` prefix to ``<property_name>`` if it's not present already
+- and then querying the system property name with the following prefixes, in
+  order:
+
+   #. ``debug.<property_name>``
+   #. ``vendor.<property_name>``
+   #. ``<property_name>``
+
+For example, ``LIBGL_DEBUG`` will be queried as:
+
+#. ``debug.mesa.libgl.debug``
+#. ``vendor.mesa.libgl.debug``
+#. ``mesa.libgl.debug``
+
+This allows for default ``vendor.`` / ``mesa.`` properties to be overridden by
+users at run-time with ``debug.`` values.
+
+System properties can be queried with:
+
+.. code-block:: sh
+
+   $ adb shell getprop <property_name>
+
+System properties can be set with:
+
+.. code-block:: sh
+
+   $ adb shell setprop <property_name> <value>
+
+For example:
+
+.. code-block:: sh
+
+   $ adb shell setprop debug.mesa.libgl.debug verbose
+   $ adb shell getprop debug.mesa.libgl.debug
+   verbose
+
+NOTE: Any driver that wishes to support Android system properties should replace
+any calls to ``getenv()`` with ``os_get_option()``, which automatically handles
+both environment variables and Android system properties.
+
+.. _envvars-android-app-developers:
+
+Android App Developers
+^^^^^^^^^^^^^^^^^^^^^^
+
+Android app developers have two options to control Mesa behavior on un-rooted
+devices:
+
+- Environment variables, using the wrap shell script
+
+  - https://developer.android.com/ndk/guides/wrap-script.html
+
+- ``debug.<property_name>`` system properties
+
+App developers with access to rooted devices can also use ``vendor.`` and
+``mesa.`` values, although ``debug.`` prefixes are recommended.
+
+While the system properties values are used for each app invocation once set,
+they do not persist across device reboots.
+
+
+Android Driver Developers
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Android driver developers have three options to control Mesa behavior on
+devices with ``root`` access:
+
+#. ``debug.<property_name>``
+#. ``vendor.<property_name>``
+#. ``<property_name>``
+
+The ``debug.`` prefix can be used without ``root``, while ``vendor.`` and
+``mesa.`` prefixes require ``root``.
+
+Any of the values can be set in the device's makefile to control Mesa
+behavior, although ``vendor.`` and ``mesa.`` are typically used for this
+purpose.
+
+While the system properties values are used for each app invocation once set
+at runtime, they do not persist across device reboots if configured with
+``setprop``.

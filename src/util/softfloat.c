@@ -96,7 +96,7 @@ uint64_t _mesa_short_shift_right_jam64(uint64_t a, uint8_t dist)
  * From softfloat_shiftRightJam64()
  */
 static inline
-uint64_t _mesa_shift_right_jam64(uint64_t a, uint32_t dist)
+uint64_t _mesa_shift_right_jam64(uint64_t a, int32_t dist)
 {
     return
         (dist < 63) ? a >> dist | ((uint64_t) (a << (-dist & 63)) != 0) : (a != 0);
@@ -153,7 +153,7 @@ double _mesa_roundtozero_f64(int64_t s, int64_t e, int64_t m)
  * \brief Extracted from softfloat_roundPackToF32()
  */
 static inline
-float _mesa_round_f32(int32_t s, int32_t e, int32_t m, bool rtz)
+float _mesa_round_f32(uint32_t s, int32_t e, int32_t m, bool rtz)
 {
     fi_type result;
     uint8_t round_increment = rtz ? 0 : 0x40;
@@ -1192,7 +1192,8 @@ _mesa_float_fma_rtz(float a, float b, float c)
     uint32_t c_flt_m = c_fi.u & 0x07fffff;
     uint32_t c_flt_e = (c_fi.u >> 23) & 0xff;
     uint32_t c_flt_s = (c_fi.u >> 31) & 0x1;
-    int32_t s, e, m = 0;
+    uint32_t s;
+    int32_t e, m = 0;
 
     c_flt_s ^= 0;
     s = a_flt_s ^ b_flt_s ^ 0;
@@ -1339,7 +1340,7 @@ _mesa_float_fma_rtz(float a, float b, float c)
             }
             if (m_64 & 0x8000000000000000) {
                 s = !s;
-                m_64 = -m_64;
+                m_64 = (uint64_t)(-(int64_t)m_64);
             }
         } else {
             m_64 -= _mesa_shift_right_jam64(c_flt_m_64, exp_diff);
@@ -1371,7 +1372,8 @@ _mesa_double_to_f32(double val, bool rtz)
     uint64_t flt_m = di.u & 0x0fffffffffffff;
     uint64_t flt_e = (di.u >> 52) & 0x7ff;
     uint64_t flt_s = (di.u >> 63) & 0x1;
-    int32_t s, e, m = 0;
+    uint32_t s;
+    int32_t e, m = 0;
 
     s = flt_s;
 
