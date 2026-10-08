@@ -1,3 +1,16 @@
+mesa (26.1.6-1deepin2) unstable; urgency=medium
+
+  * Convert jay C23 typed enum to packed enum for GCC 12.
+  * Mesa 26.1's new Intel Jay IR declares 'enum jay_predication :
+    uint8_t', a C23 fixed-underlying-type enum that GCC 12 rejects in
+    any C standard mode ('expected identifier or ( before : token' at
+    jay_ir.h:582), failing the build on x86_64 and loong64.
+  * Rewrite it as 'enum PACKED jay_predication', the same C11-compatible
+    idiom upstream already uses for the 1-byte enums jay_type and the
+    generated jay_opcode; layout (sizeof == 1) is unchanged.
+
+ -- lichenggang <lichenggang@uniontech.com>  Thu, 08 Oct 2026 20:40:50 +0800
+
 mesa (26.1.6-1deepin1) unstable; urgency=medium
 
   * Require rustc-1.95/cargo-1.95/rustfmt-1.95 for the Rust >= 1.82

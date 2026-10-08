@@ -1,2 +1,3 @@
 path_max.diff
 src_glx_dri_common.h.diff
+intel_jay_c11_enum.diff
