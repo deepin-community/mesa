@@ -1,3 +1,16 @@
+mesa (26.1.6-1deepin1) unstable; urgency=medium
+
+  * Require rustc-1.95/cargo-1.95/rustfmt-1.95 for the Rust >= 1.82
+    MSRV.
+  * Mesa 26.x raises its Rust MSRV to 1.82 (enforced by meson when
+    gallium-rusticl or nvk is enabled), but deepin 25's default rustc is
+    1.81, so configure failed with 'Mesa requires Rust 1.82.0 or newer'.
+  * Depend on the versioned rust 1.95 toolchain (available in the
+    crimson repo for all build arches) and prepend /usr/lib/rust-
+    1.95/bin to PATH in debian/rules so meson finds rustc 1.95.
+
+ -- lichenggang <lichenggang@uniontech.com>  Thu, 08 Oct 2026 19:59:35 +0800
+
 mesa (26.1.6-1) unstable; urgency=medium
 
   * New upstream release.
