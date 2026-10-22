@@ -1,3 +1,9 @@
+mesa (24.3.0-1deepin10) unstable; urgency=medium
+
+  * Fix the build when wl_dispatch_queue_timeout is available.
+
+ -- Tianyu Chen <sweetyfish@deepin.org>  Thu, 22 Oct 2026 15:37:48 +0800
+
 mesa (24.3.0-1deepin9) unstable; urgency=medium
 
   * Fix build failure: add missing util/stack_array.h header for CVE-2026-40393

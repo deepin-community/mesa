@@ -1,0 +1,34 @@
+From: Karmjit Mahil <karmjit.mahil@igalia.com>
+Date: Thu, 6 Feb 2025 10:34:49 +0100
+Subject: loader/wayland: Fix missing timespec.h include
+
+`loader_wayland_dispatch()` also makes use of `timespec` so we
+need `timespec.h`. Otherwise it fails to build due to
+`timespec_sub_saturate()` missing.
+
+Signed-off-by: Karmjit Mahil <karmjit.mahil@igalia.com>
+Fixes: 90effcceab7 ("wsi/wayland: refactor wayland dispatch")
+Closes: https://gitlab.freedesktop.org/mesa/mesa/-/issues/12580
+Reviewed-by: Eric Engestrom <None>
+Part-of: <https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/33423>
+---
+ src/loader/loader_wayland_helper.h | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/src/loader/loader_wayland_helper.h b/src/loader/loader_wayland_helper.h
+index 45f412a..0d7c49a 100644
+--- a/src/loader/loader_wayland_helper.h
++++ b/src/loader/loader_wayland_helper.h
+@@ -23,11 +23,10 @@
+ #ifndef LOADER_WAYLAND_HELPER_HEADER_H
+ #define LOADER_WAYLAND_HELPER_HEADER_H
+ 
++#include <util/timespec.h>
+ #include <wayland-client.h>
+ 
+ #ifndef HAVE_WL_DISPATCH_QUEUE_TIMEOUT
+-
+-#include <util/timespec.h>
+ int
+ wl_display_dispatch_queue_timeout(struct wl_display *display,
+                                   struct wl_event_queue *queue,
